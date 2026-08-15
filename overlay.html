@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Spaceadom — Overlay</title>
+  <!-- These two links, in this order, are what OVERLAY_RUST_HTML_CHANGES.md §5
+       specifies for the working overlay. styles.css @imports design-system.css,
+       so the tokens come with it. Do not "optimise" this to link
+       design-system.css directly — matching the documented-working
+       configuration is worth more than saving a few unused dashboard rules. -->
+  <link rel="stylesheet" href="/src/styles.css" />
+  <link rel="stylesheet" href="/src/styles/overlay-earthy.css" />
+  <style>
+    /* ARCHITECTURE (V14) — read before "improving" this:
+       This window is TRANSPARENT and small/on-demand. The 2026-08-10 note
+       that transparency composes zero pixels here was true only of a
+       FULLSCREEN transparent window; a small one renders fine (proved by
+       sampling pixels — interior read R31,G31,B30, i.e. the desktop behind).
+       So: never size this window to the full work area, and never give the
+       PAGE a background, a border or an inset box-shadow — each toast pill
+       and the HUD paint their own, and a page-level edge traces the window
+       rectangle and reads as a box.
+       backdrop-filter stays banned on this window (2026-07-10 white-box bug). */
+    html, body {
+      margin: 0;
+      overflow: hidden;
+      height: 100%;
+      background: transparent !important;
+    }
+    body { pointer-events: none; }
+    * {
+      backdrop-filter: none !important;
+      -webkit-backdrop-filter: none !important;
+    }
+  </style>
+</head>
+<body>
+  <!-- Positioned/styled by toast.ts via CSSOM (attribute styles were seen
+       silently not applying in one live run). Left here so the element
+       exists before the first event arrives. -->
+  <div id="toast-container" aria-live="polite" aria-atomic="false"></div>
+
+  <script type="module" src="/src/overlay.ts"></script>
+</body>
+</html>

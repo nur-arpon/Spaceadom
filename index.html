@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Spaceadom — hold Space and tap a key to launch, focus or minimise any app." />
+  <title>Spaceadom</title>
+  <link rel="stylesheet" href="/src/styles.css" />
+</head>
+<body>
+  <!-- ═══════════════════════════════════════════════════════════════════
+       THE STAGE — one warm surface, keyboard-only hero.
+       No sidebar, no header grid, no status bar: profiles live behind the
+       top-right pill, settings behind the bottom-left gear, special keys
+       behind the bottom-centre pill. Transcribed from
+       design/…/Dashboard Earthy v2.dc.html.
+  ═══════════════════════════════════════════════════════════════════════ -->
+  <div id="stage">
+
+    <!-- Ambient layers (pointer-events:none, purely decorative) -->
+    <div id="aura-a" class="aura"></div>
+    <div id="aura-b" class="aura"></div>
+    <div id="halo"></div>
+    <div id="cursor-glow"></div>
+
+    <!-- ── Top bar ──────────────────────────────────────────────────── -->
+    <div id="topbar">
+      <!-- PROBLEM 110 - the brand mark is the APP'S OWN ICON, recoloured.
+           It began as the literal character U+233E ("circle with a dot"),
+           transcribed faithfully from the design source where it sat as a
+           never-replaced placeholder. Hand-drawn rocket SVGs were tried and
+           rejected - the app already HAS an identity, and redrawing it by hand
+           only produces a worse copy of something that exists.
+           The artwork is applied as a CSS MASK (see styles.css) so the exact
+           silhouette is preserved while the colour comes from the theme.
+           Empty by design: the mask needs no child element. -->
+      <div id="brand-mark" aria-hidden="true"></div>
+      <span id="brand-name">Spaceadom</span>
+      <div class="spacer"></div>
+
+      <button id="profile-pill" aria-haspopup="true" aria-expanded="false">
+        <span id="profile-pill-initial">·</span>
+        <span id="profile-pill-name">Loading…</span>
+        <span id="profile-pill-chev" aria-hidden="true">▾</span>
+      </button>
+    </div>
+
+    <!-- Profile popover — rows + "New profile", built by profile-editor.ts -->
+    <div id="profile-popover" class="popover" hidden>
+      <div id="profile-list" role="list" aria-label="Profiles"></div>
+      <div id="new-profile-row" hidden>
+        <input id="new-profile-input" class="input" placeholder="Profile name…" maxlength="24" autocomplete="off" spellcheck="false" />
+        <button id="new-profile-add" class="btn btn-primary btn-sm">Add</button>
+      </div>
+      <button id="new-profile-btn" class="dashed-btn">＋ New profile</button>
+    </div>
+
+    <!-- ── The keyboard, centred and scaled to fit ──────────────────── -->
+    <div id="keyboard-outer">
+      <div id="keyboard-scale">
+        <div id="keyboard-matrix" role="group" aria-label="QWERTY keyboard layout"></div>
+      </div>
+    </div>
+
+    <!-- Key editor: backdrop + panel that blooms out of the pressed key -->
+    <div id="editor-backdrop" hidden></div>
+    <aside id="key-detail-panel" aria-label="Key binding editor" aria-hidden="true" hidden></aside>
+
+    <!-- ── Bottom-left: gear + settings popover ─────────────────────── -->
+    <div id="gear-dock">
+      <div id="settings-panel" class="popover" aria-label="Settings" hidden></div>
+      <button id="gear-btn" aria-haspopup="true" aria-expanded="false" aria-label="Settings">⚙︎</button>
+    </div>
+
+    <!-- ── Bottom-centre: special keys tray ─────────────────────────── -->
+    <div id="specials-dock">
+      <div id="specials-tray" class="popover" hidden></div>
+      <button id="specials-btn" aria-haspopup="true" aria-expanded="false">Special keys</button>
+    </div>
+
+    <!-- Conflict banner — other keyboard remappers that can steal Space.
+         Dismissible, and NOT a startup toast (explicit user decision: a toast
+         every launch is annoying). Populated by main.ts from get_conflicts;
+         stays hidden when nothing is detected. The same list is always
+         available under Settings › Conflicts. -->
+    <div id="conflict-banner" hidden></div>
+
+    <!-- PROBLEM 99 - undo offer for destructive actions. Same styling as the
+         conflict banner: it needs a BUTTON, which the single-line toast pill
+         cannot hold. -->
+    <div id="undo-banner" hidden></div>
+
+    <!-- The dashboard's OWN toast layer.
+         PROBLEM 45: this element did not exist, and toast.ts's toastLayer()
+         returns null when it is missing — so every showToast() call made by
+         dashboard code (27 of them: "Saved", "Assigned", "Profile switched",
+         "Could not change the startup task", every ⚠️ failure message) was
+         silently discarded. A tester bound apps and got no confirmation for
+         anything, including the errors that would have explained what was
+         wrong. The overlay window has its own container of the same id; they
+         are separate documents and never collide. -->
+    <div id="toast-container" aria-live="polite" aria-atomic="false"></div>
+
+  </div><!-- /#stage -->
+
+  <!-- Shared context menu, repositioned by keyboard-matrix.ts -->
+  <div id="context-menu" class="context-menu" style="display:none;" role="menu"></div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

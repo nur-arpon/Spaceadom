@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>SpaceToggle V14 — design preview (dev only)</title>
+  <link rel="stylesheet" href="/src/styles.css" />
+</head>
+<body>
+  <!-- DEV-ONLY visual harness. Not a build input (see vite.config.ts), so it
+       never ships. It renders the REAL keyboard-matrix component and the real
+       stylesheet with a stub config, so the dashboard can be compared against
+       Dashboard Earthy v2.dc.html without the Rust backend running. -->
+  <div id="stage">
+    <div id="aura-a" class="aura"></div>
+    <div id="aura-b" class="aura"></div>
+    <div id="halo"></div>
+    <div id="cursor-glow"></div>
+
+    <div id="topbar">
+      <div id="brand-mark" aria-hidden="true">⌾</div>
+      <span id="brand-name">SpaceToggle</span>
+      <div class="spacer"></div>
+      <button id="profile-pill" aria-expanded="false">
+        <span id="profile-pill-initial">F</span>
+        <span id="profile-pill-name">Founders</span>
+        <span id="profile-pill-chev" aria-hidden="true">▾</span>
+      </button>
+    </div>
+
+    <div id="profile-popover" class="popover" hidden>
+      <div id="profile-list"></div>
+      <div id="new-profile-row" hidden>
+        <input id="new-profile-input" class="input" placeholder="Profile name…" />
+        <button id="new-profile-add" class="btn btn-primary btn-sm">Add</button>
+      </div>
+      <button id="new-profile-btn" class="dashed-btn">＋ New profile</button>
+    </div>
+
+    <div id="keyboard-outer">
+      <div id="keyboard-scale">
+        <div id="keyboard-matrix"></div>
+      </div>
+    </div>
+
+    <div id="editor-backdrop" hidden></div>
+    <aside id="key-detail-panel" hidden></aside>
+
+    <div id="gear-dock">
+      <div id="settings-panel" class="popover" hidden></div>
+      <button id="gear-btn" aria-expanded="false">⚙︎</button>
+    </div>
+
+    <div id="specials-dock">
+      <div id="specials-tray" class="popover" hidden></div>
+      <button id="specials-btn" aria-expanded="false">Special keys</button>
+    </div>
+  </div>
+
+  <div id="context-menu" class="context-menu" style="display:none;"></div>
+  <script type="module" src="/src/preview.ts"></script>
+</body>
+</html>

@@ -1,0 +1,108 @@
+[package]
+name = "spaceadom"
+version = "1.0.32"
+description = "Spaceadom — hold Space + tap a key to launch, focus or minimise any app"
+authors = ["Spaceadom"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "space_toggle_os_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri core
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+
+# Tauri plugins
+tauri-plugin-notification = "2"
+tauri-plugin-autostart    = "2"
+tauri-plugin-shell        = "2"
+tauri-plugin-dialog       = "2"
+tauri-plugin-opener       = "2"
+tauri-plugin-single-instance = "2"
+
+# Serialization
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+
+# Cross-thread communication (lock-free)
+crossbeam-channel = "0.5"
+
+# Logging
+log            = "0.4"
+log4rs         = { version = "1", default-features = false, features = ["file_appender", "rolling_file_appender", "compound_policy", "size_trigger", "fixed_window_roller", "pattern_encoder"] }
+
+# Misc utilities
+once_cell = "1"
+base64    = "0.22"
+# Real PNG encoding for extracted app icons. Already in the tree via
+# tauri's image-png feature, so this costs no extra build time — and it
+# replaced a hand-rolled encoder that emitted UNCOMPRESSED deflate blocks.
+png       = "0.17"
+windows = { version = "0.58", features = ["Win32_UI_Input_KeyboardAndMouse"] }
+
+# Windows-specific crates (only linked on Windows target)
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = [
+  # Core
+  "Win32_Foundation",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Threading",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  # Audio API
+  "Win32_Media_Audio",
+  "Win32_Media_Audio_Endpoints",
+  # UI / Windows
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  "Win32_UI_HiDpi",
+  # Graphics / GDI (icon extraction)
+  "Win32_Graphics_Gdi",
+  "Win32_UI_Controls",
+  # DWM (glass effects)
+  "Win32_Graphics_Dwm",
+  # PROBLEM 79 — GetPackageFamilyName(hProcess): matching a WinUI3 window
+  # (WhatsApp.Root) whose HWND carries no AppUserModel_ID property.
+  "Win32_Storage_Packaging_Appx",
+  # Monitor info
+  "Win32_Graphics_GdiPlus",
+  # Audio (mute for Boss Key)
+  "Win32_Media_Audio",
+  "Win32_Media_Audio_Endpoints",
+  "Win32_System_Com_Marshal",
+  # Token / elevation check
+  "Win32_Security",
+  # Shell execute (runas elevation)
+  "Win32_UI_Shell_Common",
+  # SHGetPropertyStoreForWindow + PKEY_AppUserModel_ID — how Store/UWP
+  # windows are matched. Their windows belong to host processes
+  # (ApplicationFrameHost), so exe-name matching can never find them.
+  "Win32_UI_Shell_PropertiesSystem",
+  "Win32_System_Variant",
+  # CreateToolhelp32Snapshot — enumerate running processes to detect other
+  # keyboard remappers (AutoHotkey, PowerToys) and warn the user.
+  "Win32_System_Diagnostics_ToolHelp",
+  # ShellExecuteExW (SHELLEXECUTEINFOW carries an HKEY → needs Registry)
+  "Win32_System_Registry",
+  # Layered windows (opacity)
+  "Win32_UI_WindowsAndMessaging",
+  # GetTickCount64 (engine double-tap timer)
+  "Win32_System_SystemInformation",
+]

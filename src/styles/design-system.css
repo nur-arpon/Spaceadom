@@ -1,0 +1,644 @@
+/* ==========================================================================
+   SpaceToggle V14 — Design System — "Earthy" (light) / "Nocturne" (dark)
+   --------------------------------------------------------------------------
+   Replaces V13's deep-blue glassmorphism. Every token NAME from V13 is kept
+   so the existing components keep working; only the VALUES changed. The
+   --st-* names are the canonical set from handoff/motion.css.
+
+   THEME RULE: ONE setting drives everything. `body.nocturne` switches the
+   dashboard AND the overlay windows together. Never theme a surface on its
+   own — that is how the app ended up with a light dashboard over dark toasts.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   Fonts — bundled locally, no CDN (this app must render identically offline).
+   The design calls for Caprasimo (headings) over Figtree (body). Neither is
+   bundled yet (deferred by agreement — both are OFL and must be local, never
+   a CDN), so both roles fall back to Outfit, which IS bundled. When the woff2
+   files land in ../assets/fonts/, add two @font-face blocks and drop the
+   fallbacks — nothing else needs to change.
+   -------------------------------------------------------------------------- */
+@font-face {
+  font-family: 'Outfit';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url('../assets/fonts/outfit-latin-wght-normal.woff2') format('woff2-variations');
+}
+
+/* --------------------------------------------------------------------------
+   Tokens — Earthy (light) is the default
+   -------------------------------------------------------------------------- */
+:root {
+  /* ---- Canonical --st-* palette (source: handoff/motion.css) ---- */
+  --st-bg:          #f5ead8;
+  --st-surface:     #faf1de;
+  --st-card:        #fdf6e9;
+  --st-text:        #201e1d;
+  --st-text-soft:   #5c554d;
+  --st-text-dim:    #736a5f;
+  --st-accent:      #c67139;   /* terracotta — primary */
+  --st-accent-deep: #8a4a22;   /* body-size text in accent */
+  --st-accent-tint: #f6e2cf;
+  --st-accent-brd:  #e0ac80;
+  --st-accent-600:  #a85a28;
+  --st-accent-800:  #6e3a15;
+  --st-sage:        #7a8a5e;   /* second accent — success/active */
+  --st-sage-tint:   #e9ecdd;
+  --st-sage-brd:    #c3cbae;
+  --st-sage-deep:   #3f4a2e;
+  --st-danger:      #a8552f;
+  --st-danger-tint: #f6dfc9;
+  --st-warning:     #d9a13d;
+  --st-border:      #d8c9ab;
+  --st-hairline:    #e8dcc2;
+  /* Surface RGB triplet, for rgba(var(--srf-rgb), a) translucent panels */
+  --srf-rgb:        253, 246, 233;
+  /* Cursor-follow glow + ambient auras (terracotta in light, indigo in dark) */
+  --st-glow-rgb:    198, 113, 57;
+  --st-aura-2-rgb:  176, 138, 62;
+
+  /* ---- V13 token names, remapped onto the Earthy palette ---- */
+  --bg-void:       var(--st-bg);
+  --bg-surface:    var(--st-surface);
+  --bg-card:       var(--st-card);
+  --bg-card-hover: #f4e8d0;
+  --bg-elevated:   var(--st-card);
+
+  --accent-primary: var(--st-accent);
+  --accent-bright:  #d98950;
+  --accent-glow:    rgba(198, 113, 57, 0.42);
+  --accent-dim:     rgba(198, 113, 57, 0.18);
+  --aura-blue:      radial-gradient(circle at 50% 0%, rgba(198,113,57,0.13), transparent 60%);
+
+  --color-success: var(--st-sage);
+  --color-warning: var(--st-warning);
+  --color-danger:  var(--st-danger);
+  --color-info:    #b08a3e;
+
+  --text-primary:   var(--st-text);
+  --text-secondary: var(--st-text-soft);
+  --text-dim:       var(--st-text-dim);
+  --text-accent:    var(--st-accent-deep);
+
+  --border-subtle: var(--st-hairline);
+  --border-muted:  var(--st-border);
+  --border-active: var(--st-accent-brd);
+  --border-glow:   var(--st-accent);
+
+  --glass-bg:     rgba(253, 246, 233, 0.82);
+  --glass-border: var(--st-hairline);
+  --glass-blur:   blur(10px) saturate(1.1);
+
+  /* Spacing — unchanged, the layout grid is not part of this redesign */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* Radii — over-round everything: 13 keys/cards, 16 containers, 999 pills */
+  --radius-sm:   9px;
+  --radius-md:   13px;
+  --radius-lg:   16px;
+  --radius-xl:   22px;
+  --radius-full: 999px;
+  --st-radius:      13px;
+  --st-radius-lg:   16px;
+  --st-radius-pill: 999px;
+
+  /* Shadows — warm brown-tinted, NEVER pure black (they sit on cream) */
+  --shadow-sm:  0 2px 5px rgba(90, 60, 30, 0.10), inset 0 1px 0 rgba(255,255,255,0.6);
+  --shadow-md:  0 10px 28px rgba(90, 60, 30, 0.22), inset 0 1px 0 #fff;
+  --shadow-lg:  0 18px 50px rgba(90, 60, 30, 0.20);
+  --shadow-glow: 0 0 20px rgba(198, 113, 57, 0.22);
+  --shadow-key: 0 2px 6px rgba(90, 60, 30, 0.10), inset 0 1px 0 rgba(255,255,255,0.65);
+  --st-shadow-sm: var(--shadow-sm);
+  --st-shadow-md: var(--shadow-md);
+  --st-shadow-lg: var(--shadow-lg);
+
+  /* ---- Motion tokens ---- */
+  --ease-spring: cubic-bezier(.34, 1.3, .4, 1);  /* entrances, pops, blooms */
+  --ease-out:    cubic-bezier(.2, .8, .2, 1);    /* reflow, hovers */
+  --ease-in:     cubic-bezier(.4, 0, 1, 1);      /* exits — ~65% of enter */
+  --dur-micro:    180ms;
+  --dur-standard: 320ms;
+  --dur-hero:     560ms;
+
+  --transition-fast:   var(--dur-micro) var(--ease-out);
+  --transition-normal: var(--dur-standard) var(--ease-out);
+  --transition-spring: 450ms var(--ease-spring);
+  --transition-slide:  var(--dur-hero) var(--ease-spring);
+
+  /* Typography */
+  --st-font-heading: 'Caprasimo', 'Outfit', Georgia, serif;
+  --st-font-body:    'Figtree', 'Outfit', system-ui, sans-serif;
+  --font-family: var(--st-font-body);
+  --font-size-xs:  11px;
+  --font-size-sm:  12px;
+  --font-size-md:  14px;
+  --font-size-lg:  16px;
+  --font-size-xl:  18px;
+  --font-size-2xl: 22px;
+  --font-size-3xl: 28px;
+
+  /* Kept so any stale reference still resolves; the V14 dashboard is a
+     single stage with no sidebar, header grid or status bar. */
+  --sidebar-width: 0px;
+  --header-height: 0px;
+  --statusbar-height: 0px;
+}
+
+/* --------------------------------------------------------------------------
+   Nocturne (dark) — deep navy ground, indigo accent.
+   Terracotta survives ONLY as light-mode warmth; the dark glow is indigo.
+   -------------------------------------------------------------------------- */
+body.nocturne {
+  --st-bg:          #0d141f;
+  --st-surface:     #131a29;
+  --st-card:        #1c2534;
+  --st-text:        #e8e4dc;
+  --st-text-soft:   #b3bdcc;
+  --st-text-dim:    #93a0b4;
+  --st-accent:      #6b8cd6;
+  --st-accent-deep: #9db4e8;
+  --st-accent-tint: #1e2a4a;
+  --st-accent-brd:  #3c4f80;
+  --st-accent-600:  #5573b8;
+  --st-accent-800:  #b7c8ec;
+  --st-sage:        #7f93b8;
+  --st-sage-tint:   #1a2334;
+  --st-sage-brd:    #2e3a4e;
+  --st-sage-deep:   #b3bdcc;
+  --st-danger:      #d08a6a;
+  --st-danger-tint: #3a2318;
+  --st-warning:     #d9a13d;
+  --st-border:      #2e3a4e;
+  --st-hairline:    #232d3e;
+  --srf-rgb:        19, 26, 41;
+  --st-glow-rgb:    107, 140, 214;
+  --st-aura-2-rgb:  70, 95, 170;
+
+  --bg-card-hover: #232d3e;
+  --accent-bright: #8fa5dd;
+  --accent-glow:   rgba(107, 140, 214, 0.42);
+  --accent-dim:    rgba(107, 140, 214, 0.20);
+  --aura-blue:     radial-gradient(circle at 50% 0%, rgba(107,140,214,0.15), transparent 60%);
+  --color-info:    #8fa5dd;
+
+  --glass-bg:     rgba(19, 26, 41, 0.85);
+  --glass-border: #232d3e;
+
+  /* On the navy ground the shadows go black-tinted, not brown */
+  --shadow-sm:  0 2px 6px rgba(0, 0, 0, 0.40), inset 0 1px 0 rgba(255,255,255,0.05);
+  --shadow-md:  0 10px 28px rgba(0, 0, 0, 0.50), inset 0 1px 0 rgba(255,255,255,0.06);
+  --shadow-lg:  0 18px 50px rgba(0, 0, 0, 0.55);
+  --shadow-glow: 0 0 20px rgba(107, 140, 214, 0.25);
+  --shadow-key: 0 2px 6px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255,255,255,0.06);
+}
+
+/* --------------------------------------------------------------------------
+   Global reset & base
+   -------------------------------------------------------------------------- */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--st-bg);
+  color: var(--st-text);
+  font-family: var(--st-font-body);
+  font-size: var(--font-size-md);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  transition: background var(--dur-hero) var(--ease-out),
+              color var(--dur-hero) var(--ease-out);
+}
+
+h1, h2, h3, .heading { font-family: var(--st-font-heading); font-weight: 400; }
+
+/* --------------------------------------------------------------------------
+   Surfaces
+   -------------------------------------------------------------------------- */
+.glass {
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+}
+
+.glass-card {
+  background: var(--st-card);
+  border: 1px solid var(--st-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+/* --------------------------------------------------------------------------
+   Keyframes — the Earthy motion system (handoff/motion.css)
+   -------------------------------------------------------------------------- */
+
+/* Ambient background blobs */
+@keyframes st-aura-drift {
+  0%   { transform: translate(-8%, -6%) scale(1); }
+  50%  { transform: translate(6%, 4%) scale(1.15); }
+  100% { transform: translate(-8%, -6%) scale(1); }
+}
+
+/* Breathing backlight halo behind the keyboard */
+@keyframes st-breathe {
+  0%, 100% { opacity: .55; transform: translate(-50%, -50%) scale(1); }
+  50%      { opacity: .85; transform: translate(-50%, -50%) scale(1.08); }
+}
+
+/* Keyboard cascade — one key springing up into place */
+@keyframes st-key-in {
+  0%   { opacity: 0; transform: translateY(16px) scale(.85); }
+  62%  { opacity: 1; transform: translateY(-2px) scale(1.03); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* Generic pop for popover rows, chips, grid tiles */
+@keyframes st-pop-in {
+  0%   { opacity: 0; transform: translateY(8px) scale(.85); }
+  62%  { opacity: 1; transform: translateY(-1px) scale(1.04); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* A key doing one spring pop as a binding lands on it */
+@keyframes st-key-pop {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.16); }
+  70%  { transform: scale(.94); }
+  100% { transform: scale(1); }
+}
+
+/* Ripple expanding from a pressed key */
+@keyframes st-ripple {
+  0%   { opacity: .55; transform: scale(.15); }
+  100% { opacity: 0;   transform: scale(1); }
+}
+
+/* The key editor blooming OUT of the key that was pressed.
+   --fx/--fy = vector from screen centre to that key. */
+@keyframes st-editor-in {
+  0%   { opacity: 0; transform: translate(calc(-50% + var(--fx)), calc(-50% + var(--fy))) scale(.12); }
+  65%  { opacity: 1; transform: translate(-50%, -50%) scale(1.03); }
+  100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+
+/* Status LED breathing */
+@keyframes st-led-pulse {
+  0%, 100% { opacity: 1;   box-shadow: 0 0 0 0 rgba(122,138,94,.4); }
+  50%      { opacity: .75; box-shadow: 0 0 0 5px rgba(122,138,94,0); }
+}
+
+@keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
+
+/* V13 names kept as aliases so nothing that still references them breaks */
+@keyframes key-pop {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.16); }
+  70%  { transform: scale(.94); }
+  100% { transform: scale(1); }
+}
+@keyframes slide-up      { from { opacity: 0; transform: translateY(12px) } to { opacity: 1; transform: translateY(0) } }
+@keyframes slide-in-right{ from { opacity: 0; transform: translateX(32px) } to { opacity: 1; transform: translateX(0) } }
+@keyframes backdrop-fade { from { opacity: 0 } to { opacity: 1 } }
+@keyframes modal-enter   { from { opacity: 0; transform: scale(.95) translateY(-8px) } to { opacity: 1; transform: scale(1) translateY(0) } }
+@keyframes led-pulse {
+  0%, 100% { opacity: 1;  box-shadow: 0 0 4px currentColor; }
+  50%      { opacity: .6; box-shadow: 0 0 10px currentColor; }
+}
+
+/* --------------------------------------------------------------------------
+   Buttons — every interactive control is a pill
+   -------------------------------------------------------------------------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 36px;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--st-border);
+  border-radius: var(--radius-full);
+  background: var(--st-card);
+  color: var(--st-text);
+  font-family: var(--st-font-body);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+}
+
+.btn:hover {
+  background: var(--st-accent-tint);
+  border-color: var(--st-accent-brd);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+}
+
+.btn:active { transform: translateY(0) scale(.96); }
+
+.btn-primary {
+  background: var(--st-accent);
+  border-color: var(--st-accent);
+  color: #fff;
+  font-weight: 700;
+}
+.btn-primary:hover {
+  background: var(--st-accent-600);
+  border-color: var(--st-accent-600);
+  box-shadow: 0 6px 18px rgba(198, 113, 57, 0.30);
+}
+
+.btn-danger,
+.btn.danger {
+  background: transparent;
+  border-color: var(--st-accent-brd);
+  color: var(--st-danger);
+}
+.btn-danger:hover,
+.btn.danger:hover {
+  background: var(--st-danger);
+  border-color: var(--st-danger);
+  color: #fff;
+}
+
+.btn-sm   { height: 30px; padding: 0 12px; font-size: var(--font-size-xs); }
+.btn-icon { width: 36px; padding: 0; justify-content: center; }
+
+/* --------------------------------------------------------------------------
+   Inputs — pills, terracotta focus ring, never a native blue outline
+   -------------------------------------------------------------------------- */
+.input {
+  width: 100%;
+  height: 38px;
+  padding: 0 16px;
+  background: rgba(var(--srf-rgb), 1);
+  border: 1.5px solid var(--st-border);
+  border-radius: var(--radius-full);
+  color: var(--st-text);
+  font-family: var(--st-font-body);
+  font-size: var(--font-size-sm);
+  outline: none;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+.input:focus {
+  border-color: var(--st-accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+.input.error {
+  border-color: var(--st-danger);
+  box-shadow: 0 0 0 3px rgba(168, 85, 47, 0.15);
+}
+.input::placeholder { color: var(--st-text-dim); }
+
+/* --------------------------------------------------------------------------
+   Badges — sage kbd chips
+   -------------------------------------------------------------------------- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: var(--radius-full);
+  background: var(--st-accent-tint);
+  border: 1px solid var(--st-accent-brd);
+  color: var(--st-accent-800);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  letter-spacing: .02em;
+}
+.badge-active { background: var(--st-sage-tint); border-color: var(--st-sage-brd); color: var(--st-sage-deep); }
+.badge-bypass { background: var(--st-accent-tint); border-color: var(--st-accent-brd); color: var(--st-accent-800); }
+.badge-paused { background: #f6e8c8; border-color: #dfbe7a; color: #7a5a12; }
+
+/* kbd chip used in the specials tray */
+kbd, .kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  background: var(--st-accent-tint);
+  border: 1px solid var(--st-accent-brd);
+  color: var(--st-accent-800);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+/* --------------------------------------------------------------------------
+   Toggle switch — terracotta track, white thumb. No native checkboxes.
+   -------------------------------------------------------------------------- */
+.toggle-switch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.toggle-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+
+.toggle-track {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-full);
+  background: var(--st-border);
+  transition: background var(--dur-standard) var(--ease-out);
+}
+.toggle-thumb {
+  position: absolute;
+  top: 2.5px;
+  left: 2.5px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(90, 60, 30, .3);
+  transition: left var(--dur-standard) var(--ease-spring);
+}
+.toggle-switch input:checked + .toggle-track { background: var(--st-accent); }
+.toggle-switch input:checked + .toggle-track .toggle-thumb { left: 18.5px; }
+
+/* Native checkbox fallback, tinted so it can never render Windows blue */
+input[type="checkbox"], input[type="radio"] { accent-color: var(--st-accent); }
+
+/* --------------------------------------------------------------------------
+   Scrollbar
+   -------------------------------------------------------------------------- */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--st-border); border-radius: var(--radius-full); }
+::-webkit-scrollbar-thumb:hover { background: var(--st-accent-brd); }
+
+/* --------------------------------------------------------------------------
+   Misc shared pieces
+   -------------------------------------------------------------------------- */
+.divider {
+  width: 100%;
+  height: 1px;
+  background: var(--st-hairline);
+  margin: var(--space-4) 0;
+}
+
+.warning-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: #f6e8c8;
+  border: 1px solid #dfbe7a;
+  border-radius: var(--radius-lg);
+  color: #7a5a12;
+  font-size: var(--font-size-sm);
+  animation: fade-in var(--dur-standard) var(--ease-out);
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(120, 85, 45, 0.16);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: backdrop-fade var(--dur-standard) var(--ease-out);
+}
+body.nocturne .modal-overlay { background: rgba(0, 0, 0, 0.45); }
+
+.modal-box {
+  background: rgba(var(--srf-rgb), .97);
+  border: 1px solid var(--st-border);
+  border-radius: var(--radius-xl);
+  padding: var(--space-6);
+  min-width: 360px;
+  max-width: 480px;
+  box-shadow: var(--shadow-lg);
+  animation: st-pop-in var(--dur-hero) var(--ease-spring) both;
+}
+.modal-title {
+  font-family: var(--st-font-heading);
+  font-size: var(--font-size-lg);
+  margin-bottom: var(--space-4);
+}
+.modal-actions {
+  display: flex;
+  gap: var(--space-3);
+  justify-content: flex-end;
+  margin-top: var(--space-6);
+}
+
+.context-menu {
+  position: fixed;
+  background: rgba(var(--srf-rgb), .96);
+  border: 1px solid var(--st-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  z-index: 500;
+  overflow: hidden;
+  min-width: 156px;
+  padding: 5px;
+  animation: st-pop-in 240ms var(--ease-spring) both;
+}
+.context-menu-item {
+  padding: 8px 14px;
+  border-radius: var(--radius-full);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--st-text);
+  transition: background var(--transition-fast);
+}
+.context-menu-item:hover { background: var(--st-accent-tint); }
+.context-menu-item.danger { color: var(--st-danger); }
+.context-menu-item.danger:hover { background: var(--st-danger-tint); }
+
+/* --------------------------------------------------------------------------
+   Reduced motion / low visual effects
+   --------------------------------------------------------------------------
+   PROBLEM 47. The old rule here was a blanket
+       *, *::before, *::after { animation-duration:.001ms; transition-duration:.001ms }
+   which killed EVERYTHING — including the hover lift, the press depress and
+   every open/close tween. A tester with Windows animation effects switched off
+   reported the app as "no motion graphics … not smooth", because it genuinely
+   had none: the app looked frozen and unresponsive rather than calm.
+
+   Reduced motion means "don't move large things across the screen or loop
+   animations forever". It does NOT mean "remove the feedback that tells me my
+   click registered". So:
+     · KILLED: infinite ambient loops (auras, halo, toast glow) and long
+       distance-travelling entrances (key cascade, HUD bloom, editor bloom).
+     · KEPT (shortened): hover, press, and open/close tweens — the responsive
+       layer. 120ms instead of 180-560ms.
+   Applied via .reduced-motion on <html>, set by main.ts/overlay.ts from either
+   the OS media query or the user's own "Reduce visual effects" setting, so it
+   can be overridden in-app on a machine where the OS default is wrong. */
+
+:root.reduced-motion #aura-a,
+:root.reduced-motion #aura-b,
+:root.reduced-motion #halo,
+:root.reduced-motion #st-toastglow,
+:root.reduced-motion #st-hud .pulse {
+  animation: none !important;
+}
+/* The halo's centring lives in its keyframes, so removing the animation must
+   not un-centre it (same class of bug as PROBLEM 40). */
+:root.reduced-motion #halo { transform: translate(-50%, -50%); }
+
+/* Cursor glow is a decorative always-on RAF layer — hide it outright. */
+:root.reduced-motion #cursor-glow { display: none !important; }
+
+/* Long entrances become instant; the element must still end up VISIBLE, so
+   opacity/transform are reset rather than left at the keyframe's 0%. */
+:root.reduced-motion .key,
+:root.reduced-motion .ed-tile,
+:root.reduced-motion .profile-row,
+:root.reduced-motion .special-item,
+:root.reduced-motion .set-row,
+:root.reduced-motion .popover,
+:root.reduced-motion .st-chip > i,
+:root.reduced-motion #st-hud .space,
+:root.reduced-motion #key-detail-panel.open {
+  animation: none !important;
+  opacity: 1 !important;
+}
+:root.reduced-motion .key,
+:root.reduced-motion .ed-tile,
+:root.reduced-motion .profile-row,
+:root.reduced-motion .special-item,
+:root.reduced-motion .set-row,
+:root.reduced-motion .popover,
+:root.reduced-motion .st-chip > i {
+  transform: none !important;
+}
+/* These two are centred by transform, so "none" would fling them off-centre. */
+:root.reduced-motion #st-hud .space,
+:root.reduced-motion #key-detail-panel.open {
+  transform: translate(-50%, -50%) !important;
+}
+
+/* The responsive layer SURVIVES, just quicker. */
+:root.reduced-motion {
+  --dur-micro: 90ms;
+  --dur-standard: 120ms;
+  --dur-hero: 140ms;
+  --ease-spring: cubic-bezier(.2, .8, .2, 1);   /* no overshoot */
+}
+
+/* Blur is the most expensive thing we composite; drop it on low-effect mode. */
+:root.reduced-motion #stage.editing #keyboard-scale {
+  filter: none !important;
+  opacity: .55;
+}

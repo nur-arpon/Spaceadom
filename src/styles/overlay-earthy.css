@@ -1,0 +1,246 @@
+/* ==========================================================================
+   Goes at: src/styles/overlay-earthy.css
+   Linked from overlay.html (see RUST_AND_HTML_CHANGES.md §4).
+   ONE theme setting drives everything: body.nocturne = dark.
+   ========================================================================== */
+
+:root {
+  --st-pill-bg: #fffaf0;  --st-pill-brd: #e3d3b4;  --st-pill-text: #3a332b;
+  --st-chipA-bg: #f6dfc9; --st-chipA-brd: #dfaa7c; --st-chipA-text: #7c3f16; --st-kbdA: #c67139;
+  --st-chipB-bg: #e9ecdd; --st-chipB-brd: #b9c2a2; --st-chipB-text: #47523a; --st-kbdB: #7a8a5e;
+  --st-space-bg: #c67139; --st-space-brd: #a85a28; --st-ring: #e8b48b;
+  --st-glow-rgb: 198, 113, 57;
+  --st-shadow: 0 10px 28px rgba(90, 60, 30, 0.22);
+  --st-track: rgba(32, 30, 29, 0.14);
+}
+body.nocturne {
+  --st-pill-bg: rgba(20,28,44,.95); --st-pill-brd: #2e3a4e; --st-pill-text: #e8e4dc;
+  --st-chipA-bg: #1e2a4a; --st-chipA-brd: #3c4f80; --st-chipA-text: #b7c8ec; --st-kbdA: #6b8cd6;
+  --st-chipB-bg: #1a2334; --st-chipB-brd: #2e3a4e; --st-chipB-text: #b3bdcc; --st-kbdB: #41568f;
+  --st-space-bg: #6b8cd6; --st-space-brd: #5573b8; --st-ring: #3c4f80;
+  --st-glow-rgb: 107, 140, 214;
+  --st-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+  --st-track: rgba(255, 255, 255, 0.12);
+}
+
+/* ---------------- Toast — island pill ---------------- */
+.st-toast {
+  display: inline-flex; align-items: center; gap: 10px;
+  height: 42px; padding: 0 12px; overflow: hidden; white-space: nowrap;
+  background: var(--st-pill-bg); border: 1px solid var(--st-pill-brd);
+  box-shadow: var(--st-shadow);
+  /* phase: dot */
+  border-radius: 999px; max-width: 42px; opacity: .95;
+  transform: translateY(18px) scale(.45);
+}
+/* NEVER `transition: all` here. `visibility` is transitionable, so `all` defers
+   a parked pill's hide for the full 560ms — the real pill then sits on screen
+   beside its flying copy for the whole flight, which reads as a duplicate
+   toast. List the properties explicitly. */
+.st-toast.open  { max-width: 560px; opacity: 1; transform: none;
+                  transition: max-width 560ms cubic-bezier(.34,1.3,.4,1),
+                              opacity   560ms cubic-bezier(.34,1.3,.4,1),
+                              transform 560ms cubic-bezier(.34,1.3,.4,1); }
+.st-toast.leave { max-width: 42px; opacity: 0; transform: translateY(-8px) scale(.5);
+                  transition: max-width 340ms cubic-bezier(.4,0,1,1),
+                              opacity   340ms cubic-bezier(.4,0,1,1),
+                              transform 340ms cubic-bezier(.4,0,1,1); }
+/* depth 0 = newest/biggest … 2 = oldest/shortest, stepping toward circular */
+.st-toast.open[data-depth="1"] { transform: scale(.9); opacity: .7;  max-width: 300px; }
+.st-toast.open[data-depth="2"] { transform: scale(.8); opacity: .45; max-width: 128px; }
+
+.st-toast .ico { flex-shrink: 0; width: 24px; height: 24px; border-radius: 999px;
+  display: flex; align-items: center; justify-content: center;
+  font: 700 12px var(--st-font-body, "Outfit", sans-serif); color: #fff; }
+.st-toast .msg { font: 600 13px var(--st-font-body, "Outfit", sans-serif);
+  color: var(--st-pill-text); opacity: 0; transition: opacity .3s .14s; }
+.st-toast .dot { flex-shrink: 0; width: 7px; height: 7px; border-radius: 50%;
+  opacity: 0; transition: opacity .3s .18s; }
+.st-toast svg  { flex-shrink: 0; opacity: 0; transition: opacity .3s .2s; }
+.st-toast.open .msg, .st-toast.open .dot, .st-toast.open svg { opacity: 1; }
+
+@keyframes st-ring-drain { to { stroke-dashoffset: 50.27; } }
+@keyframes st-toast-glow { 0%,100% { opacity: .5 } 50% { opacity: .9 } }
+
+/* ---------------- Guide HUD — radial bloom ---------------- */
+#st-hud { position: fixed; inset: 0; z-index: 25; pointer-events: none;
+  transition: opacity 220ms cubic-bezier(.4,0,1,1), transform 220ms cubic-bezier(.4,0,1,1); }
+#st-hud.hidden { opacity: 0; transform: scale(.93); }
+
+/* ---------------------------------------------------------------------------
+   REMOVED 2026-08-11, and DO NOT PUT IT BACK without reading this.
+
+   A `#st-hud .glow` was added here: a 560x320 element with filter:blur(34px),
+   centred on the SPACE pill. It made the ENTIRE overlay window compose zero
+   pixels — HUD and toasts both vanished — while Rust reported the window
+   correctly sized, correctly centred and `visible Ok(true)`, and the frontend
+   ran all the way through to its overlay_fit_hud invoke. Nothing logged an
+   error. It simply painted nothing.
+
+   This is the failure mode already documented in OVERLAY_ACHIEVED.md §2.1
+   ("a transparent window composes ZERO pixels on this machine") — previously
+   only ever seen when the window was made fullscreen. A large blurred surface
+   is the other way to trigger it. The toast glow (#st-toastglow, 340x150,
+   blur 22px) is under that threshold and works; ~4x that area does not.
+
+   The user's actual complaint — "the glow is beneath SPACE" — was NOT a
+   missing HUD glow. It was the bottom-anchored TOAST glow leaking, because it
+   was only hidden when `_toasts.length === 0 && !_hudActive`. Fixing that leak
+   (toast.ts, hideToastGlow) removes the misplaced glow. No second glow needed.
+
+   If a HUD backlight is ever genuinely wanted: use a plain radial-gradient
+   with NO filter:blur, or bake the blur into the gradient stops, and verify by
+   holding Space before shipping.
+   --------------------------------------------------------------------------- */
+
+/* PROBLEM 50 — the misaligned ring in the tester's screenshot.
+   The centring transform used to live ONLY inside st-ring-pulse's keyframes,
+   and the element's default opacity is 1. So on any machine where the
+   animation does not run (reduced motion — which that tester had), the ring
+   lost its centring AND never faded: a 340px circle parked 170px down-and-
+   right of SPACE, visible for as long as the HUD was up.
+   Both defences now live on the ELEMENT: it is centred without help, and it
+   is invisible unless the animation explicitly drives it. Same bug class as
+   PROBLEM 40 — a transform that only exists in keyframes is lost the moment
+   the animation is removed. */
+#st-hud .pulse { position: absolute; left: 50%; top: 50%; width: 340px; height: 340px;
+  border: 1.5px solid var(--st-ring); border-radius: 50%; pointer-events: none;
+  transform: translate(-50%, -50%); opacity: 0;
+  animation: st-ring-pulse 900ms cubic-bezier(.2,.8,.2,1) both; }
+
+#st-hud .space { position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%); width: 230px; height: 60px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--st-space-bg); border: 1px solid var(--st-space-brd);
+  border-radius: 999px; box-shadow: var(--st-shadow);
+  font: 800 14px var(--st-font-body, "Outfit", sans-serif);
+  letter-spacing: .22em; color: #fff;
+  animation: st-space-pop 560ms cubic-bezier(.34,1.3,.4,1) both; }
+
+.st-chip { position: absolute; transform: translate(-50%, -50%);
+  display: flex; align-items: center; gap: 8px; border-radius: 110px;
+  box-shadow: var(--st-shadow); }
+.st-chip > i { animation: st-bloom-in 620ms cubic-bezier(.34,1.3,.4,1) both;
+  display: flex; align-items: center; gap: 8px; font-style: normal;
+  padding: 5px 11px; border-radius: 110px; }
+.st-chip.sp > i { padding: 7px 13px; background: var(--st-chipA-bg);
+  border: 1.5px solid var(--st-chipA-brd); color: var(--st-chipA-text);
+  font: 600 12.5px var(--st-font-body, "Outfit", sans-serif); }
+.st-chip.ap > i { background: var(--st-chipB-bg);
+  border: 1.5px solid var(--st-chipB-brd); color: var(--st-chipB-text);
+  font: 600 11.5px var(--st-font-body, "Outfit", sans-serif); }
+.st-chip kbd { display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 20px; padding: 0 5px; border-radius: 999px;
+  font: 700 11px ui-monospace, Menlo, monospace; color: #fff; flex-shrink: 0; }
+.st-chip.sp kbd { background: var(--st-kbdA); }
+.st-chip.ap kbd { background: var(--st-kbdB); }
+/* hard bound so arbitrary app names can never break the ring */
+.st-chip span { white-space: nowrap; max-width: 118px; overflow: hidden; text-overflow: ellipsis; }
+
+@keyframes st-bloom-in {
+  0%   { opacity: 0; transform: translate(var(--fx), var(--fy)) scale(.2); }
+  62%  { opacity: 1; transform: translate(calc(var(--fx) * -.06), calc(var(--fy) * -.06)) scale(1.06); }
+  100% { opacity: 1; transform: translate(0, 0) scale(1); }
+}
+@keyframes st-space-pop {
+  0%   { transform: translate(-50%,-50%) scale(.55); opacity: 0; }
+  62%  { transform: translate(-50%,-50%) scale(1.05); opacity: 1; }
+  100% { transform: translate(-50%,-50%) scale(1); opacity: 1; }
+}
+@keyframes st-ring-pulse {
+  0%   { transform: translate(-50%,-50%) scale(.4);  opacity: .6; }
+  100% { transform: translate(-50%,-50%) scale(1.15); opacity: 0; }
+}
+
+/* Reduced visual effects on the OVERLAY.
+   Driven by the .reduced-motion class overlay.ts puts on <html> from the
+   user's "Visual effects" setting — NOT by the media query directly, which
+   would ignore that override (PROBLEM 47).
+
+   The pulse ring is DISPLAY:NONE here, not merely un-animated: it is a
+   one-shot entrance flourish with no meaning as a static circle, and leaving
+   it un-animated is what produced the misplaced ring in the tester's
+   screenshot (PROBLEM 50). */
+:root.reduced-motion #st-hud .pulse { display: none !important; }
+
+:root.reduced-motion .st-chip > i,
+:root.reduced-motion #st-hud .space {
+  animation: none !important;
+}
+/* .space is centred by transform, so it must keep it when the animation goes. */
+:root.reduced-motion #st-hud .space { transform: translate(-50%, -50%) !important; }
+:root.reduced-motion .st-chip > i { transform: none !important; opacity: 1 !important; }
+
+/* Toasts still appear and still leave — just without the spring tween. Their
+   max-width IS the reveal, so transitions are shortened, never removed. */
+:root.reduced-motion .st-toast,
+:root.reduced-motion .st-toast.open,
+:root.reduced-motion .st-toast.leave { transition-duration: 120ms !important; }
+:root.reduced-motion #st-hud { transition-duration: 120ms !important; }
+
+
+/* ================= WARP HANDOVER — toast pill <-> SPACE pill ================
+   PROBLEM 112. The overlay window move is instant and un-animatable on Win32,
+   so the flight is animated in CSS INSIDE the window and the window move is
+   cancelled out arithmetically. See toast.ts flightWarp(). */
+
+/* A pill whose flying copy is currently in the air. It keeps its layout box (the
+   flight measures against it) but paints nothing. */
+.st-toast.parked { visibility: hidden; }
+/* Suppress the 560ms entrance transition so a parked pill can be measured at its
+   FINAL geometry — that is what the flight aims at. */
+.st-toast.settle { transition: none !important; }
+
+/* The flight layer sits at the window centre, which is also where the SPACE pill
+   is, so SPACE is the origin {0,0} and every offset is measured from it. */
+#st-flight { position: fixed; left: 50%; top: 50%; width: 0; height: 0;
+  pointer-events: none; z-index: 31; }
+
+/* PROBLEM 115 — the flying copy is TWO faces that cross-fade, each at its own
+   natural size. A single element morphed with width/height would force layout
+   every frame; this way the only animated properties are transform and
+   opacity, which stay on the compositor. `will-change` promotes each face to
+   its own layer so the cross-fade never repaints the pair. */
+.st-fly-wrap { position: absolute; left: 0; top: 0; }
+
+/* Every value here must match .st-toast exactly — height, padding, gap, radius,
+   border, shadow — or the copy will not sit pixel-on-pixel over the pill it
+   replaces and you will see the swap. */
+.st-fly { position: absolute; left: 0; top: 0; box-sizing: border-box;
+  display: flex; align-items: center; gap: 10px; padding: 0 12px;
+  border-radius: 999px; overflow: hidden; white-space: nowrap;
+  box-shadow: var(--st-shadow); transform: translate(-50%, -50%);
+  will-change: transform, opacity; backface-visibility: hidden; }
+/* The SPACE face centres one label instead of a row of toast content. */
+.st-fly.face-space-pill { justify-content: center; padding: 0; }
+.st-fly .face-space { font: 800 14px var(--st-font-body, "Outfit", sans-serif);
+  letter-spacing: .22em; color: #fff; }
+
+/* Motion streak. A gradient, NOT a blur filter — a blurred element in this
+   overlay made the whole window compose zero pixels (PROBLEM 37, 2026-08-11). */
+.st-fly-trail { position: absolute; left: 0; top: 0; height: 8px;
+  border-radius: 999px; opacity: 0; transform-origin: 0 50%;
+  will-change: transform, opacity;
+  background: linear-gradient(90deg, rgba(var(--st-glow-rgb), .62),
+              rgba(var(--st-glow-rgb), .06) 62%, transparent); }
+
+/* Impact ring at the landing point. */
+.st-fly-shock { position: absolute; width: 240px; height: 240px;
+  border: 2px solid rgba(var(--st-glow-rgb), .75); border-radius: 50%;
+  pointer-events: none; }
+
+/* During a handover the SPACE pill is DELIVERED by the flight, so its own
+   entrance must not play. `.landed` reveals it the instant the last pill hits. */
+#st-hud.handoff .space { animation: none !important; opacity: 0; }
+#st-hud.handoff.landed .space { opacity: 1; }
+
+/* PROBLEM 114 — SPACE has BECOME the toast, so it must not also fade out in
+   place. The flying copy carries its identity; leaving the real pill to finish
+   its 220ms fade underneath shows the same object twice. The ring and chips
+   still collapse normally — the HUD going away DURING the flight is wanted;
+   two SPACE pills are not. */
+#st-hud.space-gone .space { opacity: 0 !important; transition: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  .st-fly, .st-fly-trail, .st-fly-shock { display: none !important; }
+}
