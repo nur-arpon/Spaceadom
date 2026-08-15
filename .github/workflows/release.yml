@@ -37,6 +37,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A tag of v1.0.27 must build 1.0.27 source.
+      #
+      # Without this, the workflow cheerfully builds whatever sits on the
+      # tagged commit and publishes it under the tag's name — so a release
+      # can contain a different version than it claims, and nothing anywhere
+      # says so. That is a silent failure, and this project has had enough of
+      # those. Fail loudly and early instead, before the 10-minute build.
+      - name: Check tag matches source version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tag  = "${{ github.ref_name }}" -replace '^v',''
+          $pkg  = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $conf = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          Write-Host "tag=$tag  package.json=$pkg  tauri.conf.json=$conf"
+          if ($tag -ne $pkg -or $tag -ne $conf) {
+            Write-Host "::error::Tag v$tag does not match the source version ($pkg / $conf). Either bump package.json, src-tauri/tauri.conf.json and src-tauri/Cargo.toml to $tag, or tag v$pkg instead. No installers were built or uploaded."
+            exit 1
+          }
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
