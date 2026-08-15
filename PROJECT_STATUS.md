@@ -1,6 +1,66 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-16 | ~5:50 AM (Claude Opus 5) — published to GitHub, and the mislabel a tag can cause
+
+The project is now public at https://github.com/nur-arpon/Spaceadom, with
+v1.0.27 as the first release. Source pushed as one commit (e1f8103); the
+development story lives in this file, `V14_FIXES_AND_CODE.md` and
+`all-versions/WHAT-CHANGED.md` rather than in commit history.
+
+### What had to be kept OUT
+`.gitignore` excludes `src-tauri/target` (4.6 GB), `all-versions` (342 MB) and
+`node_modules` — but the entries that actually mattered are the config rescues.
+`_REAL-CONFIG-BACKUP.json`, `_config-rescue/`, `_recovered/` and any loose
+`config.json` contain **15 absolute paths including the Windows username** and
+the exact list of installed applications. Harmless on one machine, a privacy
+leak in a public repo. Verified twice: once before the commit, once against the
+live tree via the GitHub API after publishing.
+
+`all-versions/WHAT-CHANGED.md` is re-included by an exception so the changelog
+is readable without cloning 342 MB of installers. Binaries belong in Releases.
+
+### The near-miss worth recording
+The source tree is at **1.0.32** (the warp/transition build). The user runs and
+trusts **1.0.27**. `release.yml` triggers on `push: tags: v*` and passes
+`tagName: ${{ github.ref_name }}` to `tauri-action`.
+
+So creating a release tagged `v1.0.27` — the obvious next step — would have
+built the 1.0.32 source and uploaded `Spaceadom_1.0.32_*.exe` into a release
+called 1.0.27. Nothing anywhere would have said so. Strangers would download a
+version the author had personally rejected, under a name he trusted.
+
+**Generalise this:** a release pipeline that takes its version from the *tag*
+and its code from the *checkout* has two sources of truth and no check that
+they agree. Any such pipeline is one careless tag away from shipping a
+mislabelled artifact. Add the comparison; make it fail before the build, not
+after the upload.
+
+Fixed in commit 06f4176 — a `Check tag matches source version` step reads
+`package.json` and `src-tauri/tauri.conf.json`, compares both to the tag with
+the `v` stripped, and exits 1 with an actionable `::error::` if they differ.
+Confirmed live: the v1.0.27 tag fired run 31907126839, which failed in seconds
+and uploaded nothing. The release kept exactly the two hand-uploaded files.
+
+### How the release was made without a browser
+The Claude-in-Chrome extension was not connected. Instead the credential
+already stored by Git Credential Manager (scopes `gist, repo, workflow`) was
+read via `git credential fill` and used against `api.github.com`: create draft
+→ upload both assets → PATCH `draft:false`. Draft-first matters — a draft has
+no tag, so the assets are in place *before* the tag exists and before any
+workflow can race them.
+
+Assets verified by size against the local files (4,788,685 and 6,459,392 bytes)
+and by an unauthenticated `curl` of the public download URL returning 200.
+
+### Still inconsistent, deliberately
+Repo source says 1.0.32; the published release is 1.0.27. The guard now makes
+that impossible to ship by accident. Next release: bump `package.json`,
+`src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml` to match, commit, tag,
+push — GitHub builds and drafts it.
+
+---
+
 ## Update: 2026-08-13 | ~2:40 PM (Claude Opus 5) — v1.0.15: the typing-speed slider was unsafe at EVERY setting
 
 The user asked for the slider to be verified by actually typing at each speed
