@@ -61,3 +61,12 @@ Thumbs.db
 *.swp
 *.tmp
 *.md.tmp
+
+# ---------------------------------------------------------------------------
+# The developer guide. It is deliberately NOT published: its screenshots show
+# the Windows username, the personal folder tree, and the exact set of apps
+# bound to each key. Keep it, share it deliberately, but do not let a
+# `git add -A` push it to a public repository by accident.
+# ---------------------------------------------------------------------------
+Spaceadom-Developer-Guide.docx
+Spaceadom-Developer-Guide.pdf

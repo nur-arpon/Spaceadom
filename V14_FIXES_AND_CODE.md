@@ -4415,3 +4415,397 @@ recovery system that logs at ERROR on every false alarm destroys the log's
 error channel — the smoke alarm that goes off 260 times is not more sensitive,
 it is one you stop hearing.
 
+
+---
+
+## PROBLEM 116 — Space+D stopped opening Discord: the app updated itself out from under the saved path
+
+**Symptom.** Space+D did nothing. No visible error; the log said:
+
+```
+2026-08-16 20:30:04 [INFO] engine: combo Space+d received
+2026-08-16 20:30:04 [WARN] engine: absolute path missing:
+    C:\Users\beamu\AppData\Local\Discord\app-1.0.9251\Discord.exe
+2026-08-16 20:30:04 [WARN] cascade: absolute path does not exist: ...app-1.0.9251\Discord.exe
+2026-08-16 20:30:04 [WARN] cascade: active profile's binding failed - falling back to FOUNDERS
+2026-08-16 20:30:04 [WARN] cascade: absolute path does not exist: ...app-1.0.9251\Discord.exe
+```
+
+The fallback ladder worked exactly as designed and was useless, because the
+Founders binding held the identical dead path.
+
+**Root cause.** Measured on disk at the moment of failure:
+
+```
+saved binding : C:\Users\beamu\AppData\Local\Discord\app-1.0.9251\Discord.exe   GONE
+actually there: C:\Users\beamu\AppData\Local\Discord\app-1.0.9253\Discord.exe   PRESENT
+never moves   : C:\Users\beamu\AppData\Local\Discord\Update.exe   (4 months older)
+```
+
+Discord uses the **Squirrel** installer, which puts the executable in
+`<App>\app-<version>\` and creates a NEW version folder on every self-update,
+deleting the old one. Any absolute path saved into such a folder is guaranteed
+to break - not "might break": guaranteed, on every machine, at an unpredictable
+future date. Slack, Teams (classic), GitHub Desktop and Signal share the layout.
+The app picker records the exe it finds, so every one of those bindings is a
+time bomb the app sets for itself.
+
+**Exact file.** `src-tauri/src/engine/actions/smart_cascade.rs`
+
+Before - the dead end:
+
+```rust
+if p.is_absolute() {
+    if p.exists() {
+        log::info!("cascade: launching absolute path: {exe_name}");
+        return shell_launch(exe_name, None, app_handle);
+    } else {
+        log::warn!("cascade: absolute path does not exist: {exe_name}");
+        return false;
+    }
+}
+```
+
+After - re-resolve before giving up:
+
+```rust
+        } else {
+            // PROBLEM 116 - a saved path that no longer exists is USUALLY not
+            // an uninstalled app. It is an app that updated itself into a new
+            // folder. Try to re-resolve before giving up.
+            #[cfg(windows)]
+            if let Some((target, params)) = repair_versioned_path(p) {
+                log::warn!(
+                    "cascade: '{exe_name}' is gone - the app updated itself into a new \
+                     folder. Re-resolved to '{target}{}'",
+                    params.as_deref().map(|a| format!(" {a}")).unwrap_or_default()
+                );
+                return shell_launch(&target, params.as_deref(), app_handle);
+            }
+            log::warn!("cascade: absolute path does not exist: {exe_name}");
+            return false;
+        }
+```
+
+plus the helper (same file, immediately above `shell_launch`). Two strategies,
+in order:
+
+```rust
+#[cfg(windows)]
+fn repair_versioned_path(dead: &std::path::Path) -> Option<(String, Option<String>)> {
+    use std::path::PathBuf;
+
+    // Only the exact `app-<version>` shape is accepted - looser matching risks
+    // launching an unrelated executable.
+    let comps: Vec<_> = dead.components().collect();
+    let idx = comps.iter().position(|c| {
+        c.as_os_str().to_string_lossy().to_ascii_lowercase().starts_with("app-")
+    })?;
+    let base: PathBuf = comps[..idx].iter().collect();
+    let tail: PathBuf = comps[idx + 1..].iter().collect();
+
+    // Newest sibling app-*, by MODIFICATION TIME, not by name: version strings
+    // stop sorting lexicographically the moment a component reaches double
+    // digits (app-1.0.9 vs app-1.0.10).
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(&base).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if !name.starts_with("app-") || !entry.path().is_dir() { continue; }
+        let t = entry.metadata().ok().and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if newest.as_ref().is_none_or(|(best, _)| t > *best) {
+            newest = Some((t, entry.path()));
+        }
+    }
+    if let Some((_, dir)) = newest {
+        let candidate = dir.join(&tail);
+        if candidate.exists() {
+            return Some((candidate.to_string_lossy().into_owned(), None));
+        }
+    }
+
+    // Squirrel's own stable entry point - what the Start Menu shortcut runs,
+    // and what will survive every FUTURE update too.
+    let updater = base.join("Update.exe");
+    if updater.exists() {
+        let exe = dead.file_name()?.to_string_lossy().into_owned();
+        return Some((updater.to_string_lossy().into_owned(),
+                     Some(format!("--processStart {exe}"))));
+    }
+    None
+}
+```
+
+**How it was verified.** `cargo check` clean, 0 errors 0 warnings. The disk
+state above was confirmed live at the moment of the failed keypress:
+`app-1.0.9251` absent, `app-1.0.9253` present with `Discord.exe` inside,
+`Update.exe` present and dated four months earlier - untouched by the update
+that broke the binding. **NOT yet verified by pressing Space+D on an installed
+build; that requires shipping it.**
+
+**Known limitation, deliberate.** The repair is applied at launch time and is
+NOT written back to `config.json`. The dashboard therefore still shows the dead
+path, and the lookup (one directory read) repeats on each launch. Writing to
+config from the engine's hot path was judged the larger risk. Persisting the
+repair is a good follow-up.
+
+**Generalise this.** *An absolute path stored today is a guess about tomorrow's
+filesystem.* Anything that stores one needs a recovery path, not merely an error
+message. Note also the shape of the failure: a fallback ladder that falls back
+to **the same stale data** is decoration. The Founders fallback fired correctly
+and could not possibly help, because both bindings were copies of one wrong
+fact.
+
+---
+
+## PROBLEM 117 — the overlay stops compositing when the display arrangement changes, and every readback still says it is fine
+
+**Symptom.** After the app had been running 7 h 10 m, holding Space played the
+sound and launched applications but drew NOTHING - no Guide HUD, no toasts.
+"Software overlay" was already switched on. Reported since 2026-08-13 as an
+intermittent fault that "self-heals".
+
+**What was ruled out, by measurement, before theorising.**
+
+1. *The setting.* `--disable-gpu` WAS live on the running WebView2 process
+   (`Get-CimInstance Win32_Process` over `msedgewebview2.exe`: one browser and
+   two renderer processes carried the flag). Software mode was active
+   throughout. The setting works and was never the problem.
+2. *The engine.* Space+F launched Explorer, minimised it and restored it during
+   the failure. Sound played. Only the drawing was dead.
+3. *Window geometry.* Logged on every attempt, correct every time:
+
+```
+overlay_fit_hud: asked 1144x572 -> clamped 1144x572 @ (281,247);
+monitor 1707x1067 at (0,0) scale 1.5; GOT size Ok((1144.0, 572.0))
+pos Ok((281.0, 247.0)); visible Ok(true)
+```
+
+4. *Whether it drew anything at all.* The measurement that mattered. A screen
+   capture of that exact rectangle, triggered by tailing `debug.log` and firing
+   the instant `guide_hud: overlay window shown` appeared, sampled on a 5-px
+   grid for the HUD's own palette:
+
+```
+baseline (immediately before)  : 40898 points sampled, 666 HUD-coloured
+during (window reported shown) : 40898 points sampled,   0 HUD-coloured
+```
+
+   Zero. The window exists, is correctly placed, claims to be visible, and
+   composes nothing.
+
+**Root cause.** In that same run the display the app saw changed underneath it:
+
+```
+1707x1067 @1.5   117 log entries   06:32 .. 18:23   (the panel, AMD iGPU)
+1920x1080 @1     106 log entries   04:34 .. 14:59   (a second/virtual display)
+```
+
+interleaved, across one uninterrupted process lifetime. A transparent, layered,
+always-on-top window whose composition was established against one display
+arrangement does not necessarily survive that arrangement changing - and
+nothing in the app noticed, because every readback Rust can perform still
+answers "fine". Restarting the application restored both surfaces at once (233
+overlay draws in the following 40 minutes, user-confirmed).
+
+**This is the whole of the "self-healing" reported since 08-13. It never healed.
+It got restarted.**
+
+**Exact file.** New module `src-tauri/src/display_watch.rs`, wired in `lib.rs`:
+
+```rust
+mod display_watch;                       // with the other module declarations
+...
+guide_hud::set_app_handle(app_handle.clone());
+// PROBLEM 117 - started AFTER set_app_handle so a rebuild can hide the HUD first.
+display_watch::start(app_handle.clone());
+```
+
+The watcher fingerprints every monitor's position, size and scale, compares
+twice a second, and on any change waits for Windows to settle and then closes
+and rebuilds the overlay window with the properties `tauri.conf.json` declares:
+
+```rust
+fn topology(app: &tauri::AppHandle) -> Vec<(i32, i32, u32, u32, i64)> {
+    let Ok(monitors) = app.available_monitors() else { return Vec::new() };
+    let mut v: Vec<_> = monitors.iter().map(|m| {
+        let p = m.position(); let s = m.size();
+        (p.x, p.y, s.width, s.height, (m.scale_factor() * 100.0).round() as i64)
+    }).collect();
+    v.sort_unstable();   // available_monitors() gives no ordering guarantee
+    v
+}
+```
+
+**Design decisions, and why each one.**
+
+- **Polling, not `WM_DISPLAYCHANGE`.** The message goes to top-level windows, so
+  receiving it means subclassing a window Tauri and WebView2 both own -
+  version-fragile, and a mistake there breaks input for the whole app.
+  Comparing a handful of integers twice a second cannot destabilise anything.
+- **Scale quantised to whole percent.** `f64` has no useful equality.
+- **Sorted fingerprint.** `available_monitors()` promises no ordering; without
+  the sort the same physical arrangement can yield two fingerprints and rebuild
+  forever.
+- **An empty read is ignored.** Windows reports intermediate states mid-mode-
+  change; an empty list must never be read as "all monitors disappeared".
+- **1.2 s settle, then re-read.** Docking emits several changes; the last one is
+  the one worth building against.
+- **`REBUILDING` guard.** A burst of events must not start two rebuilds.
+- **Fails loudly.** If the rebuild fails, `OVERLAY_DISABLED` is set and an ERROR
+  logged - the same degraded-but-honest state the app already uses when
+  click-through cannot be applied. Silently ending with no overlay would
+  reproduce the original bug with extra steps.
+- **Portable by construction.** Assumes no monitor count, resolution, scale or
+  GPU; reacts only to CHANGE. A machine whose display never changes never
+  triggers it. The app targets any x64 Windows machine; ARM is out of scope.
+
+**How it was verified.** `cargo check` clean, 0 errors 0 warnings. The
+root-cause evidence above is measured. **The FIX itself was NOT verified on a running build at the time of writing;
+it shipped as 1.0.33, was found broken within the hour (see PROBLEM 118), and
+was proven working in 1.0.34 on 2026-08-17 across five real display changes.** - that needs an installed build and a real display change
+(plug a monitor in, or start/stop a virtual display). Until then this is
+implemented and reasoned, not proven.
+
+**Honest limit on the diagnosis.** Two things changed before the successful
+retest - the spacedesk service was stopped AND the app was restarted. spacedesk
+was then restarted WITHOUT restarting the app and the overlay kept working,
+which points at display-change rather than at spacedesk. That is evidence, not
+proof. The clean experiment (leave everything alone until it breaks, then
+restart ONLY the app) has not been run.
+
+**A measurement trap this session, worth keeping.** The first pixel test
+compared "did any pixel change" and reported 100% changed - a pass. It was
+wrong: the chat window behind the overlay had scrolled. The rewrite counted
+pixels matching the HUD's own palette instead, and returned 0. *"Something
+changed" is not evidence that the thing you are testing happened.* A second
+harness injected Space via `SendInput`, which returned success while the hook
+logged nothing at all; its positive control declared the run VOID rather than
+reporting "the overlay does not paint". Without that control it would have
+produced a confident false finding.
+
+**Generalise this.** *A component that reports its own health cannot detect the
+failure mode where it is lying.* `visible: true` was true and meaningless; the
+only honest test of "did it draw" is to look at the screen. Second: *long-lived
+processes accumulate assumptions about an environment that is free to change.*
+Anything established once at startup against the display, the audio device, the
+network or the session needs either a re-establish path or a written reason it
+cannot go stale.
+
+---
+
+## PROBLEM 118 — 1.0.33's repair for PROBLEM 117 was broken, and its failure path did more damage than the fault
+
+Shipped 1.0.33 at 21:00 on 2026-08-16. The owner hit both defects within ninety
+minutes, on his own machine, doing something he does several times a day.
+
+**Symptom.** During a Discord call: shortcuts worked, sound played, no HUD and
+no toasts. Exactly the PROBLEM 117 symptom that 1.0.33 was built to fix.
+
+**What the log showed.** The detection half worked perfectly:
+
+```
+21:32:42 [WARN]  display: configuration CHANGED — was [(0,0,2560,1600,150)],
+                 now [(0,0,1920,1080,100), (1920,0,2560,1600,150)]
+21:32:44 [ERROR] display: overlay REBUILD FAILED
+                 (a webview with label `overlay` already exists)
+22:16:10 [WARN]  display: configuration CHANGED — now [(0,0,2560,1600,150)]
+22:16:11 [ERROR] display: overlay REBUILD FAILED
+                 (a webview with label `overlay` already exists)
+```
+
+**Root cause 1 — `close()` is a request, not an action.** Tauri's
+`WebviewWindow::close()` returns immediately and the window is torn down later.
+The replacement was built in the same closure, so the label was still taken.
+The app was left with a stale overlay bound to a monitor that no longer
+existed — the original bug, now with logging.
+
+**Root cause 2 — the failure path was worse than no fix at all.** On failure the
+code did this:
+
+```rust
+Err(e) => {
+    log::error!("display: overlay REBUILD FAILED ({e}) — ...");
+    crate::guide_hud::OVERLAY_DISABLED.store(true, Ordering::Relaxed);
+}
+```
+
+But the old window was still alive and still usable — `close()` had not
+completed, which is *why* the build failed. So the repair reacted to its own
+failed teardown by switching off a working overlay until the next restart. On a
+machine where the trigger fires several times a day, that converts an
+occasional fault into a permanent one.
+
+**Exact file.** `src-tauri/src/display_watch.rs`, `rebuild_overlay()`.
+
+The rewrite does three things. It uses `destroy()`, the immediate form. It polls
+until the label is genuinely free, OFF the main thread — blocking the main
+thread would freeze the dashboard and the tray. And it only sets
+`OVERLAY_DISABLED` when the window is genuinely gone AND could not be replaced,
+a state in which nothing could have been shown anyway:
+
+```rust
+// ---- 2. wait for the label to actually free up ----
+let mut gone = false;
+for _ in 0..40 {
+    std::thread::sleep(Duration::from_millis(100));
+    if app.get_webview_window("overlay").is_none() { gone = true; break; }
+}
+if !gone {
+    // The old window outlived its own destroy request. It is still there, so
+    // it is still usable — leave it alone and say so. Do NOT disable.
+    log::error!(
+        "display: the old overlay did not go away within 4s — keeping it rather \
+         than switching the HUD off. It may be bound to the previous display."
+    );
+    done();
+    return;
+}
+```
+
+**Also fixed here.** `ensure_on_screen` (PROBLEM 83) existed but was only called
+when a window was SHOWN. A dashboard open on a display that gets unplugged was
+stranded at coordinates no monitor covers until the user closed and reopened it
+from the tray. The watcher now re-homes it on every display change, because it
+is the only thing in the app that knows the displays moved.
+
+**How it was verified — the step 1.0.33 skipped.** 1.0.34 installed at 23:57.
+The owner then plugged his second display in and out while the log was watched:
+
+```
+00:03:37  CHANGED  was [(0,0,2560,1600,150)] now [(0,0,1920,1080,100), (1920,0,2560,1600,150)]
+00:03:43  CHANGED
+00:03:44  overlay rebuilt for the new display configuration
+00:03:47  overlay rebuilt for the new display configuration
+00:04:08  CHANGED  now [(0,0,2560,1600,150)]
+00:04:11  overlay rebuilt for the new display configuration
+00:04:13  CHANGED
+00:04:16  overlay rebuilt for the new display configuration
+00:04:18  CHANGED
+00:04:21  overlay rebuilt for the new display configuration
+```
+
+Five real display changes, five clean rebuilds, zero errors. The only two
+`REBUILD FAILED` lines in the whole log are 21:32 and 22:16, both on 1.0.33.
+
+**Generalise this — three separate lessons, all cheap in hindsight.**
+
+1. *A repair path that has never been executed is not a fix, it is a guess with
+   good syntax.* 1.0.33 compiled clean, was documented honestly as "implemented
+   and reasoned, not proven", and was still shipped to a machine where the
+   untested branch was reachable within the hour. Compiling proves the types;
+   only running proves the behaviour. Exercise the recovery path once — force
+   the condition if you have to — before it goes anywhere near a user.
+
+2. *A repair must never be able to do more damage than the fault it repairs.*
+   Ask of every failure branch: what state does this leave the user in, and is
+   it worse than having done nothing? Here the answer was yes, and it took a
+   Discord call to find out. When a teardown fails, the old thing is usually
+   still there and still working — reach for "leave it alone" before
+   "disable it".
+
+3. *Distinguish an API that DOES something from one that REQUESTS it.*
+   `close()` versus `destroy()`, and the same trap exists for window messages,
+   process termination and file deletion. If the next line depends on the
+   previous one having finished, confirm it finished; do not assume the call
+   was synchronous because it returned.

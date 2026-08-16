@@ -1,6 +1,151 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-17 | ~12:10 AM (Claude Opus 5) — 1.0.33's repair was broken and made things worse; 1.0.34 fixes it and is PROVEN
+
+Full technical record: PROBLEM 118 in `V14_FIXES_AND_CODE.md`.
+
+1.0.33 shipped the display-change repair at 21:00. The owner hit it during a
+Discord call ninety minutes later: shortcuts working, sound working, no HUD and
+no toasts — the exact symptom the release was meant to cure.
+
+The detection was right and the repair was wrong. `close()` is a REQUEST that
+completes later, so rebuilding the window in the same breath failed with
+`a webview with label 'overlay' already exists`. Worse, on that failure the code
+set `OVERLAY_DISABLED`, switching off an overlay that was still alive and
+usable. **The repair did more damage than the fault**, on a trigger the owner
+fires several times a day — he plugs a second display in and out routinely.
+
+1.0.34 uses `destroy()`, polls off the main thread until the label is genuinely
+free, and only disables the overlay when it is truly gone AND unreplaceable. It
+also re-homes the dashboard on a display change, because `ensure_on_screen`
+(PROBLEM 83) only ever ran when a window was SHOWN — so a dashboard open on a
+display you unplug was stranded until you reopened it from the tray.
+
+**Proven, not reasoned.** After installing 1.0.34 the owner plugged his second
+display in and out while the log was watched: five real display changes, five
+clean rebuilds, zero errors. The only two `REBUILD FAILED` lines in the entire
+log are 21:32 and 22:16, both on 1.0.33.
+
+### The mistake worth not repeating
+
+1.0.33's recovery branch had **never been executed** — not once, not even
+forced. It compiled, it was reasoned, and PROBLEM 117 said plainly "implemented
+and reasoned, not proven". It was shipped anyway, onto a machine where the
+untested branch was reachable within the hour. Compiling proves the types; only
+running proves the behaviour. Force the condition and watch the recovery path
+work before it goes near a user.
+
+---
+
+## Update: 2026-08-16 | ~8:40 PM (Claude Opus 5) — the "hook is blind inside our own window" diagnosis was WRONG, and the invisible overlay is a long-uptime failure
+
+Two findings today, one of which retires a diagnosis this project has carried
+for weeks. Both were measured, not reasoned about.
+
+### FINDING 1 — the hook was NEVER blind inside our own window. Diagnosis refuted.
+
+The standing belief was that Windows does not deliver our own window's
+keystrokes to our own hook, and that this is why "nothing works while the
+Spaceadom window has focus". The `KB_EVENTS_OWN_FG` counter added for exactly
+this question has 260 readings in the log. Seven are non-zero, and the oldest
+is from two days ago:
+
+```
+2026-08-14 07:50:14   saw 105 key events, 105 of them while OUR window had focus
+2026-08-14 07:53:47   saw  16 key events,   8 of them while OUR window had focus
+2026-08-14 11:36:23   saw 146 key events,  20 of them while OUR window had focus
+2026-08-15 09:01:41   saw 311 key events,  24 of them while OUR window had focus
+2026-08-16 11:17:40   saw 332 key events,   4 of them while OUR window had focus
+```
+
+And in the same second as that first reading, the engine acted on them:
+
+```
+2026-08-14 07:50:14.237  engine: combo Space+b received
+2026-08-14 07:50:14.239  cascade: launching absolute path: ...\brave.exe
+2026-08-14 07:50:14.301  cascade: ShellExecute accepted (process_created=true)
+2026-08-14 07:50:18.362  Event: Space+? | Target: brave.exe | Action: Minimize
+2026-08-14 07:53:47.159  engine: combo Space+c received
+```
+
+Space+B launched Brave, Space+B minimised it, Space+C activated a Store app —
+all while the Spaceadom window held the foreground. **The hook receives our own
+window's keys, the engine dispatches them, and the actions run.** There is no
+UIPI problem here and there never was.
+
+**Generalise this:** a symptom reported as "feature X does not work in
+situation Y" is a report about what the user could OBSERVE, not about which
+component failed. Before instrumenting the component you suspect, instrument
+the OBSERVATION — here, the counter proving the keys arrived cost one log line
+and refuted weeks of work on the wrong layer.
+
+### FINDING 2 — the invisible HUD/toasts are a LONG-UPTIME failure, not a setting
+
+The user reported the Guide HUD missing while sound still played, with
+"Software overlay" already switched ON. Measured rather than assumed:
+
+- `--disable-gpu` **was** present on the live WebView2 process. The setting
+  works and was never the problem.
+- `overlay_fit_hud` logged the window at the correct size, correctly centred,
+  `visible Ok(true)` — every time.
+- A screen capture of that exact rectangle, taken at the moment the app logged
+  the window as shown, contained **0 HUD-coloured pixels** against 666 in the
+  baseline immediately before. The window is real and composes nothing.
+
+The process had been up **7 hours 10 minutes**. In that window the monitor
+Spaceadom saw flipped between two configurations:
+
+```
+1707x1067 @1.5   117 entries   06:32 .. 18:23     (the panel, via the AMD iGPU)
+1920x1080 @1     106 entries   04:34 .. 14:59     (a second/virtual display)
+```
+
+Restarting the app restored both HUD and toasts immediately — 233 overlay
+draws in the following 40 minutes, confirmed by the user.
+
+**HONEST LIMIT ON THIS RESULT:** two things were changed before the retest —
+the spacedesk service was stopped AND the app was restarted. spacedesk was then
+restarted WITHOUT restarting the app, and the overlay kept working, which
+points at uptime/display-change rather than spacedesk. That is evidence, not
+proof. The clean experiment (leave everything alone until it breaks, then
+restart ONLY the app) has not been run.
+
+**This also explains the "self-healing" reported since 08-13. Nothing healed.
+It was restarted.**
+
+### Still unknown, deliberately recorded as unknown
+
+What the user originally experienced as "shortcuts do nothing inside the app"
+is NOT explained by either finding. The hook saw the keys and the engine ran
+the actions. A dead overlay would remove the HUD and the toast — the visible
+confirmation — but Space+B launching Brave is visible on its own. Do not close
+this out; it needs the condition it fails under to be captured, not a theory.
+
+*(A 32-per-second profile cycle from a held Space+RightAlt was briefly
+suspected and then ruled out by the user: he was holding the key deliberately.
+Recorded so it is not re-investigated.)*
+
+### Being fixed now
+
+A display-topology watcher that revives the overlay when the display
+configuration changes, so no restart is ever needed. Must stay generic — the
+app targets any x64 Windows machine, not this laptop.
+
+### My errors this session, for the record
+
+Restarting the app from an unelevated shell destroyed the `Spaceadom` scheduled
+task (`schtasks /Create` returned Access denied) and left an HKCU Run entry in
+its place. Restored with the app's own parameters — `/SC ONLOGON /RL LIMITED
+/DELAY 0000:30` — and the Run key removed so the two cannot race.
+
+An injection harness reported `SendInput` success while the hook logged
+nothing; the run was declared VOID by its own positive control rather than
+reported as "the overlay does not paint". The control is why that did not
+become a false finding.
+
+---
+
 ## Update: 2026-08-16 | ~5:50 AM (Claude Opus 5) — published to GitHub, and the mislabel a tag can cause
 
 The project is now public at https://github.com/nur-arpon/Spaceadom, with

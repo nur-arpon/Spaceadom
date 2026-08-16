@@ -17,6 +17,13 @@ other version is here.
 
 ---
 
+## 2026-08-16 — two bugs killed at the root
+
+| Version | What changed |
+| --- | --- |
+| **1.0.34** | **Fixes two mistakes in 1.0.33's own repair, found within the hour on your machine.** 1.0.33 correctly noticed when you plugged your second display in, then failed to rebuild the overlay ("a webview with label `overlay` already exists") because it asked the old window to close and did not wait for it to actually go. Worse, on that failure it switched the HUD and toasts off entirely — so the repair did more damage than the fault. It now destroys the old window properly, waits until it is really gone, and if anything still fails it leaves the working overlay alone instead of disabling it. Also: if the dashboard is open on a display you unplug, it is now moved back onto a screen you still have, instead of being stranded until you reopen it from the tray. |
+| **1.0.33** | **Two permanent fixes, and the transition switched back off.** (1) The Guide HUD and toasts used to stop appearing after the app had been running a long time — sound still played, apps still launched, nothing was drawn. Cause: the display arrangement changed underneath the app and the overlay window never recovered, while every internal check still reported it healthy. Measured: at the moment the app said the HUD was shown, that part of the screen contained **zero** HUD pixels. The app now watches the display setup and rebuilds the overlay when it changes, so no restart is ever needed. **This is also the whole of the "self-healing" seen since 08-13 — it never healed, it got restarted.** (2) Space+D stopped opening Discord, because Discord updates itself into a new `app-<version>` folder and the saved path died with the old one. Paths like that now repair themselves, which fixes Slack, Teams, GitHub Desktop and Signal too. (3) The 1.0.29–1.0.32 toast/HUD flight animation is switched off at your request, so the motion is 1.0.27's again. The code is kept behind one `WARP` flag for when you want to work on it. |
+
 ## 2026-08-15 — the transition attempts
 
 | Version | What changed |

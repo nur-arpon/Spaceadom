@@ -17,6 +17,7 @@
 mod browser;
 mod commands;
 mod config;
+mod display_watch;
 mod engine;
 mod guide_hud;
 mod hook;
@@ -604,6 +605,12 @@ pub fn run() {
 
             // Wire guide HUD event emitter (renders into the "overlay" window)
             guide_hud::set_app_handle(app_handle.clone());
+
+            // PROBLEM 117 — the overlay stops compositing when the display
+            // arrangement changes underneath it, while every readback still
+            // says visible=true. Watch for the change and rebuild. Started
+            // AFTER set_app_handle so a rebuild can hide the HUD first.
+            display_watch::start(app_handle.clone());
 
             // 9b. Configure the always-on-top HUD/toast overlay.
             //

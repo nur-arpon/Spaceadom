@@ -171,6 +171,82 @@ fn shell_launch_unelevated(file: &str, params: Option<&str>) -> bool {
 #[cfg(not(windows))]
 fn shell_launch_unelevated(_f: &str, _p: Option<&str>) -> bool { false }
 
+/// Re-resolve a saved path whose app has updated itself into a new folder.
+///
+/// PROBLEM 116, found live 2026-08-16. Space+D stopped opening Discord. The
+/// binding held `...\Discord\app-1.0.9251\Discord.exe`; on disk was
+/// `...\Discord\app-1.0.9253\Discord.exe`. Discord had updated, and the saved
+/// path died with the folder it named. The user sees "the shortcut broke",
+/// which is the wrong story — the shortcut is fine, the target moved.
+///
+/// This is not a Discord quirk. It is the Squirrel installer's layout, used by
+/// Slack, Teams (classic), GitHub Desktop and Signal among others: the exe
+/// lives in `<App>\app-<version>\` and EVERY self-update creates a new one.
+/// Any absolute path saved into such a folder is guaranteed to break, on every
+/// machine, at an unpredictable future date. Re-resolving is the only fix that
+/// stays fixed.
+///
+/// Returns `(target, params)` ready for `shell_launch`, or `None` when the app
+/// really is gone.
+///
+/// GENERALISE THIS: an absolute path stored today is a guess about tomorrow's
+/// filesystem. Anything that stores one needs a recovery path, not just an
+/// error message.
+#[cfg(windows)]
+fn repair_versioned_path(dead: &std::path::Path) -> Option<(String, Option<String>)> {
+    use std::path::PathBuf;
+
+    // Find the `app-<version>` ancestor. Only this exact shape is accepted —
+    // matching looser patterns risks launching an unrelated executable.
+    let comps: Vec<_> = dead.components().collect();
+    let idx = comps.iter().position(|c| {
+        c.as_os_str()
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .starts_with("app-")
+    })?;
+    let base: PathBuf = comps[..idx].iter().collect();
+    let tail: PathBuf = comps[idx + 1..].iter().collect();
+
+    // Newest sibling `app-*`, chosen by modification time rather than by name:
+    // version strings stop sorting lexicographically the moment a component
+    // reaches double digits (app-1.0.9 vs app-1.0.10).
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(&base).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if !name.starts_with("app-") || !entry.path().is_dir() {
+            continue;
+        }
+        let t = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if newest.as_ref().is_none_or(|(best, _)| t > *best) {
+            newest = Some((t, entry.path()));
+        }
+    }
+    if let Some((_, dir)) = newest {
+        let candidate = dir.join(&tail);
+        if candidate.exists() {
+            return Some((candidate.to_string_lossy().into_owned(), None));
+        }
+    }
+
+    // Squirrel's own stable entry point. This is what the Start Menu shortcut
+    // runs, it has never moved, and it will survive every future update — so
+    // it is the better answer even though it is the fallback.
+    let updater = base.join("Update.exe");
+    if updater.exists() {
+        let exe = dead.file_name()?.to_string_lossy().into_owned();
+        return Some((
+            updater.to_string_lossy().into_owned(),
+            Some(format!("--processStart {exe}")),
+        ));
+    }
+    None
+}
+
 fn shell_launch(file: &str, params: Option<&str>, app_handle: Option<tauri::AppHandle>) -> bool {
     use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::Foundation::CloseHandle;
@@ -1179,6 +1255,18 @@ fn launch_app(exe_name: &str, app_handle: Option<tauri::AppHandle>) -> bool {
             log::info!("cascade: launching absolute path: {exe_name}");
             return shell_launch(exe_name, None, app_handle);
         } else {
+            // PROBLEM 116 — a saved path that no longer exists is USUALLY not
+            // an uninstalled app. It is an app that updated itself into a new
+            // folder. Try to re-resolve before giving up.
+            #[cfg(windows)]
+            if let Some((target, params)) = repair_versioned_path(p) {
+                log::warn!(
+                    "cascade: '{exe_name}' is gone — the app updated itself into a new \
+                     folder. Re-resolved to '{target}{}'",
+                    params.as_deref().map(|a| format!(" {a}")).unwrap_or_default()
+                );
+                return shell_launch(&target, params.as_deref(), app_handle);
+            }
             log::warn!("cascade: absolute path does not exist: {exe_name}");
             return false;
         }

@@ -21,6 +21,22 @@ const LEAVE_MS = 380;
    into SPACE when Space is held and warps back out to its exact slot on
    release. The overlay window move is instant and un-animatable, so the flight
    happens in CSS inside the window and the move is cancelled arithmetically. */
+/* ---------------------------------------------------------------------------
+   WARP — the toast <-> SPACE handover flights (PROBLEM 112/114), built across
+   1.0.29-1.0.32 and switched OFF for 1.0.33 at the owner's request: he tried
+   1.0.32, preferred 1.0.27's plain behaviour, and asked for the 1.0.33 fixes
+   without it.
+   Switched off rather than deleted, deliberately. All three flight paths were
+   written as enhancements over a plain path that is still present and still
+   correct — `absorbIntoSpace` even documents the fallback as "always correct,
+   just less pretty". Setting this to false takes every one of them, leaving
+   1.0.27's behaviour: toasts fade in bottom-centre, the HUD opens and closes on
+   its own. Nothing is reconstructed from memory, so nothing can be lost.
+   Set to true to work on the transition again; there are exactly three call
+   sites and each is marked `if (WARP`.
+   --------------------------------------------------------------------------- */
+const WARP = false;
+
 const WARP_MS = 560;      // one flight, door to door
 const STAGGER = 95;       // between pills when several fly at once
 const HUD_OUT_MS = 220;   // MUST match #st-hud's transition in overlay-earthy.css
@@ -500,7 +516,7 @@ export function showToast(message: string, options: ToastOptions = {}): void {
     !_hudActive && _isOverlay && _spaceExit !== null &&
     performance.now() - _spaceExitAt < SPACE_GRACE_MS;
 
-  if ((_hudActive || fromSpaceExit) && _isOverlay && !REDUCED()) {
+  if (WARP && (_hudActive || fromSpaceExit) && _isOverlay && !REDUCED()) {
     _stageMode = true;
     setStageAnchor(true);
     anchorGlow("hud");
@@ -928,7 +944,7 @@ function absorbIntoSpace(payload: GuideHudPayload): boolean {
   // flight begins from the wrong place (observed: pills launching off to one
   // side). Falling through to the plain path is always correct, just less
   // pretty, and is far better than a visibly wrong flight.
-  if (!_isOverlay || !_rect || REDUCED() || !_hudEl) return false;
+  if (!WARP || !_isOverlay || !_rect || REDUCED() || !_hudEl) return false;
   const live = _toasts.filter((t) => t.phase !== "leave");
   if (live.length === 0) return false;
 
@@ -999,7 +1015,7 @@ function hideGuideHud(): void {
   _absorbed = [];
 
   /* ---- PROBLEM 112: the pills come back out of SPACE ---- */
-  if (back.length > 0 && _isOverlay && !REDUCED() && _hudEl) {
+  if (WARP && back.length > 0 && _isOverlay && !REDUCED() && _hudEl) {
     const from = spaceBox();            // BEFORE .hidden scales the HUD to .93
     _hudEl.classList.remove("landed");  // SPACE leaves as the pills
     _hudEl.classList.add("hidden");     // ring + chips collapse
