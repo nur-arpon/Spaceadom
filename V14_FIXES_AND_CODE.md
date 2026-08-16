@@ -4536,8 +4536,33 @@ fn repair_versioned_path(dead: &std::path::Path) -> Option<(String, Option<Strin
 }
 ```
 
-**How it was verified.** `cargo check` clean, 0 errors 0 warnings. The disk
-state above was confirmed live at the moment of the failed keypress:
+**How it was verified.** SIX UNIT TESTS, all passing — the first automated
+tests in this project, added because PROBLEM 118 had just proved what shipping
+an unexercised recovery branch costs. They build the Squirrel layout in a temp
+directory, so they need no application installed and run on any machine:
+
+```
+resolves_to_the_newer_version_folder ............. ok
+picks_by_modification_time_not_by_name ........... ok   <- the app-1.0.10 vs app-1.0.9 trap
+falls_back_to_the_squirrel_updater ............... ok
+does_not_accept_a_version_folder_missing_the_exe . ok
+returns_none_when_the_app_is_really_gone ......... ok
+ignores_paths_that_are_not_squirrel_shaped ....... ok
+test result: ok. 6 passed; 0 failed
+```
+
+Hand-testing was impossible on the developer's machine: Discord was open on
+every attempt, so `smart_cascade` matched the running window BY EXECUTABLE NAME
+and the launch path never ran. Worth knowing on its own — a dead path is
+invisible for as long as the app happens to be running, and only bites when you
+actually need it launched.
+
+STILL UNPROVEN AT RUNTIME: that `resolve_and_launch` calls the repair at the
+right moment. The logic beneath it is tested; the five-line branch that invokes
+it is not, and needs one Space+D with Discord genuinely closed.
+
+`cargo check` clean, 0 errors 0 warnings. The disk state above was confirmed
+live at the moment of the failed keypress:
 `app-1.0.9251` absent, `app-1.0.9253` present with `Discord.exe` inside,
 `Update.exe` present and dated four months earlier - untouched by the update
 that broke the binding. **NOT yet verified by pressing Space+D on an installed

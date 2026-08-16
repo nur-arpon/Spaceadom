@@ -1645,3 +1645,137 @@ fn find_shortcut(dir: &std::path::Path, stem: &str, depth: u32) -> Option<String
 
 #[cfg(not(windows))]
 fn find_shortcut(_d: &std::path::Path, _s: &str, _depth: u32) -> Option<String> { None }
+
+/* ===========================================================================
+   TESTS — PROBLEM 116, the self-updating-app path repair.
+   ===========================================================================
+   The first automated tests in this project, added deliberately and only here.
+   The reason is PROBLEM 118: 1.0.33 shipped a recovery branch that had never
+   once been executed, and it was wrong in two ways that a single run would
+   have caught. This repair is the same shape — a branch that only fires when
+   something has already gone wrong, so it is exactly the code least likely to
+   be exercised before a user hits it.
+
+   It also could not be tested on the developer's machine by hand: Discord was
+   open during every attempt, so `smart_cascade` matched the running window by
+   executable name and the launch path never ran at all. These tests build the
+   Squirrel folder layout in a temp directory and check the resolution directly,
+   which needs no application installed and works on any machine.
+   =========================================================================== */
+#[cfg(all(test, windows))]
+mod repair_tests {
+    use super::repair_versioned_path;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    /// A scratch directory that removes itself, so a failed test cannot leave
+    /// litter behind that makes the NEXT run pass for the wrong reason.
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let mut p = std::env::temp_dir();
+            p.push(format!("spaceadom-test-{tag}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&p);
+            fs::create_dir_all(&p).expect("scratch dir");
+            Scratch(p)
+        }
+        fn path(&self) -> &Path { &self.0 }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+    }
+
+    fn touch(p: &Path) {
+        if let Some(d) = p.parent() { fs::create_dir_all(d).unwrap(); }
+        fs::write(p, b"x").unwrap();
+    }
+
+    /// The real case: Discord updated 9251 -> 9253 and the saved path died.
+    #[test]
+    fn resolves_to_the_newer_version_folder() {
+        let s = Scratch::new("newer");
+        let app = s.path().join("Discord");
+        let live = app.join("app-1.0.9253").join("Discord.exe");
+        touch(&live);
+
+        let dead = app.join("app-1.0.9251").join("Discord.exe");
+        let (target, params) = repair_versioned_path(&dead).expect("should re-resolve");
+
+        assert_eq!(Path::new(&target), live.as_path());
+        assert!(params.is_none(), "a direct exe needs no arguments");
+    }
+
+    /// Version strings stop sorting lexicographically once a component reaches
+    /// double digits: "app-1.0.10" sorts BEFORE "app-1.0.9" as text. Choosing
+    /// by modification time is what makes this correct, and this test is here
+    /// to stop anyone "simplifying" it back to a name sort.
+    #[test]
+    fn picks_by_modification_time_not_by_name() {
+        let s = Scratch::new("sorting");
+        let app = s.path().join("Slack");
+
+        let older = app.join("app-1.0.9").join("Slack.exe");
+        touch(&older);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let newer = app.join("app-1.0.10").join("Slack.exe");   // sorts EARLIER as text
+        touch(&newer);
+
+        let dead = app.join("app-1.0.8").join("Slack.exe");
+        let (target, _) = repair_versioned_path(&dead).expect("should re-resolve");
+        assert_eq!(
+            Path::new(&target), newer.as_path(),
+            "must choose the most recently written folder, not the alphabetically last"
+        );
+    }
+
+    /// When no usable version folder remains, fall back to Squirrel's own
+    /// launcher — the stable entry point that survives every future update.
+    #[test]
+    fn falls_back_to_the_squirrel_updater() {
+        let s = Scratch::new("updater");
+        let app = s.path().join("Teams");
+        touch(&app.join("Update.exe"));
+
+        let dead = app.join("app-1.0.1").join("Teams.exe");
+        let (target, params) = repair_versioned_path(&dead).expect("should fall back");
+
+        assert_eq!(Path::new(&target), app.join("Update.exe").as_path());
+        assert_eq!(params.as_deref(), Some("--processStart Teams.exe"));
+    }
+
+    /// A version folder with the WRONG executable inside must not be accepted;
+    /// the updater is the correct answer there.
+    #[test]
+    fn does_not_accept_a_version_folder_missing_the_exe() {
+        let s = Scratch::new("wrongexe");
+        let app = s.path().join("Signal");
+        touch(&app.join("app-2.0.0").join("SomethingElse.exe"));
+        touch(&app.join("Update.exe"));
+
+        let dead = app.join("app-1.0.0").join("Signal.exe");
+        let (target, params) = repair_versioned_path(&dead).expect("should fall back");
+        assert_eq!(Path::new(&target), app.join("Update.exe").as_path());
+        assert_eq!(params.as_deref(), Some("--processStart Signal.exe"));
+    }
+
+    /// Genuinely uninstalled: nothing to offer, and the caller must get None so
+    /// it logs the real error instead of launching something arbitrary.
+    #[test]
+    fn returns_none_when_the_app_is_really_gone() {
+        let s = Scratch::new("gone");
+        let dead = s.path().join("Ghost").join("app-1.0.0").join("Ghost.exe");
+        assert!(repair_versioned_path(&dead).is_none());
+    }
+
+    /// An ordinary program in Program Files has no `app-<version>` ancestor and
+    /// must be left completely alone — this repair must never fire on a path it
+    /// does not understand.
+    #[test]
+    fn ignores_paths_that_are_not_squirrel_shaped() {
+        let s = Scratch::new("plain");
+        let exe = s.path().join("Notepad++").join("notepad++.exe");
+        touch(&exe);
+        let dead = s.path().join("Notepad++").join("gone.exe");
+        assert!(repair_versioned_path(&dead).is_none());
+    }
+}
