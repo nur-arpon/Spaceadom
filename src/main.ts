@@ -321,9 +321,33 @@ async function clearActiveProfile(): Promise<void> {
  * transient and cannot hold a button (see .st-toast — nowrap, fixed height).
  * An undo the user cannot click is not an undo.
  */
+/**
+ * PROBLEM 120 — ONE countdown, held here rather than inside each call.
+ *
+ * `offerUndo` used to declare `const timer` locally, so every call started a
+ * fresh interval and never stopped the previous one. Reported by the owner:
+ * delete Gamers (20s offered), then delete Founders (30s offered) — and the
+ * Undo button vanished after 20 seconds, because the FIRST interval was still
+ * running and its expiry executed `el.hidden = true` on the banner the SECOND
+ * one was using. The 30-second undo was still perfectly valid in Rust; there
+ * was simply no longer a button to click.
+ *
+ * PROBLEM 107 made undo a stack in the backend. The countdown in front of it
+ * stayed single-instance-by-accident, which is the same shape of bug: a stale
+ * thing outliving the thing that replaced it.
+ */
+let undoTimer: number | null = null;
+function stopUndoTimer(): void {
+  if (undoTimer !== null) {
+    window.clearInterval(undoTimer);
+    undoTimer = null;
+  }
+}
+
 export function offerUndo(): void {
   const el = document.getElementById("undo-banner");
   if (!el) return;
+  stopUndoTimer();          // a previous offer must never outlive this one
 
   void (async () => {
     // PROBLEM 106 — Rust owns the deadline and returns the seconds remaining.
@@ -351,7 +375,7 @@ export function offerUndo(): void {
       } catch (_) {
         showToast("⚠️ That undo has expired");
       }
-      window.clearInterval(timer);
+      stopUndoTimer();
       el.hidden = true;
       // PROBLEM 107 — undo is a STACK now. Deleting two profiles inside the
       // window leaves two entries, and hiding the banner here would strand the
@@ -366,7 +390,7 @@ export function offerUndo(): void {
     close.textContent = "✕";
     close.addEventListener("click", (e) => {
       e.stopPropagation();
-      window.clearInterval(timer);
+      stopUndoTimer();
       el.hidden = true;
     });
 
@@ -375,10 +399,14 @@ export function offerUndo(): void {
 
     // Counting down visibly matters: an undo offer that vanishes without
     // warning reads as the app losing the option, not the window closing.
-    const timer = window.setInterval(() => {
+    // Cleared again here, not only at the top of offerUndo: this function
+    // awaits `undo_available`, so two rapid calls can both get past that guard
+    // and the later one would otherwise leak the earlier interval.
+    stopUndoTimer();
+    undoTimer = window.setInterval(() => {
       left -= 1;
       if (left <= 0) {
-        window.clearInterval(timer);
+        stopUndoTimer();
         el.hidden = true;
         return;
       }

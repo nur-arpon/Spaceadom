@@ -66,6 +66,11 @@ pub fn save_config(
     *state.0.write().unwrap_or_else(|p| p.into_inner()) = new_config.clone();
     // Sync rollover_ms to hook atomic
     hook::ROLLOVER_MS.store(new_config.rollover_ms, Ordering::Relaxed);
+    // PROBLEM 119 — the opacity floor slider wrote to config and nothing
+    // read it. Pushed here so the change takes effect on the next scroll,
+    // not on the next launch.
+    crate::engine::actions::opacity::OPACITY_FLOOR_PCT
+        .store(new_config.opacity_floor_pct, Ordering::Relaxed);
 
     // THEME RULE: one setting drives the dashboard AND the overlay. The
     // overlay is a separate webview, so it only learns about a theme/sound
@@ -572,6 +577,10 @@ pub fn undo_last_change(
     *state.0.write().unwrap_or_else(|p| p.into_inner()) = previous.clone();
     config::save(&previous)?;
     crate::hook::ROLLOVER_MS.store(previous.rollover_ms, std::sync::atomic::Ordering::Relaxed);
+    // PROBLEM 119 — undo must restore this too, or undoing a settings
+    // change silently leaves the old floor in force.
+    crate::engine::actions::opacity::OPACITY_FLOOR_PCT
+        .store(previous.opacity_floor_pct, std::sync::atomic::Ordering::Relaxed);
     let _ = app.emit("config-updated", previous);
     log::info!("undo: restored the config from before '{label}'");
     Ok(label)

@@ -4536,8 +4536,9 @@ fn repair_versioned_path(dead: &std::path::Path) -> Option<(String, Option<Strin
 }
 ```
 
-**How it was verified.** SIX UNIT TESTS, all passing — the first automated
-tests in this project, added because PROBLEM 118 had just proved what shipping
+**How it was verified.** SIX UNIT TESTS, all passing. (Not the project's
+first — `icon_extractor::tests::icon_smoke` already existed and CLAUDE.md's
+"there are no automated tests" was already out of date.) Added because PROBLEM 118 had just proved what shipping
 an unexercised recovery branch costs. They build the Squirrel layout in a temp
 directory, so they need no application installed and run on any machine:
 
@@ -4834,3 +4835,211 @@ Five real display changes, five clean rebuilds, zero errors. The only two
    process termination and file deletion. If the next line depends on the
    previous one having finished, confirm it finished; do not assume the call
    was synchronous because it returned.
+
+---
+
+## PROBLEM 119 — the "Opacity floor" slider was connected to nothing
+
+**Symptom.** Owner, 2026-08-17: *"What does the opacity floor do in my app? I
+tried changing it but I don't see any difference. Is it actually working?"*
+
+**Root cause.** No. Two independent faults, stacked.
+
+1. The slider wrote `opacity_floor_pct` into `config.json`, `schema.rs` stored
+   it, `save_config` persisted it — and **nothing ever read it back**.
+   `opacity.rs` clamped to a hardcoded constant:
+
+```rust
+const OPACITY_FLOOR: u8 = 64; // 25% of 255
+...
+let clamped = new_alpha.clamp(OPACITY_FLOOR, 255);
+```
+
+2. The feature it governs had **never once run** on this machine. A search of
+   the entire debug.log returned zero opacity events: Space+scroll had never
+   been used. So even a working slider would have shown nothing.
+
+This is precisely the failure `CLAUDE.md` names — *a control that does nothing
+is worse than a missing control* — and it survived because the value round-trips
+perfectly. Saving works, reloading works, the UI redraws the number you chose.
+Everything about it looks correct except the one thing that matters.
+
+**Exact file.** `src-tauri/src/engine/actions/opacity.rs`
+
+```rust
+/// Follows the ROLLOVER_MS pattern rather than reaching for the config lock:
+/// this runs on a scroll event, so it must not block, and an atomic is read
+/// without one.
+pub static OPACITY_FLOOR_PCT: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(25);
+
+fn floor_alpha() -> u8 {
+    let pct = OPACITY_FLOOR_PCT
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .clamp(10, 90) as u16;
+    ((pct * 255) / 100) as u8
+}
+```
+
+Pushed from THREE places, matching how `ROLLOVER_MS` is handled:
+`lib.rs` at startup, `commands.rs::save_config`, and
+`commands.rs::undo_last_change`. A value pushed from only the first goes stale
+the moment the user changes it; one that skips undo silently survives an undo
+that was supposed to revert it.
+
+**How it was verified.** Four unit tests. One walks all 256 possible stored
+values and asserts the resulting floor always leaves the window findable AND
+leaves room for at least one step — a floor at 255 would make the whole gesture
+a no-op, which is the bug this problem is about, arriving by a different route.
+
+```
+converts_percent_to_alpha ................. ok
+clamps_a_config_below_the_slider_minimum .. ok
+clamps_a_config_above_the_slider_maximum .. ok
+always_leaves_headroom_for_a_step ......... ok
+```
+
+Marker `opacity: ` confirmed present in the installed 1.0.35 binary. NOT yet
+confirmed by an actual Space+scroll gesture — the owner has never used it.
+
+**Generalise this.** *A setting is not wired up until something READS it.*
+Writing, persisting, reloading and redisplaying a value proves only that the
+storage works. Grep for every config field's read site; any field with exactly
+one reference — the write — is a dead control. And note the second half: this
+survived because the feature was never used. Unused features rot silently.
+
+---
+
+## PROBLEM 120 — a finished undo countdown hid a different, still-valid undo
+
+**Symptom.** Owner, verbatim: delete the Gamers profile, get a 20-second undo
+offer; then delete Founders, which offers 30 seconds — *"but the undo button
+disappears as soon as the Gamers deletion timer ends."*
+
+**Root cause.** `offerUndo()` declared its interval locally:
+
+```ts
+export function offerUndo(): void {
+  ...
+  const timer = window.setInterval(() => {
+    left -= 1;
+    if (left <= 0) { window.clearInterval(timer); el.hidden = true; return; }
+  }, 1000);
+}
+```
+
+Every call created a new interval and none of them ever stopped the previous
+one. Delete Gamers starts interval A counting 20. Delete Founders starts
+interval B counting 30 — with A still running. Twenty seconds later A reaches
+zero and executes `el.hidden = true` on the banner B is using.
+
+**The undo itself was never lost.** PROBLEM 107 made the backend a proper
+stack, and Rust still held a valid 30-second entry. Only the button was gone,
+which from the user's side is indistinguishable.
+
+**Exact file.** `src/main.ts`
+
+```ts
+let undoTimer: number | null = null;
+function stopUndoTimer(): void {
+  if (undoTimer !== null) { window.clearInterval(undoTimer); undoTimer = null; }
+}
+
+export function offerUndo(): void {
+  const el = document.getElementById("undo-banner");
+  if (!el) return;
+  stopUndoTimer();          // a previous offer must never outlive this one
+  void (async () => {
+    ...
+    // Cleared AGAIN here: this function awaits `undo_available`, so two rapid
+    // calls can both get past the first guard and the later one would
+    // otherwise leak the earlier interval.
+    stopUndoTimer();
+    undoTimer = window.setInterval(...);
+  })();
+}
+```
+
+The second clear is not redundant. The guard at the top runs synchronously, but
+the assignment happens after an `await`, so two calls in quick succession can
+interleave as: guard, guard, assign, assign — leaking the first interval past
+both guards.
+
+**How it was verified.** `tsc` clean; installed in 1.0.35. NOT yet confirmed by
+deleting two profiles in sequence — that needs a hand test.
+
+**Generalise this.** *A stale thing outliving the thing that replaced it.* This
+is the same shape as PROBLEM 118 (a stale overlay window surviving its own
+teardown) and PROBLEM 113 (a stale `_stageMode` flag blocking every later
+window fit). Whenever a function starts a timer, an animation, a listener or a
+window, ask what happens when it is called twice — and if the answer is "the
+older one is still running", the handle belongs OUTSIDE the function.
+
+---
+
+## PROBLEM 121 — attaching to a hung application's input thread can take both down
+
+**Symptom.** Owner: Brave and Discord *"sometimes stop responding"*, and asked
+whether Spaceadom could be the cause.
+
+**What was ruled out first.** The opacity action forces `WS_EX_LAYERED` onto
+other applications' windows, which is a plausible way to upset a Chromium
+compositor — but it has **never fired** on this machine (zero events in the
+log), so it cannot be responsible for anything.
+
+**The remaining mechanism.** `force_foreground` beats Windows' focus lock the
+standard way: attach our input thread to the foreground application's, call
+`SetForegroundWindow`, detach. The attach/detach pair was correctly balanced
+with no early return between them — that part was fine.
+
+The hazard is inherent to the API. While attached, two threads **share one
+input queue**. That is what defeats the focus lock, and it is also what makes
+it dangerous: if the other side is not pumping messages, our call blocks and
+its input processing stalls with us. One unresponsive application becomes two.
+
+The exposure is not theoretical. On 2026-08-16 this path ran **100+ times**
+(50 Minimize, 50 Restore, plus enum fallbacks) against Brave and Discord
+specifically — the two applications reported as hanging.
+
+**Exact file.** `src-tauri/src/engine/actions/smart_cascade.rs`
+
+```rust
+let fg_hung = IsHungAppWindow(fg_before).as_bool();
+if fg_hung {
+    log::warn!(
+        "force_foreground: the current foreground window is not responding — \
+         skipping AttachThreadInput so we are not dragged down with it \
+         (PROBLEM 121). Focus may not switch this time."
+    );
+}
+let attached = fg_thread != my_thread && fg_thread != 0 && !fg_hung;
+
+if attached { let _ = AttachThreadInput(my_thread, fg_thread, true); }
+let _ = BringWindowToTop(hwnd);
+let _ = SetForegroundWindow(hwnd);
+// Detach on exactly the condition we attached on. Deriving it a second time
+// from the same operands would leave a PERMANENT attachment if any of them
+// changed in between — the same freeze, with no way back but a restart.
+if attached { let _ = AttachThreadInput(my_thread, fg_thread, false); }
+```
+
+Note the second change: the detach now tests the SAME boolean the attach did,
+rather than re-evaluating `fg_thread != my_thread && fg_thread != 0`. Those
+operands are read before the call and could in principle differ afterwards; a
+mismatch would leak the attachment permanently.
+
+**How it was verified.** `cargo check` clean; marker
+`skipping AttachThreadInput` confirmed present in the installed 1.0.35 binary.
+
+**HONESTLY UNPROVEN.** This is a plausible mechanism plus a strong correlation.
+It is NOT established that it caused the hangs the owner saw. The guard cannot
+make things worse — its only cost is that a shortcut may lose a focus race
+against an app that was already frozen — but if Brave still hangs on 1.0.35,
+this is not the answer and the search continues.
+
+**Generalise this.** *Any API that couples your process to another process's
+state can propagate that state back to you.* `AttachThreadInput`,
+`SendMessage` (as opposed to `SendMessageTimeout`), `WaitForSingleObject` on a
+foreign handle, COM calls into another apartment. Before coupling, ask whether
+the other side is healthy — and prefer the variant with a timeout where one
+exists.

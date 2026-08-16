@@ -472,6 +472,9 @@ pub fn run() {
     {
         let cfg = shared_config.read().unwrap_or_else(|p| p.into_inner());
         hook::ROLLOVER_MS.store(cfg.rollover_ms, std::sync::atomic::Ordering::Relaxed);
+        // PROBLEM 119 — seed the opacity floor from the saved config.
+        engine::actions::opacity::OPACITY_FLOOR_PCT
+            .store(cfg.opacity_floor_pct, std::sync::atomic::Ordering::Relaxed);
     }
 
     // ----------------------------------------------------------------

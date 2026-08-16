@@ -10,7 +10,7 @@ use windows::Win32::{
     UI::WindowsAndMessaging::{
         EnumWindows, GetWindowLongW,
         IsWindowVisible, ShowWindow, SetForegroundWindow, GetForegroundWindow,
-        IsWindow, GetWindowThreadProcessId, IsIconic,
+        IsWindow, GetWindowThreadProcessId, IsIconic, IsHungAppWindow,
         BringWindowToTop, SwitchToThisWindow,
         GWL_STYLE, SW_MINIMIZE, SW_RESTORE, WS_VISIBLE,
     },
@@ -374,7 +374,37 @@ unsafe fn force_foreground(hwnd: windows::Win32::Foundation::HWND) {
 
     // Step 1 — attach to the current foreground thread so SetForegroundWindow
     // is not blocked by Windows' focus-lock. Detach immediately after.
-    if fg_thread != my_thread && fg_thread != 0 {
+    //
+    // PROBLEM 121 — NEVER attach to a thread that is already wedged.
+    //
+    // While two threads are attached they SHARE one input queue. That is the
+    // whole point (it is what defeats the focus lock) and also the whole
+    // danger: if the other side is not pumping messages, our call into it
+    // blocks, and its input processing stalls along with ours. Two
+    // applications go unresponsive instead of one.
+    //
+    // The exposure here is not theoretical. This path runs on every focus and
+    // every restore — 100+ times in a single day on this owner's machine,
+    // almost all of them Brave and Discord, which are exactly the two
+    // applications he reported "stop responding". That is a correlation, not
+    // a proof, but attaching to a hung thread has no upside worth defending.
+    //
+    // `IsHungAppWindow` asks Windows precisely the right question: is this
+    // window's thread failing to pump its message queue? If it is, skip the
+    // attach. The only cost is that SetForegroundWindow may lose the focus
+    // race against a Windows lock — a shortcut that does not raise a window,
+    // versus a shortcut that can freeze the window it was aimed at.
+    let fg_hung = IsHungAppWindow(fg_before).as_bool();
+    if fg_hung {
+        log::warn!(
+            "force_foreground: the current foreground window is not responding — \
+             skipping AttachThreadInput so we are not dragged down with it \
+             (PROBLEM 121). Focus may not switch this time."
+        );
+    }
+    let attached = fg_thread != my_thread && fg_thread != 0 && !fg_hung;
+
+    if attached {
         let _ = AttachThreadInput(my_thread, fg_thread, true);
     }
 
@@ -383,7 +413,11 @@ unsafe fn force_foreground(hwnd: windows::Win32::Foundation::HWND) {
     let _ = BringWindowToTop(hwnd);
     let _ = SetForegroundWindow(hwnd);
 
-    if fg_thread != my_thread && fg_thread != 0 {
+    // Detach on exactly the condition we attached on. Deriving it a second
+    // time from the same operands would leave a permanent attachment if any
+    // of them changed in between — and a leaked attachment is the same freeze,
+    // with no way back short of restarting the app.
+    if attached {
         let _ = AttachThreadInput(my_thread, fg_thread, false);
     }
 

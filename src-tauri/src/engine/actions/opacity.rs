@@ -2,7 +2,34 @@
 /// Mirrors V11 WheelUp/WheelDown handlers with 25% floor and notification suppression.
 
 const OPACITY_STEP: u8 = 15;
-const OPACITY_FLOOR: u8 = 64; // 25% of 255
+
+/// PROBLEM 119 — the floor is a SETTING, and it was not wired to anything.
+///
+/// Settings → "Opacity floor" (10–90%) wrote `opacity_floor_pct` into
+/// config.json, `schema.rs` stored it, and NOTHING ever read it: this file
+/// clamped to a hardcoded 64. The slider moved, the value saved, the config
+/// round-tripped, and the behaviour never changed once. Reported by the owner
+/// as "I tried changing it but I don't see any difference" — which was exactly
+/// correct, and is the failure `CLAUDE.md` names: a control that does nothing
+/// is worse than a missing control.
+///
+/// Follows the ROLLOVER_MS pattern rather than reaching for the config lock:
+/// this runs on a scroll event, so it must not block, and an atomic is read
+/// without one. Pushed from three places — startup (lib.rs), save_config and
+/// undo_last_change (commands.rs) — because a value pushed from only one of
+/// them goes stale the first time the user changes their mind.
+pub static OPACITY_FLOOR_PCT: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(25);
+
+/// The floor as a Win32 alpha byte. Clamped to the same 10–90 range the slider
+/// offers, so a hand-edited config cannot make a window invisible (and
+/// therefore unfindable) or pin it fully opaque.
+fn floor_alpha() -> u8 {
+    let pct = OPACITY_FLOOR_PCT
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .clamp(10, 90) as u16;
+    ((pct * 255) / 100) as u8
+}
 
 /// Increase window opacity by one step.
 pub fn increase_opacity() {
@@ -53,19 +80,27 @@ unsafe fn adjust_opacity(delta: i16) {
         alpha = 255; // treat as fully opaque
     }
 
-    // Apply delta with clamping
+    // Apply delta with clamping. `floor` is read once so a config change
+    // mid-gesture cannot make the two comparisons below disagree.
+    let floor = floor_alpha();
+
     let new_alpha = if delta > 0 {
         alpha.saturating_add(delta as u8)
     } else {
         let drop = (-delta) as u8;
-        if alpha <= OPACITY_FLOOR + drop {
-            OPACITY_FLOOR
+        // saturating_add is defensive, not a fix for an observed bug: with the
+        // floor clamped to 90% (229) and a 15 step the sum cannot reach 255
+        // today. It is here so that raising either bound later cannot silently
+        // wrap and step the window DOWN through its own floor.
+        if alpha <= floor.saturating_add(drop) {
+            floor
         } else {
             alpha - drop
         }
     };
 
-    let clamped = new_alpha.clamp(OPACITY_FLOOR, 255);
+    let clamped = new_alpha.clamp(floor, 255);
+    log::debug!("opacity: {alpha} -> {clamped} (floor {floor}, step {delta})");
     SetLayeredWindowAttributes(hwnd, COLORREF(0), clamped, LWA_ALPHA).ok();
 }
 
@@ -93,5 +128,60 @@ pub fn register_own_hwnd(hwnd: isize) {
     let mut v = OWN_HWNDS.lock().unwrap_or_else(|p| p.into_inner());
     if !v.contains(&hwnd) {
         v.push(hwnd);
+    }
+}
+
+/* ===========================================================================
+   TESTS — PROBLEM 119. The percentage-to-alpha conversion and its clamp.
+   ===========================================================================
+   Small, but this is the arithmetic that decides how transparent a window can
+   be made, and "as transparent as you like" means a window the user cannot
+   find again. PROBLEM 118's lesson applies: the branch that only matters at
+   the extremes is the one nobody exercises by hand.
+   =========================================================================== */
+#[cfg(test)]
+mod floor_tests {
+    use super::{floor_alpha, OPACITY_FLOOR_PCT};
+    use std::sync::atomic::Ordering;
+
+    fn with(pct: u8) -> u8 {
+        OPACITY_FLOOR_PCT.store(pct, Ordering::Relaxed);
+        floor_alpha()
+    }
+
+    #[test]
+    fn converts_percent_to_alpha() {
+        assert_eq!(with(25), 63);   // the old hardcoded 64, to within rounding
+        assert_eq!(with(50), 127);
+        assert_eq!(with(90), 229);
+        assert_eq!(with(10), 25);
+    }
+
+    /// A hand-edited config must not be able to make a window invisible, and
+    /// therefore impossible to find and restore.
+    #[test]
+    fn clamps_a_config_below_the_slider_minimum() {
+        assert_eq!(with(0), with(10));
+        assert_eq!(with(3), with(10));
+    }
+
+    /// Nor pin it fully opaque, which would make the feature do nothing at all
+    /// — the exact complaint that started this.
+    #[test]
+    fn clamps_a_config_above_the_slider_maximum() {
+        assert_eq!(with(100), with(90));
+        assert_eq!(with(255), with(90));
+    }
+
+    /// The floor must always leave room for the window to be seen AND for the
+    /// step to move it. A floor at or near 255 would make scrolling a no-op.
+    #[test]
+    fn always_leaves_headroom_for_a_step() {
+        for pct in 0u8..=255 {
+            let f = with(pct);
+            assert!(f >= 25,  "floor {f} at {pct}% is too transparent to find");
+            assert!(f <= 229, "floor {f} at {pct}% leaves no room to fade");
+            assert!(255 - f >= super::OPACITY_STEP, "no room for one step at {pct}%");
+        }
     }
 }

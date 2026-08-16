@@ -1,6 +1,47 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-17 | ~2:55 AM (Claude Opus 5) — three things the owner noticed, all real
+
+Full technical record: PROBLEMS 119, 120 and 121 in `V14_FIXES_AND_CODE.md`.
+Shipped as 1.0.35, installed and verified on the machine.
+
+**119 — the "Opacity floor" slider was wired to nothing.** It wrote
+`opacity_floor_pct` to config, the config stored it, and no code ever read it;
+`opacity.rs` clamped to a hardcoded 64. The owner's report — "I tried changing
+it but I don't see any difference" — was exactly right. Worse, the gesture it
+governs (Space+scroll) had NEVER fired on this machine, so the dead control sat
+in front of an unused feature. Now read through an atomic pushed from startup,
+save AND undo. Four unit tests.
+
+**120 — a finished undo countdown hid a live one.** `offerUndo()` created a new
+interval on every call and stopped none of them. Delete Gamers (20s), delete
+Founders (30s), and twenty seconds later the FIRST interval hid the banner the
+second was using. The undo itself was never lost — PROBLEM 107's backend stack
+still held it — only the button. One countdown now, held at module level.
+
+**121 — the Brave/Discord hangs have a plausible mechanism.** `force_foreground`
+attaches our input thread to the foreground app's to beat the focus lock. While
+attached the two threads SHARE an input queue, so attaching to an app that is
+already wedged stalls us and its input processing together. This path ran 100+
+times on 08-16 against Brave and Discord specifically — the two apps reported
+as hanging. It now checks `IsHungAppWindow` first and skips the attach. The
+opacity action was ruled out by measurement: it has never fired.
+
+**Not proven, and labelled so:** 121 is a mechanism plus a correlation, not an
+established cause. 119 is unit-tested but has never been exercised by a real
+Space+scroll. 120 is compiled but not yet hand-tested by deleting two profiles.
+
+### The pattern across 118, 120 and 113
+
+All three are *a stale thing outliving the thing that replaced it* — a window
+surviving its own teardown, a timer surviving its own replacement, a flag
+surviving the state it described. When a function starts a timer, a window, a
+listener or an animation, ask what a second call does. If the older one keeps
+running, the handle belongs outside the function.
+
+---
+
 ## Update: 2026-08-17 | ~12:10 AM (Claude Opus 5) — 1.0.33's repair was broken and made things worse; 1.0.34 fixes it and is PROVEN
 
 Full technical record: PROBLEM 118 in `V14_FIXES_AND_CODE.md`.
