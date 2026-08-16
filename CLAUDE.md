@@ -11,7 +11,7 @@ normal space. Rust + Tauri v2 backend, vanilla TypeScript + Vite frontend
 
 **Identity (since the 1.0.0 release pass, PROBLEM 45):** productName
 `Spaceadom`, identifier `com.spaceadom.app`, exe `spaceadom.exe`, data dir
-`%APPDATA%\Spaceadom`, Scheduled Task `Spaceadom` (elevation + run-at-logon —
+`%APPDATA%\Spaceadom`, Scheduled Task `Spaceadom` (run-at-logon, `/RL LIMITED` — deliberately NOT elevated;
 there is NO HKCU Run entry any more; the app deletes the legacy ones).
 `V14_FIXES_AND_CODE.md` §PROBLEM 45 has the full table and the elevation
 flow. The repo folder is still `SpaceToggle-V14`; rename at git-init.
@@ -131,8 +131,11 @@ npm run tauri build  # MSI → src-tauri\target\release\bundle\msi\
   `Win32_System_Variant` — inherited code that names features in a markdown
   file has not necessarily had them added to `Cargo.toml` (PROBLEM 30).
 
-- `npm run build` first, always: `tauri::generate_context!` reads `../dist`;
-  if it's missing you get a bare `error: proc macro panicked` naming no cause.
+- `npm run build` first, always: `tauri::generate_context!` reads **`../dist2`**
+  (named in `tauri.conf.json` as `frontendDist`, produced by `package.json`'s
+  `--outDir dist2`). `dist/` and `dist-stale/` are leftovers on disk and are
+  NOT what ships. If it's missing you get a bare `error: proc macro panicked`
+  naming no cause.
 - **0-byte shim trap** (this machine does it reproducibly): if cargo/rustc
   fail with "The system cannot find the file specified", the shims in
   `cargo\bin` are 0 bytes. `Test-Path` says True; check `Length`. Repair:
@@ -144,9 +147,9 @@ npm run tauri build  # MSI → src-tauri\target\release\bundle\msi\
   while Program Files silently keeps the OLD exe. Reliable sequence:
   uninstall the currently registered product code, then plain `/i` — and
   ALWAYS verify the installed exe's size/timestamp against
-  `target\release\space-toggle-v14.exe`.
+  `target\release\spaceadom.exe`.
 - **A FIX THAT IS NOT INSTALLED DOES NOT EXIST.** The user boots from
-  `C:\Program Files\SpaceToggle V14\`, never from `target\release\`. Testing
+  `C:\Program Files\Spaceadom\`, never from `target\release\`. Testing
   from the repo build is fine, but the session is NOT finished until the MSI
   is reinstalled and the installed exe verified. If a UAC prompt is declined,
   say so loudly and treat the work as UNDELIVERED — quietly continuing to
@@ -157,8 +160,13 @@ npm run tauri build  # MSI → src-tauri\target\release\bundle\msi\
   format strings and bundled CSS names are ASCII-searchable inside the exe.
   `[Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))` then test
   for markers like `url_focus:`, `aumid_focus:`, `st-hud-glow`.
-- There are no automated tests; verification is manual on the real machine
-  (see Testing laws).
+- **There ARE automated tests now** — 11, run with `cargo test --lib` from
+  `src-tauri`. They cover the self-updating-app path repair (PROBLEM 116) and
+  the opacity floor arithmetic (PROBLEM 119). Everything else is still
+  verified by hand on the real machine (see Testing laws). Add a test when
+  the logic is pure and the branch is one a user reaches only after something
+  has already gone wrong — PROBLEM 118 is what shipping an unexercised
+  recovery branch costs.
 
 ## Architecture
 
@@ -175,10 +183,13 @@ src-tauri/src/
   engine/actions/  smart_cascade (launch/focus/minimize cycling), boss_key,
                    pip, opacity, focus_engine.
   guide_hud/       Emits Tauri events to the OVERLAY window, not the dashboard.
-  config/          %APPDATA%\SpaceToggleOS\config.json — profiles → bindings.
+  config/          %APPDATA%\Spaceadom\config.json — profiles → bindings.
                    set_active_profile SAVES; don't also persistConfig() from
                    the frontend (that was the double-save bug).
-  lib.rs           Startup: self-elevation via UAC, window creation, tray.
+  lib.rs           Startup: config load, window creation, tray. NO elevation
+                   (PROBLEM 61 removed it).
+  display_watch.rs Rebuilds the overlay when the display setup changes
+                   (PROBLEM 117/118) and re-homes an off-screen dashboard.
 src/               Dashboard UI (vanilla TS): keyboard-matrix, key-detail-panel,
                    profile-editor, settings-panel; main.ts wires them.
                    (V14 removed hook-status-bar.ts and app-picker.ts — the
@@ -243,19 +254,24 @@ overlay.html       The on-demand HUD/toast surface (see window rules below).
 
 ## Testing laws
 
-- The app self-elevates via UAC on every launch and relaunches itself, so:
-  (a) the PID from `Start-Process` is not the running app — look it up by
-  name; (b) ANY input-injection harness must itself run elevated
-  (`Start-Process powershell -Verb RunAs`) or Windows silently discards its
-  input while `SendInput` reports success — results are void.
+- **The app does NOT elevate** (PROBLEM 61). Consequences: a non-elevated
+  hook receives NOTHING while an elevated window has focus (Task Manager,
+  regedit, an admin terminal) — that is Windows UIPI, it affects every
+  remapper, and the watchdog logs it correctly rather than treating it as a
+  fault. An input-injection harness still fails from a containerised agent
+  shell: `SendInput` returns success and the hook sees nothing. ALWAYS assert
+  a positive control and declare the run VOID when it fails — without one,
+  2026-08-16's harness would have reported a false negative.
 - Kill the v11 AutoHotkey process (`SpaceToggleRuntime.exe`) before testing
   V13 — two spacebar hooks feedback-loop. Leave its Startup shortcut alone.
 - Validate any harness against a known-good baseline (app stopped) first.
   Check `SendInput`'s return value; the x64 C# `INPUT` struct is 40 bytes.
 - `SetForegroundWindow` is blocked for the agent — ask the user to click the
   target window.
-- Logs: `%APPDATA%\SpaceToggleOS\debug.log` — fastest way to see engine
-  decisions. Config: `config.json` next to it.
+- Logs: `%APPDATA%\Spaceadom\debug.log` — fastest way to see engine
+  decisions. Config: `config.json` next to it. NOTE: an agent shell may read
+  a STALE containerised copy of that folder while File Explorer shows the
+  live one — cross-check timestamps before trusting a read (2026-08-16).
 - Never report anything as fixed/working/verified unless you observed it
   working. Label untested things untested. Ask the user to hand-test what
   injection can't reach.
@@ -285,5 +301,7 @@ overlay.html       The on-demand HUD/toast surface (see window rules below).
   down too. `V14_FIXES_AND_CODE.md` §"measurement traps" exists because two
   false bug reports were nearly filed; that is worth more than a clean story.
 - No CDN anything; the app must be fully offline.
-- The user's display is a single 2560×1440 monitor; Guide HUD is
+- The user's laptop panel is **2560×1600 at 150%** (1707×1067 logical), and he
+  plugs a SECOND display in and out through the day — display changes are
+  routine here, not an edge case (PROBLEM 117/118). Guide HUD stays
   primary-monitor-only by explicit user decision — don't "fix" without asking.
