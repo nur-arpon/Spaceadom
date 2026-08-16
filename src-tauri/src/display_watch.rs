@@ -104,7 +104,7 @@ fn topology(app: &tauri::AppHandle) -> Vec<(i32, i32, u32, u32, i64)> {
 ///
 /// The waiting is done OFF the main thread. Blocking the main thread would
 /// freeze the dashboard and the tray for the duration.
-fn rebuild_overlay(app: &tauri::AppHandle) {
+pub fn rebuild_overlay(app: &tauri::AppHandle) {
     if REBUILDING.swap(true, Ordering::SeqCst) {
         return;
     }

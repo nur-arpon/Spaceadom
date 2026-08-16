@@ -707,11 +707,38 @@ function wireKeyboardFit(): void {
   const scale = document.getElementById("keyboard-scale");
   if (!outer || !scale) return;
 
+  /**
+   * PROBLEM 123 — the board may now grow, not only shrink.
+   *
+   * This was `Math.min(1, …)`. The 1 is a hard 1:1 ceiling: however much room
+   * the window had, the keyboard stopped at its design size of
+   * 1048x320 CSS px and the rest of the screen stayed empty. Together with the
+   * window's own 1220x880 ceiling in lib.rs that made the dashboard a
+   * fixed-size island on any large monitor — reported by the owner as the
+   * keyboard looking small and the space being wasted.
+   *
+   * Scaling ABOVE 1 is safe because this is a CSS `transform: scale()` on the
+   * whole board: every key, gap, radius, shadow and label scales by the same
+   * factor, so the design's proportions are preserved exactly. It is the same
+   * mechanism that already handled shrinking; only the ceiling changed.
+   *
+   * MAX_SCALE is a safety valve, not a design limit. Taking the MIN across
+   * both axes already bounds this on any sane display; the cap only exists so
+   * that a pathological viewport (a very tall narrow window, a mis-reported
+   * monitor) cannot produce absurd geometry. 2.5x covers a 4K panel at 100%.
+   */
+  const MAX_SCALE = 2.5;
   const fit = () => {
     const r = outer.getBoundingClientRect();
     if (!r.width || !r.height) return;
-    const s = Math.min(1, (r.width - 12) / DESIGN_W, (r.height - 12) / DESIGN_H);
+    const s = Math.min(MAX_SCALE, (r.width - 12) / DESIGN_W, (r.height - 12) / DESIGN_H);
     scale.style.transform = `scale(${s.toFixed(4)})`;
+    // Published for anything else that should grow with the board. Nothing
+    // consumes it yet — the popovers are the obvious candidate, but their
+    // entry animation already owns `transform`, so scaling them needs `zoom`
+    // and a check on how their absolute offsets behave under it. That is a
+    // judgement to make from a screenshot, not from reasoning.
+    document.documentElement.style.setProperty("--ui-scale", s.toFixed(4));
   };
 
   fit();

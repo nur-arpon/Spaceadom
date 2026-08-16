@@ -5043,3 +5043,184 @@ state can propagate that state back to you.* `AttachThreadInput`,
 foreign handle, COM calls into another apartment. Before coupling, ask whether
 the other side is healthy — and prefer the variant with a timeout where one
 exists.
+
+---
+
+## PROBLEM 122 — the overlay detector switched itself off permanently, on exactly the machines that needed it
+
+**Symptom.** The Guide HUD composed nothing for seven hours (PROBLEM 117) and
+NOTHING IN THE APP NOTICED. The app has a pixel-sampling self-test built for
+precisely this, and it never ran once.
+
+**Root cause.** One line at the top of `compositing_selftest`:
+
+```rust
+if mode == "software" {
+    HEALED.store(true, Ordering::Relaxed); // already healed; stop testing
+    done();
+    return;
+}
+```
+
+This machine healed to software days earlier. From that moment the detector
+returned immediately on every invocation, forever — so the ONE mechanism that
+can see an unpainted overlay was switched off by the very setting meant to fix
+the problem. It would behave identically on any machine that ever heals.
+
+The reasoning behind the line is visible and wrong in an interesting way:
+"already healed" treats software rendering as a CURE. It is not. It is one
+remedy for one cause. Any other cause — a display change, a compositor reset, a
+GPU driver restart — leaves the overlay dead with the alarm disconnected.
+
+**Exact file.** `src-tauri/src/commands.rs`, `compositing_selftest`.
+
+The test now runs in BOTH modes. Only the remedy differs:
+
+```rust
+let software = {
+    let state: tauri::State<ConfigState> = app.state();
+    let mode = state.0.read().unwrap_or_else(|p| p.into_inner()).overlay_compositing.clone();
+    if mode != "auto" && mode != "software" {
+        log::warn!("compositing: unrecognised overlay_compositing '{mode}' — treating as 'auto'");
+    }
+    mode == "software"
+};
+```
+
+and, on three dead verdicts while already in software mode:
+
+```rust
+if strikes >= 3 && software {
+    // No further rendering mode to fall back to, so the remaining suspect is
+    // the WINDOW. Rebuilding it is PROBLEM 117's fix, reused here so the app
+    // repairs itself whatever the cause, not only when a display changes.
+    const MAX_REBUILDS: u32 = 3;
+    let n = REBUILDS.fetch_add(1, Ordering::SeqCst) + 1;
+    if n <= MAX_REBUILDS {
+        crate::display_watch::rebuild_overlay(&app);
+        STRIKES.store(0, Ordering::SeqCst);   // a fresh three chances
+    } else {
+        HEALED.store(true, Ordering::Relaxed);
+        log::error!("compositing: still composing nothing after {MAX_REBUILDS} rebuilds ...");
+    }
+    done();
+    return;
+}
+```
+
+`REBUILDS` is bounded on purpose: a machine whose compositor genuinely cannot
+show the overlay must not rebuild a window every few seconds for the life of
+the process. Three attempts, then stop and say so in plain words.
+
+This is "verify on use": the check runs when the HUD is shown, which is a few
+times a day, only while the overlay is already on screen, and costs one small
+pixel sample. It catches a dead overlay REGARDLESS of cause — which is what
+PROBLEM 117's display watcher, on its own, does not.
+
+**How it was verified.** `cargo check` clean. **The rebuild-in-software-mode
+branch has NOT been exercised** — it needs three consecutive dead verdicts,
+which cannot be produced on demand. Given PROBLEM 118, that is stated plainly
+rather than implied: this is implemented and reasoned, not proven.
+
+**Generalise this.** *A detector that switches itself off after one success is
+not a detector, it is a one-shot.* Any latch named "healed", "done", "fixed" or
+"already handled" deserves the question: healed of WHAT, and what happens when
+the same symptom arrives from a different cause? Here the answer was seven
+silent hours.
+
+---
+
+## PROBLEM 123 — the dashboard could never grow: two ceilings, compounding
+
+**Symptom.** Owner, on a larger monitor: the keyboard looks small, the space is
+wasted, and *"in the earlier version there was proper scaling for my bigger
+monitor — everything was scaled to make best use of it."*
+
+**Root cause.** Two independent ceilings, neither of which has ever allowed the
+dashboard to be bigger than one fixed size.
+
+1. **The board, in `src/main.ts`:**
+
+```ts
+const s = Math.min(1, (r.width - 12) / DESIGN_W, (r.height - 12) / DESIGN_H);
+```
+
+   The `1` is a hard 1:1 cap. However much room the window had, the keyboard
+   stopped at its design size of 1048x320 CSS px.
+
+2. **The window, in `src-tauri/src/lib.rs`:**
+
+```rust
+let w = 1220.0_f64.min(max_w);
+let h =  880.0_f64.min(max_h);
+```
+
+   1220x880 logical, as a CEILING. Worth noting for the record that the ORIGINAL
+   was `1220.0.min(ms.width * 0.92)` — the same shape. The 92% was never a
+   growth rule; it was a second way to shrink. **The dashboard has never been
+   able to fill a large display in any version of this app**, which is worth
+   saying because the owner remembered otherwise and the memory is the useful
+   signal even when the history is not.
+
+Together: a fixed 1220x880 window holding a fixed 1048x320 board, marooned in
+the middle of however much screen there is.
+
+**Exact file 1.** `src-tauri/src/lib.rs`, `fit_dashboard_to_work_area`:
+
+```rust
+// 92% of the WORK AREA (PROBLEM 46: work area, never the full monitor, or the
+// bottom controls hide behind the taskbar), FLOORED at the old 1220x880 so
+// nothing shrinks on screens that already fit, and still bounded by
+// max_w/max_h so a small screen behaves exactly as before.
+//
+// DO NOT "simplify" this back to a `min` against a constant. That constant is
+// the bug.
+let w = (wa_w * 0.92).clamp(1220.0_f64.min(max_w), max_w);
+let h = (wa_h * 0.92).clamp(880.0_f64.min(max_h), max_h);
+```
+
+`clamp` is safe here because the low bound is itself `min`-ed against the high
+bound, so lo <= hi always. A bare `clamp(1220.0, max_w)` would PANIC on a
+screen whose work area is under 1220 wide — exactly the netbook PROBLEM 84 was
+written for.
+
+**Exact file 2.** `src/main.ts`, `wireKeyboardFit`:
+
+```ts
+const MAX_SCALE = 2.5;
+const s = Math.min(MAX_SCALE, (r.width - 12) / DESIGN_W, (r.height - 12) / DESIGN_H);
+scale.style.transform = `scale(${s.toFixed(4)})`;
+document.documentElement.style.setProperty("--ui-scale", s.toFixed(4));
+```
+
+Scaling above 1 is safe because this is a CSS `transform: scale()` over the
+whole board: every key, gap, radius, shadow and label scales by one factor, so
+the design's proportions are preserved exactly. It is the same mechanism that
+already handled shrinking; only the ceiling moved. `MAX_SCALE` is a safety
+valve for a pathological viewport, not a design limit — taking the MIN across
+both axes already bounds it on any sane display.
+
+**What is deliberately NOT done, and why.** The popovers (`#profile-popover`,
+`#settings-panel`, `#specials-tray`) sit OUTSIDE the scaled board at fixed CSS
+sizes — `#settings-panel` is `width: 280px`. They do not grow. The owner
+explicitly mentioned the settings panel scaling too, so this is unfinished, not
+overlooked.
+
+They cannot be scaled with `transform`: `.popover` already runs
+`animation: st-pop-in` which animates `transform`, and the two would fight.
+`zoom` is the correct tool, BUT `zoom` in Chromium also scales an element's own
+absolute offsets, so `#profile-popover { top: 64px; right: 24px }` would drift
+away from the pill it is anchored to. Whether that looks right or wrong is a
+judgement to make from a screenshot, not from reasoning — so `--ui-scale` is
+published for it and nothing consumes it yet.
+
+**How it was verified.** Frontend and Rust both compile clean; built as 1.0.36.
+**NOT verified visually, and NOT installed** — the UAC prompt for the 1.0.36
+install was declined, so the running build is still 1.0.35. Nothing about the
+new sizing has been seen on screen.
+
+**Generalise this.** *A `min` against a constant is a ceiling, and a ceiling in
+layout code is a decision that the screen cannot be bigger than the designer's
+monitor.* Whenever fixed design geometry meets a variable viewport, write down
+which direction the fit is allowed to go — and if the answer is "both", say so
+in the code, because `Math.min(1, ...)` reads as a fit and behaves as a cap.

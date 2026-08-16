@@ -127,8 +127,25 @@ pub fn fit_dashboard_to_work_area(win: &tauri::WebviewWindow) {
             );
         }
 
-        let w = 1220.0_f64.min(max_w);
-        let h = 880.0_f64.min(max_h);
+        // PROBLEM 123 — PROPORTIONAL, not a fixed ceiling.
+        //
+        // This was `1220.0.min(max_w)`, and before that `1220.0.min(ms.width *
+        // 0.92)`. Both are the same shape: 1220x880 is a CEILING the window can
+        // never exceed, so on a large monitor the dashboard sat at a fixed size
+        // in the middle of a mostly empty screen. Reported by the owner: the
+        // keyboard looks small on his bigger display and the space is wasted.
+        //
+        // 92% of the WORK AREA (PROBLEM 46: work area, never the full monitor,
+        // or the bottom controls hide behind the taskbar), floored at the old
+        // 1220x880 so nothing shrinks on the screens that already fit, and
+        // still bounded by max_w/max_h so a small screen behaves exactly as
+        // before. The frontend scales the board to whatever it is given, so
+        // growing the window is what makes the keyboard grow.
+        //
+        // DO NOT "simplify" this back to a `min` against a constant. That
+        // constant is the bug.
+        let w = (wa_w * 0.92).clamp(1220.0_f64.min(max_w), max_w);
+        let h = (wa_h * 0.92).clamp(880.0_f64.min(max_h), max_h);
         let _ = win.set_size(tauri::LogicalSize::new(w, h));
         let _ = win.set_position(tauri::LogicalPosition::new(
             wa_x + (wa_w - (w + DECOR_W)) / 2.0,

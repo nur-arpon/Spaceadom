@@ -1032,6 +1032,10 @@ fn compositing_selftest(app: tauri::AppHandle) {
     static STRIKES: AtomicU32 = AtomicU32::new(0);
     static RUNNING: AtomicBool = AtomicBool::new(false);
     static HEALED: AtomicBool = AtomicBool::new(false);
+    /// PROBLEM 122 — overlay rebuilds attempted this session, bounded so a
+    /// machine that can never composite the overlay does not rebuild a window
+    /// on a loop for as long as the app is running.
+    static REBUILDS: AtomicU32 = AtomicU32::new(0);
 
     if HEALED.load(Ordering::Relaxed) || RUNNING.swap(true, Ordering::SeqCst) {
         return;
@@ -1049,21 +1053,31 @@ fn compositing_selftest(app: tauri::AppHandle) {
             // lib.rs only adds --disable-gpu for exactly "software". That
             // combination is an invisible overlay forever, with the one
             // mechanism that could have fixed it switched off.
-            {
+            // PROBLEM 122 — this used to be:
+            //     if mode == "software" { HEALED = true; return; }
+            // "already healed; stop testing". It is the reason nothing noticed
+            // the overlay was dead for seven hours on 2026-08-16: this machine
+            // healed to software days earlier, so the ONE mechanism that can
+            // detect an unpainted overlay had switched itself off permanently,
+            // and stayed off for every later cause.
+            //
+            // Software mode is not a cure, it is one remedy. The test now runs
+            // in BOTH modes; only the remedy differs. In auto we can still fall
+            // back to software rendering. In software there is no further
+            // rendering mode to try, so the remaining suspect is the window
+            // itself — rebuild it, which is exactly what a restart was doing by
+            // accident (PROBLEM 117).
+            let software = {
                 let state: tauri::State<ConfigState> = app.state();
                 let mode = state.0.read().unwrap_or_else(|p| p.into_inner()).overlay_compositing.clone();
-                if mode == "software" {
-                    HEALED.store(true, Ordering::Relaxed); // already healed; stop testing
-                    done();
-                    return;
-                }
-                if mode != "auto" {
+                if mode != "auto" && mode != "software" {
                     log::warn!(
                         "compositing: unrecognised overlay_compositing '{mode}' — treating as \
-                         'auto' and continuing to self-test (only 'software' disables it)"
+                         'auto' and continuing to self-test"
                     );
                 }
-            }
+                mode == "software"
+            };
 
             let Some(win) = app.get_webview_window("overlay") else { done(); return };
             let Some(probes) = compositing_probes(&win) else { done(); return };
@@ -1112,6 +1126,42 @@ fn compositing_selftest(app: tauri::AppHandle) {
                     "compositing: overlay pixels did not change across 450ms while visible \
                      (strike {strikes}/3) — GPU composition may be dead on this machine"
                 );
+                if strikes >= 3 && software {
+                    // PROBLEM 122 — already in software rendering, so there is
+                    // no further rendering mode to fall back to. The remaining
+                    // suspect is the overlay WINDOW: a transparent, layered,
+                    // always-on-top window whose composition has stopped. That
+                    // is PROBLEM 117's fault, and rebuilding it is PROBLEM
+                    // 117's fix — reused here so the app repairs itself
+                    // whatever the cause, not only when a display changes.
+                    //
+                    // Bounded on purpose. A machine where the overlay can never
+                    // paint must not rebuild a window every few seconds
+                    // forever; three attempts, then stop and say so plainly.
+                    const MAX_REBUILDS: u32 = 3;
+                    let n = REBUILDS.fetch_add(1, Ordering::SeqCst) + 1;
+                    if n <= MAX_REBUILDS {
+                        log::warn!(
+                            "compositing: 3 dead verdicts while ALREADY in software mode — \
+                             the overlay window itself has stopped compositing. Rebuilding it \
+                             (attempt {n}/{MAX_REBUILDS}); PROBLEM 122."
+                        );
+                        crate::display_watch::rebuild_overlay(&app);
+                        STRIKES.store(0, Ordering::SeqCst); // a fresh three chances
+                    } else {
+                        HEALED.store(true, Ordering::Relaxed); // stop burning cycles
+                        log::error!(
+                            "compositing: the overlay still composes nothing after \
+                             {MAX_REBUILDS} rebuilds in software mode. Giving up for this \
+                             session — shortcuts and sound keep working, but the HUD and \
+                             toasts will not be drawn. Restart the app, and if it persists \
+                             this machine's compositor cannot show the overlay."
+                        );
+                    }
+                    done();
+                    return;
+                }
+
                 if strikes >= 3 {
                     // Flip the config; the env var applies at next process start.
                     {

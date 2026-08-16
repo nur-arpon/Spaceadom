@@ -1,6 +1,41 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-17 | ~4:10 AM (Claude Opus 5) — the dashboard could never grow, and the overlay detector was a one-shot
+
+Full technical record: PROBLEMS 122 and 123 in `V14_FIXES_AND_CODE.md`.
+Built as 1.0.36. **NOT INSTALLED — the UAC prompt was declined. The machine is
+still running 1.0.35, and nothing below has been seen on screen.**
+
+**123 — two ceilings, compounding.** The owner reported the keyboard looking
+small on his larger monitor. `Math.min(1, ...)` capped the board at its 1048x320
+design size, and `1220.0.min(max_w)` capped the window at 1220x880. He
+remembered an earlier version scaling better; the record shows the original was
+`1220.0.min(ms.width * 0.92)` — the same ceiling. **No version of this app has
+ever filled a large display.** The memory was still the useful signal. Both now
+scale: 92% of the work area, floored (not capped) at 1220x880, and the board may
+reach 2.5x. Small screens are untouched — PROBLEM 84's netbook path still holds,
+and `clamp` is used in the one order that cannot panic when the work area is
+narrower than the floor.
+
+**122 — the detector switched itself off.** `compositing_selftest` began with
+`if mode == "software" { HEALED = true; return; }`. This machine healed days
+ago, so the one mechanism that can see an unpainted overlay had been disabled
+ever since — which is precisely why PROBLEM 117 went unnoticed for seven hours.
+Software rendering is a REMEDY, not a cure. The test now runs in both modes; in
+software the remedy becomes rebuilding the overlay window (PROBLEM 117's fix,
+reused), bounded to three attempts so a hopeless machine does not loop.
+
+### Deliberately unfinished, recorded so it is not lost
+
+The popovers still do not scale. `#settings-panel` is a fixed 280px outside the
+scaled board. `transform` is unavailable (the pop-in animation owns it) and
+`zoom` also scales absolute offsets, which may pull them off their anchors.
+That is a judgement to make from a screenshot. `--ui-scale` is published for
+whoever picks it up.
+
+---
+
 ## Update: 2026-08-17 | ~2:55 AM (Claude Opus 5) — three things the owner noticed, all real
 
 Full technical record: PROBLEMS 119, 120 and 121 in `V14_FIXES_AND_CODE.md`.
