@@ -1,6 +1,55 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-18 | ~9:30 AM (Claude Opus 5) — the conflict banner now catches a second INSTALL; the .msi patch works and is deliberately not shipped
+
+Full technical record: PROBLEMS 140 and 141 in `V14_FIXES_AND_CODE.md`. Shipped
+as 1.0.53.
+
+**Nur stopped me mid-task and he was right to.** He asked what I was even trying
+to achieve, and said he thought he had already solved version conflicts with a
+dashboard banner and a one-click elevated fix. He had — PROBLEM 75's banner is
+still in the app. It detects a stale TASK. It says nothing about a second
+INSTALL, which is what actually bit him (PROBLEM 129: HKLM v1.0.37 in Program
+Files against HKCU v1.0.40 in LOCALAPPDATA, both autostarting, both hooking the
+keyboard). No stale task is involved, so that banner never fired.
+
+**PROBLEM 141** adds `rival_install.rs`: a startup scan (on the existing
+background thread — it stats Program Files and reads a PE version resource, and
+PROBLEM 55 says no file I/O before first paint), a banner naming the version and
+path, and a one-click elevated removal that verifies against the DISK rather
+than an exit code (PROBLEM 127's lesson). It only ever offers to remove the
+per-machine copy and returns None if we ARE that copy — an app must never offer
+to delete itself.
+
+**Verified end to end, both branches**, because PROBLEM 118 is what shipping an
+unexercised recovery path costs. A real decoy was planted in Program Files and
+Nur clicked the button: detected at 09:18:09, `removal cancelled at the UAC
+prompt` at 09:18:32 (the DECLINE path, which usually ships untested), and `the
+second copy is gone` at 09:19:02. Machine clean afterwards.
+
+**PROBLEM 140: the tauri-bundler patch works and is not shipped.** He asked for
+it; it builds; `TAURI_WIX_LIGHT_ARGS=-sice:ICE38` makes the per-user .msi link.
+He also said to do both only *"if it is not coming at any cost"*. It does:
+`-sice:ICE38` does not fix ICE38, it silences it, and that check is what makes
+MSI repair and uninstall behave correctly per-user. Shipping it means a
+known-defective installer with its warning light unscrewed — a defect that
+surfaces later, on someone else's machine, at uninstall time. The two-hunk patch
+is documented as a recipe; `tools/` was deleted (it had reached **1.6 GB** with
+its Cargo build tree); `src-tauri/wix/main.wxs` stays parked.
+
+The banner covers the real risk anyway, and does something the .msi never
+could: it reaches the machines that are ALREADY wrong, including every friend
+given an older build.
+
+**My error, recorded:** I was three hours into forking a build toolchain when
+the cheaper and better answer was the mechanism he already had. When a user says
+"I think I already solved this", find out what they solved before building
+anything.
+
+— Claude Opus 5
+
+---
 ## Update: 2026-08-18 | ~9:00 AM (Claude Opus 5) — the per-user .msi is BLOCKED by Tauri's bundler; share folder refreshed
 
 Full technical record: PROBLEM 139 in `V14_FIXES_AND_CODE.md`.

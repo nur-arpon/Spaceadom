@@ -20,6 +20,7 @@ mod commands;
 mod crash_context;
 mod config;
 mod display_watch;
+mod rival_install;
 mod engine;
 mod guide_hud;
 mod hook;
@@ -528,6 +529,16 @@ pub fn run() {
             .name("st-startup-task".into())
             .spawn(move || {
                 startup::ensure_startup_task(run_at_startup);
+                // PROBLEM 141 - look for a SECOND install here, off the
+                // startup path: this stats Program Files and reads a PE
+                // version resource, neither of which belongs before the
+                // first paint (PROBLEM 55).
+                rival_install::scan();
+                // PROBLEM 141 - look for a SECOND install here, off the
+                // startup path: this stats Program Files and reads a PE
+                // version resource, neither of which belongs before the
+                // first paint (PROBLEM 55).
+                rival_install::scan();
                 startup::remove_legacy_run_entries();
             })
             .ok();
@@ -624,6 +635,8 @@ pub fn run() {
             commands::dashboard_ready,
             commands::get_stale_task,
             commands::repair_stale_task,
+            commands::get_rival_install,
+            commands::repair_rival_install,
             commands::get_conflicts,
             commands::set_startup_enabled,
         ])

@@ -7256,3 +7256,189 @@ question that decided the outcome. Ten minutes reading `WixConfig`'s fields
 first would have reordered the whole evening. And: **a build target that can
 fail takes every other target with it**, so an experimental bundle format does
 not belong in a release pipeline until it links.
+
+---
+
+## PROBLEM 140 — patching tauri-bundler to pass `-sice:ICE38` WORKS. It is documented here and deliberately not shipped.
+
+**Owner, 2026-08-18:** *"patch tauri-bundler to add lightArgs and get the msi
+working."* It was done, it compiles, and it is recorded as a recipe rather than
+as vendored code. Read PROBLEM 139 first for why the .msi needs this at all.
+
+### The patch, in full — two hunks in `tauri-bundler` 2.9.4
+
+`src/bundle/windows/msi/mod.rs`, in `build_wix_app_installer`:
+
+```rust
+// 1. the argument vector must be mutable
+-   let arguments = vec![
++   let mut arguments = vec![
+      format!("-cultures:{}", ...),
+
+// 2. immediately before `let msi_output_path = output_path.join("output.msi");`
++   if let Ok(extra) = std::env::var("TAURI_WIX_LIGHT_ARGS") {
++     let extra: Vec<String> = extra.split_whitespace()
++       .filter(|a| !a.is_empty()).map(|a| a.to_string()).collect();
++     if !extra.is_empty() {
++       log::info!(action = "Running"; "light with extra args: {extra:?}");
++       arguments.extend(extra);
++     }
++   }
+```
+
+Built as a `cargo-tauri` binary via a four-line driver crate:
+
+```toml
+[dependencies]
+tauri-cli = "2.11.4"
+[patch.crates-io]
+tauri-bundler = { path = "../tauri-bundler" }
+```
+
+```rust
+fn main() { tauri_cli::run(std::env::args_os().skip(1), None); }
+```
+
+`cargo build --release` → `cargo-tauri.exe` in 3m40s. Then
+`TAURI_WIX_LIGHT_ARGS=-sice:ICE38` and the per-user .msi links.
+
+### Why an env var and NOT a `wix.lightArgs` config field
+
+Asked for as `lightArgs`; built as an env var, on purpose. `WixConfig` in
+tauri-utils is `#[serde(deny_unknown_fields)]`, and **`tauri-build` parses the
+same `tauri.conf.json` during the application's own compile**. Adding the field
+would therefore break `cargo build` for anyone on a stock tauri-utils, and drag
+a forked dependency into the shipped app rather than leaving it in the build
+tool where it belongs. Same capability, blast radius confined to the tool.
+
+### Why it is NOT shipped — the cost the owner asked to be told about
+
+He said to do both *"if it is not coming at any cost... if it is, ask me
+again"*. It comes at a cost, and the cost is not the build time:
+
+**`-sice:ICE38` does not fix ICE38, it silences it.** The check exists because
+components installed into a user profile should be keyed on a registry value
+rather than a file — that is what makes MSI *repair* and *uninstall* behave
+correctly per-user. Suppressing it yields an .msi that installs cleanly and may
+then misbehave on repair or uninstall, leaving files behind. That is shipping a
+known-defective installer with its warning light unscrewed, which is a worse
+failure mode than not shipping one: the defect is silent and arrives later.
+
+Secondary costs: a vendored `tauri-bundler` fork in the repo, CI having to build
+it, and a re-base on every Tauri upgrade.
+
+**Weighed against PROBLEM 141's banner**, which covers the actual risk AND
+reaches the old .msi copies already on other people's machines — something a new
+per-user .msi can never do — the .msi earns nothing. Decision: recipe kept,
+`tools/` deleted (it had grown to **1.6 GB** with its Cargo build tree, which is
+its own argument against vendoring), `src-tauri/wix/main.wxs` kept parked.
+
+**Generalise this.** *"It builds" is not "it is correct."* A suppressed
+validation is a defect that has been made quiet, and quiet defects surface at
+uninstall time on someone else's machine. And **vendoring a third-party crate to
+change two lines is a bad trade** — the diff is the asset; the 1.6 GB of build
+tree around it is a liability.
+
+---
+
+## PROBLEM 141 — the conflict banner now detects a SECOND INSTALL, not just a stale task
+
+**The owner remembered this, and he was right.** Mid-way through the .msi work
+he asked what I was even doing: *"I think I had this resolved by... there would
+be something on the top of the dashboard saying that there is a conflict, there
+is an old version installed, just press this and a prompt will come up... and it
+will delete the old version. I think it should still be there in the app."*
+
+It is still in the app. It detects the wrong thing.
+
+**What existed (PROBLEM 75):** a banner for a stale *Scheduled Task* — an old
+logon task, created elevated, pointing at a moved or deleted exe. One click, one
+UAC prompt, `schtasks /Delete`. `get_stale_task` / `repair_stale_task`.
+
+**What was missing:** a second *install*. The .msi installed per-machine into
+`C:\Program Files\Spaceadom`; the setup.exe installs per-user into
+`%LOCALAPPDATA%\Spaceadom`. Windows treats them as two unrelated programs — two
+uninstall entries, two autostart registrations, and at logon two processes each
+installing a `WH_KEYBOARD_LL` hook and fighting over the spacebar. Measured on
+this machine (PROBLEM 129):
+
+```
+HKLM: v1.0.37 -> C:\Program Files\Spaceadom\        (from the .msi)
+HKCU: v1.0.40 -> %LOCALAPPDATA%\Spaceadom\          (from the setup.exe)
+```
+
+No stale task is involved, so the existing banner never fired.
+
+**Why it must be NAMED rather than diagnosed.** Nobody experiences this as "two
+apps are running". They experience Space+D opening Discord twice, or settings
+that keep reverting because two processes write one `config.json`. Nothing in
+that description points at an installer.
+
+**Exact files.** `src-tauri/src/rival_install.rs` (new), plus two commands in
+`commands.rs`, the module + a startup call in `lib.rs`, and the banner in
+`src/main.ts`.
+
+Detection is deliberately one-directional — it only ever offers to remove the
+**per-machine** copy, and returns `None` if we ARE that copy:
+
+```rust
+// an app must never offer to delete itself
+if me.starts_with(rival.parent()?) { return None; }
+```
+
+The scan rides the existing background thread next to `ensure_startup_task`,
+never the startup path: it stats Program Files and reads a PE version resource,
+and PROBLEM 55 established that no file I/O belongs before the first paint.
+
+Repair is ONE elevated `runas` — the same shape as PROBLEM 75's — that stops any
+process running *from the rival directory* (never ours), uninstalls every
+per-machine registration via `msiexec /X`, removes the leftover folder, and
+clears the HKLM Run value. Then it **verifies against the disk**, not against an
+exit code:
+
+```rust
+let gone = detect().is_none();
+RIVAL_FOUND.store(!gone, Ordering::Relaxed);
+```
+
+That is PROBLEM 127's lesson applied: an installer's exit code is a claim about
+the installer, not about the machine.
+
+`Win32_Storage_FileSystem` was added to the windows crate features for
+`GetFileVersionInfoW`, so the banner can say *"v1.0.37 is installed at…"*
+instead of pointing at a bare path. Per-API feature gating, exactly as CLAUDE.md
+warns: without it the import fails as "could not find FileSystem in Storage" on
+a path that plainly exists in the docs.
+
+**Both banners share one element**, so the rival check runs first and the
+stale-task check stands down if it already claimed the slot — two installs is
+the worse fault.
+
+### How it was verified — END TO END, both branches
+
+Not left as an unexercised recovery path, because PROBLEM 118 is this project's
+record of what that costs. A real decoy was planted in Program Files (a genuine
+signed exe, so the version resource had to actually parse), the app restarted,
+and the owner clicked the button:
+
+```
+09:18:09  a SECOND copy of Spaceadom is installed at C:\Program Files\
+          Spaceadom\spaceadom.exe (v1.0.27) ... offering a one-click removal
+09:18:32  removal cancelled at the UAC prompt          <- DECLINE path
+09:19:02  the second copy is gone — one Spaceadom remains   <- SUCCESS path
+```
+
+Afterwards: `C:\Program Files\Spaceadom` absent, HKLM Run value absent, one
+instance running. **The decline path executed too**, which is the branch that
+usually ships untested — it returns a clean `false`, the button re-arms, and the
+banner stays until the machine is actually repaired.
+
+**Generalise this.** *When the user says "I think I already solved this", find
+out what they solved before building anything.* He had solved the stale-task
+conflict, and remembered the SHAPE of the solution correctly — a banner, a
+click, a prompt. I was three hours into forking a build toolchain to make a
+second install impossible, when the cheaper and strictly better answer was to
+extend the mechanism he already had, which also reaches every machine that is
+already broken. A new installer can only protect future installs; a detector
+protects the ones already out there.
+

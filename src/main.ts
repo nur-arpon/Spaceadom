@@ -154,7 +154,14 @@ async function bootstrap(): Promise<void> {
   // ---- stale startup task (PROBLEM 75) ----
   // Delayed: the Rust side triages the task on a background thread right
   // after launch, so an immediate query could race it and read false.
-  window.setTimeout(() => void checkStaleTask(), 3000);
+  // PROBLEM 141 — two installs is the worse of the two faults and both banners
+  // share ONE element, so the rival check runs first and the stale-task check
+  // only claims the slot if the rival check did not.
+  window.setTimeout(() => {
+    void checkRivalInstall().then((shown) => {
+      if (!shown) void checkStaleTask();
+    });
+  }, 3000);
 
   // ---- stage chrome ----
   wirePopovers();
@@ -532,6 +539,75 @@ function conflictKey(list: Conflict[]): string {
 // ONE user-initiated elevated deletion. This banner is that offer. It is NOT
 // once-per-set like the conflict banner: it stays until the machine is
 // actually repaired, because until then every reboot misbehaves.
+// ---------------------------------------------------------------------------
+// PROBLEM 141 — a SECOND copy of Spaceadom is installed.
+//
+// The .msi installed per-machine into Program Files; the setup.exe installs
+// per-user into %LOCALAPPDATA%. Windows sees two unrelated programs, both
+// register autostart, and at logon two processes each hook the keyboard and
+// fight over the spacebar. Nobody experiences that as "two apps are running" —
+// they experience Space+D opening Discord twice, or settings that keep
+// reverting because two processes write one config.json. So it has to be
+// NAMED, not left to be diagnosed.
+//
+// Dropping the .msi in 1.0.41 protects NEW installs. This protects machines
+// that are already wrong — which is every friend given an older build. Same
+// shape as the stale-task banner below, deliberately: one sentence of plain
+// English, one button, one permission prompt.
+//
+// Returns whether it claimed the banner, so the stale-task check can stand
+// down — they share one element and two installs is the worse fault.
+async function checkRivalInstall(): Promise<boolean> {
+  let found = false, path = "", version = "";
+  try {
+    [found, path, version] = await invoke<[boolean, string, string]>("get_rival_install");
+  } catch (_) { /* backend unavailable — nothing to offer */ }
+  if (!found) return false;
+
+  const el = document.getElementById("conflict-banner");
+  if (!el) return false;
+  el.innerHTML = "";
+
+  const txt = document.createElement("span");
+  txt.className = "conflict-text";
+  txt.textContent =
+    `Another copy of Spaceadom (v${version}) is installed at ${path}. ` +
+    "Both start with Windows and fight over the spacebar. " +
+    "One click removes the old one (Windows will ask for permission once).";
+
+  const fix = document.createElement("button");
+  fix.className = "btn btn-sm";
+  fix.textContent = "Remove the old copy";
+  fix.addEventListener("click", async () => {
+    fix.disabled = true;
+    fix.textContent = "Removing…";
+    let ok = false;
+    try {
+      ok = await invoke<boolean>("repair_rival_install");
+    } catch (_) { /* fall through to the retry state */ }
+    if (ok) {
+      el.hidden = true;
+      showToast("✅ Old copy removed — one Spaceadom left, no more spacebar conflict");
+    } else {
+      fix.disabled = false;
+      fix.textContent = "Remove the old copy";
+      showToast("⚠️ Not removed — the permission prompt was declined");
+    }
+  });
+
+  const close = document.createElement("button");
+  close.className = "conflict-close";
+  close.setAttribute("aria-label", "Dismiss for now");
+  close.textContent = "✕";
+  close.addEventListener("click", () => {
+    el.hidden = true; // this session only — it returns until the copy is gone
+  });
+
+  el.append(txt, fix, close);
+  el.hidden = false;
+  return true;
+}
+
 async function checkStaleTask(): Promise<void> {
   let stale = false;
   try {

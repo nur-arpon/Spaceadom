@@ -829,6 +829,25 @@ pub fn dashboard_ready(app: tauri::AppHandle, window: tauri::WebviewWindow) {
 
 /// PROBLEM 75 — true when a startup task from an older build exists that this
 /// process cannot remove. The dashboard shows the one-click repair banner.
+/// PROBLEM 141 - is a SECOND copy of Spaceadom installed?
+///
+/// Returns `(found, path, version)`. The dashboard turns this into the same
+/// one-click elevated repair the stale-task banner uses (PROBLEM 75) - which is
+/// the mechanism the owner already had in mind: "there is an old version
+/// installed, just press this and it will delete the old version".
+#[tauri::command]
+pub fn get_rival_install() -> (bool, String, String) {
+    crate::rival_install::status()
+}
+
+/// PROBLEM 141 - remove the second copy. ONE UAC prompt; returns whether the
+/// machine is actually clean afterwards, verified against the DISK rather than
+/// against an exit code (PROBLEM 127's lesson).
+#[tauri::command]
+pub fn repair_rival_install() -> bool {
+    crate::rival_install::repair()
+}
+
 #[tauri::command]
 pub fn get_stale_task() -> bool {
     #[cfg(windows)]

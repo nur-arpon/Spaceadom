@@ -1,6 +1,6 @@
 [package]
 name = "spaceadom"
-version = "1.0.52"
+version = "1.0.53"
 description = "Spaceadom — hold Space + tap a key to launch, focus or minimise any app"
 authors = ["Spaceadom"]
 edition = "2021"
@@ -89,6 +89,12 @@ features = [
   "Win32_System_Com_Marshal",
   # Token / elevation check
   "Win32_Security",
+  # PROBLEM 141 — GetFileVersionInfoW on a RIVAL install's exe, so the
+  # conflict banner can name the version it is offering to remove
+  # ("v1.0.37 is installed at ...") instead of pointing at a bare path.
+  # Feature-gated per-API as always: without this the import fails as
+  # "could not find FileSystem in Storage" on a path that plainly exists.
+  "Win32_Storage_FileSystem",
   # Shell execute (runas elevation)
   "Win32_UI_Shell_Common",
   # SHGetPropertyStoreForWindow + PKEY_AppUserModel_ID — how Store/UWP
