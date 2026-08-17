@@ -6705,3 +6705,57 @@ sampled somewhere that is allowed to block. And second: *a rule with a written
 rationale still needs the rationale re-checked when the code changes around it.*
 "Returns in microseconds" was true of our instructions and false of the system
 calls they made, and the reassuring comment is exactly why nobody looked again.
+
+---
+
+### PROBLEM 134 — STATUS CORRECTION, 2026-08-17 22:30. Not fixed. Read this before building on it.
+
+PROBLEM 134 above committed to a falsifiable test: *"KB_EVENTS_OWN_FG should now
+go NON-ZERO whenever he uses shortcuts with the dashboard focused. If it stays 0
+while he reports the symptom, this diagnosis is wrong and should be written off
+here."* Honouring that in both directions, because the result was split:
+
+**The counter moved.** `saw 64 key event(s), 21 of them while the Spaceadom
+window itself had focus` — the first non-zero reading in days, after being 0 on
+every sample through every failure. Space+B fired from inside the app at
+22:01:35 and launched Brave. So the two changes were real: the Win32 calls did
+not belong on the hook path, and the thread priority did lift.
+
+**The symptom did not go away.** A baseline-differenced probe keyed to the
+overlay's actual HWND, run for 45s while the owner held Space with the dashboard
+focused, observed **0 shows** — the overlay never became visible, and the app
+logged nothing at all in that window. So 1.0.45 improved a measurement without
+fixing the fault. **It is NOT the answer, and must not be cited as one.**
+
+**RULED OUT by the owner, on evidence better than the log:** Mouse Without
+Borders and PowerToys. The hypothesis was strong on paper — MWB hooks BOTH
+keyboard and mouse, swallows input destined for another machine, and its helper
+started at 19:04:42 the same evening, which fit every log symptom including the
+otherwise-inexplicable simultaneous mouse blindness. The owner refuted it
+directly: *"this thing was solved, and I had Mouse Without Borders even back
+then... the app launching, closing, using my shortcuts inside my app, and Space
++ right alt would change the profile, holding space would show the HUD."*
+**It worked, on this machine, with these same programs running.** A hypothesis
+that requires those programs to be new cannot stand.
+
+**THE REFRAME THAT MATTERS, and the reason this entry exists at all: THIS IS A
+REGRESSION, NOT A LIMITATION.** Every investigation so far — mine and the
+2026-08-16 one — treated "shortcuts do not work while our own window is focused"
+as a property to be explained. It is not. It is a behaviour that WORKED and then
+STOPPED. That changes the whole method: the question is not "what about Windows
+prevents this" but "what did WE change". Everything above was looking for a
+mechanism when it should have been looking for a diff.
+
+**The cheap decisive experiment, NOT YET RUN.** `all-versions/` holds every
+installer ever built, and they install per-user with no admin prompt since
+1.0.41. Installing an older build and testing the one gesture — focus the
+dashboard, hold Space, look for the HUD — bisects this to a version range in
+minutes. Candidates: 1.0.27 (the documented clean baseline), 1.0.34, 1.0.36
+(where PROBLEM 123 grew the window and software compositing costs jumped).
+Config is untouched by version changes, so rollback is safe.
+
+**Deprioritised at the owner's explicit request** 2026-08-17 22:30: *"If we
+cannot figure out the solution of it, let it be. It's OK... except when my app
+is focused, everywhere else it is working, so that is good enough for now."*
+Recorded as OPEN, with the bisect as the named next step, so nobody re-derives
+the refuted theories. Do not close this. Do not treat PROBLEM 134 as its fix.

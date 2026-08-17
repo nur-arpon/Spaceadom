@@ -1,6 +1,56 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-17 | ~10:30 PM (Claude Opus 5) — 1.0.45 did not fix it; and the owner supplied the fact that reframes the whole problem
+
+Correction appended to PROBLEM 134 in `V14_FIXES_AND_CODE.md`.
+
+**1.0.45 is not the fix.** I committed in PROBLEM 134 to a falsifiable test and
+it came back split. The counter moved (0 -> 21 own-focus events, first non-zero
+in days) and Space+B fired from inside the app. But a baseline-differenced probe
+keyed to the overlay's real HWND, run for 45s while he held Space with the
+dashboard focused, saw **0 shows** and the app logged nothing. The measurement
+improved; the fault did not. Recorded as such rather than left looking like a
+fix.
+
+**Mouse Without Borders: refuted by the owner, correctly.** It fit the log
+better than anything else - MWB hooks BOTH keyboard and mouse (the only thing
+that explained simultaneous mouse blindness), swallows input bound for another
+machine, and its helper started at 19:04:42 that evening. He killed it with one
+fact I could not have got from the log: *"this thing was solved, and I had Mouse
+Without Borders even back then"* - including Space+RightAlt profile cycling and
+the HUD on hold, inside the app, on this machine, with these programs running.
+
+**THE REFRAME: it is a REGRESSION, not a limitation.** Both investigations, mine
+and 2026-08-16's, treated "no shortcuts while our own window is focused" as a
+property needing a mechanism. It is a behaviour that WORKED and STOPPED. The
+question was never "what about Windows prevents this" - it is "what did we
+change". That is a different and much more tractable search, and I spent the
+evening on the wrong one.
+
+**Named next step, not yet run: BISECT.** `all-versions/` has every installer,
+per-user and admin-free since 1.0.41, and config survives version changes. Ten
+minutes with 1.0.27 / 1.0.34 / 1.0.36 and one gesture (focus dashboard, hold
+Space, look for the HUD) brackets the regression. 1.0.36 is the prime suspect:
+PROBLEM 123 grew the dashboard to 92% of the work area, which multiplied the
+software-compositing cost on a machine already running --disable-gpu.
+
+**Deprioritised at his explicit request:** *"If we cannot figure out the solution
+of it, let it be... except when my app is focused, everywhere else it is working,
+so that is good enough for now."* Left OPEN with the bisect recorded, so the
+refuted theories are not re-derived by whoever picks this up.
+
+**My errors this session, for the record:** (1) I told him there was no
+documented fix, having searched only PROJECT_STATUS and V14_FIXES - the skill
+reference in this same repo describes hook eviction verbatim, and CLAUDE.md says
+it governs all work here. (2) My first pixel probe counted the dashboard's cream
+pixels as HUD pixels and reported "HUD IS PAINTING" - the same class of error
+this project already has written up under measurement traps. The corrected,
+HWND-keyed probe showed the opposite.
+
+— Claude Opus 5
+
+---
 ## Update: 2026-08-17 | ~10:50 PM (Claude Opus 5) — the answer WAS in the documentation, and it was in the skill file
 
 Full technical record: PROBLEM 134 in `V14_FIXES_AND_CODE.md`. Shipped as 1.0.45.
