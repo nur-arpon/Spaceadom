@@ -60,6 +60,27 @@ only automated check this project has. Arithmetic split out of the global; a
 12th test added to cover the wiring the purity would otherwise have stopped
 testing. Suite run five times, 12/12 each time.
 
+**A SERIOUS OPEN FINDING, deliberately not fixed tonight: PROBLEM 131.** While
+verifying the 1.0.41 install I read the whole of `debug.log` and found the app
+has terminated abnormally **14 times since 2026-08-12** with a panic inside
+tao's event loop (`cannot move state from Destroyed`). Measured: 133 sessions
+logged, 14 ended this way — **11%** — and the clean-shutdown signature appears
+only twice in the entire file, never next to a panic, so these are real
+in-flight deaths and not noisy quits. Nur never reported a crash; the symptom
+he DID report was things "stopping working" until he restarted, which we both
+attributed to the invisible-HUD bug.
+
+No fix is being shipped for it, on purpose. The trigger is not understood (the
+leading hypothesis explains 6 of the 14), and PROBLEM 118 is what shipping an
+unverified recovery branch costs — it failed on his machine within 90 minutes
+and made things worse than no fix at all. At 11% a real fix will prove itself
+within a day of normal use; a guess will just add noise.
+
+**The thing blocking diagnosis is fixable and needs his decision:** every
+backtrace frame prints `<unknown>`, because `spaceadom.pdb` is built but the
+installer ships only the exe. The panic handler fires correctly and says
+nothing useful. Options and their costs are written up in PROBLEM 131.
+
 **Still not judged: the 0.75 keyboard scaling.** 1.0.41 carries it and is
 running. That verdict is the owner's eyes, not arithmetic — `FILL` in
 `src/main.ts` is the single knob.

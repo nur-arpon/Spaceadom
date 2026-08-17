@@ -5773,3 +5773,110 @@ reaching for a global; it is testable without ceremony and cannot go flaky. And
 when you make something pure to test it, **check what the purity stopped
 testing** — here, the exact defect the tests existed to catch would have walked
 straight through.
+
+---
+
+## PROBLEM 131 — OPEN, NOT FIXED: the app has died 14 times in 6 days and nobody knew
+
+**Status: DIAGNOSED ENOUGH TO NAME, NOT ENOUGH TO FIX. Do not ship a guess.**
+It is written up now because the evidence is on the machine today and will be
+rotated out of the log later.
+
+**Symptom.** Found by reading `debug.log` after the 1.0.41 install — NOT
+reported by the owner, who never saw a crash dialog:
+
+```
+[ERROR] PANIC at tao-0.35.3\src\platform_impl\windows\event_loop\runner.rs:371:25:
+        cannot move state from Destroyed
+[ERROR] backtrace:
+   0: <unknown>   ...   13: DefSubclassProc
+```
+
+**The numbers, measured across the whole log.**
+
+```
+sessions logged (logger initialised) : 133
+sessions ending in this panic        :  14   = 11%
+first / last                         : 2026-08-12 14:12  ->  2026-08-17 16:38
+clean shutdowns in the entire log    :   2
+```
+
+Eleven percent of every run this app has ever had ended here.
+
+**How "it crashed" was separated from "it was quitting anyway".** This
+distinction decides whether the bug is cosmetic or severe, so it was measured
+rather than assumed. A clean shutdown has a signature:
+
+```
+hook: hooks removed, thread exiting
+engine: hook channel closed, actor exiting
+```
+
+That pair appears **twice in 133 sessions**, and neither occurrence is next to
+a panic. So no panic was preceded by an orderly shutdown. A hard kill
+(`taskkill /F`, which the installer uses) cannot produce a Rust panic at all —
+`TerminateProcess` runs no user code. Therefore these 14 are genuine in-flight
+deaths, not noisy exits.
+
+**What the app was doing immediately before each one** (the line preceding the
+panic, all 14):
+
+```
+6x  overlay_fit / overlay_fit_hud    <- resizing or placing the OVERLAY window
+4x  hook WATCHDOG (hook silent while the user was active)
+2x  compositing self-test
+2x  ordinary hook diagnostics
+```
+
+**Leading hypothesis, UNPROVEN.** `cannot move state from Destroyed` is tao's
+event-loop runner refusing a state transition after the runner reached
+`Destroyed` — i.e. a window message dispatched into an event loop that is
+already gone, which is what `DefSubclassProc` at the bottom of the backtrace
+points at. The app has a documented path that destroys a window underneath
+itself, recorded in `startup.rs` for a different reason:
+
+> WebView2 then fails with HRESULT(0x80070490) ERROR_NOT_FOUND, Tauri destroys
+> the host window, and the app runs on with NO dashboard and NO overlay
+
+If the overlay's host window is destroyed that way and a queued `overlay_fit`
+then calls `set_size`/`set_position` on it, this is exactly the panic that
+results — which fits the 6 overlay-operation occurrences. **It does not yet
+explain the other 8**, and a hypothesis that explains 6 of 14 is not a
+diagnosis. `display_watch.rs`'s `destroy()` is NOT the cause: the panics start
+2026-08-12 and `display_watch` first shipped in 1.0.33 on 2026-08-16.
+
+**Why no fix is being shipped tonight.** PROBLEM 118 is the precedent and it
+cost the owner real pain: 1.0.33 shipped a recovery branch that had never
+executed, it failed on his machine within 90 minutes during a Discord call, and
+the error handler made things WORSE than no fix. The trigger here is not
+understood, the crash is not reproducible on demand, and 11% is a rate that
+will show whether a fix worked within about a day of normal use. Guessing costs
+more than waiting.
+
+**BLOCKER on diagnosing it: every backtrace frame is `<unknown>`.** The panic
+hook from PROBLEM 125 catches the crash and names tao's line, but cannot name
+OUR call that led there. Reason: `spaceadom.pdb` (8.5 MB) is built into
+`target/release/` and the installer ships only the `.exe`, so the installed app
+has no symbols to resolve against. Options, in order of preference — decide
+WITH the owner, since each has a real cost:
+
+1. Ship the `.pdb` beside the exe. Backtraces become readable on his actual
+   machine. Cost: installer roughly doubles in size (compresses well).
+2. Log the app's own context at panic time instead of relying on symbols —
+   last overlay operation, whether the overlay window still exists, last
+   command handled. Cheaper, no size cost, but it only answers questions asked
+   in advance.
+3. Leave it. Every future occurrence stays as uninformative as these 14.
+
+**What to do at the next occurrence.** Do not clear `debug.log`. Capture the
+20 lines before the panic and cross-check against: was a display plugged or
+unplugged, was the dashboard open, had the overlay just been rebuilt, was
+WebView2 logging `0x80070490`.
+
+**Generalise this.** *A crash nobody reports is not a crash that is not
+happening.* This app dies roughly twice a day, has done for six days, and the
+owner's only symptom was that things "stopped working" until he restarted it —
+which he attributed to the invisible-HUD bug. The log had the answer the whole
+time; nothing was reading it. **A panic handler that produces
+`0: <unknown>` is a smoke alarm with the battery out** — it fires correctly and
+tells you nothing, and it looks like diligence in the code review.
