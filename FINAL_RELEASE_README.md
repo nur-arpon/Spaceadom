@@ -23,7 +23,8 @@ Tapping an assigned key summons the associated application. If the app is alread
 - **System Tray:** A non-blocking, asynchronous system tray manages the main dashboard lifecycle.
 
 ### Setup Instructions
-1. Run the `.msi` installer.
+1. Run the `setup.exe` installer. It installs per-user and never asks for an
+   administrator password. (The `.msi` was dropped in 1.0.41 - PROBLEM 129.)
 2. The application will launch into the system tray and prompt for Elevation if necessary.
 3. Use the Dashboard to configure your `Founders`, `Gamers`, and `Professionals` profiles.
 4. Enjoy!

@@ -134,7 +134,13 @@ If `dist/` is missing you get a bare **`error: proc macro panicked`** at
 `lib.rs:184` that names no cause whatsoever. That is all it means.
 
 Current state: **0 errors, 0 warnings.** Keep it that way.
-MSI output: `src-tauri\target\release\bundle\msi\SpaceToggle OS_1.0.0_x64_en-US.msi`
+Installer output: `src-tauri	argeteleaseundle
+sis\Spaceadom_<version>_x64-setup.exe`
+
+(The `.msi` target was REMOVED in 1.0.41 - PROBLEM 129. Tauri's WiX bundler is
+per-machine while its NSIS bundler is per-user, so shipping both put two copies
+of the app on one machine, each with its own autostart, both grabbing the
+spacebar at logon. Do not re-add it without reading PROBLEM 129.)
 
 ## 5. Architecture in 60 seconds
 

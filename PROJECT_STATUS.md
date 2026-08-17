@@ -1,6 +1,53 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-17 | ~10:20 PM (Claude Opus 5) — documentation audit: 17 problems the code implements were never written down
+
+Nur asked two things: whether the docs already held a fix for "shortcuts don't
+work inside the app", and which documentation was still outstanding.
+
+**On the first — there was no fix, because it was never fixed.** Searched every
+doc. What exists is the 2026-08-16 FINDING 1, which REFUTED a theory (proved the
+hook CAN see our own window's keys) and repaired nothing, plus the same entry's
+"Still unknown" section explicitly saying *"Do not close this out."* What he
+remembered as solved was a wrong theory being killed. There was no regression
+because there was no fix — 1.0.43 (PROBLEM 132) is the first actual repair.
+
+**On the second — he was right, and it was worse than expected.** A mechanical
+audit (every `PROBLEM n` cited in `src-tauri/src/**` and `src/**` vs every
+`## PROBLEM n` heading in V14_FIXES_AND_CODE.md):
+
+```
+   before:  84 cited in code, 67 documented, 17 MISSING
+   after :  83 cited in code, 83 documented,  0 missing
+```
+
+16 of the 17 were absent from PROJECT_STATUS.md as well. All 17 are now
+back-filled (53-57, 102-109, 112-115) from the code comments at each site,
+in a clearly-marked section that states the limit of that source: symptom and
+root cause are trustworthy, but most carry NO "how it was verified" line,
+because that evidence was never written and cannot be recovered. That gap is
+the cost of documenting late.
+
+**Two things the audit turned up on its own:**
+
+1. **Four docs told the reader to run an `.msi`** that has not been built since
+   1.0.41 — AI_HANDOFF.md, HANDOVER_PROMPT.md, FINAL_RELEASE_README.md, and
+   FEATURES_NOW_POSSIBLE.md (which still described the Scheduled Task autostart
+   PROBLEM 129 replaced). All four corrected.
+2. **PROBLEM 56's code comment still asserts "Spaceadom runs ELEVATED (the
+   keyboard hook needs it)."** Both halves are false — PROBLEM 61 removed
+   elevation and WH_KEYBOARD_LL never needed it. The code is still correct and
+   was left alone; the comment is FLAGGED in the new entry rather than silently
+   edited, because it is evidence of what was believed when it was written.
+
+**Still outstanding, named rather than quietly skipped:** the Developer Guide
+`.docx`/`.pdf` predate 1.0.41-1.0.44 and still document the `.msi` install path.
+Regenerating them needs a fresh pass with new screenshots.
+
+— Claude Opus 5
+
+---
 ## Update: 2026-08-17 | ~9:55 PM (Claude Opus 5) — asked whether we froze Brave; found a guard that had never fired
 
 Full technical record: PROBLEM 133 in `V14_FIXES_AND_CODE.md`. Shipped as 1.0.44.

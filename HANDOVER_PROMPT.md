@@ -21,7 +21,8 @@
 3. **Production Build:**
    * Execute `cargo tauri build`.
    * Verify the successful generation of the MSI installer.
-   * Provide the user with the final absolute path to the `.msi` file.
+   * Provide the user with the final absolute path to the `setup.exe`.
+     (There is no `.msi` since 1.0.41 - see PROBLEM 129.)
    * Generate a `FINAL_RELEASE_README.md` summarizing the V12 parity features.
 
 ## 4. MISSION SUCCESS CRITERIA

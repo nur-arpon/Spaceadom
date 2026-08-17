@@ -6226,3 +6226,349 @@ problem". They are distinguishable only by asking what the check actually
 inspects versus what the dangerous line actually touches — and those had drifted
 one variable apart here (`fg_before` vs `hwnd`). It also passed code review
 twice, because a guard named for the right bug reads as covering it.
+
+---
+
+# BACK-FILLED ENTRIES (2026-08-17) — 17 problems the code implements that this file never recorded
+
+**Why this section exists.** The owner asked which documentation was still
+outstanding. A mechanical audit — every `PROBLEM n` cited in `src-tauri/src/**`
+and `src/**`, compared against every `## PROBLEM n` heading here — found **84
+problem numbers referenced in code, 67 documented, 17 with no entry at all**.
+Sixteen of the seventeen were missing from `PROJECT_STATUS.md` too.
+
+**Source and its limits, stated up front.** These are reconstructed from the
+code comments at each site, not from live investigation. The comments are
+unusually detailed, so symptom and root cause are trustworthy. But most entries
+CANNOT carry a "how it was verified" line, because that evidence was never
+written down and cannot be recovered now. Treat them as accurate about WHAT and
+WHY, and silent about HOW IT WAS PROVEN. That gap is the cost of documenting
+late, and it is the argument for doing it at the time.
+
+---
+
+## PROBLEM 53 — Space+key did nothing for most bindings: only hardcoded paths resolved
+
+**Symptom.** A tester's log, three lines in a row:
+`could not resolve path for Battle.net.exe` / `NVIDIA GeForce Experience.exe` /
+`HaloInfinite.exe`. Space+key did nothing for most of his bindings while the
+hook and engine were working perfectly.
+
+**Root cause.** Resolution only handled apps with a hardcoded install path, an
+`App Paths` registry key, or a presence on `PATH`. That is a small minority of
+installed Windows software.
+
+**Exact file.** `src-tauri/src/engine/actions/smart_cascade.rs` (~L1629) — fall
+back to searching both Start Menu trees, which is where the app picker already
+finds things, so the two agree by construction. `ShellExecute` launches a `.lnk`
+directly.
+
+**Generalise this.** *When a lookup has three sources and all three are
+opt-in registrations, the default case is failure.* The fix was to use the
+source that is populated for nearly every installed app.
+
+---
+
+## PROBLEM 54 — "ShellExecute launched" did not mean a window appeared, and I reported it as success
+
+**Symptom.** A tester's log showed five `ShellExecute launched brave.exe` lines
+followed by `url_focus - Titles seen: []` — zero Brave windows, seconds later.
+
+**Root cause.** `ShellExecuteEx` returns success for activations that create no
+process at all, and the legacy error code rides in `hInstApp`. The log line
+claimed success unconditionally.
+
+**This one has a confession attached, and it is kept deliberately:** *"I read a
+tester's log and told the user apps 'were opening' when nothing had appeared on
+his screen."*
+
+**Exact file.** `smart_cascade.rs` (~L296) — report `process_created` alongside
+`hInstApp`. `hInstApp <= 32` is the classic error range; `5` (ACCESS DENIED) is
+the one to watch when an elevated process launches a per-user app.
+
+**Generalise this.** *Never log a launch without logging whether a PROCESS was
+created.* An API's success value describes the call, not the world — the same
+lesson PROBLEM 127 relearned for installers and PROBLEM 132 for hook reinstalls.
+
+---
+
+## PROBLEM 55 — the app froze for a moment on every launch
+
+**Symptom.** Both testers: "not responding for a few moments when first
+opening".
+
+**Root cause.** `ensure_startup_task()` ran INLINE on the startup path. It
+shells out to `schtasks` three times (`/Query`, `/Create`, `/Change`) at
+100-300ms per spawn, stacked on top of WebView2's own first-run init.
+
+**Exact file.** `src-tauri/src/lib.rs` (~L517) — moved to a background thread.
+The logon task only matters at the NEXT logon, so nothing needs it before the
+window exists.
+
+**Generalise this.** *Work whose result is not needed until the next boot must
+never be on the path to the first paint.*
+
+---
+
+## PROBLEM 56 — apps "launched" and never appeared: an elevated parent cannot start a per-user app
+
+**Symptom.** Space+letter reported a launch; no window ever appeared. Same
+evidence as PROBLEM 54.
+
+**Root cause.** Chromium browsers launched by an ELEVATED parent de-elevate
+themselves by re-launching through the shell, and on some machines that handoff
+dies silently.
+
+**Exact file.** `smart_cascade.rs` (~L116) — hand the launch to the desktop's
+explorer via `IShellDispatch2::ShellExecute`, the Microsoft-documented approach
+(Raymond Chen, "How can I launch an unelevated process from my elevated
+process", plus the ExecInExplorer SDK sample). Explorer runs at medium
+integrity, so the app starts as if double-clicked.
+
+**STALE PREMISE — FLAGGED 2026-08-17, NOT REMOVED.** The comment at this site
+still asserts *"Spaceadom runs ELEVATED (the keyboard hook needs it)"*. **Both
+halves are now false.** PROBLEM 61 removed elevation, and `WH_KEYBOARD_LL` never
+required it. The CODE is still correct and worth keeping — launching via
+explorer is harmless when unelevated and remains the right call if elevation
+ever returns — but the stated reason is wrong, and a future reader could
+reasonably conclude from it that this app elevates. Left in place with this
+flag rather than silently edited, because the comment is evidence of what was
+believed when the code was written.
+
+---
+
+## PROBLEM 57 — "it only starts if I right-click Run as administrator"
+
+**Symptom.** Exactly that, from a tester.
+
+**Root cause.** After an install moved the app, the Scheduled Task still pointed
+at the previous path. `schtasks /Run` then "succeeded" launching a stale or
+deleted exe; the stub exited; nothing appeared.
+
+**Exact file.** `src-tauri/src/startup.rs` (~L540) — verify the task's target
+matches THIS exe before running it; a mismatch falls through to one UAC prompt,
+after which the task is rewritten to the current path.
+
+**LARGELY SUPERSEDED.** Autostart is the HKCU Run value now, not a task
+(PROBLEM 129). The lesson outlives the mechanism: *a launcher that points at a
+path is a launcher that can point at the wrong path*, which is also PROBLEM
+116's shape (self-updating apps moving out from under a saved path).
+
+---
+
+## PROBLEM 102 — ten backups, all from the last four minutes
+
+**Symptom.** The user's 84 KB config from 23:16 was already gone by the time
+anyone looked for it.
+
+**Root cause.** A plain 10-deep ring. While actively binding keys, ten saves
+happen within minutes — so all ten copies covered the last few minutes. **A
+count-based ring has no time depth exactly when the user is most active, which
+is exactly when mistakes get made.** Raising the count only buys a bigger
+constant.
+
+**Exact file.** `src-tauri/src/config/mod.rs` (~L296) — bucketed retention:
+every save from the last hour, one per hour for 24 hours, one per day for 7
+days. ~30-40 files, a couple of MB. The newest file in each bucket wins.
+
+**Generalise this.** *"Keep the last N" and "keep history" are different
+requirements.* Whenever N events can arrive in a burst, a count-based ring is a
+burst-shaped blind spot.
+
+---
+
+## PROBLEM 103 — one button, two very different outcomes, and the destructive one was hidden behind the gentler word
+
+**Symptom.** The user clicked "Reset this profile" four times on their own
+profile `hi` and cleared all 26 bindings.
+
+**Root cause.** On a stock profile, reset restores factory bindings. On a
+user-created profile there are none to restore, so the same button simply
+EMPTIES it. One label; the worse outcome was the unlabelled one.
+
+**Exact file.** `src/components/settings-panel.ts` (~L72) — the label states
+what will actually happen for the profile in hand.
+
+**Generalise this.** *A control whose meaning depends on hidden state must say
+which meaning is active.* Related: PROBLEM 119's slider that did nothing.
+
+---
+
+## PROBLEM 104 — the counter that answers "does the hook see ANY key?"
+
+**Symptom.** The owner's long-running report: with the Spaceadom window focused,
+nothing works — no HUD, no toasts, no launches.
+
+**Root cause of the BLIND SPOT (not of the bug).** Every existing counter only
+recorded keys the hook DECIDED something about. So "a hook that never fires" and
+"a hook that fires and passes everything through" looked identical — both leave
+zeros everywhere. The instrumentation could not distinguish the two hypotheses
+it was being used to choose between.
+
+**Exact file.** `src-tauri/src/hook/mod.rs` (~L69) — `KB_EVENTS_SEEN`
+incremented on ENTRY, before any branch, so a still-zero value is positive proof
+the callback is not being invoked; plus `KB_EVENTS_OWN_FG` for the subset
+arriving while our own window holds the foreground.
+
+**What it went on to prove — and this is why it earns a full entry.** On
+2026-08-16 it REFUTED the standing "Windows does not deliver our own window's
+keys to our own hook" theory: seven non-zero readings, with the engine acting on
+those keys in the same second. On 2026-08-17 the same counter supplied the
+evidence for PROBLEM 132, reading `0 of them while the Spaceadom window itself
+had focus` through a 20-minute outage.
+
+**Generalise this.** *Instrument the OBSERVATION before the component you
+suspect.* One counter, one log line, refuted weeks of work aimed at the wrong
+layer — and then served a second investigation a day later.
+
+---
+
+## PROBLEM 105 — deleting the fallback profile silently breaks every other profile
+
+**Symptom.** Keys stop working later, in a DIFFERENT profile, with nothing
+connecting the failure to the act that caused it.
+
+**Root cause.** Every key left unassigned in every remaining profile is rerouted
+to the fallback. Deleting it is categorically unlike deleting any other profile.
+
+**Exact file.** `src-tauri/src/commands.rs` (~L1426) — the warning rides on the
+UNDO LABEL, not a confirm dialog.
+
+**Why not a dialog, recorded so it is not retried.** `window.confirm` was tried
+first and NEVER APPEARED: this webview does not render native script dialogs.
+That is why every destructive control here uses a two-step button instead. *A
+warning the user cannot see is worse than none, because it looks like the job
+was done.*
+
+---
+
+## PROBLEM 106 — undo windows scaled to what the action costs to rebuild
+
+**Root cause.** One duration for every destructive action ignores that the
+actions are not equally expensive to reverse. A profile the user just made by
+hand is cheap; the stock profiles carry 26 curated bindings each; the fallback
+additionally breaks every other profile's unassigned keys and needs the longest
+explanation — so it needs the longest window to read it in.
+
+**Exact file.** `src-tauri/src/commands.rs` (~L502). 10s / 20s / 30s tiers.
+
+---
+
+## PROBLEM 107 — undo was one slot, and the second delete silently destroyed the first
+
+**Symptom.** Delete A (undo armed), delete B seconds later, undo — B comes back,
+**A is gone permanently, with nothing saying so.**
+
+**Root cause.** A single-slot buffer holding "the whole config before the
+action". The second action overwrote it with a state that ALREADY had A missing.
+
+**Exact file.** `src-tauri/src/commands.rs` (~L488) — a stack, newest last, each
+entry carrying its OWN deadline so a 10s and a 30s undo can be pending
+simultaneously and expire independently.
+
+**Related:** PROBLEM 120 — the timer that hid the button was a separate bug in
+the same feature; the undo itself was never lost, only its button.
+
+---
+
+## PROBLEM 108 — two levels of friction, matched to the consequence
+
+**Root cause.** Uniform friction is wrong in both directions: heavy
+confirmation on a cheap action trains people to click through, and light
+confirmation on a catastrophic one is no protection.
+
+**Exact file.** `src/components/profile-editor.ts` (~L210) — ordinary profiles
+get the red "Delete?" pill (a light second click). The FALLBACK gets the full
+panel, because its consequence is not about that profile at all and needs
+sentences the user has time to read.
+
+---
+
+## PROBLEM 109 — deleting a preset profile was a one-way door
+
+**Symptom.** A user who removed Founders, Gamers or Professionals — to tidy up,
+or just to see what happened — had to rebuild 26 bindings by hand or dig through
+backups.
+
+**Exact file.** `src-tauri/src/commands.rs` (~L617) — "Restore preset profiles",
+deliberately **ADDITIVE**: it restores only what is ABSENT and never touches a
+preset the user still has.
+
+**That distinction is the whole reason this is not `reset_config`.** Someone who
+has spent months customising Founders must not have it silently reverted by a
+button labelled "restore".
+
+---
+
+## PROBLEM 112 — the overlay's landed rect, returned to the frontend
+
+**Root cause.** The warp handover animates a pill between its slot and the SPACE
+key, but the WINDOW moves at the same time and that move is instant and
+un-animatable on Win32. The frontend must convert a pill's position from before
+the move into the coordinate space after it, which needs both rects.
+
+**Exact file.** `src-tauri/src/commands.rs` (~L20) — every fit hands back where
+it ACTUALLY landed, not what was asked for. That doubles as the read-back the
+window rules require.
+
+---
+
+## PROBLEM 113 — a stale flag hid toasts that arrived outside a hold
+
+**Root cause.** `_stageMode` legitimately suppresses window fits while pills
+live inside the HUD window. If it is still set when a toast arrives outside a
+hold, the HUD is gone and the flag is stale — and a suppressed fit means a
+hidden window, i.e. **a toast the user never sees**.
+
+**Exact file.** `src/components/toast.ts` (~L553) — clear it at that point,
+where clearing is always safe.
+
+**Generalise this.** Another instance of the family named in PROBLEMS
+118/120/129/131: *a stale thing outliving the thing that replaced it.*
+
+---
+
+## PROBLEM 114 — the "peel out of the SPACE pill" branch was unreachable in the only case it existed for
+
+**Root cause.** The engine cancels the HUD BEFORE running the action
+(`engine/mod.rs`: `HookEvent::KeyCombo` calls `s.cancel_hud()` and only then
+dispatches), so by the time the toast arrives `_hudActive` is already false. The
+branch could therefore never run for the case it was written for: firing a
+shortcut while the HUD is up.
+
+**Exact file.** `src/components/toast.ts` (~L121) — the overlay REMEMBERS the
+SPACE geometry for a short grace period; a toast arriving inside it is the same
+gesture continuing.
+
+**The rejected alternative is the interesting part.** Reordering the engine was
+not done: cancel-first is deliberate, so a slow action cannot leave the HUD
+stranded on screen. *When a fix would undo a deliberate ordering, carry the
+state forward instead of reversing the order.*
+
+---
+
+## PROBLEM 115 — transform and opacity only
+
+**Root cause.** Animating width, height, background and border colour forces
+layout and paint every frame — impossible to make smooth, and worst on this
+owner's laptop, where the overlay runs in software rendering.
+
+**Exact file.** `src/components/toast.ts` (~L810). Morph became two faces
+cross-fading rather than one box resizing.
+
+---
+
+## What this audit did NOT cover
+
+Honest scope statement, so the next reader knows what is still unknown:
+
+- `PROBLEM 1-52` and the rest were spot-checked only for PRESENCE of a heading,
+  not for accuracy of content. A heading exists; whether it still matches the
+  code was not re-verified.
+- `PROJECT_STATUS.md` was not back-filled for these 17. This file is the
+  technical record and is the one CLAUDE.md says must let another AI apply the
+  fix without opening the codebase; duplicating 17 entries into the dev log adds
+  length without adding recoverability.
+- The `Spaceadom-Developer-Guide.docx/.pdf` predate 1.0.41-1.0.44 and still
+  describe the `.msi` install path that no longer exists. **Regenerating them is
+  outstanding work.**

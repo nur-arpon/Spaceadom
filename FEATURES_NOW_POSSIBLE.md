@@ -20,6 +20,12 @@ the opaque window stays — degraded but safe.
 
 ## 2. UAC prompt on every launch (open item in PROJECT_STATUS)
 Two documented, stable alternatives to self-relaunch-elevated:
+a) ~~**Scheduled Task**~~ SUPERSEDED - autostart is the HKCU Run value now, not
+a task. A task created while ELEVATED cannot be deleted by the non-elevated app
+(PROBLEM 61 removed elevation), so a stale one became permanent and launched an
+OLD build alongside the new one (PROBLEM 129). Original text kept below for the
+reasoning, which is still worth reading:
+
 a) **Scheduled Task** created once (with one UAC consent) with "Run with
 highest privileges" at logon — app then starts elevated silently every boot.
 b) **uiAccess manifest** — requires an Authenticode-signed binary installed
