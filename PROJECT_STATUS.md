@@ -1,6 +1,63 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-17 | ~10:50 PM (Claude Opus 5) — the answer WAS in the documentation, and it was in the skill file
+
+Full technical record: PROBLEM 134 in `V14_FIXES_AND_CODE.md`. Shipped as 1.0.45.
+
+Nur said, for the fourth time and with justified irritation, that shortcuts do
+nothing while the Spaceadom window is focused, and that this had been solved
+before and was documented. **He was right about the documentation and I had been
+looking in the wrong files.** It is not in PROJECT_STATUS or V14_FIXES — both
+record the symptom as open. It is in the project's own skill reference,
+`references/win32-keyboard-hook.md` section 2, which has described this failure
+verbatim the whole time: *"the keyboard stops responding after a while and
+restarting the app fixes it... It is hook eviction... in a Tauri or Electron app
+it is close to guaranteed if you get this wrong, because a WebView2 garbage
+collection or layout pass can stall the UI thread well past 1000ms."*
+
+Two causes, both violations of the rule printed directly beneath that passage
+("consult an atomic or lock-free structure").
+
+1. **PROBLEM 104's counter was on the hook path.** It called
+   `GetForegroundWindow` + `GetWindowThreadProcessId` per keystroke. Its own
+   comment defended this as "no allocation, no lock, no logging" - an audit that
+   counted the wrong costs, because the lock those calls take is inside the
+   window manager, shared with the foreground app's UI thread. The diagnostic
+   added to investigate this symptom was sitting on its critical path. Now an
+   atomic read, with the Win32 sampling moved to the watchdog's 3s timer.
+
+2. **The hook thread ran at the renderer's priority.** LowLevelHooksTimeout is a
+   wall-clock deadline, so a callback merely WAITING for CPU is evicted exactly
+   like a slow one. Three facts compound here: `--disable-gpu` means the
+   dashboard composites on the CPU; PROBLEM 123 grew it to 92% of the work area;
+   and the heaviest rendering happens while it is focused - the reported
+   condition exactly. Raised to ABOVE_NORMAL (not TIME_CRITICAL; it must beat a
+   render pass, not the kernel).
+
+**This reconciles the contradictions that stalled every previous attempt.**
+FINDING 1 (2026-08-16) proved the hook CAN see our own window's keys - still
+true; eviction is a load race, not a capability limit, which is why "sometimes
+it works" was always the accurate description. PROBLEM 132's twenty
+`reinstall ok: true` lines are consistent too: a reinstall restores the hook and
+does nothing about the load that evicts it again. And it explains why this got
+WORSE after 1.0.36 - a layout change degraded the keyboard hook, which is not a
+connection anyone would look for.
+
+**Not yet verified: whether the symptom is gone.** It is a load-dependent race,
+so an hour of silence is weak evidence and a day is strong. The instrument is
+already in place - `KB_EVENTS_OWN_FG` should now read NON-ZERO when he uses
+shortcuts with the dashboard focused. If it stays 0 while he still reports the
+symptom, this diagnosis is wrong and gets struck out in PROBLEM 134 rather than
+left looking plausible.
+
+**My own error, recorded:** I told him earlier today there was no documented fix.
+That was true of the two files I searched and false of the repository. The skill
+is listed in CLAUDE.md as governing all work here, and I did not search it.
+
+— Claude Opus 5
+
+---
 ## Update: 2026-08-17 | ~10:20 PM (Claude Opus 5) — documentation audit: 17 problems the code implements were never written down
 
 Nur asked two things: whether the docs already held a fix for "shortcuts don't

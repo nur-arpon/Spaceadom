@@ -233,6 +233,9 @@ static LAST_MS_EVENT: AtomicU64 = AtomicU64::new(0);
 /// move the watchdog had. A hook proc only fires on the thread that installed
 /// it, so if THAT THREAD's message pump is the thing that is wedged,
 /// SetWindowsHookEx on it can never help — it succeeds and delivers nothing.
+/// PROBLEM 134 - "is OUR window the foreground?", sampled OFF the hook path.
+/// Refreshed on the watchdog's 3s timer, read by the callback as one atomic.
+static FG_IS_SELF: AtomicBool = AtomicBool::new(false);
 static BLIND_REINSTALLS: AtomicU32 = AtomicU32::new(0);
 /// PROBLEM 132 — how many alarms fired while OUR OWN window held the
 /// foreground. This is the owner's exact repeated report ("shortcuts do not
@@ -393,6 +396,37 @@ fn hook_thread_main(tx: Sender<HookEvent>) {
 
     unsafe {
         HOOK_THREAD_ID.store(GetCurrentThreadId() as u64, Ordering::Relaxed);
+
+        // PROBLEM 134 - raise this thread above the UI.
+        //
+        // Windows evicts a low-level hook whose callback does not RETURN inside
+        // LowLevelHooksTimeout (1000ms cap since Win10 1709). That deadline is
+        // wall-clock: a callback that is merely waiting for a CPU slice misses
+        // it exactly like a slow one. At normal priority this thread competes with
+        // WebView2's renderer, and on this owner's machine the overlay runs in
+        // SOFTWARE mode (--disable-gpu, GPU composition is dead here), so the
+        // dashboard is composited on the CPU - a 1766x964 window since PROBLEM
+        // 123 grew it to 92% of the work area. The busiest moment is precisely
+        // when that window is focused, which is precisely the owner's report:
+        // "while I am using the app, nothing fires."
+        //
+        // ABOVE_NORMAL, deliberately not TIME_CRITICAL: this thread must beat a
+        // rendering pass, not the kernel. The callback is bounded work (atomics
+        // and a channel send), so it cannot monopolise anything even if it is
+        // scheduled aggressively.
+        {
+            use windows::Win32::System::Threading::{
+                GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
+            };
+            match SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL) {
+                Ok(()) => log::info!(
+                    "hook: thread priority raised to ABOVE_NORMAL so a WebView2 render                      pass cannot starve the callback past LowLevelHooksTimeout                      (PROBLEM 134)"
+                ),
+                Err(e) => log::warn!(
+                    "hook: could not raise thread priority ({e}) - continuing at normal                      priority; a heavy UI frame may still evict the hook (PROBLEM 134)"
+                ),
+            }
+        }
 
         // PROBLEM 66 — SetWindowsHookExW used to be .expect()ed: on a machine
         // where install fails (AV/policy blocking global hooks), the hook
@@ -572,6 +606,22 @@ unsafe fn watchdog_check(
     ms: &mut windows::Win32::UI::WindowsAndMessaging::HHOOK,
 ) {
     use windows::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx;
+
+    // PROBLEM 134 - sample the foreground here, on the timer, so the hook
+    // callback never has to. This branch already runs Win32 calls safely.
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetForegroundWindow, GetWindowThreadProcessId,
+        };
+        let fg = GetForegroundWindow();
+        let mut is_self = false;
+        if !fg.0.is_null() {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(fg, Some(&mut pid));
+            is_self = pid == std::process::id();
+        }
+        FG_IS_SELF.store(is_self, Ordering::Relaxed);
+    }
 
     let user_input_ms = millis_since_last_input();
     if user_input_ms >= 2_000 {
@@ -806,16 +856,27 @@ unsafe extern "system" fn kb_hook_proc(
     // lock, no logging, so the callback still returns in microseconds.
     KB_EVENTS_SEEN.fetch_add(1, Ordering::Relaxed);
     {
-        use windows::Win32::UI::WindowsAndMessaging::{
-            GetForegroundWindow, GetWindowThreadProcessId,
-        };
-        let fg = GetForegroundWindow();
-        if !fg.0.is_null() {
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(fg, Some(&mut pid));
-            if pid == std::process::id() {
-                KB_EVENTS_OWN_FG.fetch_add(1, Ordering::Relaxed);
-            }
+        // PROBLEM 134 - this used to call GetForegroundWindow +
+        // GetWindowThreadProcessId HERE, on every keystroke. Both are Win32
+        // window queries, and the rule for this callback (skill reference
+        // win32-keyboard-hook.md, section 2) is absolute: "read the event,
+        // check your dwExtraInfo tag, consult an atomic or lock-free
+        // structure, decide pass-or-suppress, return." Window queries are not
+        // on that list. They enter win32k and contend on USER32 state that the
+        // foreground application's UI thread also touches - so the cost is
+        // paid exactly when that thread is busiest, which is when OUR OWN
+        // dashboard is focused and rendering.
+        //
+        // The old comment claimed "no allocation, no lock, no logging, so the
+        // callback still returns in microseconds" and was believed for that
+        // reason. It counted the wrong costs: the lock it takes is inside the
+        // window manager, not in our code.
+        //
+        // Now a plain atomic read. FG_IS_SELF is refreshed off the hook path,
+        // on the watchdog's WM_TIMER branch - stale by up to 3s, which is
+        // irrelevant for a per-minute diagnostic counter and free here.
+        if FG_IS_SELF.load(Ordering::Relaxed) {
+            KB_EVENTS_OWN_FG.fetch_add(1, Ordering::Relaxed);
         }
     }
 

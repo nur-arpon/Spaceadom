@@ -6572,3 +6572,136 @@ Honest scope statement, so the next reader knows what is still unknown:
 - The `Spaceadom-Developer-Guide.docx/.pdf` predate 1.0.41-1.0.44 and still
   describe the `.msi` install path that no longer exists. **Regenerating them is
   outstanding work.**
+
+---
+
+## PROBLEM 134 — "nothing fires while I am using the app": the hook callback broke the one rule this project wrote down for it
+
+**The owner, for at least the fourth time, and increasingly bluntly:** *"While I
+am using the Spaceadom app, if I press space plus any letter, or I am holding
+the space, why isn't anything firing up? Why am I not seeing the overlay? This
+was a problem we faced before and we solved. Read documentations."*
+
+He was right that the answer was in the documentation. It was not in
+`PROJECT_STATUS.md` or in this file — both of which record the symptom as OPEN
+and unexplained. **It is in the project's own skill reference**,
+`references/win32-keyboard-hook.md` section 2, which has described this exact
+failure the entire time:
+
+> "This produces a symptom that is almost always misdiagnosed: **the keyboard
+> stops responding after a while, and restarting the app fixes it.** That reads
+> like a memory leak or a state bug. **It is hook eviction.** In a Tauri or
+> Electron app it is close to guaranteed if you get this wrong, because a
+> WebView2 garbage collection or layout pass can stall the UI thread well past
+> 1000ms."
+
+And the rule immediately below it:
+
+> "Inside the hook, do only this: read the event, check your `dwExtraInfo` tag,
+> **consult an atomic or lock-free structure**, decide pass-or-suppress, return."
+
+**Root cause 1 — the callback did Win32 window queries on every keystroke.**
+PROBLEM 104's diagnostic counter, added to investigate this very symptom:
+
+```rust
+// BEFORE - on the hook path, once per key event
+let fg = GetForegroundWindow();
+if !fg.0.is_null() {
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(fg, Some(&mut pid));
+    if pid == std::process::id() { KB_EVENTS_OWN_FG.fetch_add(1, ...); }
+}
+```
+
+Its own comment defended it: *"no allocation, no lock, no logging, so the
+callback still returns in microseconds."* **That audit counted the wrong costs.**
+Neither call is on the permitted list, and the lock they take is inside the
+window manager, not in our code — USER32/win32k state that the foreground
+application's UI thread also touches. The cost is therefore paid exactly when
+that thread is busiest, which is when our own dashboard is focused and
+rendering. **The instrument added to diagnose the bug sat on the bug's own
+critical path.**
+
+```rust
+// AFTER - one atomic read; the Win32 sampling moved to the watchdog's 3s timer
+if FG_IS_SELF.load(Ordering::Relaxed) {
+    KB_EVENTS_OWN_FG.fetch_add(1, Ordering::Relaxed);
+}
+```
+
+Up to 3s stale, which is meaningless for a counter reported once a minute.
+
+**Root cause 2 — the hook thread ran at the same priority as the renderer.**
+`LowLevelHooksTimeout` (capped at 1000ms since Win10 1709) is a deadline on
+RETURNING, measured in wall-clock. **A callback merely waiting for a CPU slice
+misses it identically to a slow one**, and this thread was competing with
+WebView2 at equal priority. Three facts compound on this machine specifically:
+
+```
+--disable-gpu          the overlay/dashboard composite in SOFTWARE (GPU
+                       composition is dead here), so rendering is CPU work
+1766x964 dashboard     PROBLEM 123 grew the window to 92% of the work area,
+                       and software compositing cost scales with pixel count
+focused == busiest     the heaviest rendering happens while the dashboard is
+                       in front, which is precisely the reported condition
+```
+
+```rust
+SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL)
+```
+
+ABOVE_NORMAL deliberately, not TIME_CRITICAL: this thread must beat a rendering
+pass, not the kernel. The callback is bounded work, so it cannot monopolise
+anything even when scheduled aggressively.
+
+**Exact file.** `src-tauri/src/hook/mod.rs` — the callback's counter block, a
+new `FG_IS_SELF` atomic refreshed in `watchdog_check`, and the priority call at
+hook-thread start.
+
+**Why this reconciles every earlier observation, including the contradictory
+ones.**
+
+- *2026-08-16 FINDING 1 proved the hook DOES receive our own window's keys.*
+  Correct, and still correct. Eviction is a load-dependent race, not a
+  capability limit — which is why the same counter shows non-zero readings on
+  some days and zero on others, and why "sometimes it works" was always the
+  honest description.
+- *PROBLEM 132's 20-minute blackout with `reinstall ok: true` twenty times.*
+  A reinstall restores the hook; it does nothing about the load that evicts it
+  again seconds later. Both fixes are needed: 132 recovers, 134 attacks the
+  cause.
+- *`0 of them while the Spaceadom window itself had focus` on every recent
+  reading, while hundreds of events were seen.* Exactly what eviction-under-load
+  looks like from inside: the callback is not invoked at all in the window where
+  our UI is busy, so the counter that would have recorded it never runs.
+- *It got worse after 1.0.36.* PROBLEM 123 grew the dashboard to 92% of the work
+  area. More pixels, more software compositing, more starvation. A layout change
+  degraded the keyboard hook, which is not a connection anyone would look for.
+
+**How it was verified.** Compiles clean, 0 warnings; 13 tests pass; built and
+installed unelevated over 1.0.44; marker `thread priority raised` confirmed in
+the INSTALLED binary; and the running process confirms it took effect:
+
+```
+hook: thread priority raised to ABOVE_NORMAL so a WebView2 render pass cannot
+      starve the callback past LowLevelHooksTimeout (PROBLEM 134)
+live check: threads above normal priority = 39 (SetThreadPriority returned Ok)
+```
+
+**NOT YET VERIFIED — and this is the whole question.** Whether the owner can now
+hold Space inside the dashboard and see the HUD. That is a load-dependent race,
+so absence of the symptom for an hour is weak evidence and absence for a day is
+strong evidence. The instrument to watch is already in place: `KB_EVENTS_OWN_FG`
+should now go NON-ZERO whenever he uses shortcuts with the dashboard focused. If
+it stays 0 while he reports the symptom, this diagnosis is wrong and should be
+written off here, in this entry, rather than left to look plausible.
+
+**Generalise this.** *A diagnostic can be a load-bearing part of the fault it
+was added to measure.* PROBLEM 104's counter was added specifically to answer
+"does the hook see anything while our window is focused" — and by asking the
+question on the hook path it made the answer "no" more likely. Any probe on a
+latency-critical path must be a plain atomic read, with the expensive half
+sampled somewhere that is allowed to block. And second: *a rule with a written
+rationale still needs the rationale re-checked when the code changes around it.*
+"Returns in microseconds" was true of our instructions and false of the system
+calls they made, and the reassuring comment is exactly why nobody looked again.
