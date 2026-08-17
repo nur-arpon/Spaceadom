@@ -26,6 +26,44 @@
 ; policy 10.2.9, so that is the one that matters — but if the MSI ever becomes
 ; the primary artifact, this needs a WiX custom action to match.
 
+; ---------------------------------------------------------------------------
+; PROBLEM 127 — an update could report success and install nothing.
+;
+; Spaceadom starts with Windows, so it is ALWAYS running when someone installs
+; an update. A running process holds its own .exe open, so the installer cannot
+; replace it. Windows' Restart Manager notices and asks:
+;
+;     "Some files that need to be updated are currently in use.
+;      The following applications are using files that need to be updated
+;      by this setup: Spaceadom"
+;
+; Answer that dialog and the upgrade works — verified on 2026-08-17, 1.0.35 to
+; 1.0.37, confirmed by version stamp AND by content marker.
+;
+; But in a SILENT install there is nobody to answer it. The dialog cannot be
+; shown, so the replacement is deferred to the next reboot and the installer
+; exits 0. The user is told it worked and keeps the old version. That is
+; exactly what happened here twice: MsiInstaller logged "installed the product
+; ... 1.0.37 ... status: 0" at 15:24:03 while Program Files still held 1.0.35.
+;
+; And silent is not an edge case — Microsoft Store policy 10.2.9 REQUIRES it:
+; "Initiating the install must not display an installation user interface
+; (i.e., silent install is required), however a User Account Control (UAC)
+; dialog is allowed."
+;
+; So: close the app ourselves, before the files are touched, instead of asking
+; a question nobody will hear. Safe to kill — config.json is written on every
+; change, never held for later, so nothing is lost.
+; ---------------------------------------------------------------------------
+!macro NSIS_HOOK_PREINSTALL
+  DetailPrint "Closing Spaceadom so its files can be replaced..."
+  ; /T kills child processes too (the WebView2 hosts), which hold DLLs open.
+  nsExec::Exec 'taskkill /F /T /IM spaceadom.exe'
+  Pop $0
+  ; Give Windows a moment to release the handles before the copy starts.
+  Sleep 1500
+!macroend
+
 !macro NSIS_HOOK_PREUNINSTALL
   DetailPrint "Removing the Spaceadom logon entries..."
 

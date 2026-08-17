@@ -1,6 +1,36 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-17 | ~4:30 PM (Claude Fable 5) — the owner found the silent-update bug with a screenshot, and the scaling over-correction
+
+Full technical record: PROBLEMS 127 and 128 in `V14_FIXES_AND_CODE.md`. Shipped
+as 1.0.39 (1.0.38 was 127 alone, never installed, superseded).
+
+**127 — silent updates installed nothing.** Two MsiInstaller "success" events
+in one day with the old binary still on disk. The OWNER cracked it by running
+the installer interactively and screenshotting the "Files in Use" dialog naming
+Spaceadom itself. The app runs at logon, so it is ALWAYS running during its own
+update; interactively Windows asks and the upgrade works (verified 1.0.35 →
+1.0.37 by stamp and content), silently it defers to a reboot and exits 0. Store
+policy 10.2.9 REQUIRES silent — so every Store update would fail for every
+user. Fixed with an NSIS pre-install hook that taskkills the app before file
+replacement. MSI path still unfixed (Tauri has no WiX hook) and recorded as a
+known gap.
+
+**128 — "proportionate" is not "maximal".** The PROBLEM 123 fix let the board
+eat all window space minus a fixed 12px, so a bigger monitor meant a bigger
+keyboard with the same cramped sliver around it. Now the board takes half of
+each extra unit of room and leaves the rest as margin: laptop 1.22x/247px,
+external 1440p 1.60x/640px, small screens bit-identical to before. GROWTH=0.5
+is the single tuning knob, awaiting the owner's visual verdict.
+
+**Verification state:** 127's hook is proven WIRED (generated installer.nsi
+lines 632-633) but the silent-upgrade-over-running-app behaviour is being
+tested by the owner right now. 128's arithmetic is computed for his real
+displays but not yet seen by his eyes. Neither is claimed as done.
+
+---
+
 ## Update: 2026-08-17 | ~5:20 AM (Claude Opus 5) — the pre-release pass: two crash paths, an orphaned logon task, and a privacy policy
 
 Full technical record: PROBLEMS 124, 125 and 126 in `V14_FIXES_AND_CODE.md`.

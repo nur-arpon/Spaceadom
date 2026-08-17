@@ -727,11 +727,38 @@ function wireKeyboardFit(): void {
    * that a pathological viewport (a very tall narrow window, a mis-reported
    * monitor) cannot produce absurd geometry. 2.5x covers a 4K panel at 100%.
    */
-  const MAX_SCALE = 2.5;
+  /**
+   * PROBLEM 128 — 1.0.36 grew the board until it filled the screen edge to
+   * edge, which the owner reported as "scaled too much" with no breathing
+   * room. Two changes had compounded again: the window took 92% of the display
+   * AND the board was allowed to consume all of it, leaving 12px of margin at
+   * any size.
+   *
+   * What he asked for is not "fill the space" — it is "scale in proportion to
+   * the monitor, with the space around it proportionate too". Those are
+   * different: filling means margins stay 12px while the board triples;
+   * proportionate means the margins grow with everything else.
+   *
+   * So the board grows SLOWER than the window. Below the design size nothing
+   * changes at all (GROWTH only applies above 1), which keeps PROBLEM 84's
+   * netbook behaviour exactly as it was. Above it, only GROWTH of each extra
+   * unit of room is spent on the board and the rest becomes margin:
+   *
+   *     room for 1.0x  ->  board 1.00x   (unchanged, small screens)
+   *     room for 1.6x  ->  board 1.30x   (0.30 of the 0.60 surplus used)
+   *     room for 2.2x  ->  board 1.60x
+   *
+   * TUNING: GROWTH is the one number to change. Higher = bigger keyboard,
+   * tighter margins. Lower = more space around it. MAX_SCALE is only a
+   * backstop for a pathological viewport, not a design limit.
+   */
+  const GROWTH = 0.5;
+  const MAX_SCALE = 2.0;
   const fit = () => {
     const r = outer.getBoundingClientRect();
     if (!r.width || !r.height) return;
-    const s = Math.min(MAX_SCALE, (r.width - 12) / DESIGN_W, (r.height - 12) / DESIGN_H);
+    const room = Math.min((r.width - 12) / DESIGN_W, (r.height - 12) / DESIGN_H);
+    const s = Math.min(MAX_SCALE, room > 1 ? 1 + (room - 1) * GROWTH : room);
     scale.style.transform = `scale(${s.toFixed(4)})`;
     // Published for anything else that should grow with the board. Nothing
     // consumes it yet — the popovers are the obvious candidate, but their

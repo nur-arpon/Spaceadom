@@ -5403,3 +5403,135 @@ extensions — needs a removal path that runs from the uninstaller, because the
 program itself is gone by then. And when verifying a change inside a compressed
 installer, check the generated script; absence of strings in the binary is not
 evidence.
+
+---
+
+## PROBLEM 127 — a silent update reports success and installs nothing, and silent is the mode the Store requires
+
+**Symptom.** Two installs in one day (1.0.36 at 04:19, 1.0.37 at 15:24) logged
+`MsiInstaller: installed the product ... Installation success or error status:
+0` while `C:\Program Files\Spaceadom\spaceadom.exe` stayed at 1.0.35 —
+confirmed by version stamp, by byte size, AND by content marker (the old
+`failed to spawn fullscreen watcher thread` string present, the new
+`PANIC on thread` string absent). Exit code 0, nothing installed.
+
+**How it was found.** The OWNER found the mechanism, not the tooling: he ran
+the MSI interactively and screenshotted the dialog the silent path never shows:
+
+```
+Files in Use
+Some files that need to be updated are currently in use.
+The following applications are using files that need to be updated
+by this setup:  Spaceadom
+```
+
+**Root cause.** Spaceadom starts with Windows, so it is ALWAYS running when an
+update is installed. A running process holds its own .exe open. Interactively,
+Windows' Restart Manager asks what to do — and answering it made the same
+upgrade work perfectly (1.0.35 → 1.0.37, verified by stamp and content).
+Silently (`/qn`), the question cannot be asked, the file replacement is
+deferred to a reboot that may be days away, and msiexec exits 0. The user is
+told the update succeeded and keeps the old version.
+
+**Why this is a Store blocker, not a nuisance.** Microsoft Store policy 10.2.9:
+*"Initiating the install must not display an installation user interface
+(i.e., silent install is required), however a User Account Control (UAC)
+dialog is allowed."* The Store REQUIRES the exact path that fails. Combined
+with run-at-logon, every Store-delivered update lands in the failing case, for
+every user, every time.
+
+**Exact file.** `src-tauri/installer-hooks.nsh` — close the app BEFORE any
+file is touched, instead of asking a question nobody will hear:
+
+```nsis
+!macro NSIS_HOOK_PREINSTALL
+  DetailPrint "Closing Spaceadom so its files can be replaced..."
+  ; /T kills child processes too (the WebView2 hosts), which hold DLLs open.
+  nsExec::Exec 'taskkill /F /T /IM spaceadom.exe'
+  Pop $0
+  Sleep 1500
+!macroend
+```
+
+Killing is safe here: `config.json` is written on every change and never held
+open for later, so force-closing loses nothing.
+
+**How it was verified.** Wiring proven in the generated script
+(`target/release/nsis/x64/installer.nsi` line 632-633 inserts the macro; string
+absence in the compressed setup.exe proves nothing — PROBLEM 126's lesson).
+The BEHAVIOUR — a silent setup.exe upgrade over a running app landing
+correctly — is being tested by the owner with 1.0.39 as of this writing and is
+NOT yet confirmed.
+
+**KNOWN GAP.** This fixes the NSIS `setup.exe` only. Tauri v2 has no
+`installerHooks` equivalent for WiX, so the `.msi` still defers silently over a
+running app. The setup.exe is what users download and what 10.2.9 accepts; if
+the MSI ever becomes the shipped artifact, it needs a WiX
+`util:CloseApplication` custom action.
+
+**Generalise this.** *An installer's exit code is a claim about the installer,
+not about the machine.* Verify by reading the installed artifact — version
+stamp AND content. And any app that starts at logon must assume it is RUNNING
+during its own upgrade; "the file was in use" is the default case, not the
+edge case. Interactive testing hides this class of bug because a human answers
+the dialog without registering it as a finding.
+
+---
+
+## PROBLEM 128 — "proportionate" is not "maximal": the 1.0.36 scaling filled the screen wall-to-wall
+
+**Symptom.** Owner, on 1.0.37 (which carries 1.0.36's scaling): *"the keyboard
+layout is scaled too much, also on my external monitor — put space around
+proportionately, the full space does not need keyboard."*
+
+**Root cause.** PROBLEM 123's fix over-corrected. Two changes compounded — the
+window grew to 92% of the work area AND the board consumed everything the
+window gave it, minus a fixed 12px:
+
+```ts
+const s = Math.min(MAX_SCALE, (r.width - 12) / DESIGN_W, (r.height - 12) / DESIGN_H);
+```
+
+Measured consequence: the margin around the board was 12px at EVERY size. A
+2560x1440 external drew a 2.2x keyboard with the same sliver of space as a
+netbook. Bigger monitor = bigger board = identical cramped margin. The request
+was proportionate GROWTH — board and breathing room growing together — not
+maximal fill.
+
+**Exact file.** `src/main.ts`, `wireKeyboardFit`. Above design size the board
+spends only HALF of each extra unit of room on itself; the rest becomes margin:
+
+```ts
+const GROWTH = 0.5;
+const MAX_SCALE = 2.0;
+const room = Math.min((r.width - 12) / DESIGN_W, (r.height - 12) / DESIGN_H);
+const s = Math.min(MAX_SCALE, room > 1 ? 1 + (room - 1) * GROWTH : room);
+```
+
+Below 1.0x the formula is unchanged (`room` passes through untouched), so
+PROBLEM 84's small-screen behaviour is bit-identical.
+
+Computed on the owner's real displays before shipping:
+
+```
+                                board 1.0.36   board now   margin 1.0.36   margin now
+laptop 2560x1600 @150%              1.45x        1.22x          12px          247px
+external 1920x1080                  1.64x        1.32x          12px          345px
+external 2560x1440                  2.20x        1.60x          12px          640px
+small laptop 1366x768               1.15x        1.07x          12px           90px
+```
+
+**TUNING.** `GROWTH` is the single knob: higher = bigger keyboard and tighter
+margins, lower = airier. 0.5 is a first guess awaiting the owner's eyes, not a
+measured optimum.
+
+**How it was verified.** Arithmetic verified against the four display cases
+above; `tsc` clean; shipped in 1.0.39. NOT yet judged visually — that verdict
+belongs to the owner on his own screens.
+
+**Generalise this.** *When a user says "proportionate", the margins are part of
+the proportion.* A layout that pins its padding while scaling its content
+reads as cramped at exactly the sizes where it was meant to shine. And a fix
+that inverts a complaint (too small → too big) usually means the constraint
+was moved to the opposite extreme instead of being related to the thing it
+should track.
