@@ -1,6 +1,61 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-17 | ~8:10 PM (Claude Opus 5) — 1.0.42: the next crash will name itself
+
+Full technical record: PROBLEM 131 part 2 in `V14_FIXES_AND_CODE.md`.
+
+Nur was asked how to make the 14 crashes diagnosable and chose **both** options.
+Neither fixes the crash. Both make the fifteenth one worth reading.
+
+**Symbols now ship** (`spaceadom.pdb` beside the exe, which is where dbghelp
+looks). The ordering trap cost a build to find and is why this is not a one-line
+config change: Tauri validates `bundle.resources` while the Rust crate COMPILES,
+before the linker has produced the pdb. The tempting workaround — staging the
+previous build's pdb — is the dangerous one, because mismatched symbols do not
+fail, they resolve to confidently WRONG line numbers. So `build.rs` writes an
+invalid stub (it runs on every cargo invocation, unlike Tauri's before-hooks,
+which only run for `tauri build` — found when `cargo test` broke), and
+`beforeBundleCommand` copies the real pdb over it after linking, failing the
+build if it is missing.
+
+**I over-estimated the cost when I asked him.** I said the installer would
+"roughly double". Measured: 4.6 MB → **5.6 MB**. Quote that number from now on.
+
+**Verified, not assumed:** the exe's RSDS record names `spaceadom.pdb` and the
+installed pdb carries the identical build GUID (`85597d0a-…`). That is the check
+that separates "a pdb is present" from "the RIGHT pdb is present".
+
+**Crash context** (`crash_context.rs`, 13 tests now): last overlay operation,
+last shortcut, last display event, and an overlay-rebuild counter, printed
+before the backtrace. Every read is `try_lock` — it runs inside the panic hook,
+and `lock()` would deadlock if the panicking thread held it, turning a logged
+crash into a silent hang. The rebuild counter is deliberately falsifiable: if
+reports keep showing a rebuild moments before, that is the answer; if it is 0
+every time, the hypothesis dies and gets written off.
+
+**A real bug found on the way in: there were TWO panic hooks and one had never
+run.** `set_hook` replaces; PROBLEM 125's hook was installed at lib.rs:371 and
+the older PATCH 5d block replaced it ~50 lines later without chaining. Proof is
+in the log format — all 14 crashes use hook #2's wording, never hook #1's. So a
+crash-reporting improvement "shipped" in 1.0.37 was never in effect. Same class
+as 118/120/129.
+
+**New lead, unprompted, from the conflict detector.** His 1.0.42 startup log
+shows **spacedesk** running — a VIRTUAL display driver. His "sometimes I add my
+2nd display" is therefore software-driven and can fire at any time, and display
+changes feed the one path that deliberately destroys a live window. Unproven
+(the crashes predate `display_watch` by four days) but now directly measurable.
+PowerToys Keyboard Manager is also running and can capture Space first — worth
+telling him regardless.
+
+**Expect the crash rate to be unchanged** until the root cause is found. Roughly
+two a day.
+
+— Claude Opus 5
+
+---
+
 ## Update: 2026-08-17 | ~7:15 PM (Claude Opus 5) — one app, one install: the MSI is gone and updates no longer ask for admin
 
 Full technical record: PROBLEM 129 in `V14_FIXES_AND_CODE.md`, plus the closed

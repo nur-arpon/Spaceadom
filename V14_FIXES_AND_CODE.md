@@ -5880,3 +5880,118 @@ which he attributed to the invisible-HUD bug. The log had the answer the whole
 time; nothing was reading it. **A panic handler that produces
 `0: <unknown>` is a smoke alarm with the battery out** — it fires correctly and
 tells you nothing, and it looks like diligence in the code review.
+
+### PROBLEM 131, part 2 — shipped in 1.0.42: making the next crash readable
+
+The owner chose **both** options. Neither of these fixes the crash; they make
+the fifteenth one worth reading, where the first fourteen were not.
+
+**1. The symbols now ship.** `spaceadom.pdb` is installed BESIDE the exe, which
+is where dbghelp looks.
+
+There is an ordering trap here that cost a build to find, and it is the reason
+this is not a one-line config change. Tauri validates `bundle.resources` while
+the Rust crate COMPILES (`generate_context!`) — before the linker has produced
+the pdb. So the resource path must already exist at compile time, and the real
+file cannot exist yet.
+
+The obvious workaround is the dangerous one: staging the PREVIOUS build's pdb
+satisfies the check and is far worse than shipping nothing. **Mismatched
+symbols do not fail — they resolve to confidently wrong function names and line
+numbers**, and someone will act on that. So the staging is two-phase:
+
+```
+src-tauri/build.rs           writes an obviously-invalid STUB if the path is
+                             missing. Runs on EVERY cargo invocation.
+beforeBundleCommand          scripts/stage-symbols.mjs --real copies the
+                             freshly-linked pdb over it, after the link and
+                             before packaging. Missing pdb => build FAILS.
+```
+
+`build.rs`, not `beforeBuildCommand`: Tauri's before-hooks run only for
+`tauri build`, so with the staging in the config a plain `cargo test` died with
+`resource path symbols\spaceadom.pdb doesn't exist`. Found by running the
+tests, which is the argument for having them.
+
+**Cost, measured rather than guessed.** The owner was told the installer would
+"roughly double". It did not: 4.6 MB → **5.6 MB**. The 8.2 MB pdb compresses to
+about 1 MB in the NSIS payload. The warning was honest but pessimistic, and the
+real number is the one to quote from now on.
+
+**Verified end to end, not assumed.** The exe's CodeView (RSDS) record names
+`spaceadom.pdb`, and the installed pdb carries the identical build GUID:
+
+```
+exe expects pdb : spaceadom.pdb
+exe build GUID  : 85597d0a-065e-433a-b4b1-068cba3d2e65   age 1
+pdb GUID match  : YES (offset 20492)
+```
+
+That is the check that distinguishes "a pdb is present" from "the RIGHT pdb is
+present", and it is the whole point — see the mismatched-symbols warning above.
+
+**2. Crash context: what the app was DOING.** `src-tauri/src/crash_context.rs`
+records a handful of breadcrumbs that the panic hook prints before the
+backtrace. A backtrace says which code was on the stack; it does not say the
+overlay had been rebuilt twice in the last minute.
+
+```
+app context at panic:
+    last overlay op : overlay_fit 520x282 (toast, bottom-centre) (43ms ago)
+    last action     : Space+d (1204ms ago)
+    last display evt: overlay rebuild started (...) (4102ms ago)
+    overlay rebuilds this session: 2
+```
+
+Two design rules, both from bugs in this project. Every read is `try_lock`,
+because this runs INSIDE the panic hook and `lock()` would deadlock if the
+panicking thread held it — turning a logged crash into a silent hang, which is
+strictly worse. And a busy lock is reported as `<lock busy — the panic may be
+INSIDE this path>`, which is itself a clue rather than a gap. The module is
+never called from the keyboard-hook callback, which may not touch the heap.
+
+The rebuild counter is deliberately a **falsifiable test** of the leading
+hypothesis: if crash reports keep showing a rebuild moments earlier, that is the
+answer; if the counter is 0 in every report, the hypothesis is dead and should
+be written off here.
+
+**3. A REAL BUG found on the way in: there were TWO panic hooks, and one had
+never run.** `std::panic::set_hook` REPLACES. PROBLEM 125 installed a hook at
+`lib.rs:371` that chained politely to its predecessor; the older PATCH 5d block
+called `set_hook` again ~50 lines later without chaining, discarding it. So
+everything PROBLEM 125 added — the thread name, the "this is a crash" wording —
+has never once appeared in a log. The log format is what proves it: all 14
+crashes report `PANIC at`, hook #2's wording, never `PANIC on thread`.
+
+They are now one hook. **Do not add a second `set_hook` anywhere**: the last one
+installed wins silently, and the loser leaves no trace of having lost. Same
+class as PROBLEMS 118/120/129 — *a stale thing outliving the thing that
+replaced it* — and it neatly explains why a fix "shipped" in 1.0.37 changed
+nothing about how crashes were reported.
+
+**4. A NEW LEAD, from the conflict detector, unprompted.** The 1.0.42 startup
+log on the owner's machine:
+
+```
+conflicts: spacedesk is running (spacedeskservice.exe)
+conflicts: PowerToys is running (powertoys.exe) - PowerToys Keyboard Manager
+display: watching 2 monitor(s) for configuration changes
+```
+
+**spacedesk is a VIRTUAL DISPLAY driver** — it adds and removes monitors in
+software, at any time, without a cable being touched. That reframes "sometimes
+I add my 2nd display, sometimes I disconnect it" from an occasional event into
+a software-driven one that can fire unpredictably, and display changes are the
+input to the one code path that deliberately destroys a live window. It does
+not prove anything yet — the crashes predate `display_watch` by four days — but
+it is the first plausible mechanism for why THIS machine sees them and it is
+now directly measurable via the rebuild counter.
+
+PowerToys Keyboard Manager is a separate, known concern: it can capture Space
+before Spaceadom's hook sees it. Worth telling the owner about independently of
+the crash.
+
+**Still open.** The root cause. 1.0.42 changes nothing about how often the app
+dies — expect roughly two more per day until it is actually fixed. What changes
+is that the next one names its own cause instead of printing `<unknown>` twelve
+times.

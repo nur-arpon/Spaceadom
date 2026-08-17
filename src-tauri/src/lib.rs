@@ -16,6 +16,8 @@
 
 mod browser;
 mod commands;
+/// PROBLEM 131 — breadcrumbs read by the panic hook.
+mod crash_context;
 mod config;
 mod display_watch;
 mod engine;
@@ -364,35 +366,21 @@ pub fn run() {
     // the investigation.
     //
     // Installed immediately AFTER the logger so the hook has somewhere to
-    // write, and BEFORE anything that could plausibly panic. Chains to the
-    // default handler so debug builds still print as usual.
-    {
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            // `location()` is what makes this worth having: file and line beat
-            // a bare message every time when the reporter cannot reproduce it.
-            let where_ = info
-                .location()
-                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-                .unwrap_or_else(|| "unknown location".into());
-            let what = info
-                .payload()
-                .downcast_ref::<&str>()
-                .map(|s| (*s).to_string())
-                .or_else(|| info.payload().downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "<non-string panic payload>".into());
-            let thread = std::thread::current()
-                .name()
-                .unwrap_or("<unnamed>")
-                .to_string();
-
-            log::error!(
-                "PANIC on thread '{thread}' at {where_}: {what}. This is a crash, not a \
-                 handled error — please report it with the lines above from debug.log."
-            );
-            previous(info);
-        }));
-    }
+    // write, and BEFORE anything that could plausibly panic.
+    //
+    // PROBLEM 131 — THERE USED TO BE TWO OF THESE. This one was installed
+    // here, and a second `set_hook` further down (the old PATCH 5d block)
+    // REPLACED it wholesale a few lines later, because `set_hook` replaces and
+    // that one did not chain. So everything this hook added — the thread name,
+    // the "this is a crash" wording — has never once appeared in a log. All 14
+    // recorded crashes were reported by the other hook, in the other format,
+    // which is how the duplication was noticed at all.
+    //
+    // The two are now ONE hook, below, at the point where `main_tid` and
+    // `UI_READY` are available. Do not add a second `set_hook` anywhere: the
+    // last one installed silently wins, and the loser leaves no trace of
+    // having lost. (Same class as PROBLEMS 118/120/129 — a stale thing
+    // outliving the thing that replaced it.)
 
     // 2a. PROBLEM 64 + 59 — the HKCU Run autostart path. A Run value cannot
     // express the Scheduled Task's `/DELAY 0000:30`, so when the app was
@@ -431,11 +419,32 @@ pub fn run() {
         } else {
             "<non-string panic payload>".into()
         };
-        log::error!("PANIC at {loc}: {msg}");
+        // The thread name comes from the hook that PROBLEM 131 found was being
+        // silently replaced. It matters here: a panic on the hook or engine
+        // thread is survivable and a panic on the main thread is not, and the
+        // 14 recorded crashes could not be told apart without it.
+        let thread = std::thread::current().name().unwrap_or("<unnamed>").to_string();
+        log::error!(
+            "PANIC on thread '{thread}' at {loc}: {msg}. This is a crash, not a handled \
+             error — please report it with the lines above from debug.log."
+        );
+
+        // PROBLEM 131 — what the app was DOING. A backtrace says which code was
+        // on the stack; this says the overlay had been rebuilt twice and a
+        // display changed 4 seconds ago, which is usually what identifies the
+        // trigger for a crash that only happens on someone else's machine.
+        log::error!("{}", crash_context::snapshot());
+
         // PATCH 5d — without a backtrace, a panic INSIDE a dependency (the
         // tao "cannot move state from Destroyed" report) names the crate's
         // line but not OUR call path into it, which makes the cause
         // untestable. force_capture works regardless of RUST_BACKTRACE.
+        //
+        // PROBLEM 131 — this printed `0: <unknown>` for every frame in all 14
+        // recorded crashes, because `spaceadom.pdb` was built into
+        // target/release and the installer shipped only the .exe. The pdb is
+        // now installed BESIDE the exe (tauri.conf.json `resources`), which is
+        // where dbghelp looks, so these frames resolve on the user's machine.
         log::error!(
             "backtrace:\n{}",
             std::backtrace::Backtrace::force_capture()

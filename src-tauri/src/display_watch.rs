@@ -108,6 +108,14 @@ pub fn rebuild_overlay(app: &tauri::AppHandle) {
     if REBUILDING.swap(true, Ordering::SeqCst) {
         return;
     }
+    // PROBLEM 131 — the leading hypothesis for the 14 crashes is a window
+    // message arriving after its host window was destroyed. This is the ONE
+    // place the app deliberately destroys a live window, so recording it makes
+    // the hypothesis testable from a crash log alone: if a crash report shows a
+    // rebuild moments earlier, that is the answer; if the counter is 0 in every
+    // report, the hypothesis is dead and should be written off in the notes.
+    crate::crash_context::note_overlay_rebuild();
+    crate::crash_context::note_display_event("overlay rebuild started (display topology changed)");
     let app = app.clone();
     let spawned = std::thread::Builder::new()
         .name("st-overlay-rebuild".into())

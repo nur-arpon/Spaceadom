@@ -344,6 +344,7 @@ fn cascade_toast(
 fn handle_alpha(ch: char, state_arc: &Arc<Mutex<EngineState>>) {
     // log::info, not println — stdout is invisible for a tray app.
     log::info!("engine: combo Space+{ch} received");
+            crate::crash_context::note_action(format!("Space+{ch}"));
 
     let (profile_name, binding, fallback) = {
         let s = state_arc.lock().unwrap_or_else(|p| p.into_inner());

@@ -70,3 +70,7 @@ Thumbs.db
 # ---------------------------------------------------------------------------
 Spaceadom-Developer-Guide.docx
 Spaceadom-Developer-Guide.pdf
+
+# PROBLEM 131 - staged debug symbols are a build output (8.5 MB), not source.
+# scripts/stage-symbols.mjs regenerates them on every build.
+src-tauri/symbols/

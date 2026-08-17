@@ -1,12 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Spaceadom",
-  "version": "1.0.41",
+  "version": "1.0.42",
   "identifier": "com.spaceadom.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build",
+    "beforeBundleCommand": "node scripts/stage-symbols.mjs --real",
     "frontendDist": "../dist2"
   },
   "app": {
@@ -58,7 +59,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": [],
+    "resources": {
+        "symbols/spaceadom.pdb": "spaceadom.pdb"
+      },
     "externalBin": [],
     "copyright": "© 2026 Spaceadom",
     "category": "Utility",

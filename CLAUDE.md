@@ -176,7 +176,20 @@ running app (PROBLEM 127). Restoring it requires a custom WiX template with
   format strings and bundled CSS names are ASCII-searchable inside the exe.
   `[Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))` then test
   for markers like `url_focus:`, `aumid_focus:`, `st-hud-glow`.
-- **There ARE automated tests now** — 11, run with `cargo test --lib` from
+- **Debug symbols SHIP (PROBLEM 131). Do not remove any of this plumbing:**
+  `src-tauri/symbols/spaceadom.pdb` → installed beside the exe via
+  `bundle.resources`. `build.rs` writes an invalid STUB there if missing (it
+  must run on every cargo invocation — Tauri's before-hooks only run for
+  `tauri build`, and without the stub `cargo test` fails with `resource path
+  symbols\spaceadom.pdb doesn't exist`). `beforeBundleCommand` then copies the
+  freshly-linked pdb over it. **Never stage a previous build's pdb to satisfy
+  the check**: mismatched symbols do not fail, they resolve to confidently
+  wrong lines. Cost measured: installer 4.6 → 5.6 MB.
+- **There is exactly ONE `std::panic::set_hook` call, in `lib.rs`.** There were
+  two, and the second silently replaced the first for months (PROBLEM 131) —
+  `set_hook` replaces, it does not chain unless you make it. If you add
+  another, the last one installed wins and the loser leaves no trace.
+- **There ARE automated tests now** — 13, run with `cargo test --lib` from
   `src-tauri`. They cover the self-updating-app path repair (PROBLEM 116) and
   the opacity floor arithmetic (PROBLEM 119). Everything else is still
   verified by hand on the real machine (see Testing laws). Add a test when

@@ -875,6 +875,7 @@ pub fn get_conflicts() -> Vec<crate::hook::conflicts::Conflict> {
 /// animating an OS window's bounds frame-by-frame tears on Windows.
 #[tauri::command]
 pub fn overlay_fit(app: tauri::AppHandle, width: f64, height: f64) -> Option<OverlayRect> {
+    crate::crash_context::note_overlay_op(format!("overlay_fit {width}x{height} (toast, bottom-centre)"));
     use std::sync::atomic::Ordering;
     use tauri::Manager;
     if crate::guide_hud::OVERLAY_DISABLED.load(Ordering::Relaxed) {
@@ -918,6 +919,7 @@ pub fn overlay_fit(app: tauri::AppHandle, width: f64, height: f64) -> Option<Ove
 /// 26-binding profile (user report, 2026-08-10).
 #[tauri::command]
 pub fn overlay_fit_hud(app: tauri::AppHandle, width: f64, height: f64) -> Option<OverlayRect> {
+    crate::crash_context::note_overlay_op(format!("overlay_fit_hud {width}x{height} (radial HUD, centred)"));
     use tauri::Manager;
     if !crate::guide_hud::is_visible() {
         return None;
