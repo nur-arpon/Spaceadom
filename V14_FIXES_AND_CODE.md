@@ -7176,3 +7176,83 @@ ago, the user wins.* The patch's descent lands where the stack is staged. The
 owner had already rejected that landing point in as many words. Following the
 document there would have been obedience to the wrong authority.
 
+
+---
+
+## PROBLEM 139 — a per-user .msi cannot be built with Tauri's WiX bundler. BLOCKED, with the wall located exactly.
+
+**Owner's request 2026-08-18:** *"publish the msi version of this too."* Asked
+which way, given the .msi was removed in 1.0.41, he chose **"Fix it first, then
+ship"** — a per-user .msi landing in the same folder as the setup.exe, with the
+update problem solved. That is the right answer. It is also, with this bundler,
+not currently possible. Recorded so nobody spends the evening rediscovering it.
+
+**What was built and works.** `src-tauri/wix/main.wxs`, a fork of
+tauri-bundler 2.9.4's stock template with four marked changes, KEPT IN THE REPO
+even though it is not wired up:
+
+```
+InstallScope="perUser" + InstallPrivileges="limited"   (was perMachine)
+<Directory Id="LocalAppDataFolder">                    (was ProgramFiles64Folder)
+xmlns:util=".../UtilExtension"                         (auto-loads WixUtilExtension)
+<util:CloseApplication Target="spaceadom.exe" ... />   (PROBLEM 127's fix, WiX side)
+```
+
+`candle` compiles it. The generated WXS was verified to contain all four
+changes. The extension loads itself: the bundler scans the WXS for
+`"http://schemas.microsoft.com/wix/(\w+)"` and passes `Wix$1.dll` to candle, so
+declaring the namespace is the whole wiring.
+
+**Where it stops: ICE38, at link time.**
+
+```
+error LGHT0204 : ICE38: Component Path installs to user profile.
+                 It must use a registry key under HKCU as its KeyPath, not a file.
+error LGHT0204 : ICE38: Component I3d755866... (spaceadom.pdb)     same
+error LGHT0204 : ICE38: Component I164d3ab3... (space_toggle_os_lib.dll)  same
+```
+
+A per-user MSI must install to the user profile; ICE38 then requires EVERY
+component there to be keyed on an HKCU registry value rather than on a file.
+
+**Why it cannot be fixed from the template.** The three offending components are
+not written in the template. Two arrive through `{{resources}}`, a pre-rendered
+blob emitted by the bundler's Rust code, and the third through the binaries
+loop. The template can place them; it cannot change their KeyPath.
+
+**Why it cannot be suppressed.** `light` accepts `-sice:ICE38`, and Tauri never
+offers it. The complete field list of `WixConfig` (tauri-utils 2.x):
+
+```
+language  template  fragment_paths  component_group_refs  component_refs
+feature_group_refs  feature_refs  merge_refs  skip_webview_install  license
+enable_elevated_update_task  banner_path  dialog_image_path
+```
+
+No extra-args, no skip-validation. And a `tauri build` failure on the msi target
+fails the WHOLE build — so a broken .msi would take the working setup.exe and
+the entire GitHub release pipeline down with it. That is the reason this was
+reverted rather than left switched on.
+
+**Routes that would actually work, for whoever picks this up:**
+
+1. Patch `tauri-bundler` (a fork or an upstream PR adding e.g.
+   `wix.lightArgs`), then `-sice:ICE38` makes this a two-line change.
+2. Build the MSI outside `tauri build`: the `main.wixobj` is already produced,
+   so a post-build script could run `light -sice:ICE38` itself. Costs a
+   hand-rolled step in CI and diverges from the bundler.
+3. Ship the .msi per-MACHINE, as before. **Explicitly rejected by the owner**
+   and by PROBLEM 129 — it is what put two Spaceadoms on his machine.
+
+**Delivered instead.** `share-spaceadom/` refreshed to 1.0.52 with a rewritten
+READ-ME. The 1.0.27 setup.exe AND its .msi were removed from that folder — both
+are archived in `all-versions/`, and the .msi in particular is the two-installs
+trap, which the old README actively invited by offering it as an equal choice.
+
+**Generalise this.** *Check the escape hatch before building the thing that
+needs it.* The template fork was the interesting part and it was finished before
+anyone asked whether the linker's validation could be waived — which is the one
+question that decided the outcome. Ten minutes reading `WixConfig`'s fields
+first would have reordered the whole evening. And: **a build target that can
+fail takes every other target with it**, so an experimental bundle format does
+not belong in a release pipeline until it links.

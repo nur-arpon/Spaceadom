@@ -1,6 +1,47 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-18 | ~9:00 AM (Claude Opus 5) — the per-user .msi is BLOCKED by Tauri's bundler; share folder refreshed
+
+Full technical record: PROBLEM 139 in `V14_FIXES_AND_CODE.md`.
+
+Nur asked for the .msi back. Given the choice he picked the right one — fix it
+first: per-user, landing in the same folder as the setup.exe, with the update
+problem solved. I built exactly that and it does not link.
+
+**What works:** `src-tauri/wix/main.wxs`, a fork of tauri-bundler 2.9.4's stock
+template with four marked changes — `InstallScope="perUser"`,
+`LocalAppDataFolder`, the util namespace, and `util:CloseApplication` for
+PROBLEM 127. `candle` compiles it and all four changes were verified present in
+the generated WXS.
+
+**Where it stops:** ICE38 at link time. A per-user MSI installs to the user
+profile, and ICE38 then demands every component there be keyed on an HKCU
+registry value rather than a file. The three that fail are not in the template —
+two come from `{{resources}}`, a pre-rendered blob from the bundler's Rust code,
+and one from the binaries loop. The template can position them; it cannot change
+their KeyPath.
+
+**And it cannot be waived:** `light` accepts `-sice:ICE38`; Tauri exposes no way
+to pass it. `WixConfig` has thirteen fields and not one of them is extra-args or
+skip-validation. Worse, a failing msi target fails the WHOLE `tauri build` — so
+leaving it on would take the working setup.exe and the entire release pipeline
+down with it. Reverted to nsis-only; the template stays in the repo, parked,
+with the three routes that would actually work written up.
+
+**Delivered:** `share-spaceadom/` refreshed to 1.0.52 with a rewritten README.
+Removed the 1.0.27 setup.exe and .msi from that folder — both are archived in
+`all-versions/`, and the old README offered the .msi as an equal choice, which
+is precisely how PROBLEM 129's two-installs trap gets handed to a friend.
+
+**My error, recorded:** I built the template fork before checking whether the
+linker's validation could be waived — the one question that decided the whole
+outcome. Ten minutes reading `WixConfig`'s field list first would have saved the
+detour.
+
+— Claude Opus 5
+
+---
 ## Update: 2026-08-18 | ~8:10 AM (Claude Opus 5) — thruster up, slingshot down: both directions of the handover, and the first public release
 
 Full technical record: PROBLEM 138 in `V14_FIXES_AND_CODE.md`. Shipped as

@@ -77,7 +77,7 @@
         "silent": true
       },
       "allowDowngrades": false,
-      "nsis": {
+        "nsis": {
         "installerHooks": "installer-hooks.nsh",
           "installMode": "currentUser"
       },
