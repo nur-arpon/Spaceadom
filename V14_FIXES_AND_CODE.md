@@ -5224,3 +5224,182 @@ layout code is a decision that the screen cannot be bigger than the designer's
 monitor.* Whenever fixed design geometry meets a variable viewport, write down
 which direction the fit is allowed to go — and if the answer is "both", say so
 in the code, because `Math.min(1, ...)` reads as a fit and behaves as a cap.
+
+---
+
+## PROBLEM 124 — the app could panic during start-up, before the hook existed
+
+**Symptom.** None yet, on this machine. Found by audit rather than by failure,
+which is the point: it needs a machine under memory or thread pressure, and
+this one never is.
+
+**Root cause.** `src-tauri/src/hook/fullscreen.rs`:
+
+```rust
+.expect("failed to spawn fullscreen watcher thread");
+```
+
+`std::thread::Builder::spawn` returns `Err` when the OS refuses a thread —
+memory pressure, a thread-count limit, a restrictive job object. A `.expect()`
+on that turns a survivable condition into a panic.
+
+The consequence is not a missing feature. This runs during setup, **before the
+keyboard hook is installed**, so the process dies at launch with no window, no
+tray icon, and a log the user will never read. From the outside it is
+indistinguishable from "it never started".
+
+Microsoft Store policy **10.4.2** requires the opposite: *"Products must start
+up promptly, continue to run and remain responsive to user input... must not
+close unexpectedly. The product must handle exceptions raised by any of the
+managed or native system APIs."*
+
+The sharpest detail: the probe INSIDE this same file already fails OPEN, with
+the comment *"a broken probe must never be able to disable every shortcut"*.
+The file had the right rule and the spawn was not following it.
+
+**Exact file.** `src-tauri/src/hook/fullscreen.rs`
+
+```rust
+        .map(|_| ())
+        .unwrap_or_else(|e| {
+            log::error!(
+                "fullscreen: could not spawn the watcher thread ({e}) — continuing WITHOUT \
+                 full-screen detection. Shortcuts still work everywhere; they will simply \
+                 not stand down inside an exclusive full-screen game."
+            );
+        });
+```
+
+**How it was verified.** `cargo check` clean; built into 1.0.37. The failure
+path itself cannot be triggered on demand — it needs a machine that refuses a
+thread — so it is reasoned, not exercised.
+
+**Generalise this.** *`.expect()` is a claim that a thing cannot fail.* Every
+one of them deserves the question "on whose machine?". Resource allocation —
+threads, files, handles, memory — fails on hardware you do not own. And when a
+file already establishes a failure policy ("fail open"), the other call sites
+in that file are the first place to check that it was applied.
+
+---
+
+## PROBLEM 125 — a panic left no evidence at all
+
+**Symptom.** If the app ever crashed on someone else's machine, the
+investigation ended immediately: the process vanished and `debug.log`'s last
+line was whatever happened to be written before the crash.
+
+**Root cause.** Rust prints panic messages to stderr. This binary is built with
+`windows_subsystem = "windows"` — there is no console attached, so stderr goes
+nowhere at all. The panic message, the thread and the source location were
+produced and then discarded.
+
+**Exact file.** `src-tauri/src/lib.rs`, immediately after `logger::init` (so
+the hook has somewhere to write) and before anything that could plausibly
+panic:
+
+```rust
+let previous = std::panic::take_hook();
+std::panic::set_hook(Box::new(move |info| {
+    let where_ = info.location()
+        .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+        .unwrap_or_else(|| "unknown location".into());
+    let what = info.payload().downcast_ref::<&str>().map(|s| (*s).to_string())
+        .or_else(|| info.payload().downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "<non-string panic payload>".into());
+    let thread = std::thread::current().name().unwrap_or("<unnamed>").to_string();
+    log::error!("PANIC on thread '{thread}' at {where_}: {what}. ...");
+    previous(info);
+}));
+```
+
+`location()` is the part worth having: file and line beat a bare message every
+time when the person reporting it cannot reproduce it. Chaining to the previous
+hook keeps the normal console output in debug builds.
+
+**How it was verified.** `cargo check` clean; in 1.0.37. Not triggered — doing
+so would require deliberately panicking a shipped build.
+
+**Generalise this.** *An app with no console has no stderr.* Any diagnostic that
+writes there is writing to nothing. This applies to `println!`, `eprintln!`,
+`dbg!` and the default panic handler alike — every one of them is silent in a
+`windows_subsystem = "windows"` binary.
+
+---
+
+## PROBLEM 126 — uninstalling left the logon task behind forever
+
+**Symptom.** Uninstall Spaceadom, and Windows still tries to start it at every
+logon — permanently, on a machine belonging to someone who believed they had
+removed the program.
+
+**Root cause.** The app registers a Scheduled Task named `Spaceadom` (or an
+HKCU `Run` value where creating that task is refused). The code that removes a
+stale task lives in `startup.rs` and runs **when the app launches**. After an
+uninstall, the app never launches again, so nothing ever removes it.
+
+The failure is quiet: Windows tries to run a missing executable, fails, and
+records it in Task Scheduler history. No popup, no visible damage — just a
+permanent failing entry the user cannot connect to anything. Microsoft Store
+policy **10.2.7** requires a product to *"clearly communicate and enable a
+user's ability to cleanly uninstall and remove your product from their
+device."*
+
+**Exact file.** New `src-tauri/installer-hooks.nsh`, wired in
+`tauri.conf.json` under `bundle.windows.nsis`:
+
+```json
+"nsis": { "installerHooks": "installer-hooks.nsh" }
+```
+
+```nsis
+!macro NSIS_HOOK_PREUNINSTALL
+  DetailPrint "Removing the Spaceadom logon entries..."
+  nsExec::ExecToLog 'schtasks /Delete /F /TN "Spaceadom"'
+  Pop $0
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Spaceadom"
+  ; legacy identities from before the 1.0.0 rename (PROBLEM 45)
+  nsExec::ExecToLog 'schtasks /Delete /F /TN "SpaceToggle OS"'
+  Pop $0
+  nsExec::ExecToLog 'schtasks /Delete /F /TN "SpaceToggleV14"'
+  Pop $0
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "SpaceToggle OS"
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "SpaceToggleV14"
+!macroend
+```
+
+**Deliberately NOT removed:** `%APPDATA%\Spaceadom` and
+`%LOCALAPPDATA%\SpaceadomBackups`. Those hold the user's profiles and bindings.
+Deleting them silently would mean a reinstall costs someone everything they
+ever configured, and an uninstaller is the wrong place to ask the question.
+`PRIVACY.md` and the README say where they are for anyone who wants them gone.
+
+**KNOWN GAP, recorded so it is not mistaken for done.** Tauri v2 exposes
+`installerHooks` for NSIS and has **no documented equivalent for the WiX/MSI
+bundler** (confirmed against the v2 config reference, 2026-08-17). The `.msi`
+therefore still orphans the task. The `setup.exe` is the artifact handed to
+users and the one Store policy 10.2.9 accepts, so that is the one fixed; if the
+MSI ever becomes primary this needs a WiX custom action to match.
+
+**How it was verified.** Strings are NOT visible in the built `setup.exe` —
+NSIS compresses its script data, so their absence proves nothing. The
+generated script does prove it:
+
+```
+target/release/nsis/x64/installer.nsi
+  line  31:  !include "D:\...\src-tauri\installer-hooks.nsh"
+  line 749:  !ifmacrodef NSIS_HOOK_PREUNINSTALL
+  line 750:    !insertmacro NSIS_HOOK_PREUNINSTALL
+```
+
+The include resolved, `makensis` compiled without error, and the macro is
+defined — so `!ifmacrodef` is true and the macro is inserted. **An actual
+uninstall has NOT been run**, so the task deletion is proven wired, not proven
+effective.
+
+**Generalise this.** *Cleanup code that runs at start-up cannot clean up an
+uninstall.* Anything a program registers OUTSIDE its own install directory —
+scheduled tasks, Run keys, services, firewall rules, file associations, shell
+extensions — needs a removal path that runs from the uninstaller, because the
+program itself is gone by then. And when verifying a change inside a compressed
+installer, check the generated script; absence of strings in the binary is not
+evidence.

@@ -109,6 +109,17 @@ doesn't have to rediscover them.
 
 ---
 
+## Privacy
+
+Spaceadom has no network code, no accounts and no telemetry. It watches your
+keyboard because that is its job, and it records none of what you type.
+
+The full policy — including exactly what the settings file and the log DO
+contain, and how to delete them — is in
+**[PRIVACY.md](PRIVACY.md)**.
+
+---
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).

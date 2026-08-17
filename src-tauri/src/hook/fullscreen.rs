@@ -57,7 +57,29 @@ pub fn start_fullscreen_watcher(flag: Arc<AtomicBool>, allowlist: Vec<String>) {
                 }
             }
         })
-        .expect("failed to spawn fullscreen watcher thread");
+        .map(|_| ())
+        // PROBLEM 124 — this was `.expect("failed to spawn fullscreen watcher
+        // thread")`, i.e. a PANIC on a failure that is entirely plausible on
+        // someone else's machine: `Builder::spawn` returns Err under memory
+        // pressure, against a thread-count limit, or inside a restrictive job
+        // object. It never fails here, which is exactly why it survived.
+        //
+        // The consequence was not a missing feature. This runs during setup,
+        // BEFORE the keyboard hook is installed, so a panic here killed the
+        // app at launch with no window, no tray icon and a log nobody reads —
+        // indistinguishable from "it never started". Microsoft Store policy
+        // 10.4.2 requires the opposite: handle the exception and stay running.
+        //
+        // Note the probe INSIDE this same file already fails OPEN, with the
+        // comment "a broken probe must never be able to disable every
+        // shortcut". The spawn now follows its own file's rule.
+        .unwrap_or_else(|e| {
+            log::error!(
+                "fullscreen: could not spawn the watcher thread ({e}) — continuing WITHOUT \
+                 full-screen detection. Shortcuts still work everywhere; they will simply \
+                 not stand down inside an exclusive full-screen game."
+            );
+        });
 }
 
 /// Returns true if the foreground window appears to be an exclusive full-screen 3D app.

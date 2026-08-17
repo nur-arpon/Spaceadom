@@ -355,6 +355,45 @@ pub fn run() {
     logger::init(&data_dir);
     log::info!("Spaceadom starting — data dir: {}", data_dir.display());
 
+    // PROBLEM 125 — a panic used to leave NOTHING behind.
+    //
+    // Rust prints panics to stderr, and this is a `windows_subsystem = "windows"`
+    // binary: there is no console, so stderr goes nowhere. The app vanished and
+    // the log's last line was whatever happened to be written before the crash.
+    // On a stranger's machine, with no way to reproduce it, that is the end of
+    // the investigation.
+    //
+    // Installed immediately AFTER the logger so the hook has somewhere to
+    // write, and BEFORE anything that could plausibly panic. Chains to the
+    // default handler so debug builds still print as usual.
+    {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            // `location()` is what makes this worth having: file and line beat
+            // a bare message every time when the reporter cannot reproduce it.
+            let where_ = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "unknown location".into());
+            let what = info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic payload>".into());
+            let thread = std::thread::current()
+                .name()
+                .unwrap_or("<unnamed>")
+                .to_string();
+
+            log::error!(
+                "PANIC on thread '{thread}' at {where_}: {what}. This is a crash, not a \
+                 handled error — please report it with the lines above from debug.log."
+            );
+            previous(info);
+        }));
+    }
+
     // 2a. PROBLEM 64 + 59 — the HKCU Run autostart path. A Run value cannot
     // express the Scheduled Task's `/DELAY 0000:30`, so when the app was
     // started BY that Run value (`--autostart`) the cold-boot wait happens
