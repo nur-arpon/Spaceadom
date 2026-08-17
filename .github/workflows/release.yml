@@ -2,8 +2,13 @@
 # installers attached.
 #
 # WHY THIS EXISTS: so releasing never involves your laptop again. Push a tag
-# and GitHub builds the MSI and the setup.exe, creates the release page, and
-# uploads both. Nothing to remember, nothing to drag into a browser.
+# and GitHub builds the setup.exe, creates the release page, and uploads it.
+# Nothing to remember, nothing to drag into a browser.
+#
+# ONE installer, on purpose (PROBLEM 129): the .msi target was removed in
+# 1.0.41. Tauri's WiX bundler installs per-machine while its NSIS bundler
+# installs per-user, so shipping both put two copies of the app on one machine,
+# each with its own autostart, both grabbing the spacebar at logon.
 #
 # HOW TO RELEASE:
 #   1. bump the version in package.json, src-tauri/tauri.conf.json and
@@ -51,9 +56,15 @@ jobs:
           $tag  = "${{ github.ref_name }}" -replace '^v',''
           $pkg  = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $conf = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-          Write-Host "tag=$tag  package.json=$pkg  tauri.conf.json=$conf"
-          if ($tag -ne $pkg -or $tag -ne $conf) {
-            Write-Host "::error::Tag v$tag does not match the source version ($pkg / $conf). Either bump package.json, src-tauri/tauri.conf.json and src-tauri/Cargo.toml to $tag, or tag v$pkg instead. No installers were built or uploaded."
+          # Cargo.toml is checked too, and it is the one that matters most for
+          # diagnosis: it stamps the exe's FileVersion, which is how an install
+          # is proven to have actually landed (PROBLEM 127). A Cargo.toml left
+          # behind produces a binary that REPORTS the old version while
+          # containing the new code — the worst possible state to debug from.
+          $cargo = ([regex]::Match((Get-Content src-tauri/Cargo.toml -Raw), '(?m)^version\s*=\s*"([^"]+)"')).Groups[1].Value
+          Write-Host "tag=$tag  package.json=$pkg  tauri.conf.json=$conf  Cargo.toml=$cargo"
+          if ($tag -ne $pkg -or $tag -ne $conf -or $tag -ne $cargo) {
+            Write-Host "::error::Tag v$tag does not match the source version (package.json=$pkg, tauri.conf.json=$conf, Cargo.toml=$cargo). Either bump all three to $tag, or tag v$pkg instead. No installer was built or uploaded."
             exit 1
           }
 
@@ -96,7 +107,8 @@ jobs:
 
             ### Install
             Download **`Spaceadom_*_x64-setup.exe`** below and run it.
-            (The `.msi` is the same app — use it if your setup prefers MSI.)
+            It installs for your user account only, so it never asks for an
+            administrator password — including for updates.
 
             Windows may warn that the publisher is unknown, because the build
             is not code-signed. Choose **More info → Run anyway**.
