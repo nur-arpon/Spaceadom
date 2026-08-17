@@ -1,6 +1,64 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-17 | ~5:20 AM (Claude Opus 5) — the pre-release pass: two crash paths, an orphaned logon task, and a privacy policy
+
+Full technical record: PROBLEMS 124, 125 and 126 in `V14_FIXES_AND_CODE.md`.
+Built as 1.0.37. Prompted by a full shipping audit (`SHIPPING_AUDIT.md`) asking
+what breaks when strangers use this.
+
+**124 — the app could panic during start-up.** `fullscreen.rs` spawned its
+watcher with `.expect()`. `Builder::spawn` fails under memory pressure, against
+a thread limit, or inside a restrictive job object — never here, which is why it
+survived. It runs BEFORE the keyboard hook is installed, so the panic killed the
+app with no window, no tray and no explanation. The probe inside that same file
+already fails OPEN by design; the spawn was not following its own file's rule.
+
+**125 — a panic left no evidence.** Rust writes panics to stderr; this is a
+`windows_subsystem = "windows"` binary, so there is no stderr. Message, thread
+and source location were all produced and discarded. A panic hook now records
+thread, file, line and column before the process dies.
+
+**126 — uninstalling orphaned the logon task forever.** The code that removes a
+stale task runs when the app LAUNCHES, and after an uninstall it never launches
+again. Windows kept trying to start a missing exe at every logon on a machine
+whose owner believed the program was gone. An NSIS pre-uninstall hook now
+removes it, plus the Run-key fallback and the pre-1.0.0 names.
+
+**PRIVACY.md** — required unconditionally for Win32 products by Store policy
+10.5.1, and now linked from the README. It states plainly that `debug.log`
+contains which shortcuts were pressed, which apps were launched, and their full
+paths including the Windows username. The "no network code" claim was VERIFIED
+before publishing, not asserted.
+
+### Two verification lessons from this pass
+
+**Absence of strings in a compressed installer proves nothing.** The uninstall
+hook's text is not findable in the built `setup.exe` because NSIS compresses its
+script data. The generated `target/release/nsis/x64/installer.nsi` is the
+evidence: line 31 includes the file, line 750 inserts the macro.
+
+**Do not publish a claim you have not checked.** The privacy policy said "no
+network code" before `cargo tree` had been run. It was then checked — no
+`reqwest`, `hyper`, `ureq`, `curl`, `rustls`, `native-tls`, `openssl`; no
+`fetch`/XHR/WebSocket in the frontend — and the verification dated in the
+document. The claim happened to be true. It could have been false.
+
+### Still blocking the Microsoft Store
+
+Code signing (policy 10.2.9) — `certificateThumbprint` is still `null`. That one
+costs money and is the gate. Also outstanding: the incompatible-device check
+(10.4.1), the first-run disclosure, and `offlineInstaller` for WebView2.
+
+### Still untested on hardware that is not this laptop
+
+Non-QWERTY layouts and CJK IME input. `vk_to_char` maps VK codes straight to
+a-z and VK codes are POSITIONAL, so on AZERTY that key is labelled Q. The hook
+always suppresses Space-down, which is how IME users commit a candidate. Both
+affect enormous numbers of people and neither has ever been run.
+
+---
+
 ## Update: 2026-08-17 | ~4:10 AM (Claude Opus 5) — the dashboard could never grow, and the overlay detector was a one-shot
 
 Full technical record: PROBLEMS 122 and 123 in `V14_FIXES_AND_CODE.md`.
