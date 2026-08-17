@@ -1,6 +1,65 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-18 | ~6:30 AM (Claude Opus 5) — the slingshot arrival ships, after three builds spent looking inside the wrong box
+
+Full technical record: PROBLEM 135 in `V14_FIXES_AND_CODE.md`. Shipped across
+1.0.46 → 1.0.49. **Confirmed working by Nur: "the sling is working now, i can
+see it."** He also said it still needs tuning, which is open, not done.
+
+**What he asked for.** He kept the HUD's ripple entrance and wanted the HANDOVER
+to become a real move — the toast tearing out of the launched app's own chip,
+arcing around the ring, landing in its slot. He supplied the full patch and two
+constraints: implement it FRESH (do not re-enable 1.0.33's warp), and *"ensure
+you give enough time for the animation this time"*.
+
+**Implemented on its own `SLING` flag; `WARP` stays false.** New: `chipFor`,
+`arcPoints`, `tearOut`/`refill`, `flightSling`, chips tagged `data-st-app`, and
+the dashed socket CSS. One deliberate deviation from his patch, flagged to him at
+the time: it animates `width`/`height`, which PROBLEM 115 banned in this exact
+file because they force layout every frame under `--disable-gpu`. Same shape,
+driven by `scale()`/`scaleX()` instead.
+
+**Then three builds where he saw nothing, and I want the sequence on the record.**
+
+- **1.0.46** — the toast vanished completely. Mine: `_stageMode` left set blocks
+  every `overlay_fit`, and `overlay_fit` is what SHOWS the window. A verbatim
+  re-creation of PROBLEM 113, down to the same log signature: combos logged with
+  zero `overlay_fit` lines between them.
+- **1.0.47** — toast back, no animation. Added a decision log instead of guessing;
+  it immediately proved the branch ran and the chip matched.
+- **1.0.48** — still nothing. Found a second real defect (the pill had no visible
+  box between 17% and 60% of its flight) and added a geometry log. Every number
+  came back in bounds.
+
+**The root cause was never in the animation.** `hide_guide_hud()` hid the OS
+WINDOW unconditionally, and the engine calls `cancel_hud()` BEFORE dispatching
+the action — so the window was hidden the instant the combo fired, ~500-1000ms
+before the toast even existed. Every slingshot since 1.0.46 ran perfectly inside
+an invisible window, and the toast's later `overlay_fit` re-showed it, which is
+exactly the "ring vanishes, pause, toast pops" he reported three times.
+
+Three rounds of in-page instrumentation could never have found it: a page cannot
+observe that its own window is hidden. And that `win.hide()` was the ONLY window
+operation in this app that logged nothing, while `overlay_fit`/`overlay_fit_hud`
+log size, position and visibility on every call — the window rules already
+demand that logging, the rule just had never been extended to `hide`.
+
+Fixed by threading one bit from the component that knows it: `cancel_hud(true)`
+on a combo, `false` on a plain release or a wheel; Rust keeps the window up when
+an action is pending; the overlay holds the ring 1200ms (sized to MEASURED
+launch latency — Brave ~500ms, VLC ~1000ms; my first guess of 380ms lost the
+race to every cold launch) and folds the ring away underneath the flight.
+
+**My error, plainly: he described the mechanism before I wrote a line.** *"As
+soon as I left the space key the guide disappeared... there was no time"* names
+the window-hide ordering precisely. I read it as a request for a slower
+animation instead of as a report of when the window went away, and that cost him
+three test cycles.
+
+— Claude Opus 5
+
+---
 ## Update: 2026-08-17 | ~10:30 PM (Claude Opus 5) — 1.0.45 did not fix it; and the owner supplied the fact that reframes the whole problem
 
 Correction appended to PROBLEM 134 in `V14_FIXES_AND_CODE.md`.

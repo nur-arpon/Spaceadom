@@ -244,3 +244,43 @@ body.nocturne {
 @media (prefers-reduced-motion: reduce) {
   .st-fly, .st-fly-trail, .st-fly-shock { display: none !important; }
 }
+
+/* ================= SLINGSHOT ARRIVAL — chip -> toast pill =================
+   The HUD-is-up direction only. A launched app's toast tears out of that app's
+   own chip in the ring, arcs around the OUTSIDE of the ring, and decelerates
+   into its slot. The chip leaves a dashed socket that fills back in on landing.
+
+   NOTE ON THE PATCH THIS CAME FROM: the source patch animated `width`/`height`
+   on the pill and `width` on the trail. Both are BANNED here by PROBLEM 115 —
+   they force layout every frame, and this overlay runs with --disable-gpu on
+   this machine, where there is no headroom for that. The shape is implemented
+   exactly as specified; the driving is scale()/scaleX(), as flightWarp already
+   does. Nothing below animates layout or paint.                            */
+
+/* The empty slot a chip leaves while it is flying. Lives INSIDE the chip's
+   cell so the ring's own layout keeps positioning it. */
+.st-chip-socket { position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%); box-sizing: border-box;
+  border-radius: 999px; border: 1.5px dashed rgba(var(--st-glow-rgb), .5);
+  pointer-events: none; opacity: 0; }
+
+/* The chip face of a flying copy: same type as a real chip, centred. */
+.st-fly.face-chip-pill { justify-content: center; padding: 0 10px; gap: 6px; }
+.st-fly.face-chip-pill i { display: flex; align-items: center; gap: 6px;
+  font-style: normal; white-space: nowrap; }
+.st-fly.face-chip-pill kbd { font: 700 11px var(--st-font-body, "Outfit", sans-serif); }
+.st-fly.face-chip-pill span { font: 600 12px var(--st-font-body, "Outfit", sans-serif);
+  color: var(--st-pill-text); }
+
+@media (prefers-reduced-motion: reduce) {
+  .st-chip-socket { display: none !important; }
+}
+
+/* Slingshot faces: content-only layers inside the ONE persistent box. The box
+   owns background/border/motion; these just cross-fade. */
+.st-fly .sl-face { position: absolute; inset: 0; display: flex;
+  align-items: center; justify-content: center; gap: 8px; padding: 0 12px;
+  white-space: nowrap; }
+.st-fly .sl-face kbd { font: 700 11px var(--st-font-body, "Outfit", sans-serif); }
+.st-fly .sl-face span { font: 600 12px var(--st-font-body, "Outfit", sans-serif);
+  color: var(--st-pill-text); }

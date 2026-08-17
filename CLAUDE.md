@@ -254,6 +254,19 @@ overlay.html       The on-demand HUD/toast surface (see window rules below).
   the resulting size/position/visibility. **Never remove that logging** —
   without it, a wrong size, a wrong position and a window that never moved are
   indistinguishable, which cost a full diagnostic round trip.
+- **That rule covers `hide()` and `show()` too (PROBLEM 135).** `hide_guide_hud`
+  called `win.hide()` silently, and the engine cancels the HUD BEFORE
+  dispatching an action — so on every shortcut the overlay window was hidden
+  ~500-1000ms before the toast existed. Three builds of animation work played
+  out inside an invisible window while in-page instrumentation (geometry,
+  decision, JS errors) reported perfect health, **because a page cannot observe
+  that its own window is hidden.** Any call that changes what the user can see
+  must say so in the log. If a visual is missing and everything measurable
+  inside the page is fine, suspect the WINDOW before the page.
+- **A hide that races a pending action must be told about it.**
+  `hide_guide_hud_pending(action_pending)` keeps the window up when a combo has
+  fired and its toast is still coming; `overlay_toasts_done` remains the single
+  terminal path that actually hides it.
 - Undecorated Win11 windows draw a 1px DWM border that reads as a "box"
   around overlay content — clear it with `DWMWA_BORDER_COLOR = 0xFFFFFFFE`
   plus `DWMWCP_DONOTROUND` (done in lib.rs overlay setup).

@@ -37,6 +37,40 @@ const LEAVE_MS = 380;
    --------------------------------------------------------------------------- */
 const WARP = false;
 
+/* ---------------------------------------------------------------------------
+   SLINGSHOT — the HUD -> toast arrival, and ONLY that direction.
+   Owner's request 2026-08-17: he kept the ring's entrance (he likes the ripple)
+   and asked for the handover INTO the toast to become a real, visible move. He
+   also said explicitly: do NOT bring back 1.0.33's warp, implement this fresh.
+   So this is gated on its own flag and does not turn WARP on: the toast->SPACE
+   absorb and the return-on-release stay off, exactly as he left them.
+   He is writing the opposite direction (toast -> HUD) himself.
+   --------------------------------------------------------------------------- */
+const SLING = true;
+const SLING_MS = 940;      // door to door - slow ON PURPOSE, this is the set piece
+const SLING_BOW = 150;     // px the arc swings out past the chord
+const SLING_SAMPLES = 22;  // bezier keyframes; 22 is smooth, more buys nothing
+const SLING_STRETCH = 1.9; // nose-first stretch at mid-flight (warp uses 2.5)
+const SLING_MID = 0.5;     // fraction at which the box is smallest / trail longest
+const SLING_T0 = 0.16;     // stretch ramps from here - AFTER the face fade (0.17)
+/* Long tail - orbital capture. Fast off the chip, then a long deceleration into
+   the slot. Do NOT reuse WARP_EASE: its late snap fights the arc. */
+const CAPTURE_EASE = "cubic-bezier(.3,0,.08,1)";
+/* The ring must OUTLIVE the flight. The engine cancels the HUD before it
+   dispatches the action, so without this the chips are torn down ~240ms after
+   release while the flight needs 940ms - which is exactly the owner's
+   complaint: "as soon as I left the space key the guide disappeared... there
+   was no time". Set when a slingshot launches; hideGuideHud waits for it. */
+let _slingUntil = 0;
+/* How long the ring waits, after a COMBO cancels the HUD, for the toast to
+   arrive and claim its chip. Only applies when the engine says an action is
+   pending - a plain release collapses on the normal schedule. 1200 because the
+   gap is real launch latency, MEASURED: Brave ~500ms, VLC ~1000ms from combo to
+   toast. The 380 this replaced lost the race to every cold launch, and the ring
+   was gone before the flight began (PROBLEM 135). */
+const SLING_HANDOVER_MS = 1200;
+let _slingHeld = false;
+
 const WARP_MS = 560;      // one flight, door to door
 const STAGGER = 95;       // between pills when several fly at once
 const HUD_OUT_MS = 220;   // MUST match #st-hud's transition in overlay-earthy.css
@@ -516,6 +550,55 @@ export function showToast(message: string, options: ToastOptions = {}): void {
     !_hudActive && _isOverlay && _spaceExit !== null &&
     performance.now() - _spaceExitAt < SPACE_GRACE_MS;
 
+  /* ---- SLINGSHOT: fired WHILE Space is held, and the launched app HAS a chip
+     on the ring. The toast tears out of that chip, arcs around the outside of
+     the ring, and lands in its slot. Gated on SLING, NOT on WARP: the owner
+     asked for this direction only and asked explicitly that 1.0.33's warp not
+     come back with it. ---- */
+  // PROBLEM 114's ordering, which this MUST respect: the engine calls
+  // cancel_hud() BEFORE it dispatches the action, so by the time the toast
+  // arrives `_hudActive` is already false. Gating on _hudActive alone would
+  // make this branch unreachable for the exact gesture it exists for. The ring
+  // is still on screen here because hideGuideHud defers its collapse (below),
+  // so chipFor() can still find the chip and tear it out.
+  if (SLING && (_hudActive || _hudBusy) && _isOverlay && !REDUCED() && _hudEl) {
+    const c = chipFor(text);
+    // One line, so "no animation happened" is never again a matter of opinion:
+    // it says whether the branch ran and whether the app's chip was found.
+    invoke("overlay_log", {
+      msg: `sling: text="${text}" chip=${c ? "FOUND" : "none"} ` +
+           `hudActive=${_hudActive} hudBusy=${_hudBusy} chips=${
+             _hudEl.querySelectorAll("[data-st-app]").length}`,
+    }).catch(() => {});
+    if (c) {
+      _stageMode = true;
+      setStageAnchor(true);
+      anchorGlow("hud");
+      setToastLayerHidden(false);   // container visible; the PILL is parked
+      park(entry, true);
+      entry.phase = "open";
+      el.classList.add("open");
+      relayout();                   // depth attrs only - the stage guard blocks the fit
+      const to = settledBox(el);    // its real slot and real width, measured now
+
+      // Tear-out, measure and the copy's first frame are ONE synchronous block,
+      // so there is never a frame showing both the chip and its copy.
+      const from = boxRel(c.chip);
+      const chipHtml = c.chip.innerHTML;
+      tearOut(c);
+
+      const D = flightSling({
+        from, to, chipHtml, toastHtml: el.innerHTML, cell: c.cell,
+        onArrive: () => { park(entry, false); beep(640); },
+      });
+      armEntry(entry, D + duration, D + duration + LEAVE_MS);
+      return;
+    }
+    // No chip on the ring (volume, clipboard, an unlisted app): fall through to
+    // the plain path below. Deliberately NOT the SPACE ejection the source
+    // patch specifies - that is a WARP flight, and WARP stays off.
+  }
+
   if (WARP && (_hudActive || fromSpaceExit) && _isOverlay && !REDUCED()) {
     _stageMode = true;
     setStageAnchor(true);
@@ -656,6 +739,9 @@ function buildHud(payload: GuideHudPayload, entranceDelay = 0): Promise<Rect | n
     span.textContent = a[1];
     inner.append(kbd, span);
     c.appendChild(inner);
+    // SLINGSHOT - the flight has to find the launched app's chip. The label is
+    // the only thing a toast ("Brave launched") and a chip ("Brave") share.
+    c.dataset.stApp = a[1].toLowerCase();
     _hudEl!.appendChild(c);
     return c;
   };
@@ -876,6 +962,240 @@ function flightWarp(o: {
   return delay + WARP_MS;
 }
 
+/* =======================================================================
+   SLINGSHOT ARRIVAL - chip -> toast, the HUD-is-up direction only
+   ======================================================================= */
+
+/** The ring cell + chip for a launched app, or null (volume, clipboard, an app
+ *  not on the ring). Case-insensitive on the leading word, so a toast reading
+ *  "Spotify launched" finds the "Spotify" chip. */
+function chipFor(name: string | undefined): { cell: HTMLElement; chip: HTMLElement } | null {
+  if (!name || !_hudEl) return null;
+  const key = name.trim().toLowerCase();
+  for (const cell of Array.from(_hudEl.querySelectorAll<HTMLElement>("[data-st-app]"))) {
+    const app = cell.dataset.stApp ?? "";
+    if (!app) continue;
+    if (key === app || key.startsWith(app + " ") || app.startsWith(key)) {
+      const chip = cell.firstElementChild as HTMLElement | null;
+      if (chip) return { cell, chip };
+    }
+  }
+  return null;
+}
+
+/** Quadratic-bezier samples from (dx,dy) down to (0,0), bowed `bow` px
+ *  perpendicular to the chord. Each sample carries the tangent angle so the
+ *  pill can fly nose-first. */
+function arcPoints(dx: number, dy: number, bow: number, n: number) {
+  const len = Math.hypot(dx, dy) || 1;
+  const px = -dy / len, py = dx / len;               // unit perpendicular
+  const cx = dx / 2 + px * bow, cy = dy / 2 + py * bow;
+  const out: { t: number; x: number; y: number; a: number }[] = [];
+  for (let i = 0; i <= n; i++) {
+    const t = i / n, u = 1 - t;
+    out.push({
+      t,
+      x: u * u * dx + 2 * u * t * cx,
+      y: u * u * dy + 2 * u * t * cy,
+      a: (Math.atan2(2 * u * (cy - dy) + 2 * t * -cy,
+                     2 * u * (cx - dx) + 2 * t * -cx) * 180) / Math.PI,
+    });
+  }
+  return out;
+}
+
+/** Hide the chip and leave a dashed socket in its cell. */
+function tearOut(c: { cell: HTMLElement; chip: HTMLElement }): void {
+  const box = boxOf(c.chip);
+  c.chip.style.visibility = "hidden";
+  const ghost = document.createElement("div");
+  ghost.className = "st-chip-socket";
+  ghost.style.width = box.w + "px";
+  ghost.style.height = box.h + "px";
+  c.cell.appendChild(ghost);
+  ghost.animate([{ opacity: 0 }, { opacity: 1, offset: 0.2 }, { opacity: 0.55 }],
+    { duration: 300, fill: "both" });
+}
+
+/** Fill the socket back in: ghost fades, chip pops back with a spring. */
+function refill(cell: HTMLElement): void {
+  const ghost = cell.querySelector(".st-chip-socket");
+  const chip = cell.firstElementChild as HTMLElement | null;
+  if (ghost instanceof HTMLElement) {
+    ghost.animate([{ opacity: 0.55 }, { opacity: 0 }], { duration: 220, fill: "forwards" });
+    window.setTimeout(() => ghost.remove(), 240);
+  }
+  if (chip) {
+    chip.style.visibility = "visible";
+    chip.animate(
+      [{ transform: "scale(.6)", opacity: 0 },
+       { transform: "scale(1.06)", opacity: 1, offset: 0.7 },
+       { transform: "scale(1)", opacity: 1 }],
+      { duration: 360, easing: "cubic-bezier(.34,1.3,.4,1)" });
+  }
+}
+
+/**
+ * Fly ONE pill from its app's chip, around the OUTSIDE of the ring, into its
+ * staged slot. Chip face cross-fades to toast face; the box morphs from the
+ * chip's measured size to the slot's settled size.
+ *
+ * TRANSFORM AND OPACITY ONLY (PROBLEM 115). The patch this came from animated
+ * `width`/`height` on the pill and `width` on the trail; both force layout on
+ * every frame and cannot be smooth here, where the overlay composites in
+ * software. The box morph is a scale() on each face, cross-scaled exactly as
+ * flightWarp does it, and the trail is a fixed-width bar driven by scaleX().
+ *
+ * Coordinates are offsets from the flight origin (window centre), same
+ * convention as flightWarp. Returns ms until arrival.
+ */
+function flightSling(o: {
+  from: FlightGeo;
+  to: FlightGeo;
+  chipHtml: string;
+  toastHtml: string;
+  cell: HTMLElement;
+  onArrive?: () => void;
+}): number {
+  const { from, to, chipHtml, toastHtml, cell, onArrive } = o;
+  if (REDUCED()) { onArrive?.(); return 0; }
+
+  const host = flightHost();
+  const dx = from.x - to.x;
+  const dy = from.y - to.y;
+  // Bow AWAY from the window centre so the swing clears the ring and never
+  // crosses the SPACE key. The chip's own x decides the side.
+  const bow = SLING_BOW * (Math.sign(from.x) || 1);
+  const pts = arcPoints(dx, dy, bow, SLING_SAMPLES);
+
+  const mover = document.createElement("div");
+  mover.style.cssText =
+    "position:absolute;left:" + to.x + "px;top:" + to.y + "px;" +
+    "will-change:transform;transform:translate(" + dx + "px," + dy + "px)";
+
+  const trail = document.createElement("div");
+  trail.className = "st-fly-trail";
+  trail.style.width = Math.min(Math.hypot(dx, dy) * 0.72, 240) + "px";
+
+  const pill = document.createElement("div");
+  pill.className = "st-fly-wrap";
+
+  // ONE BOX, always visible door to door (the source patch's design - my first
+  // version put the background on the faces, and between the chip face fading
+  // out at 17% and the toast face arriving at 60% the pill had NO visible box
+  // for ~400ms, which on this machine read as "no animation at all").
+  const box = document.createElement("div");
+  box.className = "st-fly face-chip-pill";
+  box.style.width = from.w + "px";
+  box.style.height = from.h + "px";
+  box.style.background = "var(--st-pill-bg)";
+  box.style.border = "1px solid var(--st-pill-brd)";
+
+  const faceToast = document.createElement("div");
+  faceToast.className = "sl-face";
+  faceToast.innerHTML = toastHtml;
+  faceToast.style.opacity = "0";
+
+  const faceChip = document.createElement("div");
+  faceChip.className = "sl-face";
+  faceChip.innerHTML = chipHtml;
+
+  box.append(faceToast, faceChip);
+  pill.appendChild(box);
+  mover.append(trail, pill);
+  host.appendChild(mover);
+
+  // GEOMETRY LOG - so "nothing was visible" is a measurement, not a mystery.
+  // One line per flight: where it starts, where it lands, and whether both are
+  // actually inside the overlay window at flight time.
+  {
+    const iw = window.innerWidth, ih = window.innerHeight;
+    const inWin = (p: FlightGeo) =>
+      Math.abs(p.x) < iw / 2 + 40 && Math.abs(p.y) < ih / 2 + 40;
+    invoke("overlay_log", {
+      msg: `sling-geo: from=(${Math.round(from.x)},${Math.round(from.y)} ` +
+           `${Math.round(from.w)}x${Math.round(from.h)})${inWin(from) ? "" : " OFF-WINDOW"} ` +
+           `to=(${Math.round(to.x)},${Math.round(to.y)} ` +
+           `${Math.round(to.w)}x${Math.round(to.h)})${inWin(to) ? "" : " OFF-WINDOW"} ` +
+           `win=${iw}x${ih} bow=${Math.round(bow)}`,
+    }).catch(() => {});
+  }
+  _flying++;
+  _slingUntil = performance.now() + SLING_MS + 120;   // keep the ring alive
+
+  const opt: KeyframeAnimationOptions = { duration: SLING_MS, fill: "both" };
+
+  // 1 - travel: the sampled arc, one global capture easing.
+  mover.animate(
+    pts.map((p) => ({ transform: "translate(" + p.x + "px," + p.y + "px)", offset: p.t })),
+    { ...opt, easing: CAPTURE_EASE });
+
+  // Box morph factors: the one box grows from the chip's size to the slot's.
+  const chipToSlotX = to.w / Math.max(1, from.w);
+  const chipToSlotY = to.h / Math.max(1, from.h);
+
+  /** Nose-first shear at t: peaks at SLING_MID, ramps from SLING_T0 - AFTER the
+   *  chip face has faded, because shear on legible text reads as a broken
+   *  glyph rather than as speed. */
+  const shear = (t: number) => {
+    const up = Math.max(0, Math.min(1, (t - SLING_T0) / (SLING_MID - SLING_T0)));
+    const k = t < SLING_MID
+      ? 1 + (SLING_STRETCH - 1) * up
+      : 1 + (SLING_STRETCH - 1) * Math.max(0, 1 - (t - SLING_MID) / (1 - SLING_MID));
+    return { k: k, sy: 1 - 0.38 * (k - 1) / (SLING_STRETCH - 1) };
+  };
+  // Rotate into the travel axis, scale, rotate back - the same T() shape
+  // flightWarp uses, re-aimed at every sample so the ship follows its velocity.
+  const T = (a: number, sx: number, sy: number) =>
+    "translate(-50%,-50%) rotate(" + a + "deg) scale(" + sx + "," + sy + ") rotate(" + (-a) + "deg)";
+
+  // 2 - the BOX: starts 1:1 over the real chip, morphs to the slot size while
+  //     shearing nose-first. Visible for the whole flight.
+  box.animate(
+    pts.map((p) => {
+      const a = p.a + 180;
+      const sh = shear(p.t);
+      const bx = 1 + (chipToSlotX - 1) * p.t;
+      const by = 1 + (chipToSlotY - 1) * p.t;
+      return { transform: T(a, bx * sh.k, by * sh.sy), offset: p.t };
+    }),
+    { ...opt, easing: CAPTURE_EASE });
+
+  // 3 - the faces only cross-fade; the box carries all the motion.
+  faceChip.animate(
+    [{ opacity: 1 }, { opacity: 0, offset: 0.17 }, { opacity: 0 }],
+    { ...opt, easing: "linear" });
+  faceToast.animate(
+    [{ opacity: 0 }, { opacity: 0, offset: SLING_MID + 0.1 },
+     { opacity: 1, offset: SLING_MID + 0.34 }, { opacity: 1 }],
+    { ...opt, easing: "linear" });
+
+  // 4 - trail: scaleX, never width. Grows to mid, gone before landing.
+  trail.animate(
+    pts.map((p) => {
+      const f = p.t < SLING_MID
+        ? p.t / SLING_MID
+        : Math.max(0, 1 - (p.t - SLING_MID) / (1 - SLING_MID));
+      return {
+        transform: "translate(0,-50%) rotate(" + (p.a + 180) + "deg) scaleX(" + f.toFixed(4) + ")",
+        opacity: p.t < 0.06 || p.t > 0.94 ? 0 : 0.9,
+        offset: p.t,
+      };
+    }),
+    { ...opt, easing: CAPTURE_EASE });
+
+  window.setTimeout(() => shockAt(to), SLING_MS - 70);
+  window.setTimeout(() => {
+    mover.remove();
+    _flying = Math.max(0, _flying - 1);
+    // The ring may already be gone if Space was released mid-flight.
+    if (cell.isConnected) refill(cell);
+    onArrive?.();
+  }, SLING_MS + 20);
+
+  return SLING_MS;
+}
+
 function shockAt(at: FlightGeo): void {
   if (REDUCED()) return;
   const r = document.createElement("div");
@@ -894,6 +1214,7 @@ function shockAt(at: FlightGeo): void {
 }
 
 function showGuideHud(payload: GuideHudPayload): void {
+  _slingHeld = false;   // SLINGSHOT - a fresh hold gets a fresh handover grace
   _lastPayload = payload;
   _hudActive = true;
   if (!_hudEl) {
@@ -1002,7 +1323,7 @@ function absorbIntoSpace(payload: GuideHudPayload): boolean {
   return true;
 }
 
-function hideGuideHud(): void {
+function hideGuideHud(actionPending = false): void {
   _hudActive = false;
   _hudBusy = true;
   // PROBLEM 114 — measure SPACE before `.hidden` scales the HUD to .93, so a
@@ -1075,6 +1396,41 @@ function hideGuideHud(): void {
     return;
   }
 
+  /* SLINGSHOT - the ring must OUTLIVE the handover, in two stages.
+     The engine calls cancel_hud() BEFORE dispatching the action, so this runs
+     FIRST and the toast arrives afterwards - anywhere from a few ms (focus) to
+     several hundred (a cold launch, waiting on ShellExecute). Collapsing the
+     ring on the usual 240ms schedule is exactly the owner's complaint: "as soon
+     as I left the space key the guide disappeared... there was no time".
+
+     Stage 1: hold the ring, once, for SLING_HANDOVER_MS, so a toast that is
+              about to arrive still finds its chip to tear out of.
+     Stage 2: if a flight did start, wait for it to land before collapsing.
+
+     Both are bounded, and `_slingHeld` makes stage 1 strictly one-shot so this
+     can never defer forever. Cost on a plain release with no shortcut: the ring
+     lingers SLING_HANDOVER_MS. The owner asked for MORE time, not less. */
+  if (SLING && !REDUCED()) {
+    const flightLeft = Math.max(0, _slingUntil - performance.now());
+    if (flightLeft > 0) {
+      // A flight is in the air: fold the ring away UNDER it (pure visuals -
+      // the flight lives in #st-flight, not #st-hud) and defer the real
+      // teardown, whose refit would yank the window mid-flight, to landing.
+      if (_hudEl) _hudEl.classList.add("hidden");
+      sweep(760, 280, 150);
+      window.setTimeout(() => { if (!_hudActive) hideGuideHud(false); }, flightLeft + 40);
+      return;
+    }
+    // The engine says a toast is coming (combo fired). Hold the ring - and the
+    // WINDOW, which Rust now leaves up for exactly this case - long enough for
+    // the launch to produce it. One-shot per hold; bounded.
+    if (actionPending && !_slingHeld) {
+      _slingHeld = true;
+      window.setTimeout(() => { if (!_hudActive) hideGuideHud(false); }, SLING_HANDOVER_MS);
+      return;
+    }
+  }
+
   if (_hudEl) _hudEl.classList.add("hidden");
   sweep(760, 280, 150);
   window.setTimeout(() => {
@@ -1093,7 +1449,24 @@ function hideGuideHud(): void {
     // A toast fired mid-hold is already staged inside this window — leave it
     // be, no fit, no move. Anything else gets one clean fit now the HUD is gone.
     setToastLayerHidden(false);
-    if (!_stageMode) relayout();
+    /* SLINGSHOT / PROBLEM 113, RE-CREATED BY 1.0.46 AND FIXED HERE.
+       A slingshot stages the toast INSIDE the HUD's window (_stageMode = true),
+       and that flag blocks every overlay_fit. For the WARP handover skipping the
+       fit is correct, because the pills go on living in that window. For the
+       slingshot it is wrong: hideGuideHud has already WAITED for the flight to
+       land, and the HUD window is collapsing right now - so leaving the flag set
+       means the toast's own window is never fitted, and overlay_fit is what
+       SHOWS it. The owner saw exactly that on 1.0.46: "the toast is not visible
+       anymore... everything just went away as soon as I left the space."
+       Measured: 2 combos after a hold with ZERO overlay_fit lines between them,
+       which is the identical signature PROBLEM 113 recorded.
+       Always un-stage and always fit. */
+    if (_stageMode) {
+      _stageMode = false;
+      setStageAnchor(false);
+      anchorGlow("toast");
+    }
+    relayout();
   }, HUD_OUT_MS + 20);
 }
 
@@ -1122,7 +1495,8 @@ export async function initToastListener(): Promise<void> {
   await listen<GuideHudPayload>("guide-hud-show", (e) => {
     if (e.payload) showGuideHud(e.payload);
   });
-  await listen("guide-hud-hide", () => hideGuideHud());
+  await listen<boolean>("guide-hud-hide", (e) =>
+    hideGuideHud(e.payload === true));
   await listen<boolean>("theme-changed", (e) => applyTheme(!!e.payload));
   await listen<boolean>("sound-changed", (e) => { _soundOn = !!e.payload; });
 }

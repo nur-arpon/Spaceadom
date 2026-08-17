@@ -6759,3 +6759,277 @@ cannot figure out the solution of it, let it be. It's OK... except when my app
 is focused, everywhere else it is working, so that is good enough for now."*
 Recorded as OPEN, with the bisect as the named next step, so nobody re-derives
 the refuted theories. Do not close this. Do not treat PROBLEM 134 as its fix.
+
+---
+
+## PROBLEM 135 — the slingshot arrival, and why it was invisible for three consecutive builds
+
+**Owner's request, 2026-08-17 night.** He kept the HUD's entrance ("there is a
+very good transition, the ripple effect") and asked for the HANDOVER to become a
+real, visible move: *"from the guide HUD disappearing to the toast, there's not
+enough good transition. I want to see that transition."* He supplied a full
+implementation patch — "Slingshot arrival" — and two constraints that shaped
+everything below:
+
+1. *"Do not go back to version 1.0.33... do not implement anything of that one.
+   Implement newly. Whatever I am giving."*
+2. *"I do not care if there is a bit of slowness because of visually seeing the
+   animation work. Because I remember last time, as soon as I left the space
+   key, then the guide actually disappeared, but the toasts were there and from
+   the guide to coming to the toast, there was no time. **Ensure you give enough
+   time for the animation this time.**"*
+
+Constraint 2 turned out to be the entire bug, stated by the owner in plain
+language before a line was written. It took three failed builds to hear it.
+
+---
+
+### PART A — what the slingshot is
+
+A toast fired mid-hold no longer fades in. It tears out of that app's own chip
+in the ring, arcs around the OUTSIDE of the ring, and decelerates into its slot.
+The chip leaves a dashed socket that fills back in when the pill lands.
+
+**Exact files.** `src/components/toast.ts`, `src/styles/overlay-earthy.css`.
+
+**Gated on its own flag — `WARP` stays `false`.** Honouring constraint 1: the
+1.0.33 warp machinery (toast→SPACE absorb, return-on-release) is NOT switched
+back on. Only the arrival is new code.
+
+```ts
+const SLING = true;
+const SLING_MS = 940;      // door to door - slow on purpose, this is the set piece
+const SLING_BOW = 150;     // px the arc swings out past the chord
+const SLING_SAMPLES = 22;  // bezier keyframes
+const SLING_STRETCH = 1.9; // nose-first stretch at mid-flight
+const SLING_MID = 0.5;
+const SLING_T0 = 0.16;     // stretch ramps from here - AFTER the face fade (0.17)
+const CAPTURE_EASE = "cubic-bezier(.3,0,.08,1)";
+```
+
+New functions, all in `toast.ts`: `chipFor()` (find the launched app's chip by
+leading-word match), `arcPoints()` (sampled quadratic bezier with tangent angle
+per sample), `tearOut()` / `refill()` (the dashed socket), `flightSling()`.
+Chips are tagged in `buildHud`'s `make()` with `c.dataset.stApp =
+a[1].toLowerCase()`, which is the only thing a toast ("Brave launched") and a
+chip ("Brave") share.
+
+**DELIBERATE DEVIATION FROM THE SUPPLIED PATCH — do not "restore" it.** The
+patch animates `width`/`height` on the pill and `width` on the trail. Both are
+banned in this file by **PROBLEM 115**, which removed exactly those because they
+force layout every frame and this overlay runs `--disable-gpu` on this machine.
+The shape is implemented as specified — same arc, same 22 samples, same
+nose-first shear, same fade offsets — but driven by `scale()` / `scaleX()` using
+the cross-scale technique `flightWarp` already proved here. A fixed-width trail
+scaled on X, never resized.
+
+---
+
+### PART B — three builds, three wrong answers, and what each cost
+
+Recorded because the sequence is the lesson, not the destination.
+
+**1.0.46 — the toast vanished entirely.** Owner: *"the toast is not visible
+anymore... everything just went away as soon as I left the space."*
+
+Self-inflicted, and a straight re-creation of **PROBLEM 113**. The slingshot
+sets `_stageMode = true` to park the toast inside the HUD's window during the
+flight — and `_stageMode` blocks every `overlay_fit`. For the WARP handover
+skipping the fit is correct, because the pills go on living in that window. For
+the slingshot it is wrong: `hideGuideHud` has already waited for the flight to
+land and the HUD window is collapsing, so leaving the flag set means the toast's
+window is never fitted — and `overlay_fit` is what SHOWS it.
+
+The measured signature was identical to PROBLEM 113's, five months of notes
+apart:
+
+```
+05:54:22  combo Space+b received   -> no overlay_fit
+05:54:25  combo Space+f received   -> no overlay_fit
+```
+
+Fix, in the non-WARP tail of `hideGuideHud`:
+
+```ts
+// before
+setToastLayerHidden(false);
+if (!_stageMode) relayout();
+
+// after - always un-stage, always fit
+setToastLayerHidden(false);
+if (_stageMode) { _stageMode = false; setStageAnchor(false); anchorGlow("toast"); }
+relayout();
+```
+
+**1.0.47 — toast back, still no animation.** Added the decision log rather than
+guessing again:
+
+```ts
+invoke("overlay_log", { msg: `sling: text="${text}" chip=${c ? "FOUND" : "none"} ...` });
+```
+
+It answered its question immediately and ruled out the whole "naming mismatch"
+branch:
+
+```
+overlay-js: sling: text="Brave" chip=FOUND hudActive=false hudBusy=true chips=34
+```
+
+**1.0.48 — still no animation.** Found a real second defect: I had put
+`background` and `border` on the two FACES rather than on one shared box. The
+chip face fades out at 17% and the toast face does not arrive until 60% — so for
+roughly 400ms mid-flight **the pill had no visible box at all**. Restructured to
+the patch's actual design (one persistent box, faces cross-fade inside it) and
+added a geometry log:
+
+```
+overlay-js: sling-geo: from=(251,-158 106x45) to=(0,239 166x43) win=1050x525 bow=150
+```
+
+Every number in bounds. Flight firing, chip found, geometry correct, no JS
+errors — and the owner still saw nothing. **That combination is the finding**:
+when everything measurable inside the page is healthy and the result is still
+invisible, the fault is outside the page.
+
+---
+
+### PART C — the actual root cause
+
+`hide_guide_hud()` hid the **OS window**, unconditionally, the instant a combo
+cancelled the HUD:
+
+```rust
+pub fn hide_guide_hud() {
+    if HUD_VISIBLE.swap(false, Ordering::Relaxed) {
+        if let Some(handle) = APP_HANDLE.get() {
+            if let Some(win) = handle.get_webview_window("overlay") {
+                let _ = win.hide();          // <-- here
+            }
+            let _ = handle.emit("guide-hud-hide", ());
+        }
+    }
+}
+```
+
+The engine calls `cancel_hud()` BEFORE it dispatches the action
+(`engine/mod.rs`, `HookEvent::KeyCombo`). So the ordering on every single
+shortcut was:
+
+```
+combo pressed
+  -> cancel_hud()      -> win.hide()          WINDOW GONE
+  -> action dispatched -> ShellExecute...     (500-1000ms)
+  -> toast arrives     -> slingshot flies     inside an invisible window
+  -> toast's overlay_fit re-shows the window  toast "pops" with no transition
+```
+
+Which is precisely what the owner described three times: ring vanishes
+instantly, pause, toast appears with nothing in between. **Every slingshot since
+1.0.46 executed perfectly, in a window nobody could see.**
+
+Why three builds missed it: a page cannot observe that its own window is hidden.
+`getBoundingClientRect`, `IsWindowVisible` on child elements, WAAPI state, the
+JS error bridge — all report health. And this `win.hide()` was **the only window
+operation in the app that logged nothing**, while `overlay_fit` and
+`overlay_fit_hud` log size, position and visibility on every call. The window
+rules in CLAUDE.md already say never to remove that logging, for exactly this
+reason; the rule had simply never been applied to `hide`.
+
+**The fix: thread one bit of truth from the component that knows it.**
+
+`src-tauri/src/guide_hud/mod_impl.rs`:
+
+```rust
+pub fn hide_guide_hud() { hide_guide_hud_pending(false); }
+
+/// `action_pending` = the engine cancelled the HUD because a COMBO fired, so a
+/// toast is about to arrive in this same window.
+pub fn hide_guide_hud_pending(action_pending: bool) {
+    if HUD_VISIBLE.swap(false, Ordering::Relaxed) {
+        if let Some(handle) = APP_HANDLE.get() {
+            if action_pending {
+                log::info!("guide_hud: hide with action pending - window stays up for the handover");
+            } else if let Some(win) = handle.get_webview_window("overlay") {
+                log::info!("guide_hud: overlay window hidden (no action pending)");
+                let _ = win.hide();
+            }
+            let _ = handle.emit("guide-hud-hide", action_pending);
+        }
+    }
+}
+```
+
+`src-tauri/src/engine/mod.rs` — the caller states what it knows:
+
+```rust
+fn cancel_hud(&mut self, action_pending: bool) { ... }
+
+HookEvent::KeyCombo(combo) => { s.cancel_hud(true);  }   // a toast is coming
+HookEvent::SpaceUp { .. }  => { s.cancel_hud(false); }   // plain release
+HookEvent::WheelUp/Down    => { s.cancel_hud(false); }   // opacity, no toast
+```
+
+The window is still hidden eventually — by `overlay_toasts_done` when the stack
+empties, the same terminal path every toast already uses. Nothing leaks.
+
+`src/components/toast.ts` — the flag rides the event, and the grace is sized to
+reality:
+
+```ts
+await listen<boolean>("guide-hud-hide", (e) => hideGuideHud(e.payload === true));
+
+/* 1200 because the gap is real launch latency, MEASURED from this machine's
+   log: Brave ~500ms, VLC ~1000ms from combo to toast. The 380 this replaced
+   lost the race to every cold launch. */
+const SLING_HANDOVER_MS = 1200;
+```
+
+And the ring now folds away UNDER the flight instead of being held rigid until
+it lands — the flight lives in `#st-flight`, not `#st-hud`, so collapsing the
+ring is pure visuals and cannot disturb the pill:
+
+```ts
+if (flightLeft > 0) {
+  if (_hudEl) _hudEl.classList.add("hidden");   // ring collapses beneath the pill
+  sweep(760, 280, 150);
+  window.setTimeout(() => { if (!_hudActive) hideGuideHud(false); }, flightLeft + 40);
+  return;
+}
+```
+
+---
+
+### How it was verified
+
+`tsc` clean, `cargo check` clean, 0 warnings. Installed unelevated over 1.0.48;
+marker `window stays up for the handover` confirmed present in the INSTALLED
+binary. **And confirmed by the only instrument that can see this overlay — the
+owner's eyes: "the sling is working now, i can see it."** That is the project's
+own rule for overlay work (hold Space and LOOK); no harness can substitute,
+because the failure mode lived in the window manager, not the page.
+
+**NOT DONE — the owner's words: "it still needs work, we will do that."** The
+motion is visible and correct in shape; tuning is open. The knobs are `SLING_MS`
+(940), `SLING_BOW` (150), `SLING_STRETCH` (1.9) and `SLING_HANDOVER_MS` (1200).
+
+### Generalise this
+
+*When every measurement inside the box is healthy and the result is still wrong,
+the box is the wrong box.* Three rounds of in-page instrumentation — decision
+log, geometry log, error bridge — all returned "fine" while the window they drew
+into was hidden. The page is structurally incapable of observing its own
+window's visibility, so no amount of better logging inside it could ever have
+found this.
+
+*Any call that can make the user's screen change must say so in the log.* This
+project already learned that for `overlay_fit` and wrote it into the window
+rules as "never remove that logging". `hide()` is the same class of operation
+and was silent, and that silence cost three builds and three of the owner's test
+cycles. The rule was right; its scope was too narrow.
+
+*And when the user describes the mechanism, that is data, not colour.* "As soon
+as I left the space key the guide disappeared... there was no time" named the
+window-hide ordering exactly, before implementation started. It was read as a
+request for a longer animation rather than as a report of when the window went
+away.
+

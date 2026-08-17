@@ -88,11 +88,13 @@ impl EngineState {
         let _ = self.app_handle.emit("bypass-toggled", active);
     }
 
-    fn cancel_hud(&mut self) {
+    /// `action_pending`: true when a combo fired and its toast is about to
+    /// arrive - the overlay window must stay up for the handover (PROBLEM 135).
+    fn cancel_hud(&mut self, action_pending: bool) {
         if let Some(tx) = self.hud_cancel_tx.take() {
             let _ = tx.send(true);
         }
-        guide_hud::hide_guide_hud();
+        guide_hud::hide_guide_hud_pending(action_pending);
     }
 }
 
@@ -230,17 +232,18 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
             // the hook path gets the hook evicted by Windows (PROBLEM 58).
             crate::hook::drain_hook_diagnostics();
             let mut s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
-            s.cancel_hud();
+            s.cancel_hud(false);
         }
 
         // ---------------------------------------------------------------
         // Combo key while Space held
         // ---------------------------------------------------------------
         HookEvent::KeyCombo(combo) => {
-            // Cancel guide HUD immediately on any combo
+            // Cancel guide HUD immediately on any combo. `true`: a toast is
+            // coming, so the overlay window must stay up (PROBLEM 135).
             {
                 let mut s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
-                s.cancel_hud();
+                s.cancel_hud(true);
             }
 
             match combo {
@@ -263,14 +266,14 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
         HookEvent::WheelUp => {
             {
                 let mut s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
-                s.cancel_hud();
+                s.cancel_hud(false);
             }
             actions::opacity::increase_opacity();
         }
         HookEvent::WheelDown => {
             {
                 let mut s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
-                s.cancel_hud();
+                s.cancel_hud(false);
             }
             actions::opacity::decrease_opacity();
         }

@@ -125,12 +125,40 @@ pub fn show_guide_hud(
 
 /// Hide the Guide HUD — hides the window, then tells the page to clean up.
 pub fn hide_guide_hud() {
+    hide_guide_hud_pending(false);
+}
+
+/// Hide the Guide HUD. `action_pending` = the engine cancelled the HUD because
+/// a COMBO fired, so a toast is about to arrive in this same window.
+///
+/// PROBLEM 135 - the `win.hide()` below used to run unconditionally, and it is
+/// why the slingshot arrival was invisible through three consecutive builds
+/// (1.0.46-48): the engine cancels the HUD BEFORE dispatching the action, so
+/// the OS WINDOW was hidden before the toast even existed, and the entire
+/// flight played out inside an invisible window. Every in-page measurement
+/// said everything was fine - geometry in-bounds, no JS errors - because the
+/// page cannot see that its window is gone. The toast's later overlay_fit
+/// re-showed the window, which is exactly what the owner reported: ring
+/// vanishes instantly, pause, toast pops with no transition.
+///
+/// With `action_pending` the window STAYS UP and the frontend owns the
+/// choreography (hold the ring, fly the pill, then collapse). The window is
+/// eventually hidden by overlay_toasts_done when the stack empties, which is
+/// the same terminal path every toast already uses. A plain release (no combo)
+/// hides immediately, exactly as before.
+pub fn hide_guide_hud_pending(action_pending: bool) {
     if HUD_VISIBLE.swap(false, Ordering::Relaxed) {
         if let Some(handle) = APP_HANDLE.get() {
-            if let Some(win) = handle.get_webview_window("overlay") {
+            if action_pending {
+                log::info!("guide_hud: hide with action pending - window stays up for the handover");
+            } else if let Some(win) = handle.get_webview_window("overlay") {
+                // Say so. This hide was silent, and a silent window hide cost
+                // three diagnostic rounds (PROBLEM 135) - the same lesson the
+                // window rules already record for fits.
+                log::info!("guide_hud: overlay window hidden (no action pending)");
                 let _ = win.hide();
             }
-            let _ = handle.emit("guide-hud-hide", ());
+            let _ = handle.emit("guide-hud-hide", action_pending);
         }
     }
 }

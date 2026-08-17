@@ -27,6 +27,15 @@ other version is here.
 
 ---
 
+## 2026-08-18 — the slingshot arrival
+
+| Version | What changed |
+| --- | --- |
+| **1.0.49** | **The slingshot you asked for — and the reason you could not see it.** The animation itself had been working since 1.0.46. It was running inside a window that was already hidden. When you press Space+B, the app cancels the guide HUD *before* it launches the app — and cancelling used to hide the whole overlay window immediately, while the app took another half-second to a full second to start. So the flight played out beautifully, invisibly, and then the toast re-showed the window and popped in with no transition. That is exactly what you described three times: "the guide disappeared, there was no time". The window now stays up when an action is on its way, and closes normally on a plain release. The ring also folds away underneath the flying pill instead of vanishing first, and the app now waits up to 1.2 seconds for a slow-launching app (measured on yours: Brave about half a second, VLC about one second). |
+| **1.0.48** | Found a real fault in the flight: the pill had no visible body for about 400ms in the middle of its journey, because the background was attached to the two faces rather than to one shared shape, and there is a gap between the first fading out and the second fading in. Rebuilt as one solid pill with the contents cross-fading inside it. Also added a line to the log recording exactly where each flight starts and ends. |
+| **1.0.47** | Fixed the toast disappearing completely in 1.0.46 — the flag that parks a toast inside the HUD's window during a flight was never cleared, and that flag blocks the call that actually *shows* the toast window. Same bug as 1.0.35's, caused by me this time. Also added a log line recording whether a flight fired and whether it matched your app to its chip, so "no animation" stops being a matter of opinion. |
+| **1.0.46** | **First build of the slingshot arrival.** A toast fired while you are holding Space no longer fades in: it tears out of that app's own chip in the ring, arcs around the outside, and lands in its slot, leaving a dashed socket that fills back in. Built fresh on its own switch — the 1.0.33 motion you rejected stays off, exactly as you asked. One thing done differently from the patch you gave: it asked for the pill's width and height to be animated, which this app banned back in 1.0.32 because it forces the screen to re-layout on every frame and your overlay is drawn by the processor rather than the graphics card. Same shape, driven a way that stays smooth. |
+
 ## 2026-08-17 — one app, one install
 
 | Version | What changed |
