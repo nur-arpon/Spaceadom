@@ -11,10 +11,14 @@
     <?error Unsupported value of sys.BUILDARCH=$(sys.BUILDARCH)?>
 <?endif?>
 
-<!-- SPACEADOM: forked from tauri-bundler 2.9.4's stock main.wxs (PROBLEM
-     139). FOUR changes only, each marked SPACEADOM. Everything else is the
-     stock template verbatim - keep it that way, so a bundler upgrade can be
-     diffed against the new original instead of re-derived from scratch. -->
+<!-- SPACEADOM: forked from tauri-bundler 2.9.4's stock main.wxs.
+     Exactly ONE change, marked SPACEADOM below: util:CloseApplication.
+     Everything else is stock - keep it that way so a bundler upgrade can
+     be diffed against the new original rather than re-derived.
+     The install stays PER-MACHINE, as every .msi up to 1.0.40 was. A
+     per-user variant was tried and abandoned (PROBLEM 139/140): it exists
+     only to prevent a second install, and PROBLEM 141's conflict banner
+     already detects and removes one with a single permission prompt. -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
      xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
     <Product
@@ -25,19 +29,12 @@
             Manufacturer="{{manufacturer}}"
             Version="{{version}}">
 
-        <!-- SPACEADOM: perUser, not perMachine. The stock value put this .msi
-             in Program Files while the setup.exe installs per-user, so Windows
-             saw TWO Spaceadoms, both registered autostart, and both grabbed the
-             spacebar. Not hypothetical - PROBLEM 129 records it on the owner's
-             own machine: HKLM v1.0.37 in Program Files against HKCU v1.0.40 in
-             LOCALAPPDATA. perUser also removes the UAC prompt entirely. -->
         <Package Id="*"
                  Keywords="Installer"
                  InstallerVersion="450"
                  Languages="0"
                  Compressed="yes"
-                 InstallScope="perUser"
-                 InstallPrivileges="limited"
+                 InstallScope="perMachine"
                  SummaryCodepage="!(loc.TauriCodepage)"/>
 
         <!-- https://docs.microsoft.com/en-us/windows/win32/msi/reinstallmode -->
@@ -52,19 +49,16 @@
         <!-- SPACEADOM: close a RUNNING Spaceadom before replacing its files.
              PROBLEM 127: this app starts with Windows, so it is ALWAYS running
              during its own update, and a running process holds its .exe open.
-             Interactively Windows shows "Files in Use"; silently (/qn - the mode
-             the Microsoft Store requires) it cannot ask, defers the replacement
-             to a reboot, and msiexec exits 0. Measured four times on the owner's
-             machine: "installed the product ... status: 0" while the on-disk exe
-             never changed version. The NSIS installer fixes this with a
-             PREINSTALL taskkill hook; WiX has no installerHooks equivalent,
-             which is why the .msi was DROPPED in 1.0.41 rather than repaired.
-             util:CloseApplication is the WiX answer - it runs during
-             CostFinalize, before any file is touched.
-             Target is a literal, not {{main_binary_name}}: the bundler's own
-             source comments say that variable is "not used in our template", and
-             whether it carries the .exe suffix is not guaranteed. A literal
-             cannot be wrong for our own app.
+             Interactively Windows shows "Files in Use"; silently (/qn) it
+             cannot ask, defers the replacement to a reboot, and msiexec exits
+             0. Measured FOUR times on the owner's machine: "installed the
+             product ... status: 0" while the on-disk exe never changed version
+             - and that is what made him judge a scaling fix as "no change"
+             while running a build that never contained it.
+             The NSIS installer solves this with a PREINSTALL taskkill hook.
+             This is the WiX equivalent: it runs during CostFinalize, before any
+             file is touched. The bundler auto-loads WixUtilExtension because it
+             scans this file for "http://schemas.microsoft.com/wix/(\w+)".
              TerminateProcess because config.json is written on every change and
              never held open, so force-closing loses nothing. -->
         <util:CloseApplication Id="CloseSpaceadom"
@@ -156,11 +150,7 @@
                     <RegistryValue Root="HKCU" Key="Software\\{{manufacturer}}\\{{product_name}}" Name="Desktop Shortcut" Type="integer" Value="1" KeyPath="yes" />
                 </Component>
             </Directory>
-            <!-- SPACEADOM: LocalAppDataFolder, not Program Files. This is the
-                 SAME directory the NSIS setup.exe targets, so the two installers
-                 land on top of one another instead of side by side: one copy of
-                 the app, one autostart entry, one keyboard hook. -->
-            <Directory Id="LocalAppDataFolder">
+            <Directory Id="$(var.PlatformProgramFilesFolder)" Name="PFiles">
                 <Directory Id="INSTALLDIR" Name="{{product_name}}"/>
             </Directory>
             <Directory Id="ProgramMenuFolder">

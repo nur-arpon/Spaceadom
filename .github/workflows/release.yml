@@ -2,13 +2,18 @@
 # installers attached.
 #
 # WHY THIS EXISTS: so releasing never involves your laptop again. Push a tag
-# and GitHub builds the setup.exe, creates the release page, and uploads it.
+# and GitHub builds BOTH installers, creates the release page, and uploads
+# them.
 # Nothing to remember, nothing to drag into a browser.
 #
-# ONE installer, on purpose (PROBLEM 129): the .msi target was removed in
-# 1.0.41. Tauri's WiX bundler installs per-machine while its NSIS bundler
-# installs per-user, so shipping both put two copies of the app on one machine,
-# each with its own autostart, both grabbing the spacebar at logon.
+# TWO installers again from 1.0.54. The .msi was dropped in 1.0.41 because it
+# installs per-machine while the setup.exe installs per-user, which put two
+# copies on one machine both grabbing the spacebar (PROBLEM 129). That risk is
+# now handled where it belongs: PROBLEM 141's dashboard banner detects a second
+# install and removes it with one permission prompt. So the .msi is back, built
+# from a custom WiX template (src-tauri/wix/main.wxs) whose ONLY change is
+# util:CloseApplication - the fix for the silent-update failure it always had
+# (PROBLEM 127). Stock tauri CLI; no forked bundler, no suppressed validation.
 #
 # HOW TO RELEASE:
 #   1. bump the version in package.json, src-tauri/tauri.conf.json and
@@ -106,9 +111,15 @@ jobs:
             Hold **Space** and tap a key to launch, focus or minimise any app.
 
             ### Install
-            Download **`Spaceadom_*_x64-setup.exe`** below and run it.
-            It installs for your user account only, so it never asks for an
-            administrator password — including for updates.
+            **Most people: download `Spaceadom_*_x64-setup.exe`** and run it.
+            It installs for your user account only and never asks for an
+            administrator password, including for updates.
+
+            The `.msi` is the same app, for anyone who needs one (managed
+            deployment). It installs for the whole PC and asks for admin once.
+            **Pick one or the other** — installing both puts two copies on the
+            machine. If that does happen, the dashboard now spots it and offers
+            to remove the old one in a click.
 
             Windows may warn that the publisher is unknown, because the build
             is not code-signed. Choose **More info → Run anyway**.

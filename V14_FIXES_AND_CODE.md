@@ -7442,3 +7442,67 @@ extend the mechanism he already had, which also reaches every machine that is
 already broken. A new installer can only protect future installs; a detector
 protects the ones already out there.
 
+
+---
+
+### PROBLEMS 139/140 — RESOLVED 2026-08-18, and the resolution was the owner's, not mine.
+
+He asked the question that ended three hours of wrong work: *"You made MSI many
+times before, at that time there was no issue. Why is this issue coming up? I
+thought this new issue you solved using the UAC prompt and the user can just
+give the permission."*
+
+Both halves are correct.
+
+**Why the old .msi always built:** it was PER-MACHINE. ICE38 is a rule about
+installing into the USER PROFILE — it never fires for a Program Files install.
+Every .msi up to 1.0.40 built cleanly because none of them tried to be
+per-user. **The ICE38 wall in PROBLEM 139 was self-inflicted**: it appeared the
+moment I set `InstallScope="perUser"`, and it existed only because I was trying
+to make a second install physically impossible.
+
+**And it no longer needs to be impossible.** PROBLEM 141's banner detects a
+second install and removes it with one permission prompt — the mechanism he had
+designed and remembered. Once the conflict is *detected and repairable*, the
+whole reason for a per-user .msi evaporates.
+
+**What shipped in 1.0.54.** The stock per-machine .msi, exactly as before, with
+ONE change to the WiX template: `util:CloseApplication`. That fixes the real
+defect the old .msi always had — PROBLEM 127's silent update deferral over a
+running app — and it needs only `wix.template`, a stock Tauri feature. **No
+forked bundler, no `-sice`, no suppressed validation.** `tools/` and the
+patched-CLI tree are deleted; PROBLEM 140's recipe stays recorded in case a
+per-user .msi is ever genuinely wanted.
+
+Verified from the MSI's own tables rather than by scanning its bytes — an .msi
+is a compound document, so string absence proves nothing (PROBLEM 126's lesson,
+which an ASCII scan here duly "failed" before the table query confirmed the
+opposite):
+
+```
+WixCloseApplication : CloseSpaceadom | spaceadom.exe | 33
+CustomAction        : WixCloseApplications (1), WixCloseApplicationsDeferred (3073)
+InstallExecuteSeq   : WixCloseApplications @ 3999   (immediately before InstallFiles)
+Scope               : ALLUSERS=1, INSTALLDIR under ProgramFiles64Folder
+```
+
+**NOT verified: a live silent install over a running app.** The UAC prompt for
+that test was cancelled, so PROBLEM 127's cure is confirmed structurally
+(the action exists and is sequenced before file copy) and NOT behaviourally.
+Say so rather than implying otherwise.
+
+**And a second occurrence of the same config trap, worth its own line.**
+`tauri.conf.json` ended up with TWO `"wix"` blocks — twice — because a regex
+insert added one while a block already existed. Duplicate JSON keys are legal:
+the parser silently keeps the last, so the template pointer vanished and the
+build produced a stock .msi while the config appeared to say otherwise. Both
+times it was caught only by reading the *effective* parsed value, never by
+reading the file. The fix now parses, mutates the structure, and re-serialises,
+with an explicit duplicate-key detector that printed `duplicate keys found:
+['wix']` on the way through.
+
+**Generalise this.** *When a constraint appears that never existed before, ask
+what changed on YOUR side first.* ICE38 was not a Tauri limitation discovered;
+it was a rule I walked into by changing the install scope. And *a validated
+config is not a verified config* — check the value the program actually
+received, not the text you believe you wrote.

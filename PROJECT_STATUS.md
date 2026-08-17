@@ -1,6 +1,54 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-18 | ~10:15 AM (Claude Opus 5) — the .msi is back, and Nur's question is what fixed it
+
+Recorded as the resolution of PROBLEMS 139/140 in `V14_FIXES_AND_CODE.md`.
+Shipped as 1.0.54, with BOTH installers.
+
+He asked: *"You made MSI many times before, at that time there was no issue.
+Why is this issue coming up? I thought this new issue you solved using the UAC
+prompt and the user can just give the permission."* Both halves right, and it
+ended three hours of wrong work.
+
+**Why the old .msi always built:** it was PER-MACHINE. ICE38 is a rule about
+installing into the USER PROFILE and never fires for Program Files. Every .msi
+up to 1.0.40 built cleanly. The wall in PROBLEM 139 was SELF-INFLICTED — it
+appeared the moment I set `InstallScope="perUser"`, and I only wanted per-user
+to make a second install physically impossible.
+
+**And it does not need to be impossible.** PROBLEM 141's banner detects a second
+install and removes it with one permission prompt — exactly the mechanism he
+remembered designing. Once the conflict is detectable and repairable, the reason
+for a per-user .msi disappears.
+
+**Shipped in 1.0.54:** the stock per-machine .msi with ONE template change,
+`util:CloseApplication`, which fixes the silent-update failure the old .msi
+always had (PROBLEM 127). It needs only `wix.template`, a stock Tauri feature.
+No forked bundler, no `-sice`, no suppressed validation. Both `tools/` and the
+patched-CLI tree are deleted; PROBLEM 140's recipe stays on file.
+
+Verified from the MSI's own tables (`WixCloseApplication`, the two custom
+actions, sequenced at 3999 immediately before InstallFiles, ALLUSERS=1 under
+ProgramFiles64Folder) rather than by scanning bytes — an .msi is a compound
+document, and an ASCII scan duly reported the action ABSENT before the table
+query proved the opposite. PROBLEM 126's lesson, live again.
+
+**NOT verified: a live silent install over a running app.** The UAC prompt for
+that test was cancelled, so PROBLEM 127's cure is confirmed structurally and not
+behaviourally. Recorded as such.
+
+**The same config trap bit twice:** `tauri.conf.json` ended up with TWO `"wix"`
+blocks, because a regex insert added one where a block already existed.
+Duplicate JSON keys are legal — the parser keeps the last silently — so the
+template pointer vanished and the build produced a stock .msi while the config
+looked right. Caught both times only by printing the EFFECTIVE parsed value. The
+fix now parses, mutates and re-serialises, with a duplicate-key detector that
+printed `duplicate keys found: ['wix']` on its way past.
+
+— Claude Opus 5
+
+---
 ## Update: 2026-08-18 | ~9:30 AM (Claude Opus 5) — the conflict banner now catches a second INSTALL; the .msi patch works and is deliberately not shipped
 
 Full technical record: PROBLEMS 140 and 141 in `V14_FIXES_AND_CODE.md`. Shipped
