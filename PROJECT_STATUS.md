@@ -1,6 +1,59 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-17 | ~9:40 PM (Claude Opus 5) — 1.0.43: the watchdog spent 20 minutes doing a repair that could not work
+
+Full technical record: PROBLEM 132 in `V14_FIXES_AND_CODE.md`.
+
+Nur reported, again and with justified irritation, that shortcuts stop working
+inside the app and that this keeps coming back. He was right that it was
+documented — PROJECT_STATUS 2026-08-16 left it OPEN with the note *"Do not
+close this out; it needs the condition it fails under to be captured, not a
+theory."* This time the log covered the failure while it was happening.
+
+```
+20:36:22 .. 20:55:22   one WATCHDOG alarm every 60s, unbroken
+                       kb 60000ms / mouse 60000ms  (neither hook saw ANYTHING)
+                       user active 0-16ms ago
+                       reinstall ok: true   ... twenty times
+session total: watchdog-reinstalls:24
+```
+
+Three defects, all in the recovery path, none of them in the hook itself:
+
+1. **The repair could not work.** Re-hooking was the only move the watchdog
+   had. A hook proc fires on the thread that INSTALLED it, so if that thread's
+   message pump is wedged, a new hook on it never fires. `reinstall ok: true`
+   only means SetWindowsHookEx returned a handle.
+2. **The log blamed a cause the code had already excluded** — "usually means an
+   elevated window has focus (UIPI)" printed on a path that returns early when
+   the foreground IS elevated. Two investigations read that and went looking at
+   elevation. That line cost more than it ever explained.
+3. **The reported case was the uninstrumented case.** The elevation check is
+   guarded by `pid != std::process::id()`, so when Spaceadom's OWN window had
+   focus it was skipped entirely — the exact scenario in the bug report.
+
+Fixed by escalating instead of repeating: after two consecutive blind
+reinstalls (~2 min) the whole hook thread is torn down and PROBLEM 82's
+supervisor rebuilds it with a fresh message pump. The alarm now names the
+foreground window instead of guessing at it.
+
+**Stated plainly: the escalation branch has never executed.** That is PROBLEM
+118's shape and I am not repeating its claim. The difference is blast radius —
+worst case here is an unnecessary thread restart costing microseconds, where
+118's branch could disable a working overlay. Shipped and instrumented, not
+fixed. The next occurrence proves it either way.
+
+**Also confirmed today, separately: the HUD/toast self-heal WORKED.** At
+21:13:31 the compositing self-test hit 3 strikes while already in software
+mode, rebuilt the overlay, and the HUD came back — which is why Nur saw it fail
+and then start working. That is the 1.0.42 detector firing in software mode for
+the first time. The cost is that it takes three failed shortcut presses to
+trigger, which is what he experienced as "it's broken".
+
+— Claude Opus 5
+
+---
 ## Update: 2026-08-17 | ~8:10 PM (Claude Opus 5) — 1.0.42: the next crash will name itself
 
 Full technical record: PROBLEM 131 part 2 in `V14_FIXES_AND_CODE.md`.

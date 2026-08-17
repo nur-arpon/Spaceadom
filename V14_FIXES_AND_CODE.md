@@ -5995,3 +5995,135 @@ the crash.
 dies — expect roughly two more per day until it is actually fixed. What changes
 is that the next one names its own cause instead of printing `<unknown>` twelve
 times.
+
+---
+
+## PROBLEM 132 — "shortcuts do not work inside the app": the watchdog spent 20 minutes performing a repair that could not work, and logged success every time
+
+**Reported by the owner, again, on 2026-08-17 21:12** — *"Now again the
+shortcuts are not working while inside the app... this is repeating, sometimes
+it's working, sometimes it's not."* He was right to be annoyed: this symptom
+has been reported repeatedly, investigated twice, and closed neither time.
+PROJECT_STATUS 2026-08-16 explicitly left it open with the instruction *"Do not
+close this out; it needs the condition it fails under to be captured, not a
+theory."* This is that capture.
+
+**The measurement that had never been taken.** Every previous look sampled the
+log AFTER the fact. This time the log covered the failure as it happened:
+
+```
+20:36:22  WATCHDOG  kb 12000ms / mouse  9375ms   reinstall ok: true
+20:37:22  WATCHDOG  kb 60000ms / mouse 30734ms   reinstall ok: true
+20:38:22  WATCHDOG  kb 60000ms / mouse 60000ms   reinstall ok: true
+   ... one alarm every 60s, unbroken ...
+20:55:22  WATCHDOG  kb 60000ms / mouse 60000ms   reinstall ok: true
+```
+
+**Twenty consecutive minutes in which neither hook saw a single event**, while
+`GetLastInputInfo` reported the user active 0-16ms earlier, and the repair
+reported success twenty times. Session totals: `watchdog-reinstalls:24`, and
+`0 of them while the Spaceadom window itself had focus` on every reading of the
+PROBLEM 104 counter — the keys it did see came from his other apps.
+
+**Root cause — three defects, all in the recovery path.**
+
+**(1) The repair could not work, and could never report that.** Re-hooking was
+the watchdog's ONLY move. But a low-level hook proc fires on the thread that
+INSTALLED it, so if that thread's message pump is what is wedged, a fresh hook
+on the same wedged pump is a fresh hook that never fires. `reinstall ok: true`
+means only that `SetWindowsHookEx` returned a handle; it says nothing about
+whether events will arrive. The watchdog therefore repeated a failing move once
+a minute, indefinitely, announcing success each time.
+
+**(2) The log named a cause the code had already excluded.** The alarm read
+*"Usually means an elevated window has focus (UIPI), which a reinstall cannot
+fix"* — but the block immediately above it RULES ELEVATION OUT and returns
+early when the foreground process is elevated. If that sentence is ever
+printed, UIPI is the one thing it cannot be. Two separate investigations read
+that line and went looking at elevation. **A log that asserts a cause the code
+has already excluded is worse than a log that says nothing: it is a signpost
+pointing away from the answer, and it carries the authority of the program.**
+
+**(3) The one case the owner keeps reporting was the one case with no
+diagnosis at all.** The elevation discriminator is guarded by
+`pid != std::process::id()` — so when *Spaceadom's own window* is in the
+foreground, the check is skipped entirely and control falls straight through to
+the "evicted" verdict with no evidence gathered either way. The exact scenario
+in the bug report was the exact scenario the instrumentation ignored.
+
+**Exact file.** `src-tauri/src/hook/mod.rs`.
+
+*Escalation — stop repeating a move that has already failed twice:*
+
+```rust
+let streak = BLIND_REINSTALLS.fetch_add(1, Ordering::Relaxed) + 1;
+if streak >= 2 {
+    BLIND_REINSTALLS.store(0, Ordering::Relaxed);
+    let own = BLIND_WHILE_OWN_FG.swap(0, Ordering::Relaxed);
+    log::error!(
+        "hook: {streak} reinstalls in a row and STILL no events - re-hooking has \
+         failed, so the ENTIRE hook thread is being restarted (fresh message pump). \
+         Foreground: {fg}. Alarms while Spaceadom's OWN window had focus: {own}."
+    );
+    ESCALATE_RESTART.store(true, Ordering::Relaxed);
+}
+```
+
+*The pump acts on it. Leaving the pump IS the repair:*
+
+```rust
+if ESCALATE_RESTART.swap(false, Ordering::Relaxed) {
+    let _ = KillTimer(None, timer_id);
+    let _ = UnhookWindowsHookEx(kb_hook);
+    let _ = UnhookWindowsHookEx(ms_hook);
+    HOOK_INSTALLED.store(false, Ordering::Relaxed);
+    return;               // HOOK_SHUTDOWN stays false -> PROBLEM 82's
+}                         // supervisor rebuilds the thread from scratch
+```
+
+`HOOK_SHUTDOWN` staying false is load-bearing: it is exactly what distinguishes
+this from a deliberate exit, so the supervisor treats it as a crash and builds a
+NEW thread with a NEW message queue and NEW hooks — the only repair that can
+survive a wedged pump. The supervisor's existing 5-restarts-per-10-minutes cap
+bounds it, so escalation cannot become a spin loop. Streak resets to 0 the
+moment any event arrives, so this only ever fires for CONTINUOUS blindness
+(~2 minutes), never for a one-off.
+
+*And the alarm now names the window instead of guessing:*
+
+```rust
+fn foreground_desc() -> String { ... }   // "chrome.exe (pid 1234)"
+                                         // "spaceadom.exe <- SPACEADOM'S OWN WINDOW"
+                                         // "<none - secure desktop or desktop switch>"
+```
+
+`PROCESS_QUERY_LIMITED_INFORMATION`, deliberately, not the full flavour: the
+LIMITED one SUCCEEDS against an elevated process from medium integrity, which is
+the whole point — we want the name even when that window is the reason we are
+deaf. Safe here and only here, on the WM_TIMER branch of the pump rather than in
+a hook callback, so its round-trip cannot trip LowLevelHooksTimeout.
+
+**How it was verified — and what is NOT verified.** Compiles clean, 0 warnings;
+13 tests pass; built, installed unelevated over the running 1.0.42, and both
+new strings confirmed present in the INSTALLED binary by ASCII scan
+(`reinstalls in a row`, `SPACEADOM'S OWN WINDOW`).
+
+**The escalation branch has never executed.** That is PROBLEM 118's exact
+shape — shipping a recovery path that has never run once — and it is stated
+here rather than glossed. What makes it acceptable this time: the branch's
+failure mode is bounded (worst case, the hook thread restarts unnecessarily,
+which costs microseconds and is what the supervisor already does on a panic),
+where PROBLEM 118's branch could DISABLE a working overlay. It is not called
+fixed. It is called shipped and instrumented. Confirmation requires the next
+occurrence to show either the escalation line followed by recovery, or the
+alarm naming a foreground window we did not expect.
+
+**Generalise this.** *A repair that reports success without checking that it
+worked is not a repair, it is a ritual.* `reinstall ok: true` asked the API
+whether it accepted the call, never whether events resumed — and a health check
+that can only ever say "fine" will happily narrate a 20-minute outage. Verify
+the OUTCOME, and when a repair fails twice, escalate instead of repeating: the
+second identical failure is evidence about the repair, not about the fault.
+Also: **guard clauses hide their exceptions.** `if pid != self` looked like an
+optimisation and was actually a blind spot aimed precisely at the case being
+investigated.

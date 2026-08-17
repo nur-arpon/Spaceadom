@@ -227,6 +227,22 @@ static WATCHDOG_LAST_REINSTALL: AtomicU64 = AtomicU64::new(0);
 /// independently, and our keyboard callback is the heavy one — a dead
 /// keyboard hook with a live mouse hook is the realistic failure.
 static LAST_MS_EVENT: AtomicU64 = AtomicU64::new(0);
+/// PROBLEM 132 — consecutive watchdog reinstalls with NO hook event in
+/// between. The 2026-08-17 outage ran 20 unbroken minutes at one reinstall a
+/// minute, each logging `reinstall ok: true`, because re-hooking is the only
+/// move the watchdog had. A hook proc only fires on the thread that installed
+/// it, so if THAT THREAD's message pump is the thing that is wedged,
+/// SetWindowsHookEx on it can never help — it succeeds and delivers nothing.
+static BLIND_REINSTALLS: AtomicU32 = AtomicU32::new(0);
+/// PROBLEM 132 — how many alarms fired while OUR OWN window held the
+/// foreground. This is the owner's exact repeated report ("shortcuts do not
+/// work inside the app"), and until now it was the ONE case the watchdog could
+/// not describe: the UIPI discriminator skips self-focus, so it fell straight
+/// through to the eviction verdict with no evidence either way.
+static BLIND_WHILE_OWN_FG: AtomicU32 = AtomicU32::new(0);
+/// Set by the watchdog, read by the message pump: tear this whole thread down
+/// so the PROBLEM 82 supervisor rebuilds it with a fresh pump and fresh hooks.
+static ESCALATE_RESTART: AtomicBool = AtomicBool::new(false);
 /// `true` while the WH_KEYBOARD_LL hook is believed installed. Set by the
 /// hook thread; read by get_hook_status so the dashboard tells the truth
 /// (it used to hardcode `installed: true`).
@@ -408,6 +424,17 @@ fn hook_thread_main(tx: Sender<HookEvent>) {
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             if msg.message == WM_TIMER && msg.wParam.0 == timer_id {
                 watchdog_check(&mut kb_hook, &mut ms_hook);
+                // PROBLEM 132 - returning here IS the repair, not a failure.
+                // HOOK_SHUTDOWN stays false, and that is precisely what tells
+                // the supervisor this exit was not deliberate, so it rebuilds
+                // the thread immediately with a fresh message queue.
+                if ESCALATE_RESTART.swap(false, Ordering::Relaxed) {
+                    let _ = KillTimer(None, timer_id);
+                    let _ = UnhookWindowsHookEx(kb_hook);
+                    let _ = UnhookWindowsHookEx(ms_hook);
+                    HOOK_INSTALLED.store(false, Ordering::Relaxed);
+                    return;
+                }
                 continue;
             }
             let _ = TranslateMessage(&msg);
@@ -477,6 +504,68 @@ fn millis_since_last_input() -> u64 {
 ///    long window exists because "mouse active, no typing" is a normal way
 ///    to read a page; the price of the occasional false positive is a sub-ms
 ///    unhook/rehook, which is harmless.
+/// PROBLEM 132 — WHICH window has the foreground, by name.
+///
+/// The watchdog used to log "Usually means an elevated window has focus
+/// (UIPI)" on every alarm. That sentence is wrong by construction: the code
+/// immediately above it RULES ELEVATION OUT before it can be reached. Weeks of
+/// investigation went past this line and believed it. A log that asserts a
+/// cause the code already excluded is worse than one that says nothing —
+/// it is a signpost pointing away from the answer.
+///
+/// Safe here and ONLY here: this runs on the WM_TIMER branch of the pump, not
+/// in a hook callback, so an OpenProcess round-trip cannot trip
+/// LowLevelHooksTimeout.
+#[cfg(windows)]
+fn foreground_desc() -> String {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.0.is_null() {
+            return "<none - secure desktop or desktop switch>".to_string();
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(fg, Some(&mut pid));
+        if pid == 0 {
+            return "<foreground window reports no pid>".to_string();
+        }
+        let is_self = pid == std::process::id();
+        let mut name = String::new();
+        // LIMITED, not PROCESS_QUERY_INFORMATION: this one SUCCEEDS against an
+        // elevated process from medium integrity, which is the point — we want
+        // the name even when the window is the reason we are deaf.
+        if let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+            let mut buf = [0u16; 260];
+            let mut len = buf.len() as u32;
+            if QueryFullProcessImageNameW(
+                h,
+                PROCESS_NAME_WIN32,
+                windows::core::PWSTR(buf.as_mut_ptr()),
+                &mut len,
+            )
+            .is_ok()
+            {
+                let full = String::from_utf16_lossy(&buf[..len as usize]);
+                name = full.rsplit(std::path::MAIN_SEPARATOR).next().unwrap_or("").to_string();
+            }
+            let _ = CloseHandle(h);
+        }
+        if name.is_empty() {
+            name = format!("pid {pid}");
+        }
+        if is_self {
+            format!("{name} <- SPACEADOM'S OWN WINDOW")
+        } else {
+            format!("{name} (pid {pid})")
+        }
+    }
+}
+
 #[cfg(windows)]
 unsafe fn watchdog_check(
     kb: &mut windows::Win32::UI::WindowsAndMessaging::HHOOK,
@@ -532,6 +621,12 @@ unsafe fn watchdog_check(
         {
             let mut pid = 0u32;
             GetWindowThreadProcessId(fg, Some(&mut pid));
+            // PROBLEM 132 — when the foreground IS us, the elevation test below
+            // is skipped and we fall through to "evicted". That is the owner's
+            // exact repeated symptom, so COUNT it rather than losing it.
+            if pid != 0 && pid == std::process::id() {
+                BLIND_WHILE_OWN_FG.fetch_add(1, Ordering::Relaxed);
+            }
             if pid != 0 && pid != std::process::id() {
                 match OpenProcess(PROCESS_QUERY_INFORMATION, false, pid) {
                     Ok(h) => {
@@ -576,6 +671,9 @@ unsafe fn watchdog_check(
     // no longer claims it can.
     let both_dead = kb_silence > 8_000 && ms_silence > 8_000;
     if !both_dead {
+        // Events are arriving: whatever was wrong has cleared. Reset the
+        // streak so escalation only ever fires for CONTINUOUS blindness.
+        BLIND_REINSTALLS.store(0, Ordering::Relaxed);
         return;
     }
     WATCHDOG_LAST_REINSTALL.store(now, Ordering::Relaxed);
@@ -589,6 +687,7 @@ unsafe fn watchdog_check(
     SPACE_INTERCEPTED.store(false, Ordering::Relaxed);
     SPACE_ABORTED.store(false, Ordering::Relaxed);
 
+    let fg = foreground_desc();
     let (nkb, nms) = install_hooks();
     *kb = nkb;
     *ms = nms;
@@ -602,11 +701,38 @@ unsafe fn watchdog_check(
     // was OBSERVED and leave the diagnosis open.
     log::warn!(
         "hook: WATCHDOG — user active {user_input_ms}ms ago but NEITHER hook saw anything \
-         (kb {kb_silence}ms / mouse {ms_silence}ms). Usually means an elevated window has \
-         focus (UIPI), which a reinstall cannot fix; reinstalling anyway in case the hook \
-         really was evicted. reinstall ok: {}",
+         (kb {kb_silence}ms / mouse {ms_silence}ms). Foreground: {fg}. Elevation was \
+         ALREADY ruled out above, so this is NOT UIPI. Re-hooking. reinstall ok: {}",
         !nkb.is_invalid()
     );
+
+    // PROBLEM 132 - ESCALATE. Re-hooking was the ONLY repair this watchdog
+    // had, and on 2026-08-17 it ran for 20 unbroken minutes: one alarm a
+    // minute, every one reporting `reinstall ok: true`, while the owner had no
+    // shortcuts at all. That "ok" only means SetWindowsHookEx returned a
+    // handle. It says nothing about whether events will ARRIVE, because a hook
+    // proc fires on the thread that INSTALLED it - so if this thread's message
+    // pump is what is wedged, a fresh hook on the same wedged pump is a fresh
+    // hook that never fires. Repeating it every minute forever is a repair
+    // that cannot work, logging success each time.
+    //
+    // After two consecutive blind reinstalls (~2 min) take the bigger move and
+    // end this thread. The PROBLEM 82 supervisor reads an unexpected pump exit
+    // as a crash and rebuilds it from scratch - new thread, new message queue,
+    // new hooks - which is the only repair that survives a wedged pump. That
+    // supervisor's own 5-restarts-per-10-minutes cap bounds this, so escalation
+    // cannot become a spin loop.
+    let streak = BLIND_REINSTALLS.fetch_add(1, Ordering::Relaxed) + 1;
+    if streak >= 2 {
+        BLIND_REINSTALLS.store(0, Ordering::Relaxed);
+        let own = BLIND_WHILE_OWN_FG.swap(0, Ordering::Relaxed);
+        log::error!(
+            "hook: {streak} reinstalls in a row and STILL no events - re-hooking has failed, \
+             so the ENTIRE hook thread is being restarted (fresh message pump). \
+             Foreground: {fg}. Alarms while Spaceadom's OWN window had focus: {own}."
+        );
+        ESCALATE_RESTART.store(true, Ordering::Relaxed);
+    }
 }
 
 #[cfg(not(windows))]
