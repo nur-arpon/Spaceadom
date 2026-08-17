@@ -1,6 +1,36 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-17 | ~9:55 PM (Claude Opus 5) — asked whether we froze Brave; found a guard that had never fired
+
+Full technical record: PROBLEM 133 in `V14_FIXES_AND_CODE.md`. Shipped as 1.0.44.
+
+**Answer to the question asked: for that freeze, no.** Spaceadom did not touch
+Brave between 21:09:52 and 21:28:52, and at 21:28:52 it LAUNCHED Brave — so
+Brave was already gone before we did anything. The cascade only runs when a
+shortcut fires, and none targeted Brave in that window.
+
+**The check produced a worse finding than the complaint.** The PROBLEM 121
+hung-app guard — added in 1.0.35 precisely because he reported Brave and
+Discord freezing — **has never fired once in the entire log**, across 100+
+focus/restore operations that were almost all Brave and Discord.
+
+It was guarding `fg_before`, the window being switched AWAY from, while
+`BringWindowToTop(hwnd)` and `SetForegroundWindow(hwnd)` reach into the TARGET
+with no check at all. `fg_before` is normally the healthy window he is looking
+at; the sick one is whatever he just aimed a shortcut at — you press Space+B
+*because* Brave stopped responding. So the guard inspected the well window on
+every call, reported all clear, and the unguarded line below reached straight
+into the sick one. Two code reviews passed it because a guard named for the
+right bug reads as covering it.
+
+Now checks the target as well. Left alone deliberately: `ShowWindow(SW_RESTORE)`
+earlier in the cascade can also block on a wedged thread, but widening the fix
+past the two documented blockers without evidence is how PROBLEM 118 happened.
+
+— Claude Opus 5
+
+---
 ## Update: 2026-08-17 | ~9:40 PM (Claude Opus 5) — 1.0.43: the watchdog spent 20 minutes doing a repair that could not work
 
 Full technical record: PROBLEM 132 in `V14_FIXES_AND_CODE.md`.

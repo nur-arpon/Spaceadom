@@ -6127,3 +6127,102 @@ second identical failure is evidence about the repair, not about the fault.
 Also: **guard clauses hide their exceptions.** `if pid != self` looked like an
 optimisation and was actually a blind spot aimed precisely at the case being
 investigated.
+
+---
+
+## PROBLEM 133 — the anti-freeze guard was watching the wrong window, and had never fired once
+
+**Reported by the owner 2026-08-17 21:33:** *"something made brave freeze,
+check if its my app which was the culprit"* — the "say so if it happens again"
+that PROBLEM 121 explicitly asked for.
+
+**First, the answer to his actual question: for THAT freeze, no.** The log is
+unambiguous:
+
+```
+21:09:52          last Spaceadom interaction with Brave (Restore/Minimize)
+21:15 .. 21:28:52 no Brave activity of any kind
+21:28:52          Space+B -> "cascade: LAUNCHING brave.exe"   <- already gone
+21:33:41          every Brave process Responding = True
+```
+
+Spaceadom LAUNCHED Brave at 21:28:52, so Brave had already died or been closed,
+and nothing in this app touched it for the preceding 19 minutes. The cascade
+only runs when a shortcut fires, and no shortcut targeted Brave in that window.
+
+**But checking produced a worse finding than the one being investigated.**
+
+```
+has the PROBLEM 121 hung-app guard EVER fired?   ->   NEVER, in the entire log
+```
+
+Not once, across 100+ focus/restore operations, almost all of them Brave and
+Discord — the exact two applications reported as freezing. A guard with that
+much exposure and zero firings is not a guard that found nothing. It is a guard
+aimed at the wrong window.
+
+**Root cause.** `force_foreground` checks the OUTGOING foreground:
+
+```rust
+let fg_hung = IsHungAppWindow(fg_before).as_bool();     // window we leave
+let attached = fg_thread != my_thread && fg_thread != 0 && !fg_hung;
+if attached { AttachThreadInput(my_thread, fg_thread, true); }
+
+let _ = BringWindowToTop(hwnd);        // <-- the TARGET
+let _ = SetForegroundWindow(hwnd);     // <-- never checked for hang
+```
+
+That check is correct for what it covers: `fg_thread` is whose input queue we
+join, so refusing to attach to a wedged one is right. It is also incomplete in
+the direction that matters. `BringWindowToTop` and `SetForegroundWindow` are
+aimed at `hwnd`, the TARGET, and nothing asked whether the target was alive. A
+call into a wedged window's thread blocks the caller — and we may be attached to
+a second thread while it happens, so the stall can reach a third party.
+
+**Why it could never fire.** `fg_before` is normally the healthy window the
+owner is looking at. The sick one is whatever he just aimed a shortcut at — you
+press Space+B *because* Brave is not responding to clicks. The guard therefore
+inspected the well window on every single call and reported all clear, while the
+unguarded line below reached straight into the sick one.
+
+**Exact file.** `src-tauri/src/engine/actions/smart_cascade.rs`, before the
+attach:
+
+```rust
+let target_hung = IsHungAppWindow(hwnd).as_bool();
+if target_hung {
+    log::warn!(
+        "force_foreground: the TARGET window is not responding - not touching it \
+         (PROBLEM 133). Raising a wedged window cannot succeed and risks dragging \
+         Spaceadom down with it. The app is stuck on its own; this shortcut is a \
+         no-op until it recovers."
+    );
+    return;
+}
+```
+
+`IsHungAppWindow` only reports true after ~5s of a thread not pumping, so this
+cannot trigger on a merely busy app. When it does say hung, raising the window
+was never going to work; the only open question was whether we hung too.
+
+**How it was verified.** Compiles clean, 0 warnings; 13 tests pass; installed
+unelevated over the running 1.0.43 and the string confirmed present in the
+INSTALLED binary (`TARGET window is not responding`).
+
+**HONEST LIMITS, both of them.** (1) Like PROBLEM 121 before it, this branch has
+not been observed firing — it needs a genuinely wedged target, which cannot be
+manufactured on demand. Unlike 121, we now know it is pointed at the right
+window, and the same log query that exposed 121 will confirm or refute this one.
+(2) `ShowWindow(SW_RESTORE)` on a minimised target is NOT covered by this guard.
+It runs earlier in the cascade and can also block on a wedged thread. It is left
+alone deliberately rather than guessed at — this fix addresses the two calls
+that are documented blockers, and widening it further without evidence is how
+PROBLEM 118 happened.
+
+**Generalise this.** *A safety check that has never fired deserves an
+investigation, not confidence.* The natural reading of "zero occurrences" is
+"the problem is rare"; the equally likely reading is "the check cannot see the
+problem". They are distinguishable only by asking what the check actually
+inspects versus what the dangerous line actually touches — and those had drifted
+one variable apart here (`fg_before` vs `hwnd`). It also passed code review
+twice, because a guard named for the right bug reads as covering it.

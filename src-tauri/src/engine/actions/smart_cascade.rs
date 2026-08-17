@@ -394,6 +394,36 @@ unsafe fn force_foreground(hwnd: windows::Win32::Foundation::HWND) {
     // attach. The only cost is that SetForegroundWindow may lose the focus
     // race against a Windows lock — a shortcut that does not raise a window,
     // versus a shortcut that can freeze the window it was aimed at.
+    // PROBLEM 133 - the TARGET must be checked too, and it is the one that
+    // matters for the reported symptom.
+    //
+    // PROBLEM 121 (above) guards the window we are switching AWAY from,
+    // because that is whose input queue AttachThreadInput joins. Correct, but
+    // incomplete: `BringWindowToTop` and `SetForegroundWindow` below are aimed
+    // at `hwnd`, the TARGET, and nothing asked whether IT was alive. A call
+    // into a wedged window's thread blocks the caller - and we may be attached
+    // to a second thread at the time, so the stall spreads to a third party.
+    //
+    // The evidence that this was the real gap: `fg_before` is normally the
+    // healthy window the owner is looking at, while the sick one is whatever
+    // he just aimed a shortcut at. So the guard sat on the wrong window and
+    // NEVER FIRED ONCE in the entire log - 100+ focus/restore operations,
+    // almost all Brave and Discord, the exact two apps reported as freezing.
+    // A protection that cannot fire is indistinguishable from no protection,
+    // and it reads as covered in a code review.
+    //
+    // IsHungAppWindow only reports true after ~5s of a thread not pumping, so
+    // this cannot trigger on a merely busy app. If it says hung, raising the
+    // window was never going to work anyway; the only question was whether we
+    // hung too.
+    let target_hung = IsHungAppWindow(hwnd).as_bool();
+    if target_hung {
+        log::warn!(
+            "force_foreground: the TARGET window is not responding - not touching it              (PROBLEM 133). Raising a wedged window cannot succeed and risks dragging              Spaceadom down with it. The app is stuck on its own; this shortcut is a              no-op until it recovers."
+        );
+        return;
+    }
+
     let fg_hung = IsHungAppWindow(fg_before).as_bool();
     if fg_hung {
         log::warn!(
