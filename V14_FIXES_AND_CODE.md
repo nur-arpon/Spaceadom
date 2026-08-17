@@ -5459,15 +5459,28 @@ open for later, so force-closing loses nothing.
 **How it was verified.** Wiring proven in the generated script
 (`target/release/nsis/x64/installer.nsi` line 632-633 inserts the macro; string
 absence in the compressed setup.exe proves nothing — PROBLEM 126's lesson).
-The BEHAVIOUR — a silent setup.exe upgrade over a running app landing
-correctly — is being tested by the owner with 1.0.39 as of this writing and is
-NOT yet confirmed.
+**CONFIRMED FIXED 2026-08-17 19:11.** The 1.0.41 setup.exe was run `/S` from a
+NON-elevated shell with 1.0.40 running. Exit 0, and — the part that matters —
+the on-disk binary actually changed:
 
-**KNOWN GAP.** This fixes the NSIS `setup.exe` only. Tauri v2 has no
-`installerHooks` equivalent for WiX, so the `.msi` still defers silently over a
-running app. The setup.exe is what users download and what 10.2.9 accepts; if
-the MSI ever becomes the shipped artifact, it needs a WiX
-`util:CloseApplication` custom action.
+```
+whoami elevated : False
+exit code       : 0
+before          : 1.0.40   (app running)
+after           : 1.0.41   written 19:11:04
+content marker  : "PANIC on thread" present
+```
+
+That is the first time an upgrade over a running Spaceadom has been observed to
+land. The four earlier "successes" all left the old exe in place.
+
+**FORMER KNOWN GAP — now closed by removal.** The hook covers the NSIS
+`setup.exe` only; Tauri v2 has no `installerHooks` equivalent for WiX, so the
+`.msi` kept deferring silently over a running app. Rather than leave a shipped
+artifact with a known silent-failure mode, **the `msi` target was removed** in
+1.0.41 (`tauri.conf.json` → `bundle.targets: ["nsis"]`). See PROBLEM 129 — the
+MSI also turned out to be the source of a worse fault. If the MSI is ever
+restored it needs a WiX `util:CloseApplication` custom action FIRST.
 
 **Generalise this.** *An installer's exit code is a claim about the installer,
 not about the machine.* Verify by reading the installed artifact — version
@@ -5525,13 +5538,238 @@ small laptop 1366x768               1.15x        1.07x          12px           9
 margins, lower = airier. 0.5 is a first guess awaiting the owner's eyes, not a
 measured optimum.
 
-**How it was verified.** Arithmetic verified against the four display cases
-above; `tsc` clean; shipped in 1.0.39. NOT yet judged visually — that verdict
-belongs to the owner on his own screens.
+**SUPERSEDED BEFORE IT WAS EVER SEEN.** The `GROWTH` build (1.0.39) never
+reached the owner's screen — PROBLEM 127's silent MSI deferral kept 1.0.37 on
+disk — so his "still the same size" was a verdict on the OLD scaling, not on
+this formula. He then specified the design himself: *"make the keyboard layout
+0.75 times of what is running right now."* That is a cleaner rule than
+`GROWTH`: board = room x FILL, so the margin is always 25% of the available
+space, on every display, above and below the design size alike.
+
+```ts
+const FILL = 0.75;
+const MAX_SCALE = 2.0;
+const room = Math.min(r.width / DESIGN_W, r.height / DESIGN_H);
+const s = Math.min(MAX_SCALE, room * FILL);
+```
+
+Computed against his real displays:
+
+```
+                                board GROWTH   board now   margin now
+laptop 2560x1600 @150%             1.22x         1.10x        383px
+external 1920x1080                 1.32x         1.24x        432px
+external 2560x1440                 1.60x         1.66x        579px
+small laptop 1366x768              1.07x         0.87x        304px
+```
+
+Note the last row: small screens now ALSO get the proportional margin instead
+of filling to 12px — a deliberate reading of "scale up or down depending on the
+size of the display", flagged to the owner rather than slipped in.
+
+**How it was verified.** Arithmetic against the four display cases; `tsc`
+clean; shipped in 1.0.40 and carried into 1.0.41. `FILL` is the single knob if
+0.75 needs adjusting. The visual verdict belongs to the owner's eyes on his own
+screens and is NOT yet given.
 
 **Generalise this.** *When a user says "proportionate", the margins are part of
 the proportion.* A layout that pins its padding while scaling its content
 reads as cramped at exactly the sizes where it was meant to shine. And a fix
 that inverts a complaint (too small → too big) usually means the constraint
 was moved to the opposite extreme instead of being related to the thing it
-should track.
+should track. Also: **never take a verdict on a build you have not proven is
+the one running** — PROBLEM 127 turned this fix into wasted work twice over.
+
+---
+
+## PROBLEM 129 — shipping two installers put TWO copies of the app on one machine, each starting itself at logon
+
+**Symptom.** Found by inspection on 2026-08-17, not by a crash — which is what
+makes it worth writing down. The owner's machine held:
+
+```
+HKLM: v1.0.37 -> C:\Program Files\Spaceadom\        (from the .msi)
+HKCU: v1.0.40 -> %LOCALAPPDATA%\Spaceadom\          (from the setup.exe)
+```
+
+And the running app's own log named the consequence:
+
+```
+startup: task 'Spaceadom' is from an OLDER build (wrong exe or no --autostart)
+         and this process cannot remove it (Access denied — it was created
+         elevated).
+startup: HKCU Run autostart set -> "...\AppData\Local\Spaceadom\spaceadom.exe"
+         --autostart
+```
+
+At the next logon **both** would have started: the stale elevated Scheduled
+Task launching 1.0.37, and the HKCU Run value launching 1.0.40. Two processes,
+two `WH_KEYBOARD_LL` hooks, both claiming the spacebar. The symptom a user
+would report is not "two apps are running" — it is *"Space+D opens Discord
+twice"*, or *"my settings keep reverting"* (two processes writing one
+`config.json`), or a spacebar that stutters. Nothing in that description points
+at the installer.
+
+**Root cause.** Two things, and only the second is really a bug:
+
+1. `bundle.targets` shipped both `msi` and `nsis`. Tauri's WiX bundler installs
+   **per-machine** (elevated, Program Files); its NSIS bundler defaults to
+   **per-user** (`%LOCALAPPDATA%`). They write different uninstall keys, so
+   neither installer can see — let alone remove — the other's copy. Installing
+   both is not an upgrade, it is an addition.
+2. The elevated Scheduled Task was the deeper trap. The app creates its own
+   autostart, but a task created by an ELEVATED process cannot be deleted by
+   the non-elevated one (PROBLEM 61 removed elevation deliberately). So the app
+   could detect that its autostart was stale, log it correctly, and be
+   powerless to fix it — permanently, on every subsequent launch.
+
+**Exact file.** `src-tauri/tauri.conf.json`:
+
+```jsonc
+// before
+"targets": [ "msi", "nsis" ],
+"nsis": { "installerHooks": "installer-hooks.nsh" }
+
+// after
+"targets": [ "nsis" ],
+"nsis": {
+  "installerHooks": "installer-hooks.nsh",
+  "installMode": "currentUser"    // Tauri's default; now it is WRITTEN DOWN
+}
+```
+
+`installMode` was already the effective behaviour. It is stated explicitly
+because *a default that is never written down is a default that can change
+under you* between Tauri versions — and this one decides whether the app lands
+in Program Files or `%LOCALAPPDATA%`.
+
+**Why per-user, and what it costs.** Chosen by the owner from a direct
+question. Per-user means: no UAC on any install or update ever again; no
+Program Files write permission needed; every update lands in a folder the app
+already owns. It costs the `.msi` that some IT departments require for fleet
+deployment, and it installs for one Windows user rather than all of them. For a
+single-user desktop utility that updates often, that trade is correct. Restoring
+the MSI later means writing a custom WiX template with `InstallScope="perUser"`
+— Tauri exposes no option for it.
+
+**The machine was repaired, not just the config.** A config fix does not undo an
+install that already happened. `scratchpad/go-per-user.ps1` stopped every
+process, deleted the elevated task, ran `msiexec /X` on the per-machine product
+code, removed the leftover Program Files folder, and re-pointed HKCU Run at the
+per-user exe. Result:
+
+```
+per-machine exe : gone
+per-user exe    : v1.0.40 -> v1.0.41
+logon task      : gone (correct — per-user autostart uses the Run key)
+running         : 1 instance
+```
+
+**How it was verified.** Registry and filesystem read back after the repair
+(shown above), then 1.0.41 installed `/S` from a **non-elevated** shell over the
+running app — exit 0, disk binary confirmed at 1.0.41 by version stamp AND
+content marker, one process running, no HKLM entry and no task recreated.
+
+**Generalise this — installer edition.** *Two installers for one app is two apps.* Any autostart
+mechanism — Run key, Scheduled Task, Startup folder — is a claim on the machine
+that outlives the install that made it, so shipping two install scopes means
+shipping a race with no owner. And **never create a persistent artifact at a
+privilege level your normal runtime cannot revoke**: an elevated task made by a
+non-elevated app is a message the app can read forever and never act on. This is
+the same family as PROBLEMS 118, 120 and 113 — *a stale thing outliving the
+thing that replaced it* — but at the level of the installer rather than the
+process.
+
+---
+
+## PROBLEM 130 — a test that passed alone and failed in the suite: four tests sharing one global
+
+**Symptom.** `cargo test --lib` on 1.0.41, immediately before tagging:
+
+```
+test engine::actions::opacity::floor_tests::clamps_a_config_above_the_slider_maximum ... FAILED
+test result: FAILED. 10 passed; 1 failed
+```
+
+Running that single test on its own: **passes**. Running the whole suite:
+fails. That combination is the signature, and it is worth learning to read —
+"passes in isolation, fails together" is never about the assertion, it is
+always about something shared.
+
+**Root cause.** All four PROBLEM 119 tests drove the real global:
+
+```rust
+fn with(pct: u8) -> u8 {
+    OPACITY_FLOOR_PCT.store(pct, Ordering::Relaxed);   // <-- one static
+    floor_alpha()                                      //     shared by all
+}
+```
+
+Cargo runs a crate's tests **in one process, on parallel threads**, by default.
+`always_leaves_headroom_for_a_step` loops storing 0..=255 into that static
+while `clamps_a_config_above_the_slider_maximum` is midway through
+`assert_eq!(with(100), with(90))` — the second `with` reads a value the *other
+thread* wrote. Nothing is wrong with the app: in production there is exactly
+one writer (config load, `save_config`, `undo_last_change`), never two at once.
+The test harness invented a concurrency that the product does not have.
+
+**Why this mattered more than a red line.** It is intermittent by construction
+— thread scheduling decides it. It had been green on every previous run. On
+GitHub Actions it would fail on some pushes and not others, and the natural
+response to a flaky test is to re-run the job until it goes green, which
+teaches everyone to ignore the one automated check this project has.
+
+**Exact file.** `src-tauri/src/engine/actions/opacity.rs` — split the
+arithmetic out of the global so there is nothing left to share:
+
+```rust
+// before: the only entry point read the static
+fn floor_alpha() -> u8 {
+    let pct = OPACITY_FLOOR_PCT.load(Ordering::Relaxed).clamp(10, 90) as u16;
+    ((pct * 255) / 100) as u8
+}
+
+// after: pure arithmetic, plus a thin reader
+const fn floor_alpha_for(pct: u8) -> u8 {
+    let pct = if pct < 10 { 10 } else if pct > 90 { 90 } else { pct } as u16;
+    ((pct * 255) / 100) as u8
+}
+fn floor_alpha() -> u8 {
+    floor_alpha_for(OPACITY_FLOOR_PCT.load(Ordering::Relaxed))
+}
+```
+
+The three arithmetic tests now call `floor_alpha_for` and are order-independent
+by construction — not by convention, not by a comment asking future authors to
+be careful.
+
+**A test was ADDED, not just repaired.** Making the tests pure would have left
+the arithmetic proven and the WIRING unproven — and PROBLEM 119 was a wiring
+bug: a slider that saved a number no code ever read. So one test still owns the
+global, deliberately and exclusively, and asserts the connection:
+
+```rust
+#[test]
+fn the_configured_value_is_the_one_actually_used() {
+    for pct in [10u8, 25, 50, 90] {
+        OPACITY_FLOOR_PCT.store(pct, Ordering::Relaxed);
+        assert_eq!(floor_alpha(), floor_alpha_for(pct),
+            "floor_alpha() ignored the configured {pct}% — the slider is dead again");
+    }
+    OPACITY_FLOOR_PCT.store(25, Ordering::Relaxed); // leave the default behind
+}
+```
+
+Its doc comment states that it must remain the only test touching that static.
+
+**How it was verified.** The full suite run **five consecutive times**, 12/12
+passing each time — because one green run is exactly what a race gives you most
+of the time. `cargo build --release` clean, 0 warnings.
+
+**Generalise this.** *"Passes alone, fails together" means shared state, every
+time* — look for a `static`, a file, an env var or a port before re-reading the
+assertion. Prefer a pure function taking its input as an argument over one
+reaching for a global; it is testable without ceremony and cannot go flaky. And
+when you make something pure to test it, **check what the purity stopped
+testing** — here, the exact defect the tests existed to catch would have walked
+straight through.

@@ -1,6 +1,73 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-17 | ~7:15 PM (Claude Opus 5) — one app, one install: the MSI is gone and updates no longer ask for admin
+
+Full technical record: PROBLEM 129 in `V14_FIXES_AND_CODE.md`, plus the closed
+gap on PROBLEM 127. Shipped as **1.0.41**.
+
+**What was actually wrong.** Not a crash — this was found by reading the
+machine's own registry. Spaceadom was installed TWICE: v1.0.37 per-machine in
+`C:\Program Files\Spaceadom` (from the `.msi`) and v1.0.40 per-user in
+`%LOCALAPPDATA%\Spaceadom` (from the `setup.exe`). Tauri's two bundlers use
+different install scopes and different uninstall keys, so neither one can see
+the other. The app's own log had been reporting the consequence for a while:
+
+```
+startup: task 'Spaceadom' is from an OLDER build ... and this process cannot
+         remove it (Access denied — it was created elevated).
+startup: HKCU Run autostart set -> ...\AppData\Local\Spaceadom\spaceadom.exe
+```
+
+At the next logon both would have started — a stale elevated Scheduled Task
+launching 1.0.37 and a Run key launching 1.0.41. Two keyboard hooks fighting
+over the spacebar. What the owner would have reported is "Space+D opens Discord
+twice" or "my settings keep reverting", neither of which sounds like an
+installer problem.
+
+**Decision, made by the owner from a direct question: per-user everywhere.**
+So the `msi` target was dropped (`bundle.targets: ["nsis"]`) and
+`nsis.installMode: "currentUser"` is now stated explicitly instead of relied on
+as a default. Cost: no `.msi` for IT-department fleet deployment. Gain: no UAC
+prompt on any install or update, ever again.
+
+**The machine itself was repaired, not just the config** — a config change does
+not undo an install that already happened. Every process stopped, the elevated
+task deleted, the per-machine product uninstalled via `msiexec /X`, the
+leftover Program Files folder removed, HKCU Run re-pointed at the per-user exe.
+
+**And PROBLEM 127 is now CONFIRMED fixed, which it previously was not.** 1.0.41
+was installed `/S` from a **non-elevated** shell while 1.0.40 was running:
+
+```
+whoami elevated : False        exit code : 0
+before          : 1.0.40 (running)
+after           : 1.0.41       content marker "PANIC on thread" present
+running         : 1 instance   HKLM: none   logon task: none
+```
+
+That is the first observed instance of an upgrade over a running Spaceadom
+actually landing. The four earlier "successful" installs all left the old exe
+in place while reporting success.
+
+**Caught while tagging: a flaky test (PROBLEM 130).** `cargo test` failed on
+one opacity test that passes when run alone. Not an app bug — the four tests
+all wrote the same global and cargo runs them on parallel threads, so they
+clobbered each other. It had been green every previous run and would have
+failed randomly in GitHub Actions, which is the worst kind: the fix for a
+flaky test is usually "re-run the job", and that teaches everyone to ignore the
+only automated check this project has. Arithmetic split out of the global; a
+12th test added to cover the wiring the purity would otherwise have stopped
+testing. Suite run five times, 12/12 each time.
+
+**Still not judged: the 0.75 keyboard scaling.** 1.0.41 carries it and is
+running. That verdict is the owner's eyes, not arithmetic — `FILL` in
+`src/main.ts` is the single knob.
+
+— Claude Opus 5
+
+---
+
 ## Update: 2026-08-17 | ~4:30 PM (Claude Fable 5) — the owner found the silent-update bug with a screenshot, and the scaling over-correction
 
 Full technical record: PROBLEMS 127 and 128 in `V14_FIXES_AND_CODE.md`. Shipped

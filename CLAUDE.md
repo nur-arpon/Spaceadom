@@ -11,8 +11,13 @@ normal space. Rust + Tauri v2 backend, vanilla TypeScript + Vite frontend
 
 **Identity (since the 1.0.0 release pass, PROBLEM 45):** productName
 `Spaceadom`, identifier `com.spaceadom.app`, exe `spaceadom.exe`, data dir
-`%APPDATA%\Spaceadom`, Scheduled Task `Spaceadom` (run-at-logon, `/RL LIMITED` — deliberately NOT elevated;
-there is NO HKCU Run entry any more; the app deletes the legacy ones).
+`%APPDATA%\Spaceadom`, install dir `%LOCALAPPDATA%\Spaceadom` (per-user).
+**Autostart is the HKCU Run value `Spaceadom`, NOT a Scheduled Task** — that
+reverses what this file said before 1.0.41. The task approach failed for a
+concrete reason worth keeping: a task created while elevated cannot be deleted
+by the non-elevated app (PROBLEM 61 removed elevation), so a stale task became
+permanent and launched an OLD build alongside the new one (PROBLEM 129). The
+app deletes legacy tasks and legacy Run names when it can.
 `V14_FIXES_AND_CODE.md` §PROBLEM 45 has the full table and the elevation
 flow. The repo folder is still `SpaceToggle-V14`; rename at git-init.
 
@@ -122,8 +127,17 @@ $env:CARGO_HOME="D:\RUST-DOWNLOADED-HERE\cargo"
 $env:RUSTUP_HOME="D:\RUST-DOWNLOADED-HERE\rustup"
 $env:PATH="D:\RUST-DOWNLOADED-HERE\cargo\bin;$env:PATH"
 npm run build        # tsc + vite — MUST run before ANY cargo command
-npm run tauri build  # MSI → src-tauri\target\release\bundle\msi\
+npm run tauri build  # setup.exe → src-tauri\target\release\bundle\nsis\
 ```
+
+**One installer, per-user, since 1.0.41 (PROBLEM 129).** `bundle.targets` is
+`["nsis"]` and `nsis.installMode` is `"currentUser"`. Do NOT re-add the `msi`
+target: Tauri's WiX bundler is per-machine only, so shipping both put TWO
+copies of the app on the owner's machine — Program Files and `%LOCALAPPDATA%`,
+each with its own autostart, both grabbing the spacebar at logon. The MSI also
+has no `installerHooks` equivalent, so it silently defers updates over the
+running app (PROBLEM 127). Restoring it requires a custom WiX template with
+`InstallScope="perUser"` AND a `util:CloseApplication` action, in that order.
 
 - **`windows` crate features are per-API.** A missing feature reads as
   `unresolved import` on a path that plainly exists in the docs. Store/UWP
@@ -142,16 +156,18 @@ npm run tauri build  # MSI → src-tauri\target\release\bundle\msi\
   delete each empty shim and copy `rustup.exe` over it (`rustup default
   stable` does NOT fix it). Full script in AI_HANDOFF.md §4.
 - Keep the build at 0 errors, 0 warnings.
-- **MSI same-version reinstall trap**: Tauri regenerates the ProductCode per
-  build at the same version, so `msiexec /i` over an existing install exits 0
-  while Program Files silently keeps the OLD exe. Reliable sequence:
-  uninstall the currently registered product code, then plain `/i` — and
-  ALWAYS verify the installed exe's size/timestamp against
-  `target\release\spaceadom.exe`.
+- **Installing: `setup.exe /S`, and NEVER trust its exit code.** Four separate
+  installs exited 0 having replaced nothing (PROBLEM 127 — the app is running
+  during its own upgrade, and the MSI deferred the file swap to a reboot). The
+  NSIS `installerHooks` PREINSTALL macro now kills the app first, but the rule
+  stands for any installer: **verify the installed exe by version stamp AND by
+  an ASCII content marker** before believing a fix shipped. A verdict taken on
+  an unverified build is worse than no verdict — it discredits a working fix.
 - **A FIX THAT IS NOT INSTALLED DOES NOT EXIST.** The user boots from
-  `C:\Program Files\Spaceadom\`, never from `target\release\`. Testing
-  from the repo build is fine, but the session is NOT finished until the MSI
-  is reinstalled and the installed exe verified. If a UAC prompt is declined,
+  `%LOCALAPPDATA%\Spaceadom\`, never from `target\release\`. Testing
+  from the repo build is fine, but the session is NOT finished until the
+  setup.exe has been run and the installed exe verified. Per-user means no UAC
+  prompt at all now; if one ever appears and is declined,
   say so loudly and treat the work as UNDELIVERED — quietly continuing to
   test from the repo is how five hours of fixes failed to reach the user's
   startup (PROBLEM 42), leaving them booting a build that still had the

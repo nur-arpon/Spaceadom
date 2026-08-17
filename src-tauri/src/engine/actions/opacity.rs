@@ -21,14 +21,23 @@ const OPACITY_STEP: u8 = 15;
 pub static OPACITY_FLOOR_PCT: std::sync::atomic::AtomicU8 =
     std::sync::atomic::AtomicU8::new(25);
 
-/// The floor as a Win32 alpha byte. Clamped to the same 10–90 range the slider
-/// offers, so a hand-edited config cannot make a window invisible (and
-/// therefore unfindable) or pin it fully opaque.
-fn floor_alpha() -> u8 {
-    let pct = OPACITY_FLOOR_PCT
-        .load(std::sync::atomic::Ordering::Relaxed)
-        .clamp(10, 90) as u16;
+/// The arithmetic, split out from the global so it can be tested. Clamped to
+/// the same 10–90 range the slider offers, so a hand-edited config cannot make
+/// a window invisible (and therefore unfindable) or pin it fully opaque.
+///
+/// This is a free function taking `pct` rather than reading the atomic itself
+/// for a reason found the hard way: when the tests drove `OPACITY_FLOOR_PCT`
+/// directly they passed alone and failed in the full suite, because cargo runs
+/// tests in one process on parallel threads and they were all writing the same
+/// static. A pure function has nothing to share and cannot go flaky.
+const fn floor_alpha_for(pct: u8) -> u8 {
+    let pct = if pct < 10 { 10 } else if pct > 90 { 90 } else { pct } as u16;
     ((pct * 255) / 100) as u8
+}
+
+/// The floor as a Win32 alpha byte, for the value currently configured.
+fn floor_alpha() -> u8 {
+    floor_alpha_for(OPACITY_FLOOR_PCT.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Increase window opacity by one step.
@@ -141,13 +150,9 @@ pub fn register_own_hwnd(hwnd: isize) {
    =========================================================================== */
 #[cfg(test)]
 mod floor_tests {
+    use super::floor_alpha_for as with;
     use super::{floor_alpha, OPACITY_FLOOR_PCT};
     use std::sync::atomic::Ordering;
-
-    fn with(pct: u8) -> u8 {
-        OPACITY_FLOOR_PCT.store(pct, Ordering::Relaxed);
-        floor_alpha()
-    }
 
     #[test]
     fn converts_percent_to_alpha() {
@@ -183,5 +188,26 @@ mod floor_tests {
             assert!(f <= 229, "floor {f} at {pct}% leaves no room to fade");
             assert!(255 - f >= super::OPACITY_STEP, "no room for one step at {pct}%");
         }
+    }
+
+    /// The arithmetic being right is not the thing that broke. PROBLEM 119 was
+    /// a DISCONNECTION: the slider saved a number nothing read. So this asserts
+    /// the wiring itself — that the value pushed into the global is the value
+    /// the scroll path actually uses.
+    ///
+    /// This is deliberately the ONLY test that touches `OPACITY_FLOOR_PCT`.
+    /// Adding a second one re-creates the parallel-thread race described above;
+    /// test new arithmetic through `floor_alpha_for` instead.
+    #[test]
+    fn the_configured_value_is_the_one_actually_used() {
+        for pct in [10u8, 25, 50, 90] {
+            OPACITY_FLOOR_PCT.store(pct, Ordering::Relaxed);
+            assert_eq!(
+                floor_alpha(),
+                with(pct),
+                "floor_alpha() ignored the configured {pct}% — the slider is dead again"
+            );
+        }
+        OPACITY_FLOOR_PCT.store(25, Ordering::Relaxed); // leave the default behind
     }
 }

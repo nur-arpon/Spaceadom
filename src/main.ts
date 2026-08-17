@@ -728,37 +728,40 @@ function wireKeyboardFit(): void {
    * monitor) cannot produce absurd geometry. 2.5x covers a 4K panel at 100%.
    */
   /**
-   * PROBLEM 128 — 1.0.36 grew the board until it filled the screen edge to
-   * edge, which the owner reported as "scaled too much" with no breathing
-   * room. Two changes had compounded again: the window took 92% of the display
-   * AND the board was allowed to consume all of it, leaving 12px of margin at
-   * any size.
+   * PROBLEM 128, second attempt — the board takes a fixed PROPORTION of the
+   * room, so the breathing room is a proportion too.
    *
-   * What he asked for is not "fill the space" — it is "scale in proportion to
-   * the monitor, with the space around it proportionate too". Those are
-   * different: filling means margins stay 12px while the board triples;
-   * proportionate means the margins grow with everything else.
+   * History, because this one line has now been wrong in opposite directions:
+   *   - 1.0.36/37 filled the room to a fixed 12px margin. Owner, twice:
+   *     "scaled too much, no breathing room".
+   *   - The first fix (GROWTH=0.5, built as 1.0.39) NEVER REACHED HIS SCREEN:
+   *     the MSI deferred the upgrade while the app was running (PROBLEM 127),
+   *     so his "still the same" verdict was about a binary that did not
+   *     contain it. Do not judge this formula by that report.
+   *   - He then specified the design himself: "make the keyboard 0.75 times
+   *     of what is running right now" — 75% of the fill, at EVERY size.
    *
-   * So the board grows SLOWER than the window. Below the design size nothing
-   * changes at all (GROWTH only applies above 1), which keeps PROBLEM 84's
-   * netbook behaviour exactly as it was. Above it, only GROWTH of each extra
-   * unit of room is spent on the board and the rest becomes margin:
+   * FILL is that number. board = room * FILL, so the margin is always
+   * (1 - FILL) of the available space: a quarter of a small screen, a quarter
+   * of a 4K panel. That is what "proportionate breathing room" means, and the
+   * board scales continuously with the display instead of being pinned at
+   * either extreme.
    *
-   *     room for 1.0x  ->  board 1.00x   (unchanged, small screens)
-   *     room for 1.6x  ->  board 1.30x   (0.30 of the 0.60 surplus used)
-   *     room for 2.2x  ->  board 1.60x
+   * NOTE: this also applies BELOW the design size — small screens get the
+   * same 25% margin instead of filling to the old 12px. Deliberate reading of
+   * "it should scale up or down depending on the size of the display", and
+   * flagged to the owner rather than slipped in.
    *
-   * TUNING: GROWTH is the one number to change. Higher = bigger keyboard,
-   * tighter margins. Lower = more space around it. MAX_SCALE is only a
-   * backstop for a pathological viewport, not a design limit.
+   * TUNING: FILL is the one knob, and 0.75 is the owner's own number, not a
+   * guess. MAX_SCALE stays as a backstop for pathological viewports only.
    */
-  const GROWTH = 0.5;
+  const FILL = 0.75;
   const MAX_SCALE = 2.0;
   const fit = () => {
     const r = outer.getBoundingClientRect();
     if (!r.width || !r.height) return;
-    const room = Math.min((r.width - 12) / DESIGN_W, (r.height - 12) / DESIGN_H);
-    const s = Math.min(MAX_SCALE, room > 1 ? 1 + (room - 1) * GROWTH : room);
+    const room = Math.min(r.width / DESIGN_W, r.height / DESIGN_H);
+    const s = Math.min(MAX_SCALE, room * FILL);
     scale.style.transform = `scale(${s.toFixed(4)})`;
     // Published for anything else that should grow with the board. Nothing
     // consumes it yet — the popovers are the obvious candidate, but their

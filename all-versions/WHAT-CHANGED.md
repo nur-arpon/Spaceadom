@@ -1,11 +1,21 @@
 # Spaceadom — what changed in each version
 
-Every installer ever built lives in this folder. Both formats are kept for each
-version: `Spaceadom_<v>_x64_en-US.msi` and `Spaceadom_<v>_x64-setup.exe`.
+Every installer ever built lives in this folder.
 
-**To go back to any version:** run its `.msi`. Uninstall the current one first
-from Add/Remove Programs, or the installer may exit successfully while leaving
-the old exe in place (Tauri regenerates the product code every build).
+**From 1.0.41 onward there is only one format: `Spaceadom_<v>_x64-setup.exe`.**
+The `.msi` was dropped — see the 1.0.41 row for why. Versions up to 1.0.40 have
+both files; use their `setup.exe` too, for the same reason.
+
+**To go back to any version:** run its `setup.exe`. It installs into your own
+user folder, needs no admin password, and replaces whatever is there — you do
+not need to uninstall first.
+
+**One warning about the old `.msi` files, if you ever run one:** an `.msi`
+installs to `C:\Program Files` instead, which is a SEPARATE copy. Windows then
+has two Spaceadoms that cannot see each other, and both try to start when you
+log in — two programs fighting over your spacebar. If you ever do it by
+accident, uninstall "Spaceadom" from Add/Remove Programs and reinstall from a
+`setup.exe`.
 
 **Your settings are not touched** by switching versions — profiles and bindings
 live in `%APPDATA%\Spaceadom\config.json`, separate from the app. Rolling back
@@ -16,6 +26,13 @@ attempt at the toast/HUD transition and it made the HUD feel delayed. Every
 other version is here.
 
 ---
+
+## 2026-08-17 — one app, one install
+
+| Version | What changed |
+| --- | --- |
+| **1.0.41** | **You had Spaceadom installed twice, and neither copy could see the other.** This was found by checking your machine, not because it crashed — but it was about to bite. One copy was v1.0.37 in `C:\Program Files` (put there by the `.msi`), the other v1.0.40 in your own user folder (put there by the `setup.exe`). Windows treats those as two different programs. Both were set to start when you log in, so at your next restart two Spaceadoms would have launched and both would have grabbed the spacebar. You would not have seen "two apps running" — you would have seen Space+D opening Discord twice, or your settings mysteriously reverting. Fixed three ways: the old copy was removed from your machine; the `.msi` is no longer built at all; and the `setup.exe` now says in writing that it installs to your user folder. **What this means for you day to day: updates never ask for an admin password again.** What it costs: there is no `.msi` for company IT departments that require one — say the word if you ever need that back. Also proven for the first time today: an update installed *while Spaceadom was running* actually replaced the program. Every "successful" update before this one had quietly left the old version in place. |
+| **1.0.40** | **The keyboard at 0.75, as you specified.** You said "make the keyboard layout 0.75 times of what is running right now" — so instead of the keyboard growing to fill whatever space exists, it now takes three quarters of it and leaves the last quarter as breathing room. That ratio holds on every display: your laptop, both external monitors, and small laptops too. (1.0.39's version of this never actually reached your screen — the update bug above kept 1.0.37 on disk — which is why it still looked unchanged to you.) |
 
 ## 2026-08-16 — two bugs killed at the root
 
