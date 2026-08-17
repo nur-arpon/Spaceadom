@@ -1,6 +1,6 @@
 [package]
 name = "spaceadom"
-version = "1.0.49"
+version = "1.0.52"
 description = "Spaceadom — hold Space + tap a key to launch, focus or minimise any app"
 authors = ["Spaceadom"]
 edition = "2021"

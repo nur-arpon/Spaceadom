@@ -608,6 +608,7 @@ pub fn run() {
             commands::overlay_log,
             commands::overlay_fit,
             commands::overlay_fit_hud,
+            commands::overlay_fit_handover,
             commands::overlay_shape,
             commands::overlay_toasts_done,
             commands::find_browser_cmd,

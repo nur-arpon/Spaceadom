@@ -917,6 +917,74 @@ pub fn overlay_fit(app: tauri::AppHandle, width: f64, height: f64) -> Option<Ove
 /// HUD owns the window. This is what makes clipping structurally impossible:
 /// the old fixed 680×600 cut off Y, Z and every special-function row on a
 /// 26-binding profile (user report, 2026-08-10).
+/// PROBLEM 137 - the HANDOVER window: the ring's box, extended DOWNWARD so the
+/// flight can reach the toast's real bottom-centre slot.
+///
+/// The owner: "make it land to the bottom normal bottom center position, no
+/// need any jump, make it fly to the final position." That is impossible from
+/// the HUD window alone - measured on his 1707x1067 panel, the toast's final
+/// resting place is 88px BELOW the HUD window's bottom edge, so the pill had
+/// nowhere to fly to and PROBLEM 136 could only park the toast mid-screen.
+///
+/// Placement, and every term matters:
+///   * TOP edge is unchanged from the centred HUD box, so the ring does not
+///     move on screen when this runs. The frontend pins #st-hud to that
+///     original height so it keeps centring in the same place.
+///   * BOTTOM edge is `ms.height - 64`, byte-for-byte the same expression
+///     `overlay_fit` uses. A toast anchored `bottom: 74px` in THIS window is
+///     therefore at the exact pixel it would occupy in the normal toast
+///     window - so the flight lands on the final position, and the later fit
+///     (or none at all) moves nothing.
+///
+/// Deliberately NOT fullscreen. A fullscreen transparent webview composes ZERO
+/// pixels on this machine (PROBLEM 37/80); this is the ring's width by roughly
+/// 70% of the screen height, well inside what the overlay already does.
+#[tauri::command]
+pub fn overlay_fit_handover(
+    app: tauri::AppHandle,
+    width: f64,
+    height: f64,
+) -> Option<OverlayRect> {
+    crate::crash_context::note_overlay_op(format!(
+        "overlay_fit_handover {width}x{height} (ring box, extended to the toast slot)"
+    ));
+    use std::sync::atomic::Ordering;
+    use tauri::Manager;
+    if crate::guide_hud::OVERLAY_DISABLED.load(Ordering::Relaxed) {
+        return None;
+    }
+    let win = app.get_webview_window("overlay")?;
+    let Ok(Some(mon)) = win.primary_monitor() else {
+        log::warn!("overlay_fit_handover: primary_monitor() returned nothing - not positioned");
+        return None;
+    };
+    let sf = mon.scale_factor();
+    let ms = mon.size().to_logical::<f64>(sf);
+    let mp = mon.position().to_logical::<f64>(sf);
+
+    let w = width.clamp(120.0, ms.width - 32.0);
+    let ring_h = height.clamp(44.0, ms.height - 32.0);
+    // Top edge: where the CENTRED ring box already is. Unchanged.
+    let y = mp.y + (ms.height - ring_h) / 2.0;
+    // Bottom edge: exactly overlay_fit's, so the toast slot lines up.
+    let bottom = mp.y + ms.height - 64.0;
+    let h = (bottom - y).clamp(ring_h, ms.height - 32.0);
+    let x = mp.x + (ms.width - w) / 2.0;
+
+    let _ = win.set_size(tauri::LogicalSize::new(w, h));
+    let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+    log::info!(
+        "overlay_fit_handover: ring {ring_h:.0}px -> window {w:.0}x{h:.0} @ ({x:.0},{y:.0}); \
+         bottom {bottom:.0} matches overlay_fit; monitor {:.0}x{:.0} scale {sf}; GOT size {:?} pos {:?}",
+        ms.width, ms.height,
+        win.outer_size().map(|s| s.to_logical::<f64>(sf)).map(|s| (s.width.round(), s.height.round())),
+        win.outer_position().map(|p| p.to_logical::<f64>(sf)).map(|p| (p.x.round(), p.y.round())),
+    );
+    let _ = win.set_always_on_top(true);
+    let _ = win.show();
+    Some(OverlayRect { x, y, w, h })
+}
+
 #[tauri::command]
 pub fn overlay_fit_hud(app: tauri::AppHandle, width: f64, height: f64) -> Option<OverlayRect> {
     crate::crash_context::note_overlay_op(format!("overlay_fit_hud {width}x{height} (radial HUD, centred)"));

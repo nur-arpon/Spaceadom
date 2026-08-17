@@ -115,7 +115,14 @@ jobs:
 
             ### What changed
             See [WHAT-CHANGED.md](https://github.com/${{ github.repository }}/blob/main/all-versions/WHAT-CHANGED.md).
-          # Draft so you can read it over and edit before anyone sees it.
-          # Change to false once you trust the pipeline.
-          releaseDraft: true
+          # PUBLIC from 1.0.52 (2026-08-18), at the owner's request: he wants a
+          # link he can send to friends. Every release before this was a draft
+          # and visible only to him.
+          #
+          # What this means in practice: pushing a tag now publishes a
+          # downloadable release to anyone, with no further click. The version
+          # guard above is the only thing standing between a mistyped tag and a
+          # public artifact, which is why it checks all three version files.
+          # Set back to true if you ever want to review before shipping.
+          releaseDraft: false
           prerelease: false

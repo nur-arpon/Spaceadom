@@ -7033,3 +7033,146 @@ window-hide ordering exactly, before implementation started. It was read as a
 request for a longer animation rather than as a report of when the window went
 away.
 
+
+---
+
+## PROBLEM 138 — thruster up, slingshot down: the toast ⇄ HUD handover, both directions
+
+**Owner's spec, 2026-08-18**, delivered as `THRUSTER_SLING.md` inside
+`design/Design system overhaul 2 project.zip`, with one instruction attached:
+*"Make sure there is no twitching in the middle."* Confirmed working by him on
+1.0.52: *"the thruster is working."*
+
+The pairing:
+
+- **Hold Space, toasts on screen → THRUSTER CONVOY.** Each pill squats, ignites
+  and burns up to the SPACE key behind a flickering three-layer exhaust plume,
+  shedding pressure rings and sparks. One launch every 120ms; the ring blooms as
+  the last one lands.
+- **Release Space → SLINGSHOT DOWN.** Each pill peels out of SPACE and flies ONE
+  continuous curved arc into its own slot. Alternating sides, bows widening per
+  pair.
+
+**Exact files.** `src/components/toast.ts` (constants, `mkPlume`,
+`shedExhaust`, `flightThruster`, `flightSlingDown`, `absorbIntoSpace`,
+`hideGuideHud`, the chip-less mid-hold branch).
+
+---
+
+### `WARP` is back on, and that is not a reversal of 1.0.33
+
+The flag's own header said: *"Switched off rather than deleted... Set to true to
+work on the transition again; there are exactly three call sites."* What the
+owner rejected in 1.0.33 was the MOTION, not the machinery — the staging,
+freezing, parking, rect arithmetic and one-grow-per-handover contract were all
+kept, correct, and dormant. Turning `WARP` on now re-activates that machinery to
+drive the flights **he designed and supplied himself**. `flightWarp`'s old
+straight-line motion survives in exactly one place: the 420ms `fromSpaceExit`
+grace ejection. The flag's comment records this so a future reader does not
+"restore" 1.0.33 by mistake.
+
+---
+
+### THREE DEVIATIONS from the supplied patch — all deliberate, none cosmetic
+
+**1. PROBLEM 115: no `width`/`height`/`background` animation.** The patch
+animates all three per frame, on both flights and both trails. That is banned in
+this file, in writing, because it forces layout and paint every frame and this
+overlay composites in software — it is why 1.0.29–1.0.31 could never be made
+smooth however the easing was tuned. Both flights therefore use `flightWarp`'s
+two-face cross-scale construction: each face is built at its OWN natural size
+and never resized, and the box morph is a `scale()` between them. Same squat,
+same plume, same arc, same timings, same face-fade offsets — transform and
+opacity only. The trails are fixed-width bars driven by `scaleX`.
+
+**2. The descent lands at the TRUE bottom slot, not the staged one.** The patch
+has the pills land in the staged mid-window position, which is precisely the
+mid-screen stop the owner had already rejected one round earlier ("no need that
+lower middle center... make it fly to the final position"). So the descent
+reuses PROBLEM 137's handover window:
+
+```ts
+invoke<Rect | null>("overlay_fit_handover", { width: window.innerWidth, height: ringH })
+  .then(() => {
+    _hudEl.style.top = "0px";              // pin: the ring must not move a pixel
+    _hudEl.style.bottom = "auto";
+    _hudEl.style.height = ringH + "px";
+    const from = spaceBox();               // AFTER the grow, BEFORE .hidden scales to .93
+    _hudEl.classList.add("hidden");        // ring folds away UNDER the arcs
+    setStageAnchor(false);                 // normal anchor = the true final slots
+    void document.body.offsetWidth;
+    relayout();                            // depth attrs only - stage guard holds
+    back.forEach((t, i) => { ... flightSlingDown({ from, to: settledBox(t.el), ... }) });
+  })
+```
+
+**Why this produces no twitch, which was the owner's one instruction.** There
+are three seams where a jump could hide, and each is closed by construction:
+
+```
+seam 1  window grows for the descent   top edge FIXED + ring pinned to ringH
+                                       -> the ring cannot move on screen
+seam 2  stack un-stages to the slots   happens while the pills are PARKED
+                                       -> nothing visible is moved
+seam 3  window shrinks after landing   handover bottom == overlay_fit bottom
+                                       (`ms.height - 64.0`, same expression)
+                                       -> the toast's screen position is
+                                          identical before and after
+```
+
+`spaceBox()` is measured AFTER the grow deliberately: the pills' slots and the
+SPACE key must be read in the SAME viewport, or the arc starts from a stale
+origin — the failure PROBLEM 113 recorded as "a flight sometimes began off to
+one side".
+
+**3. Chip-less mid-hold toasts now fly too.** Volume, clipboard and unlisted
+apps have no chip to tear out of, so `SLINGSHOT_ARRIVAL.md`'s fallback was a
+plain fade. They now launch from the SPACE key via `flightSlingDown` — the same
+descent, the same true-bottom landing — so every mid-hold toast is a flight.
+
+---
+
+### The no-pause guarantee, and where it lives
+
+The spec is explicit that the descent must never be split: *"any seam reads as
+the pill stopping mid-air, which is exactly what was rejected."* In
+`flightSlingDown` the position is ONE `mover.animate()` over `SLING_SAMPLES`
+arc keyframes with ONE easing (`CAPTURE_EASE`). The shear, the faces and the
+trail are separate animations, but they animate DIFFERENT elements and different
+properties — none of them touches `mover`'s transform. If a future change ever
+adds a second position animation to `mover`, or chains two, the pause comes
+back.
+
+The thruster's squat is the same rule in the other direction: the 14px dip is a
+keyframe at offset 0.11 INSIDE the single position animation, never a chained
+segment.
+
+---
+
+### How it was verified
+
+`tsc` clean, `cargo check` clean, 0 warnings; built and installed unelevated
+over 1.0.51; the installed exe confirmed newer than the edited source (added
+after 1.0.50 shipped a version bump whose patch script had silently failed).
+**Behaviour confirmed by the owner** — the only instrument that can see this
+overlay, per this project's own rule.
+
+**Timings, all tunable in one block near `WARP_MS`:** `THRUST_MS` 640,
+`THRUST_STAGGER` 120, `THRUST_DIP` 14, `THRUST_STRETCH` 2.35, `EXHAUST_EVERY`
+64, `SLING_DOWN_MS` 820, `SLING_DOWN_BOW` 170, `SLING_DOWN_STRETCH` 1.9.
+
+### Generalise this
+
+*A supplied patch is a specification of INTENT, not of implementation.* This one
+was precise about shape and timing and wrong about mechanism for this codebase —
+it prescribed the exact per-frame property animation that this file had already
+banned by measurement. Implementing it literally would have produced the correct
+choreography and the same jank that got the previous attempt rejected. Read the
+patch for what it wants to look like; read the codebase for how it is allowed to
+be built.
+
+*And when a spec's own fallback contradicts a decision the user made an hour
+ago, the user wins.* The patch's descent lands where the stack is staged. The
+owner had already rejected that landing point in as many words. Following the
+document there would have been obedience to the wrong authority.
+

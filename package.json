@@ -1,7 +1,7 @@
 {
   "name": "spaceadom",
   "private": true,
-  "version": "1.0.49",
+  "version": "1.0.52",
   "type": "module",
   "scripts": {
     "dev": "vite",

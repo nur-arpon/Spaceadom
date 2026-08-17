@@ -1,6 +1,53 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-18 | ~8:10 AM (Claude Opus 5) — thruster up, slingshot down: both directions of the handover, and the first public release
+
+Full technical record: PROBLEM 138 in `V14_FIXES_AND_CODE.md`. Shipped as
+1.0.52. **Confirmed by Nur: "the thruster is working."**
+
+He supplied `THRUSTER_SLING.md` (in `design/Design system overhaul 2
+project.zip`) with one instruction: *"make sure there is no twitching in the
+middle."* Hold Space and the toasts squat, ignite and burn up to the SPACE key
+behind a three-layer plume, shedding rings and sparks, one every 120ms. Release
+and each pill peels out of SPACE and flies ONE continuous arc into its own slot.
+
+**`WARP` is back on, and that is not a reversal of his 1.0.33 decision.** The
+flag's own header always said it was switched off rather than deleted, with the
+staging machinery kept intact. He rejected the MOTION, not the machinery; that
+machinery now drives the flights HE designed. `flightWarp`'s straight-line
+motion survives only in the 420ms grace ejection.
+
+**Three deliberate deviations from his patch, all documented in 138:**
+
+1. It animates `width`/`height`/`background` per frame on both flights.
+   PROBLEM 115 banned exactly that in this file, by measurement, because it
+   forces layout every frame and this overlay composites in software — it is
+   why 1.0.29-31 could never be made smooth. Rebuilt on flightWarp's two-face
+   cross-scale construction: identical shapes and timings, transform and
+   opacity only.
+2. Its descent lands at the STAGED mid-window position — which is the exact
+   mid-screen stop he had rejected an hour earlier. The descent now reuses
+   PROBLEM 137's handover window and lands at the true bottom slots.
+3. Chip-less toasts (volume, clipboard, unlisted apps) now fly out of the SPACE
+   key instead of fading in, so every mid-hold toast is a flight.
+
+**On "no twitching": three seams, each closed by construction** — the window
+grow keeps its top edge fixed and pins the ring so it cannot move; the un-stage
+happens while the pills are parked, so nothing visible moves; and the handover
+window's bottom edge is `ms.height - 64.0`, the same expression `overlay_fit`
+uses, so the post-landing shrink leaves the toast at an identical screen
+position. `spaceBox()` is read AFTER the grow on purpose, so slots and SPACE
+are measured in one viewport — reading it before is what PROBLEM 113 recorded
+as "a flight sometimes began off to one side".
+
+**Also this session: the first PUBLIC release.** He asked for something he can
+share with friends, so `releaseDraft` is now false and v1.0.52 publishes
+automatically. Everything before this was a draft and visible only to him.
+
+— Claude Opus 5
+
+---
 ## Update: 2026-08-18 | ~6:30 AM (Claude Opus 5) — the slingshot arrival ships, after three builds spent looking inside the wrong box
 
 Full technical record: PROBLEM 135 in `V14_FIXES_AND_CODE.md`. Shipped across

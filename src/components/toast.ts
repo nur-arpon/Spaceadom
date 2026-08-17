@@ -35,7 +35,13 @@ const LEAVE_MS = 380;
    Set to true to work on the transition again; there are exactly three call
    sites and each is marked `if (WARP`.
    --------------------------------------------------------------------------- */
-const WARP = false;
+/* RE-ENABLED 2026-08-18 at the owner's request, WITH NEW FLIGHTS. He rejected
+   1.0.32's motion, not the machinery: the staging, freezing, parking and rect
+   arithmetic below are unchanged, but the flights inside absorbIntoSpace and
+   hideGuideHud are now flightThruster / flightSlingDown from THRUSTER_SLING.md
+   - the pairing he chose and supplied himself. flightWarp remains only for the
+   §4.3 grace-window ejection. */
+const WARP = true;
 
 /* ---------------------------------------------------------------------------
    SLINGSHOT — the HUD -> toast arrival, and ONLY that direction.
@@ -56,6 +62,18 @@ const SLING_T0 = 0.16;     // stretch ramps from here - AFTER the face fade (0.1
 /* Long tail - orbital capture. Fast off the chip, then a long deceleration into
    the slot. Do NOT reuse WARP_EASE: its late snap fights the arc. */
 const CAPTURE_EASE = "cubic-bezier(.3,0,.08,1)";
+
+/* ---- thruster convoy (absorb: toasts -> SPACE) - THRUSTER_SLING.md ---- */
+const THRUST_MS = 640;        // one lift-off, door to door
+const THRUST_STAGGER = 120;   // convoy spacing
+const THRUST_DIP = 14;        // squat px before lift-off - the "compress" beat
+const THRUST_STRETCH = 2.35;  // shear along travel at mid-flight
+const EXHAUST_EVERY = 64;     // ms between shed rings/sparks
+
+/* ---- slingshot down (release: SPACE -> slots) ---- */
+const SLING_DOWN_MS = 820;    // one continuous arc, no pause
+const SLING_DOWN_BOW = 170;   // px the arc bows out; alternates sides per pill
+const SLING_DOWN_STRETCH = 1.9;
 /* The ring must OUTLIVE the flight. The engine cancels the HUD before it
    dispatches the action, so without this the chips are torn down ~240ms after
    release while the flight needs 940ms - which is exactly the owner's
@@ -70,6 +88,13 @@ let _slingUntil = 0;
    was gone before the flight began (PROBLEM 135). */
 const SLING_HANDOVER_MS = 1200;
 let _slingHeld = false;
+/* PROBLEM 136 - a slingshot LANDED on the staged stack, so the toast already
+   sits exactly where the pill touched down. Re-fitting after that re-anchors
+   the stack (setStageAnchor(false): top:50%+239px -> bottom:74px) AND moves the
+   window itself, so the toast leaps out from under the landing. That is the
+   owner's "pausing in the middle before jumping to toast". While this is set,
+   the handover leaves the geometry alone. */
+let _slingStaged = false;
 
 const WARP_MS = 560;      // one flight, door to door
 const STAGGER = 95;       // between pills when several fly at once
@@ -439,6 +464,7 @@ function retire(t: ToastEntry): void {
   if (_toasts.length === 0) {
     hideToastGlow();
     if (_stageMode) { _stageMode = false; setStageAnchor(false); }
+    _slingStaged = false;          // PROBLEM 136 - landing pad is gone
     if (_isOverlay && !_hudActive) invoke("overlay_toasts_done").catch(() => {});
   }
 }
@@ -585,18 +611,95 @@ export function showToast(message: string, options: ToastOptions = {}): void {
       // so there is never a frame showing both the chip and its copy.
       const from = boxRel(c.chip);
       const chipHtml = c.chip.innerHTML;
-      tearOut(c);
 
-      const D = flightSling({
-        from, to, chipHtml, toastHtml: el.innerHTML, cell: c.cell,
-        onArrive: () => { park(entry, false); beep(640); },
+      _slingStaged = true;   // PROBLEM 136 - this stack is a landing pad now
+      const chipHtml2 = chipHtml;
+
+      /* PROBLEM 137 - fly to the REAL bottom-centre slot, not a midpoint.
+         The toast's final home is below the HUD window's bottom edge, so grow
+         the window DOWNWARD first (top edge fixed, bottom edge = overlay_fit's
+         own bottom), pin #st-hud to its original height so the ring does not
+         move a pixel, then un-stage the stack so it sits at its NORMAL
+         bottom:74px anchor - which is now the true final position. Everything
+         is measured AFTER that, so the flight lands where the toast lives and
+         nothing moves afterwards. */
+      const ringH = window.innerHeight;
+      invoke<Rect | null>("overlay_fit_handover", {
+        width: window.innerWidth, height: ringH,
+      }).then(() => {
+        if (_hudEl) {                       // ring keeps its old box, so it stays put
+          _hudEl.style.top = "0px";
+          _hudEl.style.bottom = "auto";
+          _hudEl.style.height = `${ringH}px`;
+        }
+        _stageMode = false;                 // normal anchor = the real slot
+        setStageAnchor(false);
+        _stageMode = true;                  // but still no window fits during the flight
+        void document.body.offsetWidth;     // flush before measuring
+
+        const to2 = settledBox(el);
+        const from2 = boxRel(c.chip);
+        tearOut(c);
+        const D2 = flightSling({
+          from: from2, to: to2, chipHtml: chipHtml2, toastHtml: el.innerHTML,
+          cell: c.cell,
+          onArrive: () => { park(entry, false); beep(640); },
+        });
+        armEntry(entry, D2 + duration, D2 + duration + LEAVE_MS);
+      }).catch(() => {
+        // Window did not grow: fall back to the mid-screen landing rather than
+        // no animation at all.
+        tearOut(c);
+        const D3 = flightSling({
+          from, to, chipHtml: chipHtml2, toastHtml: el.innerHTML, cell: c.cell,
+          onArrive: () => { park(entry, false); beep(640); },
+        });
+        armEntry(entry, D3 + duration, D3 + duration + LEAVE_MS);
       });
-      armEntry(entry, D + duration, D + duration + LEAVE_MS);
       return;
     }
-    // No chip on the ring (volume, clipboard, an unlisted app): fall through to
-    // the plain path below. Deliberately NOT the SPACE ejection the source
-    // patch specifies - that is a WARP flight, and WARP stays off.
+    else {
+      /* No chip on the ring (volume, clipboard, an unlisted app): the pill
+         flies out of the SPACE key itself - flightSlingDown, the same descent
+         the release uses - straight to the true bottom slot. Same handover
+         window, same no-jump guarantee. */
+      _stageMode = true;
+      setStageAnchor(true);
+      anchorGlow("hud");
+      setToastLayerHidden(false);
+      park(entry, true);
+      entry.phase = "open";
+      el.classList.add("open");
+      relayout();
+      _slingStaged = true;
+      const ringH2 = window.innerHeight;
+      invoke<Rect | null>("overlay_fit_handover", {
+        width: window.innerWidth, height: ringH2,
+      }).then(() => {
+        if (_hudEl) {
+          _hudEl.style.top = "0px";
+          _hudEl.style.bottom = "auto";
+          _hudEl.style.height = ringH2 + "px";
+        }
+        const from3 = spaceBox();        // ring pinned, so SPACE has not moved
+        _stageMode = false;
+        setStageAnchor(false);
+        _stageMode = true;
+        void document.body.offsetWidth;
+        const to3 = settledBox(el);
+        const D4 = flightSlingDown({
+          from: from3, to: to3, html: el.innerHTML, bow: SLING_DOWN_BOW,
+          onArrive: () => { park(entry, false); beep(640); },
+        });
+        armEntry(entry, D4 + duration, D4 + duration + LEAVE_MS);
+      }).catch(() => {
+        // The grow failed: show the pill plainly rather than fly wrong.
+        park(entry, false);
+        armEntry(entry, LEAVE_AT, DIE_AT);
+        relayout();
+      });
+      return;
+    }
   }
 
   if (WARP && (_hudActive || fromSpaceExit) && _isOverlay && !REDUCED()) {
@@ -641,6 +744,7 @@ export function showToast(message: string, options: ToastOptions = {}): void {
   if (!_hudActive && !_hudBusy && _stageMode) {
     _stageMode = false;
     setStageAnchor(false);
+    _slingStaged = false;
     anchorGlow("toast");
   }
 
@@ -803,6 +907,335 @@ function buildHud(payload: GuideHudPayload, entranceDelay = 0): Promise<Rect | n
 }
 
 interface FlightGeo { x: number; y: number; w: number; h: number; s?: number }
+
+/* =======================================================================
+   THRUSTER CONVOY (toasts -> SPACE on hold) + SLINGSHOT DOWN (SPACE ->
+   slots on release) - THRUSTER_SLING.md, 2026-08-18.
+
+   ADAPTED, not transcribed: the source patch animates width/height/
+   background/borderColor per frame. PROBLEM 115 bans exactly those in this
+   file (layout+paint every frame; this overlay composites in software), so
+   both flights use flightWarp's two-face cross-scale technique - same
+   shapes, same timings, transform and opacity only.
+   ======================================================================= */
+
+/** Three-layer gradient exhaust plume, pointed opposite the travel angle.
+ *  Gradients only - NEVER a blur filter here (PROBLEM 80). */
+function mkPlume(travelAngleDeg: number): HTMLDivElement {
+  const P = document.createElement("div");
+  const ang = travelAngleDeg + 180;
+  P.style.cssText =
+    "position:absolute;left:0;top:0;pointer-events:none;" +
+    "transform:rotate(" + ang + "deg);transform-origin:0 0";
+  const layers: [number, number, string][] = [
+    [96, 12, ".30"], [67, 8, ".55"], [40, 4.5, ".90"],
+  ];
+  for (const [len, th, a] of layers) {
+    const bar = document.createElement("div");
+    bar.style.cssText =
+      "position:absolute;left:10px;top:0;width:" + len + "px;height:" + th + "px;" +
+      "border-radius:999px;transform:translate(0,-50%);" +
+      "background:linear-gradient(90deg,rgba(var(--st-glow-rgb)," + a + "),transparent)";
+    P.appendChild(bar);
+  }
+  // Afterburner flicker: cheap scaleX loop, no filters.
+  P.animate(
+    [{ transform: "rotate(" + ang + "deg) scaleX(1)" },
+     { transform: "rotate(" + ang + "deg) scaleX(.8)" },
+     { transform: "rotate(" + ang + "deg) scaleX(1.08)" },
+     { transform: "rotate(" + ang + "deg) scaleX(.88)" },
+     { transform: "rotate(" + ang + "deg) scaleX(1)" }],
+    { duration: 180, iterations: 24, easing: "linear" });
+  return P;
+}
+
+/** Shed pressure rings + sparks from a mover's live position while it flies.
+ *  Stops itself at `untilMs` or when the mover leaves the DOM. */
+function shedExhaust(mover: HTMLElement, untilMs: number): void {
+  const host = flightHost();
+  const hr = host.getBoundingClientRect();
+  const iv = window.setInterval(() => {
+    if (!mover.isConnected) { window.clearInterval(iv); return; }
+    const r = mover.getBoundingClientRect();
+    const x = r.left - hr.left, y = r.top - hr.top;
+    const ring = document.createElement("div");
+    ring.style.cssText =
+      "position:absolute;left:" + x + "px;top:" + y + "px;width:26px;height:26px;" +
+      "border-radius:50%;border:1.5px solid rgba(var(--st-glow-rgb),.4);" +
+      "pointer-events:none";
+    host.appendChild(ring);
+    ring.animate(
+      [{ transform: "translate(-50%,-50%) scale(.3)", opacity: 0.8 },
+       { transform: "translate(-50%,-50%) scale(1.9)", opacity: 0 }],
+      { duration: 360, easing: "cubic-bezier(.22,1,.36,1)", fill: "forwards" });
+    window.setTimeout(() => ring.remove(), 380);
+    const dot = document.createElement("div");
+    const jx = (Math.random() - 0.5) * 12, jy = (Math.random() - 0.5) * 12;
+    dot.style.cssText =
+      "position:absolute;left:" + (x + jx) + "px;top:" + (y + jy) + "px;" +
+      "width:4px;height:4px;border-radius:50%;" +
+      "background:rgba(var(--st-glow-rgb),.9);pointer-events:none";
+    host.appendChild(dot);
+    dot.animate(
+      [{ transform: "translate(-50%,-50%) scale(1)", opacity: 0.9 },
+       { transform: "translate(-50%,-50%) scale(.2)", opacity: 0 }],
+      { duration: 300, easing: "linear", fill: "forwards" });
+    window.setTimeout(() => dot.remove(), 320);
+  }, EXHAUST_EVERY);
+  window.setTimeout(() => window.clearInterval(iv), untilMs);
+}
+
+/**
+ * Lift ONE pill off its slot and slam it into the SPACE key, rocket-style:
+ * squat (THRUST_DIP px down at 11%), then a hard burn up the chord with plume
+ * and shed exhaust. flightWarp's coordinate convention and two-face structure.
+ * Returns ms from now until arrival (delay included).
+ */
+function flightThruster(o: {
+  from: FlightGeo;
+  to: FlightGeo;
+  via?: { w: number; h: number; s: number } | null;
+  html: string;
+  delay?: number;
+  onArrive?: () => void;
+}): number {
+  const { from, to, via, html, onArrive } = o;
+  const delay = o.delay ?? 0;
+  if (REDUCED()) { window.setTimeout(() => onArrive?.(), delay); return delay; }
+
+  const host = flightHost();
+  const dx = from.x - to.x;
+  const dy = from.y - to.y;
+  const ang = (Math.atan2(-dy, -dx) * 180) / Math.PI;   // slot -> SPACE
+  const kA = from.s ?? 1;
+  const kB = to.s ?? 1;
+  const kV = via ? via.s : kA;
+  const useVia = !!via && (Math.abs(via.w - from.w) > 1 || Math.abs(kV - kA) > 0.01);
+
+  const mover = document.createElement("div");
+  mover.style.cssText =
+    "position:absolute;left:" + to.x + "px;top:" + to.y + "px;" +
+    "will-change:transform;transform:translate(" + dx + "px," + dy + "px)";
+
+  const trail = document.createElement("div");
+  trail.className = "st-fly-trail";
+  trail.style.width = Math.min(Math.hypot(dx, dy) * 0.8, 260) + "px";
+  trail.style.transform = "translate(0,-50%) rotate(" + (ang + 180) + "deg) scaleX(0)";
+
+  const pill = document.createElement("div");
+  pill.className = "st-fly-wrap";
+
+  const faceToast = document.createElement("div");
+  faceToast.className = "st-fly face-toast";
+  faceToast.style.width = from.w + "px";
+  faceToast.style.height = from.h + "px";
+  faceToast.style.background = "var(--st-pill-bg)";
+  faceToast.style.border = "1px solid var(--st-pill-brd)";
+  faceToast.innerHTML = html;
+
+  const faceSpace = document.createElement("div");
+  faceSpace.className = "st-fly face-space-pill";
+  faceSpace.style.width = to.w + "px";
+  faceSpace.style.height = to.h + "px";
+  faceSpace.style.background = "var(--st-space-bg)";
+  faceSpace.style.border = "1px solid var(--st-space-brd)";
+  faceSpace.innerHTML = '<span class="face-space">SPACE</span>';
+  faceSpace.style.opacity = "0";
+
+  pill.append(faceToast, faceSpace);
+  mover.append(trail, mkPlume(ang), pill);
+  host.appendChild(mover);
+  _flying++;
+
+  const opt: KeyframeAnimationOptions = { duration: THRUST_MS, delay, fill: "both" };
+
+  // Position: squat, then burn. ONE animation, one easing - the squat is a
+  // keyframe INSIDE it, never a chained segment (the no-seam rule).
+  mover.animate(
+    [
+      { transform: "translate(" + dx + "px," + dy + "px)" },
+      { transform: "translate(" + dx + "px," + (dy + THRUST_DIP) + "px)", offset: 0.11 },
+      { transform: "translate(0,0)" },
+    ],
+    { ...opt, easing: WARP_EASE });
+
+  const toastToSpaceX = to.w / Math.max(1, from.w);
+  const toastToSpaceY = to.h / Math.max(1, from.h);
+  const spaceToToastX = from.w / Math.max(1, to.w);
+  const spaceToToastY = from.h / Math.max(1, to.h);
+  const T = (sx: number, sy: number) =>
+    "translate(-50%,-50%) rotate(" + ang + "deg) scale(" + sx + "," + sy + ") rotate(" + (-ang) + "deg)";
+
+  faceToast.animate(
+    [
+      { transform: T(kA, kA), opacity: 1 },
+      { transform: T(kA * 0.94, kA * 1.06), opacity: 1, offset: 0.11 },   // the squat
+      ...(useVia ? [{ transform: T(kV, kV), opacity: 0.6, offset: SETTLE_AT }] : []),
+      { transform: T(THRUST_STRETCH, 0.62), opacity: 0, offset: SQUEEZE_AT },
+      { transform: T(toastToSpaceX, toastToSpaceY), opacity: 0 },
+    ],
+    { ...opt, easing: WARP_EASE });
+
+  faceSpace.animate(
+    [
+      { transform: T(spaceToToastX, spaceToToastY), opacity: 0 },
+      { transform: T(THRUST_STRETCH, 0.62), opacity: 0, offset: SQUEEZE_AT },
+      { transform: T(kB, kB), opacity: 1 },
+    ],
+    { ...opt, easing: WARP_EASE });
+
+  trail.animate(
+    [
+      { transform: "translate(0,-50%) rotate(" + (ang + 180) + "deg) scaleX(0)", opacity: 0 },
+      { transform: "translate(0,-50%) rotate(" + (ang + 180) + "deg) scaleX(1)", opacity: 0.9, offset: SQUEEZE_AT },
+      { transform: "translate(0,-50%) rotate(" + (ang + 180) + "deg) scaleX(0)", opacity: 0 },
+    ],
+    { ...opt, easing: WARP_EASE });
+
+  window.setTimeout(() => shedExhaust(mover, THRUST_MS * 0.8), delay + 10);
+  window.setTimeout(() => shockAt(to), delay + THRUST_MS - 40);
+  window.setTimeout(() => {
+    mover.remove();
+    _flying = Math.max(0, _flying - 1);
+    onArrive?.();
+  }, delay + THRUST_MS + 20);
+
+  return delay + THRUST_MS;
+}
+
+/**
+ * Fly ONE pill out of the SPACE key, around a curved arc, DIRECTLY into its
+ * settled slot - one continuous position animation, one easing, no mid-air
+ * stop of any kind (the whole point of this flight). SPACE face -> toast face
+ * on the way. Returns ms until arrival.
+ */
+function flightSlingDown(o: {
+  from: FlightGeo;
+  to: FlightGeo;
+  html: string;
+  bow: number;
+  delay?: number;
+  onArrive?: () => void;
+}): number {
+  const { from, to, html, bow, onArrive } = o;
+  const delay = o.delay ?? 0;
+  if (REDUCED()) { window.setTimeout(() => onArrive?.(), delay); return delay; }
+
+  const host = flightHost();
+  const dx = from.x - to.x;
+  const dy = from.y - to.y;
+  const pts = arcPoints(dx, dy, bow, SLING_SAMPLES);
+  const kB = to.s ?? 1;
+
+  const mover = document.createElement("div");
+  mover.style.cssText =
+    "position:absolute;left:" + to.x + "px;top:" + to.y + "px;" +
+    "will-change:transform;transform:translate(" + dx + "px," + dy + "px)";
+
+  const trail = document.createElement("div");
+  trail.className = "st-fly-trail";
+  trail.style.width = Math.min(Math.hypot(dx, dy) * 0.72, 240) + "px";
+
+  const pill = document.createElement("div");
+  pill.className = "st-fly-wrap";
+
+  const faceSpace = document.createElement("div");
+  faceSpace.className = "st-fly face-space-pill";
+  faceSpace.style.width = from.w + "px";
+  faceSpace.style.height = from.h + "px";
+  faceSpace.style.background = "var(--st-space-bg)";
+  faceSpace.style.border = "1px solid var(--st-space-brd)";
+  faceSpace.innerHTML = '<span class="face-space">SPACE</span>';
+
+  const faceToast = document.createElement("div");
+  faceToast.className = "st-fly face-toast";
+  faceToast.style.width = to.w + "px";
+  faceToast.style.height = to.h + "px";
+  faceToast.style.background = "var(--st-pill-bg)";
+  faceToast.style.border = "1px solid var(--st-pill-brd)";
+  faceToast.innerHTML = html;
+  faceToast.style.opacity = "0";
+
+  pill.append(faceSpace, faceToast);
+  mover.append(trail, pill);
+  host.appendChild(mover);
+  _flying++;
+
+  const opt: KeyframeAnimationOptions = { duration: SLING_DOWN_MS, delay, fill: "both" };
+
+  // 1 - position: the WHOLE arc in one animation with one easing. This is the
+  //     no-pause guarantee - never split it.
+  mover.animate(
+    pts.map((p) => ({ transform: "translate(" + p.x + "px," + p.y + "px)", offset: p.t })),
+    { ...opt, easing: CAPTURE_EASE });
+
+  const spaceToSlotX = to.w / Math.max(1, from.w);
+  const spaceToSlotY = to.h / Math.max(1, from.h);
+  const slotToSpaceX = from.w / Math.max(1, to.w);
+  const slotToSpaceY = from.h / Math.max(1, to.h);
+
+  const shearD = (t: number) => {
+    const up = Math.max(0, Math.min(1, (t - SLING_T0) / (SLING_MID - SLING_T0)));
+    const k = t < SLING_MID
+      ? 1 + (SLING_DOWN_STRETCH - 1) * up
+      : 1 + (SLING_DOWN_STRETCH - 1) * Math.max(0, 1 - (t - SLING_MID) / (1 - SLING_MID));
+    return { k: k, sy: 1 - 0.38 * (k - 1) / (SLING_DOWN_STRETCH - 1) };
+  };
+  const TD = (a: number, sx: number, sy: number) =>
+    "translate(-50%,-50%) rotate(" + a + "deg) scale(" + sx + "," + sy + ") rotate(" + (-a) + "deg)";
+
+  // 2 - SPACE face: 1:1 over the key at launch, gone by 17%.
+  faceSpace.animate(
+    pts.map((p) => {
+      const a = p.a + 180;
+      const sh = shearD(p.t);
+      const bx = 1 + (spaceToSlotX - 1) * p.t;
+      const by = 1 + (spaceToSlotY - 1) * p.t;
+      return {
+        transform: TD(a, bx * sh.k, by * sh.sy),
+        opacity: p.t < 0.17 ? 1 - p.t / 0.17 : 0,
+        offset: p.t,
+      };
+    }),
+    { ...opt, easing: CAPTURE_EASE });
+
+  // 3 - toast face: counter-scaled at launch, lands at exactly 1:1.
+  faceToast.animate(
+    pts.map((p) => {
+      const a = p.a + 180;
+      const sh = shearD(p.t);
+      const bx = slotToSpaceX + (1 - slotToSpaceX) * p.t;
+      const by = slotToSpaceY + (1 - slotToSpaceY) * p.t;
+      const s = 1 + (kB - 1) * p.t;
+      const IN0 = SLING_MID + 0.06;
+      const fade = p.t < IN0 ? 0 : Math.min(1, (p.t - IN0) / 0.26);
+      return { transform: TD(a, s * bx * sh.k, s * by * sh.sy), opacity: fade, offset: p.t };
+    }),
+    { ...opt, easing: CAPTURE_EASE });
+
+  // 4 - trail rides the tangent; scaleX, never width; gone before landing.
+  trail.animate(
+    pts.map((p) => {
+      const f = p.t < SLING_MID
+        ? p.t / SLING_MID
+        : Math.max(0, 1 - (p.t - SLING_MID) / (1 - SLING_MID));
+      return {
+        transform: "translate(0,-50%) rotate(" + (p.a + 180) + "deg) scaleX(" + f.toFixed(4) + ")",
+        opacity: p.t < 0.06 || p.t > 0.94 ? 0 : 0.9,
+        offset: p.t,
+      };
+    }),
+    { ...opt, easing: CAPTURE_EASE });
+
+  window.setTimeout(() => shockAt(to), delay + SLING_DOWN_MS - 60);
+  window.setTimeout(() => {
+    mover.remove();
+    _flying = Math.max(0, _flying - 1);
+    onArrive?.();
+  }, delay + SLING_DOWN_MS + 20);
+
+  return delay + SLING_DOWN_MS;
+}
 
 /**
  * PROBLEM 112 — fly ONE pill between its slot and the SPACE key, morphing
@@ -1214,7 +1647,12 @@ function shockAt(at: FlightGeo): void {
 }
 
 function showGuideHud(payload: GuideHudPayload): void {
-  _slingHeld = false;   // SLINGSHOT - a fresh hold gets a fresh handover grace
+  _slingHeld = false;
+  if (_hudEl) {                 // PROBLEM 137 - undo the handover pin
+    _hudEl.style.top = "";
+    _hudEl.style.bottom = "";
+    _hudEl.style.height = "";
+  }   // SLINGSHOT - a fresh hold gets a fresh handover grace
   _lastPayload = payload;
   _hudActive = true;
   if (!_hudEl) {
@@ -1288,7 +1726,7 @@ function absorbIntoSpace(payload: GuideHudPayload): boolean {
   setToastLayerHidden(false);
   live.forEach((t) => park(t, true));   // same tick as the copies being made
 
-  const total = WARP_MS + STAGGER * (src.length - 1);
+  const total = THRUST_MS + THRUST_STAGGER * (src.length - 1);
   _hudEl.classList.add("handoff");      // SPACE is delivered by the flight
   _hudEl.classList.remove("hidden");    // ring + chips wait on their delay
   buildHud(payload, Math.max(0, total - 120)).then((after) => {
@@ -1300,7 +1738,7 @@ function absorbIntoSpace(payload: GuideHudPayload): boolean {
     src.forEach((sItem, i) => {
       const settled = settledBox(sItem.t.el);   // the size it was growing towards
       const last = i === src.length - 1;
-      flightWarp({
+      flightThruster({
         from: {
           x: sItem.sx - (now.x + host.left),
           y: sItem.sy - (now.y + host.top),
@@ -1309,8 +1747,7 @@ function absorbIntoSpace(payload: GuideHudPayload): boolean {
         via: { w: settled.w, h: settled.h, s: settled.s },
         to,
         html: sItem.html,
-        toSpace: true,
-        delay: STAGGER * i,
+        delay: THRUST_STAGGER * i,
         onArrive: () => {
           if (!last || !_hudEl) return;
           _hudEl.classList.add("landed");
@@ -1335,31 +1772,53 @@ function hideGuideHud(actionPending = false): void {
   const back = _absorbed.filter((t) => _toasts.includes(t));
   _absorbed = [];
 
-  /* ---- PROBLEM 112: the pills come back out of SPACE ---- */
+  /* ---- THRUSTER_SLING: the pills come back out of SPACE and fly ONE
+     continuous arc each, straight to their TRUE bottom-centre slots - "no
+     pause, no hover, no mid-air stop" (owner, 2026-08-18). Reachable because
+     PROBLEM 137's handover window extends to overlay_fit's own bottom edge:
+     the grow is invisible (top edge fixed, ring pinned), the stack sits on
+     its NORMAL bottom anchor, and the post-landing window shrink is invisible
+     too because both windows share the same bottom edge. ---- */
   if (WARP && back.length > 0 && _isOverlay && !REDUCED() && _hudEl) {
-    const from = spaceBox();            // BEFORE .hidden scales the HUD to .93
-    _hudEl.classList.remove("landed");  // SPACE leaves as the pills
-    _hudEl.classList.add("hidden");     // ring + chips collapse
-    sweep(760, 280, 150);
-
-    // No window move: the stack lands inside the HUD's own window.
-    _stageMode = true;
-    setStageAnchor(true);
+    _stageMode = true;                  // no window fits while pills fly
     setToastLayerHidden(false);
     back.forEach((t) => {
       t.phase = "open";
       t.el.classList.remove("leave");
       t.el.classList.add("open");
-      park(t, true);
+      park(t, true);                    // hidden until its copy lands on it
     });
-    relayout();
 
-    back.forEach((t, i) => {
-      const to = settledBox(t.el);      // its exact slot and width
-      flightWarp({
-        from, to, html: t.el.innerHTML, toSpace: false, delay: STAGGER * i,
-        onArrive: () => { park(t, false); thawEntry(t); },
+    const ringH = window.innerHeight;
+    invoke<Rect | null>("overlay_fit_handover", {
+      width: window.innerWidth, height: ringH,
+    }).then(() => {
+      if (!_hudEl) return;
+      _hudEl.style.top = "0px";         // pin: the ring must not move a pixel
+      _hudEl.style.bottom = "auto";
+      _hudEl.style.height = ringH + "px";
+      const from = spaceBox();          // AFTER the grow (same viewport as the
+                                        // slots), BEFORE .hidden scales to .93
+      _hudEl.classList.remove("landed");
+      _hudEl.classList.add("hidden");   // ring folds away under the arcs
+      sweep(760, 280, 150);
+      setStageAnchor(false);            // normal anchor = the true final slots
+      void document.body.offsetWidth;
+      relayout();                       // depth attrs only - stage guard holds
+
+      back.forEach((t, i) => {
+        const to = settledBox(t.el);    // its exact slot - land HERE, directly
+        const bow = SLING_DOWN_BOW * (i % 2 ? -1 : 1) * (1 + Math.floor(i / 2) * 0.35);
+        flightSlingDown({
+          from, to, html: t.el.innerHTML, bow, delay: STAGGER * i,
+          onArrive: () => { park(t, false); thawEntry(t); },
+        });
       });
+    }).catch(() => {
+      // The grow failed: reveal the pills in place rather than fly wrong.
+      if (_hudEl) { _hudEl.classList.remove("landed"); _hudEl.classList.add("hidden"); }
+      sweep(760, 280, 150);
+      back.forEach((t) => { park(t, false); thawEntry(t); });
     });
 
     window.setTimeout(() => {
@@ -1392,7 +1851,7 @@ function hideGuideHud(actionPending = false): void {
       // geometry, and refreshes _rect for the next absorb.
       if (_toasts.length > 0) relayout();
       else if (_isOverlay) invoke("overlay_toasts_done").catch(() => {});
-    }, HUD_OUT_MS + WARP_MS + STAGGER * back.length);
+    }, HUD_OUT_MS + SLING_DOWN_MS + STAGGER * back.length);
     return;
   }
 
@@ -1443,12 +1902,31 @@ function hideGuideHud(actionPending = false): void {
       hideToastGlow();
       setToastLayerHidden(false);
       if (_stageMode) { _stageMode = false; setStageAnchor(false); }
+      _slingStaged = false;
       if (_isOverlay) invoke("overlay_toasts_done").catch(() => {});
       return;
     }
     // A toast fired mid-hold is already staged inside this window — leave it
     // be, no fit, no move. Anything else gets one clean fit now the HUD is gone.
     setToastLayerHidden(false);
+
+    /* PROBLEM 136 - the pill landed ON this toast. Leave it exactly there.
+       `to` is measured as settledBox(el) in the STAGED layout, so the flight
+       touches down precisely on the real pill - and then this handover used to
+       un-stage and re-fit, which does two things at once: setStageAnchor(false)
+       moves the stack from top:50%+239px to bottom:74px, and overlay_fit
+       resizes and moves the WINDOW under it. Net effect for the owner: "it
+       pauses in the middle before jumping to toast".
+       Staying staged is safe now in a way it was NOT in 1.0.46: the window is
+       already up, because PROBLEM 135 stopped Rust hiding it while an action is
+       pending, so no fit is needed to show anything. overlay_toasts_done still
+       hides the window when the stack empties and retire() clears the flags, so
+       nothing is stranded. */
+    if (_stageMode && _slingStaged) {
+      anchorGlow("toast");
+      return;
+    }
+
     /* SLINGSHOT / PROBLEM 113, RE-CREATED BY 1.0.46 AND FIXED HERE.
        A slingshot stages the toast INSIDE the HUD's window (_stageMode = true),
        and that flag blocks every overlay_fit. For the WARP handover skipping the
