@@ -7506,3 +7506,128 @@ what changed on YOUR side first.* ICE38 was not a Tauri limitation discovered;
 it was a rule I walked into by changing the install scope. And *a validated
 config is not a verified config* — check the value the program actually
 received, not the text you believe you wrote.
+
+---
+
+## PROBLEM 142 — the tray icon went back into the overflow when the installer moved, and a one-shot latch made it permanent
+
+**Owner, 2026-08-18:** *"It was shown, it was pinned. I didn't have to press the
+show hidden icons thing. Especially in 1.0.15... Get that back."*
+
+He was right that it used to work, right about the version, and the cause is
+exactly the thing he could not have known about.
+
+**Root cause.** Windows 11 keys notification-icon visibility to the
+**EXECUTABLE PATH**, in `HKCU\Control Panel\NotifyIconSettings\<id>\IsPromoted`,
+where `<id>` derives from that path. New icons default to the overflow flyout.
+Measured on his machine: **116 known icons, 2 promoted.**
+
+PROBLEM 76 had already solved this — and the log proves it ran:
+
+```
+2026-08-12 14:37:06  startup: tray icon promoted to the visible taskbar corner
+                     ({6D809377-6AF0-444B-8957-A3…}\Spaceadom\spaceadom.exe)
+```
+
+That GUID is `FOLDERID_ProgramFilesX64`. It promoted the **Program Files**
+identity and set `tray_promoted: true` in config. Then PROBLEM 129 moved the
+install to `%LOCALAPPDATA%\Spaceadom` in 1.0.41 — to Windows a **different
+icon**, freshly hidden. The latch said "already done", so promotion never ran
+again.
+
+**The latch was the bug, not the promotion.** A bare bool cannot express WHICH
+icon was promoted, so it could not notice that the answer had gone stale. It
+exists for a good reason — a user who drags the icon back into the overflow must
+not be overridden — and that reason survives if the latch stores the path:
+
+```rust
+// config/schema.rs
+/// PROBLEM 142 — the exe path the tray icon was last promoted FOR.
+#[serde(default)]
+pub tray_promoted_for: String,
+
+// lib.rs — gate on the PATH, not a bare bool
+let me = std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+let done_for = cfg_arc.read().map(|c| c.tray_promoted_for.clone()).unwrap_or_else(|_| me.clone());
+if !me.is_empty() && done_for.eq_ignore_ascii_case(&me) { return; }
+```
+
+Within one install location it still runs exactly once. Move the app and it
+re-promotes once for the new identity.
+
+**Second defect in the same code: a single 5-second sleep.** The shell writes
+the `NotifyIconSettings` entry only after it has SHOWN the icon, and a cold
+logon is still settling at 5s. One sleep meant a silent no-op on a slow boot,
+with `promoted=false` and a retry deferred to the next launch. Now polls 8× at
+3s, then logs that it gave up.
+
+`promote_tray_icon_once` also now prefers an EXACT match on `current_exe()`
+before the `…spaceadom\spaceadom.exe` suffix rule, so the log says whether the
+icon the user is actually looking at got promoted rather than some stale entry.
+
+**How it was verified.** On the real machine, from outside the agent container:
+
+```
+tray IsPromoted   : 1
+tray_promoted_for : C:\Users\beamu\AppData\Local\Spaceadom\spaceadom.exe
+20:17:19  startup: tray icon promoted to the visible taskbar corner (…\Spaceadom\spaceadom.exe)
+```
+
+**Generalise this.** *A "do this once" flag must record WHAT it did it to.* A
+bare bool is a cache with no key: the moment the underlying identity changes it
+becomes a permanent lie, and the failure is invisible because the flag looks
+correct. This is the same family as PROBLEM 116 (a saved path outliving the app
+that moved) and PROBLEM 118 (a stale window outliving its replacement).
+
+---
+
+## PROBLEM 143 — every install I "verified" for a whole session went into an agent sandbox
+
+**Symptom, from the owner:** *"I restarted my laptop and it didn't come up. The
+app didn't restart with my laptop."*
+
+**Root cause, and it is a tooling failure, not an app bug.** The agent shell
+runs inside an MSIX container (`Claude_pzs8sxrjxfjjc`) which redirects
+`%LOCALAPPDATA%` and virtualises `HKCU`. Every `setup.exe /S` run from that
+shell installed into the container. Read back from the same shell, everything
+looked perfect — exe present, right version, right content marker, Run key set.
+Read from OUTSIDE the container:
+
+```
+HKCU\...\Run  Spaceadom              -> ERROR: value does not exist
+%LOCALAPPDATA%\Spaceadom\spaceadom.exe -> ABSENT
+%ProgramFiles%\Spaceadom\spaceadom.exe -> ABSENT
+StartupApproved\Spaceadom            -> 02 (enabled)   [leftover]
+```
+
+**The app was not installed on the real machine at all.** It could not start at
+logon because there was nothing to start.
+
+**Why it went unnoticed for hours.** After every build I launched the app
+myself, so it was always running and the owner tested real, working builds. Only
+persistence was fake, and only a reboot could reveal that. The container's
+redirect is also read-through, so both paths showed the same size and timestamp
+— the copies were indistinguishable by inspection.
+
+**The tell, in hindsight:** Windows had recorded a tray-icon entry for
+`…\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Local\Spaceadom\spaceadom.exe`. The
+container path was sitting in the registry the whole time.
+
+**The escape hatch.** `explorer.exe` runs outside the container, and anything it
+starts is un-virtualised. Every real install/verify in this session was done as:
+
+```bash
+powershell -Command "Start-Process explorer.exe -ArgumentList 'C:\...\script.cmd'"
+```
+
+**CLAUDE.md already warned about half of this** — "an agent shell may read a
+STALE containerised copy of that folder while File Explorer shows the live one"
+— for the LOG folder. The warning was right and its scope was too narrow. It now
+covers installs and the registry.
+
+**Generalise this.** *A sandbox that lies consistently is worse than one that
+fails.* Every check I had — version stamp, byte size, ASCII content marker,
+registry read-back — is a check performed BY the same sandboxed process, so all
+of them agreed and all of them were wrong. The only cure is to verify through a
+channel outside the sandbox. **"I verified the install" means nothing unless the
+verifier and the installer are in different worlds.**

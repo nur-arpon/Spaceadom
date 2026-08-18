@@ -817,20 +817,52 @@ pub fn run() {
                 std::thread::Builder::new()
                     .name("st-tray-promote".into())
                     .spawn(move || {
-                        let already = cfg_arc.read().map(|c| c.tray_promoted).unwrap_or(true);
-                        if already {
+                        // PROBLEM 142 — gate on the exe PATH, not a bare bool.
+                        //
+                        // The old `tray_promoted` flag latched true on
+                        // 2026-08-12 for the Program Files install. PROBLEM 129
+                        // then moved the app to %LOCALAPPDATA% in 1.0.41, which
+                        // Windows treats as a DIFFERENT icon and hides afresh —
+                        // and the latch said "already done", so it never ran
+                        // again. The owner had to click the chevron every time
+                        // and reported it as a regression from 1.0.15, which is
+                        // exactly what it was.
+                        //
+                        // Keying on the path preserves the reason the latch
+                        // exists: within one install location this still runs
+                        // once, so a user who drags the icon back into the
+                        // overflow is never overridden.
+                        let me = std::env::current_exe()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        let done_for = cfg_arc
+                            .read()
+                            .map(|c| c.tray_promoted_for.clone())
+                            .unwrap_or_else(|_| me.clone());
+                        if !me.is_empty() && done_for.eq_ignore_ascii_case(&me) {
                             return;
                         }
-                        std::thread::sleep(std::time::Duration::from_secs(5));
-                        if startup::promote_tray_icon_once() {
-                            if let Ok(mut c) = cfg_arc.write() {
-                                c.tray_promoted = true;
-                                let snapshot = c.clone();
-                                drop(c);
-                                let _ = config::save(&snapshot);
+                        // The shell writes the NotifyIconSettings entry only
+                        // after it has shown the icon once, and at a cold logon
+                        // it is still settling. Poll instead of guessing one
+                        // delay — a single 5s sleep is what let this silently
+                        // do nothing on a slow boot.
+                        for _ in 0..8 {
+                            std::thread::sleep(std::time::Duration::from_secs(3));
+                            if startup::promote_tray_icon_once() {
+                                if let Ok(mut c) = cfg_arc.write() {
+                                    c.tray_promoted = true;
+                                    c.tray_promoted_for = me.clone();
+                                    let snapshot = c.clone();
+                                    drop(c);
+                                    let _ = config::save(&snapshot);
+                                }
+                                return;
                             }
                         }
-                        // returned false → entry not there yet; retry next launch
+                        log::info!(
+                            "tray: no NotifyIconSettings entry for this exe after ~24s — the icon                              stays where Windows put it; it can still be dragged out of the                              overflow by hand, and this retries on the next launch."
+                        );
                     })
                     .ok();
             }

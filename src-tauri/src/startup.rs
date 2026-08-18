@@ -437,6 +437,15 @@ pub fn promote_tray_icon_once() -> bool {
     let Ok(root) = hkcu.open_subkey(r"Control Panel\NotifyIconSettings") else {
         return false; // pre-Win11 shell — icons are visible by default there
     };
+    // PROBLEM 142 — match OUR OWN exe first. The suffix rule below is a
+    // fallback for the shell's KNOWNFOLDER-GUID spelling of the same path; on
+    // its own it also matches STALE entries for install locations we have since
+    // moved away from, which are harmless to promote but tell us nothing about
+    // whether the icon the user is actually looking at got promoted.
+    let me = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_lowercase().replace('/', "\\"))
+        .unwrap_or_default();
+
     let mut promoted = false;
     for name in root.enum_keys().flatten() {
         let Ok(entry) = root.open_subkey_with_flags(&name, winreg::enums::KEY_ALL_ACCESS) else {
@@ -449,7 +458,8 @@ pub fn promote_tray_icon_once() -> bool {
         // Program Files path and the shell's KNOWNFOLDER-GUID form
         // ({6D809377-…}\Spaceadom\spaceadom.exe), while EXCLUDING dev builds
         // (…\target\release\spaceadom.exe — wrong parent directory).
-        if path.to_lowercase().replace('/', "\\").ends_with(r"spaceadom\spaceadom.exe") {
+        let norm = path.to_lowercase().replace('/', "\\");
+        if (!me.is_empty() && norm == me) || norm.ends_with(r"spaceadom\spaceadom.exe") {
             match entry.set_value("IsPromoted", &1u32) {
                 Ok(()) => {
                     log::info!("startup: tray icon promoted to the visible taskbar corner ({path})");

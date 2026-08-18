@@ -43,8 +43,28 @@ pub struct AppConfig {
     /// Windows 11 overflow flyout. Promotion happens ONCE; after that the
     /// user's own arrangement of their taskbar corner is never overridden.
     /// Not shown in Settings.
+    ///
+    /// SUPERSEDED by `tray_promoted_for` (PROBLEM 142) and kept only so old
+    /// configs still deserialise. Do not read it: as a bare bool it could not
+    /// express WHICH icon was promoted, which is the whole bug below.
     #[serde(default)]
     pub tray_promoted: bool,
+
+    /// PROBLEM 142 — the exe path the tray icon was last promoted FOR.
+    ///
+    /// Windows 11 keys icon visibility to the EXECUTABLE PATH. The bare
+    /// `tray_promoted` bool above latched true on 2026-08-12 for
+    /// `{6D809377-…ProgramFiles…}\Spaceadom\spaceadom.exe`, and then PROBLEM
+    /// 129 moved the install to `%LOCALAPPDATA%\Spaceadom` in 1.0.41. To
+    /// Windows that is a DIFFERENT icon, freshly hidden — but the latch said
+    /// "already done", so it was never promoted again and the owner had to
+    /// click the chevron every time.
+    ///
+    /// Storing the PATH keeps both properties: promotion happens once per
+    /// install location, and a user who later drags the icon back into the
+    /// overflow is never overridden, because the path has not changed.
+    #[serde(default)]
+    pub tray_promoted_for: String,
 
     /// Milliseconds Space must be held before the Guide HUD appears (default: 300).
     pub guide_hud_delay_ms: u64,
@@ -218,6 +238,7 @@ impl Default for AppConfig {
             rollover_ms: DEFAULT_ROLLOVER_MS,
             typing_wpm: DEFAULT_TYPING_WPM,
             tray_promoted: false,
+            tray_promoted_for: String::new(),
             guide_hud_delay_ms: 300,
             overlay_compositing: default_overlay_compositing(),
             opacity_floor_pct: 25,

@@ -1,6 +1,51 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-18 | ~8:20 PM (Claude Opus 5) - autostart and the tray icon, and an agent-sandbox failure behind one of them
+
+Full technical record: PROBLEMS 142 and 143 in `V14_FIXES_AND_CODE.md`. Shipped
+as 1.0.55, installed and verified on the REAL machine.
+
+Nur restarted his laptop and Spaceadom did not come back, and separately noted
+the tray icon now hides under the chevron when it used to be pinned "especially
+in 1.0.15". Two unrelated causes.
+
+**PROBLEM 143 - the autostart failure was MINE, not the app's.** The agent shell
+runs in an MSIX container that redirects `%LOCALAPPDATA%` and virtualises
+`HKCU`. Every install I ran and verified for hours went into that sandbox. Read
+from outside it, the real machine had NO Spaceadom installed anywhere and NO Run
+key - nothing for Windows to start. It went unnoticed because I launched the app
+myself after each build, so he was always testing a real, running, correct
+build; only persistence was fake, and only a reboot could show it. Every check I
+had - version stamp, byte size, content marker, registry read-back - was made BY
+the sandboxed process, so they all agreed and all were wrong.
+
+The escape hatch is `explorer.exe`, which runs outside the container. 1.0.55 was
+installed, started and verified through it: exe present, Run key written, app
+running from the real path. CLAUDE.md's warning about this covered the LOG
+folder only; it now covers installs and the registry.
+
+**PROBLEM 142 - the tray icon was a latch bug, and his 1.0.15 memory pinned it.**
+The promotion code from PROBLEM 76 works and DID run: on 2026-08-12 it promoted
+`{6D809377-...ProgramFiles...}\Spaceadom\spaceadom.exe` and set
+`tray_promoted: true`. Then PROBLEM 129 moved the install to `%LOCALAPPDATA%` in
+1.0.41. Windows keys tray visibility to the EXE PATH, so that was a brand-new
+hidden icon - but the bare boolean said "already done" and it never ran again.
+Measured on his machine: 116 known icons, 2 promoted.
+
+Fixed by keying the latch to the path (`tray_promoted_for`), so moving the
+install re-promotes exactly once while a user who re-hides the icon is still
+never overridden. Also replaced the single 5s wait with an 8x3s poll - the shell
+writes the NotifyIconSettings entry only after showing the icon, and a cold
+logon outruns 5 seconds.
+
+Verified on the real machine: `tray IsPromoted: 1`, `tray_promoted_for` set to
+the live exe path, and the app's own log recording the promotion.
+
+- Claude Opus 5
+
+---
+
 ## Update: 2026-08-18 | ~10:15 AM (Claude Opus 5) — the .msi is back, and Nur's question is what fixed it
 
 Recorded as the resolution of PROBLEMS 139/140 in `V14_FIXES_AND_CODE.md`.
