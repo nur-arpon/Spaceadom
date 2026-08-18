@@ -7558,8 +7558,51 @@ re-promotes once for the new identity.
 **Second defect in the same code: a single 5-second sleep.** The shell writes
 the `NotifyIconSettings` entry only after it has SHOWN the icon, and a cold
 logon is still settling at 5s. One sleep meant a silent no-op on a slow boot,
-with `promoted=false` and a retry deferred to the next launch. Now polls 8× at
-3s, then logs that it gave up.
+with `promoted=false` and a retry deferred to the next launch.
+
+```rust
+// lib.rs, inside the st-tray-promote thread — BEFORE
+std::thread::sleep(std::time::Duration::from_secs(5));
+if startup::promote_tray_icon_once() { /* save flag */ }
+// returned false -> entry not there yet; retry next launch
+
+// AFTER — poll, and say so if it never appears
+for _ in 0..8 {
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    if startup::promote_tray_icon_once() {
+        if let Ok(mut c) = cfg_arc.write() {
+            c.tray_promoted = true;
+            c.tray_promoted_for = me.clone();
+            let snapshot = c.clone();
+            drop(c);
+            let _ = config::save(&snapshot);
+        }
+        return;
+    }
+}
+log::info!(
+    "tray: no NotifyIconSettings entry for this exe after ~24s — the icon stays      where Windows put it; it can still be dragged out of the overflow by hand,      and this retries on the next launch."
+);
+```
+
+**Third: match OUR exe, not just the suffix.** `promote_tray_icon_once` matched
+any entry ending `spaceadom\spaceadom.exe`, which also hits STALE entries for
+install locations we have moved away from. Promoting those is harmless, but it
+makes the log say "promoted" without telling you whether the icon the user is
+actually looking at was the one promoted.
+
+```rust
+// startup.rs — prefer an exact match on our own path, keep the suffix rule
+// as the fallback for the shell's KNOWNFOLDER-GUID spelling of the same path.
+let me = std::env::current_exe()
+    .map(|p| p.to_string_lossy().to_lowercase().replace('/', "\\"))
+    .unwrap_or_default();
+
+let norm = path.to_lowercase().replace('/', "\\");
+if (!me.is_empty() && norm == me) || norm.ends_with(r"spaceadom\spaceadom.exe") {
+    entry.set_value("IsPromoted", &1u32)?;
+}
+```
 
 `promote_tray_icon_once` also now prefers an EXACT match on `current_exe()`
 before the `…spaceadom\spaceadom.exe` suffix rule, so the log says whether the
