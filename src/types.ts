@@ -49,6 +49,15 @@ export interface AppConfig {
   profiles: Profile[];
   /** Nocturne (dark) mode. ONE setting drives dashboard AND overlay. */
   dark_mode?: boolean;
+  /** PROBLEM 144 — "earthy" | "warcry" | "starry". Migrated from dark_mode. */
+  theme?: string;
+  /** PROBLEM 144 — the personality layer. Also decides whether Starry night
+   *  is the new sky or the plain nocturne this app has always had. */
+  fun_mode?: boolean;
+  /** PROBLEM 144 — clear the dashboard away and leave only the sky. */
+  hide_keyboard?: boolean;
+  /** PROBLEM 144 — every setting's description open at once. */
+  show_me_around?: boolean;
   /** Optional WebAudio sine ticks. Off by default. */
   sound_enabled?: boolean;
   /**

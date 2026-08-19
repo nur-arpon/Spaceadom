@@ -12,6 +12,7 @@
  * the user saw in the previous attempt.
  */
 import { invoke } from "@tauri-apps/api/core";
+import { boardSpecial, boardCardIndex, toggleSpecialCard } from "./special-cards";
 import { showToast } from "./toast";
 import type { AppConfig, KeyBinding, Profile } from "../types.ts";
 
@@ -288,6 +289,20 @@ function createKeyCell(
     sub.appendChild(txt);
     cell.appendChild(sub);
     cell.title = `Space + ${label} — ${SPECIAL_ON_KEY[key]}`;
+
+    // PROBLEM 148 — pressing it explains it (spec §4). These keys are not
+    // bindable, so the press was doing nothing but a ripple; the card is the
+    // only thing on the board that ever tells you what a special DOES.
+    const spec = boardSpecial(key);
+    const idx = boardCardIndex(key);
+    if (spec && idx >= 0) {
+      cell.dataset.spec = spec.id;
+      cell.setAttribute("aria-expanded", "false");
+      cell.addEventListener("click", (e) => {
+        e.stopPropagation();
+        toggleSpecialCard(cell, spec, idx);
+      });
+    }
   }
 
   return cell;

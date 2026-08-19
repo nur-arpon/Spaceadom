@@ -38,7 +38,27 @@ pub fn load_or_init() -> SharedConfig {
                     // most hurt by losing it. A config that just parsed
                     // cleanly is by definition a known-good one worth keeping.
                     write_backup(raw.trim_start_matches('\u{feff}'));
-                    let mut dirty = false;
+
+                    // PROBLEM 144 — migrate the old two-state dark toggle into the 3-way
+                    // theme, ONCE. An existing config has no `theme` key, so serde gives it
+                    // the "earthy" default — which would silently flip a dark-mode user into
+                    // daylight on upgrade. Derive it from what they actually had instead.
+                    let migrated_theme = cfg.theme.is_empty();
+                    if migrated_theme {
+                        cfg.theme = if cfg.dark_mode { "starry" } else { "earthy" }.to_string();
+                        log::info!(
+                            "config: migrated dark_mode={} -> theme=\"{}\" (PROBLEM 144)",
+                            cfg.dark_mode, cfg.theme
+                        );
+                    }
+                    // The two must never disagree: `dark_mode` is what drives body.nocturne on
+                    // the dashboard AND the overlay, and the overlay knows nothing about themes.
+                    cfg.dark_mode = cfg.theme != "earthy";
+                    // Write the migrated fields straight back, rather than waiting
+                    // for the user's next settings change. A config whose file does
+                    // not match the config the app is running is exactly the kind of
+                    // state this project has been bitten by before.
+                    let mut dirty = migrated_theme;
                     // Auto-upgrade legacy 0ms rollover to 120ms to fix typing bugs
                     if cfg.rollover_ms == 0 {
                         cfg.rollover_ms = 120;

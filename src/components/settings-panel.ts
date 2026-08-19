@@ -14,15 +14,21 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import {
-  appConfig, persistConfig, applyTheme, applySound, applyMotion,
-  knownConflicts, refreshConflicts,
+  appConfig, persistConfig, applySound, applyMotion,
+  applyLook, applySkyMode, knownConflicts, refreshConflicts,
 } from "../main";
+import { sfx } from "../sfx";
+import { toggleSwitchHtml, sliderShell } from "./controls";
 import { showToast } from "./toast";
 
 let panelEl: HTMLElement | null = null;
 let _paused = false;
 /** Two-step confirm state for the destructive buttons: "def" | "clr" | null */
 let _armed: "def" | "clr" | null = null;
+/** PROBLEM 144 — true only for the first render after the gear is opened, so
+ *  the "Show me around" convoy plays once and never re-opens what the user
+ *  closed. */
+let _freshOpen = false;
 let _armTimer: number | undefined;
 
 let _onResetDefaults: (() => void) | null = null;
@@ -45,6 +51,7 @@ export function isSettingsPanelOpen(): boolean {
 
 export function openSettingsPanel(): void {
   if (!panelEl) return;
+  _freshOpen = true;      // PROBLEM 144 — arm the one-shot "Show me around"
   render();
   panelEl.hidden = false;
   document.getElementById("gear-btn")?.setAttribute("aria-expanded", "true");
@@ -86,8 +93,6 @@ function resetLabel(): string {
 
 function render(): void {
   if (!panelEl || !appConfig) return;
-
-  const dark = !!appConfig.dark_mode;
   const sound = !!appConfig.sound_enabled;
 
   // run_at_startup is optional on configs migrated from V14 — treat missing
@@ -110,20 +115,27 @@ function render(): void {
   // automatically, so a false positive would otherwise be permanent.
   const software = appConfig.overlay_compositing === "software";
 
+  // PROBLEM 144 — the new settings. `theme` is the 3-way look; `fun` gates the
+  // personality layer AND (per the owner) whether Starry night is the new sky
+  // or the plain nocturne this app has always had.
+  const theme = appConfig.theme || (appConfig.dark_mode ? "starry" : "earthy");
+  const fun = appConfig.fun_mode !== false;
+  const hideBoard = appConfig.hide_keyboard === true;
+  const showAround = appConfig.show_me_around !== false;
+
   panelEl.innerHTML = `
     <div class="set-title">Settings</div>
 
     <div class="set-rows">
-      ${toggleRow("engine",  "Engine active",  !_paused, 0)}
-      ${toggleRow("dark",    "Dark mode",      dark,     1)}
-      ${toggleRow("sound",   "Sound ticks",    sound,    2)}
-      ${toggleRow("startup", "Run at startup", startup,  3)}
-      ${toggleRow("motion",  "Visual effects", effects,  4)}
-      ${toggleRow("software", "Software overlay", software, 5)}
-    </div>
-    <div class="set-note" style="margin:-2px 2px 0; font-size:11px; opacity:.62; line-height:1.45;">
-      Turn on if the Guide HUD or toasts stop appearing while sounds still
-      play. Applies at the next launch.
+      ${toggleRow("around",  "Show me around", showAround, 0)}
+      ${themeRow(theme, 1)}
+      ${toggleRow("engine",  "Engine active",  !_paused, 2)}
+      ${toggleRow("fun",     "Fun mode",       fun,      3)}
+      ${toggleRow("sound",   "Sound ticks",    sound,    4)}
+      ${toggleRow("startup", "Run at startup", startup,  5)}
+      ${toggleRow("motion",  "Visual effects", effects,  6)}
+      ${toggleRow("hideboard", "Hide the keyboard", hideBoard, 7)}
+      ${toggleRow("software", "Software overlay", software, 8)}
     </div>
 
     <div class="divider" style="margin:14px 0 10px;"></div>
@@ -131,6 +143,7 @@ function render(): void {
     ${typingSpeedRow(appConfig.typing_wpm ?? DEFAULT_WPM)}
     ${sliderRow("huddelay", "Guide HUD delay", appConfig.guide_hud_delay_ms, 100, 1000, 50, "ms")}
     ${sliderRow("opacity",  "Opacity floor",   appConfig.opacity_floor_pct, 10, 90, 5, "%")}
+
 
     <div class="divider" style="margin:14px 0 10px;"></div>
     <div class="set-title" style="font-size:13px; margin-bottom:8px;">Conflicts</div>
@@ -144,10 +157,17 @@ function render(): void {
     <button class="btn" id="set-logs" style="width:100%; justify-content:center; margin-top:7px; height:34px; font-size:12px;">Open log folder</button>
   `;
 
+  // One render, one animation. Anything after this point sees a clean slate,
+  // so a later render (a toast, a conflict re-check) cannot replay a character
+  // the user pressed minutes ago.
+  _flipped = null;
+
   wireToggle("engine", async () => {
     try {
       const paused = await invoke<boolean>("toggle_bypass");
       _paused = paused;
+      // Engine ON is the thruster ignition; OFF is a plain flip down.
+      if (paused) sfx.toggleOff("engine"); else sfx.toggleOn("engine");
       showToast(paused ? "⏸️ Engine paused" : "▶️ Engine active");
     } catch (_) {
       showToast("⚠️ Could not toggle the engine");
@@ -155,18 +175,80 @@ function render(): void {
     render();
   });
 
-  wireToggle("dark", async () => {
+  // PROBLEM 144 — the 3-way theme pill replaced the Dark mode switch.
+  panelEl?.querySelectorAll<HTMLElement>("[data-theme-set]").forEach((b) => {
+    b.addEventListener("click", async () => {
+      if (!appConfig) return;
+      const next = b.dataset.themeSet ?? "earthy";
+      if (next === appConfig.theme) return;
+      appConfig.theme = next;
+      // sounds.js names the middle theme "war", not "warcry".
+      sfx.theme(next === "warcry" ? "war" : next);
+      // dark_mode stays the single source of truth for body.nocturne on BOTH
+      // windows — the overlay has no idea themes exist (CLAUDE.md theme rule).
+      appConfig.dark_mode = next !== "earthy";
+      applyLook();
+      await persistConfig();
+      render();
+    });
+  });
+
+  // "Show me around" — open or close every description as a convoy.
+  wireToggle("around", async () => {
     if (!appConfig) return;
-    appConfig.dark_mode = !appConfig.dark_mode;
-    applyTheme(appConfig.dark_mode);      // dashboard + overlay, one setting
+    const on = !(appConfig.show_me_around !== false);
+    appConfig.show_me_around = on;
+    convoyAll(on);
+    if (on) sfx.convoyOn(); else sfx.convoyOff();
+    await persistConfig();
+    // deliberately NOT render() — a re-render would wipe the convoy mid-flight
+  });
+
+  wireToggle("fun", async () => {
+    if (!appConfig) return;
+    appConfig.fun_mode = !(appConfig.fun_mode !== false);
+    // toggleOn/Off("fun") is special-cased inside sounds.js: it plays the
+    // genie / wind-down in EITHER gate state, so the switch that controls the
+    // personality layer is never the one switch you cannot hear.
+    if (appConfig.fun_mode) sfx.toggleOn("fun"); else sfx.toggleOff("fun");
+    applyLook();          // the living sky exists only while fun is on
     await persistConfig();
     render();
   });
+
+  wireToggle("hideboard", async () => {
+    if (!appConfig) return;
+    appConfig.hide_keyboard = !(appConfig.hide_keyboard === true);
+    // Not a switch sound: this is the one control that clears the whole
+    // screen. sounds.js §8a documents spaceRise/spaceFall for exactly this
+    // ("big reveals" / "exiting a mode"). They ignore fun() by design, so the
+    // gate is ours — in plain mode it stays an ordinary flip.
+    const funNow = appConfig.fun_mode !== false;
+    if (appConfig.hide_keyboard) { if (funNow) sfx.spaceRise(); else sfx.toggleOn("hideboard"); }
+    else                         { if (funNow) sfx.spaceFall(); else sfx.toggleOff("hideboard"); }
+    applySkyMode(appConfig.hide_keyboard);
+    await persistConfig();
+    render();
+  });
+
+  wireDescriptions();
+  // Auto-open ONCE per panel opening, not on every render.
+  //
+  // render() runs again after every toggle, so doing this unconditionally
+  // would re-open any description the user had just closed by hand — the
+  // setting would quietly fight them, which is the sort of thing that reads as
+  // a bug rather than a feature.
+  if (_freshOpen && appConfig?.show_me_around !== false) convoyAll(true);
+  _freshOpen = false;
 
   wireToggle("sound", async () => {
     if (!appConfig) return;
     appConfig.sound_enabled = !appConfig.sound_enabled;
     applySound(appConfig.sound_enabled);
+    // toggleOn("sound") forces past the mute gate internally — the switch you
+    // just enabled has to confirm itself, and enabled() reads false until the
+    // very instant above.
+    if (appConfig.sound_enabled) sfx.toggleOn("sound"); else sfx.toggleOff("sound");
     await persistConfig();
     render();
   });
@@ -180,6 +262,7 @@ function render(): void {
       // can never drift apart. Not persistConfig() — that path doesn't touch
       // the task.
       await invoke("set_startup_enabled", { enabled: next });
+      if (next) sfx.toggleOn("startup"); else sfx.toggleOff("startup");
       showToast(next ? "🚀 Starts with Windows" : "🚀 Won't start with Windows");
     } catch (_) {
       appConfig.run_at_startup = !next;   // revert on failure
@@ -194,6 +277,8 @@ function render(): void {
     // Flipping writes an EXPLICIT choice, never "auto" — the user has just
     // told us what they want, so stop deferring to Windows for this app.
     appConfig.motion = nowReduced ? "full" : "reduced";
+    // Before applyMotion: turning effects DOWN still gets to announce itself.
+    if (nowReduced) sfx.toggleOn("motion"); else sfx.toggleOff("motion");
     applyMotion(appConfig.motion);
     await persistConfig();
     showToast(nowReduced ? "✨ Visual effects on" : "🪶 Visual effects reduced");
@@ -210,6 +295,7 @@ function render(): void {
     try {
       await invoke("set_overlay_compositing", { mode: next });
       appConfig.overlay_compositing = next;
+      if (next === "software") sfx.toggleOn("software"); else sfx.toggleOff("software");
       showToast(
         next === "software"
           ? "🖥️ Software overlay on — restart Spaceadom to apply"
@@ -231,6 +317,7 @@ function render(): void {
     e.stopPropagation();                       // #stage closes popovers (PROBLEM 98)
     try {
       const restored = await invoke<string[]>("restore_preset_profiles");
+      sfx.confirm();
       showToast(
         restored.length === 0
           ? "✓ All preset profiles are already here"
@@ -242,6 +329,7 @@ function render(): void {
   });
 
   panelEl.querySelector("#set-logs")!.addEventListener("click", () => {
+    sfx.tick();
     void invoke("open_log_folder").catch(() => showToast("⚠️ Could not open the log folder"));
   });
 
@@ -252,13 +340,15 @@ function render(): void {
   // Destructive actions arm on the first click and fire on the second —
   // a window.confirm() dialog over this stage looks like a different app.
   panelEl.querySelector("#set-reset")!.addEventListener("click", () => {
-    if (_armed !== "def") { arm("def"); return; }
+    if (_armed !== "def") { arm("def"); sfx.arm(); return; }
     disarm();
+    sfx.confirm();
     _onResetDefaults?.();
   });
   panelEl.querySelector("#set-clear")!.addEventListener("click", () => {
-    if (_armed !== "clr") { arm("clr"); return; }
+    if (_armed !== "clr") { arm("clr"); sfx.arm(); return; }
     disarm();
+    sfx.confirm();
     _onClearAll?.();
   });
 }
@@ -322,8 +412,10 @@ function renderConflicts(): void {
     again.style.cssText = "width:100%; justify-content:center; margin-top:8px;";
     again.textContent = "Re-check now";
     again.addEventListener("click", async () => {
+      sfx.tick();
       again.textContent = "Checking…";
       await refreshConflicts();
+      sfx.confirm();
       draw();
     });
     box.appendChild(again);
@@ -333,18 +425,230 @@ function renderConflicts(): void {
 }
 
 // ---------------------------------------------------------------------------
+// PRESS-TO-EXPAND DESCRIPTIONS (PROBLEM 144)
+//
+// The owner's brief: "a user who didn't use this ever doesn't know how to use
+// this, or what those settings do... at the same time the place doesn't look
+// clumsy." So nothing is added to a row until it is asked for — press a
+// setting's label and its description slides open underneath it.
+//
+// Copy is transcribed VERBATIM from design/design-system-overhaul-3.md §1.
+// It is deliberately plain-spoken ("your spacebar is just a spacebar again"),
+// which was an explicit instruction: real language, not artificial language.
+// Do not "improve" these into product-speak.
+// ---------------------------------------------------------------------------
+const DESC: Record<string, string> = {
+  engine:
+    "The main switch. Turn it off and your spacebar is just a spacebar again — nothing launches until you flip it back on.",
+  fun:
+    "All the personality — character switches, swirling cards, flame convoys and space sounds. Off swaps everything for plain, quiet controls.",
+  sound:
+    "Tiny clicks when keys are pressed and switches flip. Just for feel — off means silence.",
+  startup:
+    "Spaceadom opens quietly in the background when your PC turns on, so your shortcuts work from the first minute.",
+  motion:
+    "All the movement — keys popping, panels gliding. Turn off if the app ever feels heavy on your machine.",
+  software:
+    "A backup way of drawing the pop-ups. Turn on only if the guide or toasts stop appearing while sounds still play. Applies at the next launch.",
+  theme:
+    "Three looks for the whole app, pop-ups included: Earthy daylight, a Warcry of iron and war-banners, or a Starry night sky.",
+  // Not in the spec — this setting is new, so the copy is written to match its
+  // voice: what you get, and how to come back.
+  hideboard:
+    "Clears the whole dashboard away and leaves just the sky. Your shortcuts keep working exactly as they are — press Esc, or the small arrow in the corner, to bring everything back.",
+  wpm:
+    "If apps launch by accident while you type, pick a slower speed — Spaceadom then waits longer before treating Space+key as a shortcut.",
+  huddelay:
+    "How long you hold Space before the shortcut guide appears. Shorter shows help sooner; longer keeps it out of your way.",
+  opacity:
+    "The limit for Space+Scroll window fading. The floor stops a window from ever turning fully invisible.",
+  conflicts:
+    "Other remapping software that's also holding your keyboard. Spaceadom only reports — it never closes anything for you.",
+  reset:
+    "Puts a preset profile back to its factory bindings. On a profile you created, it clears it instead — you confirm first.",
+  clear:
+    "Empties every binding in this profile. Asks you to confirm first.",
+  presets:
+    "Brings back any missing preset (Founders, Gamers, Professionals). Never overwrites one you still have.",
+  logs:
+    "Opens the folder with Spaceadom's log files — handy when reporting a bug.",
+};
+
+/** How long a label must be hovered before its description opens itself. */
+const HOVER_LINGER_MS = 2000;
+/** Gap between rows when "Show me around" opens them all as a convoy. */
+const CONVOY_STAGGER_MS = 80;
+
+/** Descriptions that were opened by hovering, so they can close on leave.
+ *  One opened by a CLICK stays put — that was a deliberate act. */
+const _hoverOpened = new Set<string>();
+let _hoverTimer: number | undefined;
+
+/** The collapsing box under a row. Empty when there is no copy for the id. */
+function descBox(id: string): string {
+  const copy = DESC[id];
+  if (!copy) return "";
+  // The visual box is a CHILD of the clipped wrapper, never the wrapper
+  // itself — see the .set-desc-in note in styles.css for why.
+  return `<div class="set-desc" data-desc-for="${id}"><div class="set-desc-in"><div class="set-desc-body">${copy}</div></div></div>`;
+}
+
+function setDescOpen(id: string, open: boolean): void {
+  const box = panelEl?.querySelector<HTMLElement>(`[data-desc-for="${id}"]`);
+  if (!box) return;
+  box.classList.toggle("is-open", open);
+  panelEl
+    ?.querySelectorAll<HTMLElement>(`[data-desc="${id}"]`)
+    .forEach((l) => l.setAttribute("aria-expanded", String(open)));
+  if (!open) _hoverOpened.delete(id);
+}
+
+function isDescOpen(id: string): boolean {
+  return !!panelEl?.querySelector(`[data-desc-for="${id}"].is-open`);
+}
+
+/**
+ * Open or close every description at once, staggered.
+ *
+ * The stagger is the whole point of the "convoy" — they arrive in order rather
+ * than all snapping at once. Closing runs the stagger REVERSED so the panel
+ * folds up from the bottom, which reads as the same gesture played backwards.
+ */
+function convoyAll(open: boolean): void {
+  const boxes = Array.from(
+    panelEl?.querySelectorAll<HTMLElement>("[data-desc-for]") ?? [],
+  );
+  const order = open ? boxes : boxes.slice().reverse();
+  const reduced = document.documentElement.classList.contains("reduced-motion");
+  order.forEach((box, i) => {
+    const id = box.dataset.descFor ?? "";
+    if (reduced) { setDescOpen(id, open); return; }
+    window.setTimeout(() => setDescOpen(id, open), i * CONVOY_STAGGER_MS);
+  });
+}
+
+/**
+ * Wire every label: click toggles, a 2s hover opens.
+ *
+ * Re-wired on every render, which is safe because render() replaces the whole
+ * subtree — the old listeners go with the old nodes.
+ */
+function wireDescriptions(): void {
+  panelEl?.querySelectorAll<HTMLElement>("[data-desc]").forEach((label) => {
+    const id = label.dataset.desc ?? "";
+    if (!id || !DESC[id]) return;
+
+    label.addEventListener("click", (e) => {
+      // A label inside a <label for=…> would otherwise flip the switch too.
+      e.preventDefault();
+      e.stopPropagation();
+      const next = !isDescOpen(id);
+      setDescOpen(id, next);
+      if (next) sfx.bloomOpen(); else sfx.bloomClose();
+      if (!next) _hoverOpened.delete(id);
+    });
+
+    label.addEventListener("pointerenter", () => {
+      if (isDescOpen(id)) return;
+      window.clearTimeout(_hoverTimer);
+      _hoverTimer = window.setTimeout(() => {
+        setDescOpen(id, true);
+        sfx.whisper();                 // barely-there: it opened by itself
+        _hoverOpened.add(id);          // opened by hover -> closes on leave
+      }, HOVER_LINGER_MS);
+    });
+
+    label.addEventListener("pointerleave", () => {
+      window.clearTimeout(_hoverTimer);
+      // Only retract what hover opened. Anything the user clicked open stays.
+      if (_hoverOpened.has(id)) setDescOpen(id, false);
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Row builders
 // ---------------------------------------------------------------------------
 
+/**
+ * The row the user just flipped, and which way — consumed by the NEXT render
+ * and then forgotten.
+ *
+ * The spec's rule is "first render = no animation (static position); animate
+ * only after user interaction". render() re-runs after every single toggle,
+ * so without this latch, flipping one switch would replay all eight
+ * characters at once — eight knobs hopping because one was pressed.
+ */
+let _flipped: { id: string; on: boolean } | null = null;
+
+/**
+ * Stamped centrally by wireToggle on the checkbox's own `change`, so a new
+ * switch cannot be added without a character — and so the value recorded is
+ * the checkbox's real state, not what a handler intended.
+ *
+ * It marks BOTH the live element and the next render. The live stamp exists
+ * for "Show me around", which deliberately never re-renders (that would wipe
+ * the convoy mid-flight) and would otherwise be the one silent switch.
+ */
+function markFlipped(id: string, on: boolean): void {
+  _flipped = { id, on };
+  panelEl?.querySelectorAll<HTMLElement>(".toggle-switch[data-anim]")
+    .forEach((sw) => sw.removeAttribute("data-anim"));
+  panelEl?.querySelector<HTMLElement>(`#set-${id}`)
+    ?.closest<HTMLElement>(".toggle-switch")
+    ?.setAttribute("data-anim", on ? "on" : "off");
+}
+
 function toggleRow(id: string, label: string, on: boolean, i: number): string {
+  // PROBLEM 144 — this row used to be one big <label>, so a click anywhere on
+  // it flipped the switch. Press-to-expand needs the TEXT to mean "explain
+  // this" and only the switch to mean "change this", so the label is now a
+  // button and the track carries the `for=`. The CSS keeps working because
+  // `input:checked + .toggle-track` is still an adjacent sibling.
   return `
-    <label class="set-row" style="animation-delay:${60 + i * 45}ms">
-      <span class="set-row-label">${label}</span>
-      <span class="toggle-switch">
-        <input type="checkbox" id="set-${id}" ${on ? "checked" : ""} />
-        <span class="toggle-track"><span class="toggle-thumb"></span></span>
-      </span>
-    </label>`;
+    <div class="set-item" style="animation-delay:${60 + i * 45}ms">
+      <div class="set-row">
+        <button type="button" class="set-row-label" data-desc="${id}"
+                aria-expanded="false">${label}</button>
+        ${toggleSwitchHtml(id, on,
+          _flipped?.id === id && _flipped.on === on ? (on ? "on" : "off") : undefined)}
+      </div>
+      ${descBox(id)}
+    </div>`;
+}
+
+/**
+ * The 3-way Theme pill (PROBLEM 144) — Earthy / Warcry / Starry night.
+ *
+ * Replaces the old "Dark mode" switch. A sliding indicator hops between three
+ * equal segments; `--seg-i` drives its translateX so the movement is a single
+ * transform rather than three elements changing background.
+ */
+function themeRow(theme: string, i: number): string {
+  const opts: [string, string][] = [
+    ["earthy", "Earthy"],
+    ["warcry", "Warcry"],
+    ["starry", "Starry night"],
+  ];
+  const idx = Math.max(0, opts.findIndex(([v]) => v === theme));
+  return `
+    <div class="set-item" style="animation-delay:${60 + i * 45}ms">
+      <div class="set-row set-row-stack">
+        <button type="button" class="set-row-label" data-desc="theme"
+                aria-expanded="false">Theme</button>
+        <div class="theme-seg" style="--seg-i:${idx}" role="radiogroup" aria-label="Theme">
+          <span class="theme-seg-ind" data-seg="${opts[idx][0]}"></span>
+          ${opts
+            .map(
+              ([v, l], n) => `<button type="button" class="theme-seg-opt${n === idx ? " is-on" : ""}"
+                     data-theme-set="${v}" role="radio"
+                     aria-checked="${n === idx}">${l}</button>`,
+            )
+            .join("")}
+        </div>
+      </div>
+      ${descBox("theme")}
+    </div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -416,8 +720,9 @@ function typingSpeedRow(wpm: number): string {
               id="set-wpm-val">${typingTierName(wpm)} · ${wpm} wpm</span>
       </div>
       <div class="wpm-ticks" id="set-wpm-ticks">${ticks}</div>
-      <input type="range" id="set-wpm" min="${WPM_MIN}" max="${WPM_MAX}" step="5" value="${wpm}"
-             style="width:100%; accent-color:var(--st-accent);" />
+      ${sliderShell("wpm", `
+        <input type="range" id="set-wpm" min="${WPM_MIN}" max="${WPM_MAX}" step="5" value="${wpm}" />`,
+        WPM_MIN, WPM_MAX, wpm)}
       <span style="font-size:10.5px; color:var(--st-ink-soft); line-height:1.35;">
         If apps launch by accident while you type, choose a SLOWER speed —
         Spaceadom then waits longer before treating Space+key as a shortcut.
@@ -435,14 +740,77 @@ function sliderRow(
         <span class="set-row-label">${label}</span>
         <span style="font-size:11px; font-weight:700; color:var(--st-accent-deep);" id="set-${id}-val">${value}${unit}</span>
       </div>
-      <input type="range" id="set-${id}" min="${min}" max="${max}" step="${step}" value="${value}"
-             data-unit="${unit}" style="width:100%; accent-color:var(--st-accent);" />
+      ${sliderShell(id, `
+        <input type="range" id="set-${id}" min="${min}" max="${max}" step="${step}" value="${value}"
+               data-unit="${unit}" />`, min, max, value)}
     </div>`;
 }
 
 function wireToggle(id: string, onChange: () => void | Promise<void>): void {
   const el = panelEl?.querySelector<HTMLInputElement>(`#set-${id}`);
-  el?.addEventListener("change", () => void onChange());
+  el?.addEventListener("change", () => { markFlipped(id, el.checked); void onChange(); });
+}
+
+/**
+ * The slider's personality (spec §3) and its two sounds — one function for all
+ * three sliders, so a new slider cannot arrive silent and undecorated.
+ *
+ * Everything here writes to the WRAPPER, never to the input: `--p` for the
+ * fill and the decorations' positions, `data-dir` so the comet's tail trails
+ * the direction of travel rather than leading it, and `.is-drag` for the
+ * glow and the orbit's faster spin. The input keeps its own semantics.
+ */
+function wireSliderChar(id: string): void {
+  const el = panelEl?.querySelector<HTMLInputElement>(`#set-${id}`);
+  const shell = panelEl?.querySelector<HTMLElement>(`#sld-${id}`);
+  if (!el || !shell) return;
+
+  const min = parseFloat(el.min || "0");
+  const max = parseFloat(el.max || "100");
+  let last = parseFloat(el.value);
+
+  const paint = (): void => {
+    const v = parseFloat(el.value);
+    // --p is the ONLY thing JS writes for position; --x and every decoration
+    // derive from it in CSS. A measured pixel --x was tried and reverted: it
+    // was chasing a drift that did not exist. See characters.css §3.
+    if (max > min) shell.style.setProperty("--p", ((v - min) / (max - min)).toFixed(4));
+    // 0 is not a direction — hold the last one so the tail does not flip to a
+    // default every time the handle pauses.
+    if (v !== last) shell.dataset.dir = v > last ? "1" : "-1";
+    last = v;
+  };
+
+  el.addEventListener("input", paint);
+  // pointerdown, not mousedown: this is a touchscreen laptop.
+  el.addEventListener("pointerdown", () => { shell.classList.add("is-drag"); sfx.sliderGrab(); });
+  // Keyboard adjustment is a real adjustment: it must move the fill too.
+  el.addEventListener("change", paint);
+  paint();
+  wireSliderRelease();
+}
+
+/**
+ * The end of a drag, wired ONCE for the whole panel.
+ *
+ * It has to live on `window`: a drag that ends with the pointer off the track
+ * — which is most of them — never delivers pointerup to the input. But
+ * render() rebuilds this panel after every setting change, so a per-slider
+ * window listener would stack up a new pair on every render and outlive the
+ * elements they close over. One listener, one flag, no accumulation.
+ */
+let _sliderUpWired = false;
+function wireSliderRelease(): void {
+  if (_sliderUpWired) return;
+  _sliderUpWired = true;
+  const up = (): void => {
+    const dragging = document.querySelectorAll<HTMLElement>(".sld.is-drag");
+    if (dragging.length === 0) return;
+    dragging.forEach((sh) => sh.classList.remove("is-drag"));
+    sfx.sliderRelease();
+  };
+  window.addEventListener("pointerup", up);
+  window.addEventListener("pointercancel", up);
 }
 
 /** Live tier readout while dragging; persists both wpm and the derived ms. */
@@ -461,6 +829,7 @@ function wireTypingSpeed(): void {
     });
   };
   paint(parseInt(el.value, 10));
+  wireSliderChar("wpm");
 
   el.addEventListener("input", () => paint(parseInt(el.value, 10)));
   el.addEventListener("change", async () => {
@@ -479,6 +848,7 @@ function wireSlider(id: string, apply: (v: number) => void): void {
   const out = panelEl?.querySelector<HTMLElement>(`#set-${id}-val`);
   if (!el) return;
   const unit = el.dataset.unit ?? "";
+  wireSliderChar(id);
   el.addEventListener("input", () => { if (out) out.textContent = el.value + unit; });
   el.addEventListener("change", async () => {
     apply(parseInt(el.value, 10));

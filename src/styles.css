@@ -12,6 +12,11 @@
    ========================================================================== */
 
 @import "./styles/design-system.css";
+/* PROBLEM 144 — the three looks. MUST come after design-system.css: each
+   theme re-tints the nocturne palette rather than redefining it. */
+@import "./styles/themes.css";
+@import "./styles/starry-sky.css";
+@import "./styles/characters.css";
 /* The dashboard shows its own toasts now (PROBLEM 45) and needs the pill
    styles. This also pulls in the #st-hud rules, which are inert here because
    the dashboard never creates that element. Keeping ONE stylesheet for the
@@ -26,14 +31,23 @@
   width: 100%;
   height: 100%;
   overflow: hidden;
+  /* PROBLEM 144 — these three stops were HARDCODED, and #stage fills the
+     whole viewport opaquely. That is why Warcry stayed blue-grey (it only
+     changed --st-bg, which this gradient barely uses) and why the star field
+     never appeared (body::before was painted over). Themed vars now, with a
+     --st-stage-a/b/c triple each theme can set — including to `transparent`,
+     which is how the sky gets to show through at all. */
   background: radial-gradient(130% 120% at 50% -10%,
-              #fdf6e9 0%, var(--st-bg) 55%, #efe0c4 100%);
+              var(--st-stage-a, #fdf6e9) 0%,
+              var(--st-stage-b, var(--st-bg)) 55%,
+              var(--st-stage-c, #efe0c4) 100%);
   color: var(--st-text);
   transition: background var(--dur-hero) var(--ease-out);
 }
-body.nocturne #stage {
-  background: radial-gradient(130% 120% at 50% -10%,
-              #17202f 0%, #0d141f 55%, #090d15 100%);
+body.nocturne {
+  --st-stage-a: #17202f;
+  --st-stage-b: #0d141f;
+  --st-stage-c: #090d15;
 }
 
 /* ---- Ambient layers ---- */
@@ -601,7 +615,7 @@ body.nocturne #key-detail-panel { box-shadow: 0 24px 60px rgba(0, 0, 0, .55); }
   cursor: pointer;
   animation: st-pop-in 360ms var(--ease-spring) both;
 }
-.set-row-label { flex: 1; font-size: 13px; font-weight: 600; }
+/* .set-row-label is redefined below — it is a <button> since PROBLEM 144. */
 
 /* Typing-speed tier labels sitting above the slider (PROBLEM 69). Absolutely
    positioned at each band's midpoint, so a name lines up with the stretch of
@@ -862,3 +876,190 @@ body.nocturne .confirm-box {
   width: auto; padding: 0 9px; font-size: 11px; font-weight: 700;
   color: #fff; background: var(--danger, #b4462f); border-radius: 999px;
 }
+
+/* ===========================================================================
+   PRESS-TO-EXPAND DESCRIPTIONS + THEME PILL + SKY MODE (PROBLEM 144)
+   Spec: design/design-system-overhaul-3.md §1 and §5.
+   =========================================================================== */
+
+/* A row and its description are one unit, so the panel's own 11px gap sits
+   between SETTINGS rather than between a row and its own explanation. */
+.set-item { display: flex; flex-direction: column; animation: st-pop-in 360ms var(--ease-spring) both; }
+.set-item .set-row { animation: none; }
+
+/* The label is a button now (it means "explain this"), so every button default
+   has to be undone or it renders as a chip in the middle of the row. */
+.set-row-label {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font-family: inherit;
+  color: inherit;
+  cursor: help;
+  position: relative;
+  transition: color var(--dur-quick, .16s) var(--ease-out);
+}
+.set-row-label:hover { color: var(--st-accent-deep); }
+.set-row-label:focus-visible { outline: 2px solid var(--st-accent-brd); outline-offset: 3px; border-radius: 4px; }
+
+/* A quiet dotted rule under the text — the only hint that a label is pressable.
+   scaleX from the left so it draws itself in rather than fading. */
+.set-row-label::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: -2px;
+  border-bottom: 1px dotted currentColor;
+  opacity: 0;
+  transform: scaleX(.4);
+  transform-origin: left;
+  transition: opacity .18s var(--ease-out), transform .28s var(--ease-spring);
+}
+.set-row-label:hover::after,
+.set-row-label[aria-expanded="true"]::after { opacity: .45; transform: scaleX(1); }
+
+/* THE COLLAPSE. grid 0fr -> 1fr is the one honest way to animate to auto
+   height; the inner div must carry overflow:hidden and min-height:0 or the
+   content refuses to be clipped. 380ms cubic-bezier(.3,.9,.3,1) per spec. */
+.set-desc {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 380ms cubic-bezier(.3, .9, .3, 1);
+}
+.set-desc > .set-desc-in { overflow: hidden; min-height: 0; }
+.set-desc.is-open { grid-template-rows: 1fr; }
+
+/* The visible box. Margins per spec (7 top / 6 bottom) so a description never
+   touches the control above it — including under the action buttons. */
+.set-desc-in > * { display: block; }
+.set-desc.is-open > .set-desc-in {
+  animation: st-convoy-a 460ms cubic-bezier(.3, 1.2, .35, 1) both;
+}
+/* THE COLLAPSED-STATE BUG (owner, 2026-08-19: "when the descriptions are not
+   expanded there's a visual bug, it's not clean").
+   The box's own margin, padding and left border sat on the GRID ITEM. A grid
+   row animating to 0fr collapses its height — it does not collapse the item's
+   margins or hide a 2px border, so every closed row left a sliver and a 13px
+   dead gap. The visual box therefore moves to a child INSIDE the overflow
+   clip, where zero height really means nothing is drawn. */
+.set-desc-in { padding: 0; margin: 0; border: 0; }
+.set-desc-in > .set-desc-body {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--st-text-dim);
+  border-left: 2px solid var(--st-accent-brd);
+  padding: 7px 0 6px 9px;
+  margin: 7px 0 6px;
+}
+
+/* Verbatim from the lab's <style> block. */
+@keyframes st-convoy-a {
+  0%   { opacity: 0; transform: translateY(12px) scaleY(.55); }
+  45%  { opacity: 1; transform: translateY(-4px) scaleY(1.09); }
+  100% { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .set-desc { transition: none; }
+  .set-desc.is-open > .set-desc-in { animation: none; }
+}
+
+/* --------------------------------------------------------------------------
+   THEME — 3-way segmented pill
+   -------------------------------------------------------------------------- */
+.set-row-stack { flex-direction: column; align-items: stretch; gap: 7px; }
+
+.theme-seg {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0;
+  padding: 3px;
+  border-radius: var(--radius-full);
+  background: var(--st-surface);
+  border: 1px solid var(--st-border);
+}
+
+/* One element moves. translateX of a third of the track is a single transform,
+   which is the whole reason the indicator is a sibling rather than three
+   backgrounds taking turns. */
+.theme-seg-ind {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc((100% - 6px) / 3);
+  border-radius: var(--radius-full);
+  transform: translateX(calc(var(--seg-i, 0) * 100%));
+  transition: transform 480ms cubic-bezier(.34, 1.45, .36, 1);
+  box-shadow: var(--shadow-sm);
+}
+.theme-seg-ind[data-seg="earthy"] { background: radial-gradient(circle at 32% 28%, #ffdf9e, #e8a13f 55%, #c67139); }
+.theme-seg-ind[data-seg="warcry"] { background: linear-gradient(135deg, #a63a2c, #521712); }
+.theme-seg-ind[data-seg="starry"] { background: linear-gradient(135deg, #2e3560, #131832); }
+
+.theme-seg-opt {
+  position: relative;
+  z-index: 1;
+  border: 0;
+  background: none;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: .01em;
+  padding: 6px 4px;
+  border-radius: var(--radius-full);
+  color: var(--st-text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color .2s var(--ease-out);
+}
+.theme-seg-opt.is-on { color: #fff; }
+.theme-seg-opt:focus-visible { outline: 2px solid var(--st-accent-brd); outline-offset: 2px; }
+
+/* Fun off = no overshoot anywhere, per the master gate. */
+body[data-fun="off"] .theme-seg-ind { transition: transform 200ms var(--ease-out); }
+@media (prefers-reduced-motion: reduce) { .theme-seg-ind { transition: none; } }
+
+/* --------------------------------------------------------------------------
+   SKY MODE — the dashboard clears away and leaves only the sky
+   -------------------------------------------------------------------------- */
+body.sky-mode #stage > *:not(#sky-return),
+body.sky-mode .topbar,
+body.sky-mode .dock {
+  opacity: 0;
+  transform: scale(.985);
+  pointer-events: none;
+  transition: opacity 420ms var(--ease-out), transform 420ms var(--ease-out);
+}
+body:not(.sky-mode) #stage > *,
+body:not(.sky-mode) .topbar,
+body:not(.sky-mode) .dock {
+  transition: opacity 320ms var(--ease-out), transform 320ms var(--ease-out);
+}
+
+/* The way back. Always painted, because a user who never thinks to press Esc
+   must not be stranded in an empty window. Faint until approached. */
+#sky-return {
+  position: fixed;
+  right: 18px;
+  bottom: 16px;
+  z-index: 60;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--st-border);
+  background: var(--st-surface);
+  color: var(--st-text-dim);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: .28;
+  transition: opacity .22s var(--ease-out), transform .28s var(--ease-spring), color .22s var(--ease-out);
+}
+#sky-return:hover { opacity: 1; transform: scale(1.09); color: var(--st-accent-deep); }
+#sky-return:focus-visible { opacity: 1; outline: 2px solid var(--st-accent-brd); outline-offset: 3px; }

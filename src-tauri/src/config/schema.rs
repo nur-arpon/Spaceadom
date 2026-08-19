@@ -106,6 +106,44 @@ pub struct AppConfig {
     #[serde(default)]
     pub dark_mode: bool,
 
+    /// PROBLEM 144 — which of the three looks the app wears:
+    /// `"earthy"` (daylight), `"warcry"` (iron and war-banners) or
+    /// `"starry"` (night sky). Replaces the old two-state dark toggle.
+    ///
+    /// `dark_mode` above is KEPT and kept in sync, because it is what drives
+    /// `body.nocturne` on BOTH windows and the overlay has no idea themes
+    /// exist. Earthy is light; warcry and starry are both nocturne underneath,
+    /// so every rule that already works in the dark keeps working and each
+    /// theme only re-tints on top. Migrated from `dark_mode` on first load, so
+    /// an existing config keeps the look it had.
+    /// Serde default is the EMPTY string, deliberately, not "earthy": an
+    /// absent key must be distinguishable from a deliberate choice, or the
+    /// migration in `config/mod.rs` cannot tell an upgrading dark-mode user
+    /// from a new install and would silently flip them into daylight.
+    #[serde(default)]
+    pub theme: String,
+
+    /// PROBLEM 144 — the personality layer: character toggles, convoy
+    /// staggers, flames, themed sounds and (later) the live sky.
+    ///
+    /// The owner's rule for the night theme, in his words: with fun ON the
+    /// Starry night is the new sky; with it OFF, Starry night is "the previous
+    /// dark mode we have been using all along" — i.e. plain nocturne, no star
+    /// field. So this gates the starry PALETTE, not the theme choice itself.
+    #[serde(default = "default_true")]
+    pub fun_mode: bool,
+
+    /// PROBLEM 144 — hide the keyboard board and the whole dashboard chrome,
+    /// leaving only the sky. Esc or the corner control brings it back.
+    #[serde(default)]
+    pub hide_keyboard: bool,
+
+    /// PROBLEM 144 — "Show me around": when true every setting's description
+    /// is open. ON at first install so a first-time user is told what each
+    /// control does without having to go looking.
+    #[serde(default = "default_true")]
+    pub show_me_around: bool,
+
     /// Whether the optional WebAudio sine-tick sound effects are enabled.
     /// Sent to the overlay via the "sound-changed" event. Defaults to false.
     #[serde(default)]
@@ -250,6 +288,10 @@ impl Default for AppConfig {
             profiles: Vec::new(),
             special_keys: HashMap::new(),
             dark_mode: false,
+            theme: "earthy".to_string(),
+            fun_mode: true,
+            hide_keyboard: false,
+            show_me_around: true,
             sound_enabled: false,
             run_at_startup: true,
             motion: default_motion(),

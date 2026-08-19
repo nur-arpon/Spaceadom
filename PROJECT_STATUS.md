@@ -1,6 +1,79 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-20 | (Claude Fable 5) - the design overhaul lands: descriptions, three themes, the living sky, sounds, and the personality layer
+
+Full technical record: PROBLEMS 144-148 in `V14_FIXES_AND_CODE.md`. Shipped as
+1.0.59. Everything below was built against
+`design/design-system-overhaul-3.md` and the v3 lab, which is a specification,
+not a suggestion - values are transcribed, not paraphrased.
+
+**What Nur asked for, and what happened to each.**
+
+*"Some stuff need more description... at the same time the place doesn't look
+clumsy."* Every settings label is now a button; pressing it slides its own
+description open underneath (PROBLEM 144). Nothing is added to a row until it is
+asked for. He caught a real bug in the first build - collapsed descriptions left
+a stray hairline - and the cause is worth remembering: a CSS grid collapsed to
+`0fr` is zero-height, but margins and borders ON THE GRID ITEM still paint.
+They have to live on the clipped child.
+
+*"In warcry you kept bluish background and it looks so bad!"* One hardcoded line
+caused that AND the missing stars in Starry night (PROBLEM 145): `#stage` owned
+a literal blue-grey gradient and painted it over every theme. Warcry is now
+blood crimson and COLD IRON on a near-black stage - gold appears only as a rare
+warning edge, because *"i dont like golden color much"*.
+
+*"Constellations are not pressable."* My fault, and the spec had warned about it
+in the same paragraph I transcribed the scene from (PROBLEM 146): a transparent
+wrapper still takes every press inside its box. Reading a warning is not the
+same as applying it. He confirmed the fix: *"constellations working now"*.
+
+*"Where the sound effects?"* There were none to find - the design synthesises
+every sound in WebAudio. His `sounds.js` is now in the app BYTE-IDENTICAL, and
+every call site comes from the module's own "WHERE EACH SOUND BELONGS" table
+rather than from my guesses (PROBLEM 147). The two places I did guess were the
+two the module already handled better.
+
+**And then the personality layer that was still outstanding** (PROBLEM 148):
+toggle characters (a thruster with a real flame, orbit hops, sonar rings, a warp
+smear), slider characters (a comet with a tail that flips with the drag, a
+planet with an orbit ring, a starfield with a moon for a handle), and the
+special-key cards.
+
+**The special-key cards are the part that is not decoration.** The bottom tray
+has been a row of inert labels since V14: it names the keys and leaves you to
+guess what "PiP Cycle" means. Pressing a chip - or the special key on the board
+itself - now opens a card with what it actually does and how to press it, in
+plain language. Eight entrance animations cycle by index; the board uses index
++3 so a key never performs the same entrance in both places.
+
+**Two mistakes of mine, recorded because they are the useful part.**
+
+1. I "fixed" a 4px drift in the slider decorations that did not exist. The dev
+   preview scales its layout with a transform, so `getBoundingClientRect()`
+   reports post-transform pixels while every CSS length stays pre-transform. I
+   was comparing two different units and believed the comparison over the code.
+   The fix was reverted. **Check the units of a verification before changing the
+   thing it accuses.**
+
+2. `preview.html` was still rendering a hand-written "Dark mode" switch - three
+   versions after the theme pill replaced it. A harness that has drifted cannot
+   catch anything. The switch, the slider shell and the cards now come from
+   modules the app and the preview both import, so they cannot disagree again.
+   Making that possible meant moving them into LEAF modules: the first attempt
+   pulled `main.ts` into the harness behind them, main's bootstrap ran, failed
+   on a missing Tauri `invoke`, and blanked the whole page.
+
+**Verified** in the harness by sampling the animations through the Web
+Animations API rather than by eye - the table of measurements is in PROBLEM 148.
+The keyframe values match the lab's exactly.
+
+**NOT yet verified on the real machine.** This is a frontend-only change (no
+Rust touched beyond the version), but per CLAUDE.md that is not the same as
+delivered: the installed exe is what Nur boots, and this build has not been run
+from `%LOCALAPPDATA%\Spaceadom` yet.
+
 ## Update: 2026-08-18 | ~8:20 PM (Claude Opus 5) - autostart and the tray icon, and an agent-sandbox failure behind one of them
 
 Full technical record: PROBLEMS 142 and 143 in `V14_FIXES_AND_CODE.md`. Shipped

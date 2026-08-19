@@ -7674,3 +7674,403 @@ registry read-back — is a check performed BY the same sandboxed process, so al
 of them agreed and all of them were wrong. The only cure is to verify through a
 channel outside the sandbox. **"I verified the install" means nothing unless the
 verifier and the installer are in different worlds.**
+
+---
+
+## PROBLEM 144 — a settings panel full of controls nobody could read
+
+**Symptom, from the owner:** *"In my settings panel there's a lot of stuff and
+some stuff need more description… a user who didn't use this ever doesn't know
+how to use this, or what those settings do… at the same time the place doesn't
+look clumsy."*
+
+**Root cause.** Nothing was broken. Every switch worked and none of them said
+what they did. "Software overlay" and "Opacity floor" are unguessable, and the
+obvious fix — a line of help under every row — is exactly the clumsiness he
+ruled out.
+
+**The design's answer (design/design-system-overhaul-3.md §1): nothing is added
+to a row until it is asked for.** The label becomes a button; pressing it slides
+its description open underneath.
+
+**Exact files.** `src/components/settings-panel.ts`, `src/styles.css`.
+
+The collapse is a CSS grid, not a height animation — a height animation needs a
+measured pixel value and this text wraps differently in every theme:
+
+```css
+.set-desc      { display: grid; grid-template-rows: 0fr;
+                 transition: grid-template-rows 380ms cubic-bezier(.3,.9,.3,1); }
+.set-desc.open { grid-template-rows: 1fr; }
+.set-desc-in   { overflow: hidden; min-height: 0; }
+```
+
+**The bug the owner caught in the first build:** *"in place of descriptions, in
+the settings, when the descriptions are not expanded, there's a visual bug."*
+The margin and border were on the GRID ITEM. At `0fr` a grid item is zero-height
+but its margins and borders still paint, so every collapsed description left a
+stray hairline and a gap. They moved to a nested `.set-desc-body`:
+
+```css
+/* WRONG — paints at 0fr */        /* RIGHT — inside the clipped child */
+.set-desc-in { margin-top: 7px;    .set-desc-body { margin: 7px 0 6px;
+               border-left: 2px; }                  border-left: 2px solid …; }
+```
+
+**Generalise this.** *A collapsing container must have nothing on it that paints
+at zero size.* Margin, border, padding and outline all survive `0fr`/`0px`; only
+the CLIPPED child may carry them.
+
+**Two more things live in this problem number,** both from the same brief:
+
+- **`theme` replaced `dark_mode` as the source of truth,** with the serde
+  default deliberately EMPTY so migration can tell "never set" from "set to
+  earthy" (`src-tauri/src/config/schema.rs`, `config/mod.rs`):
+
+  ```rust
+  let migrated_theme = cfg.theme.is_empty();
+  if migrated_theme { cfg.theme = if cfg.dark_mode { "starry" } else { "earthy" }.to_string(); }
+  cfg.dark_mode = cfg.theme != "earthy";   // ONE setting still drives the overlay
+  dirty |= migrated_theme;                 // persist now, or it re-migrates every launch
+  ```
+
+- **"Hide the keyboard layout so a person could enjoy the blank sky"** —
+  `applySkyMode()`. Two things are non-negotiable when the entire UI can vanish:
+  Esc always returns, and a corner control is always painted, so a user who
+  never thinks to press Esc is not stranded in an empty window.
+
+---
+
+## PROBLEM 145 — Warcry looked like a blue night, and Starry night had no stars
+
+**Symptom, from the owner:** *"in warcry you kept bluish background and it looks
+so bad! warcry is supposed to be giving out warrior, war, fight, bloodshed,
+kings, kingdom etc type vibe, not this!"* — and, separately, no stars appeared
+in Starry night.
+
+**Root cause, ONE line, causing BOTH.** The stage's background was hardcoded:
+
+```css
+/* src/styles.css — before */
+#stage { background: linear-gradient(160deg, #1a2138 0%, #10141f 55%, #070a11 100%); }
+```
+
+Every theme repainted its tokens and then the stage painted that same blue-grey
+over the whole window. Warcry's iron and blood never reached the screen, and the
+starfield — which is a background-image on `#stage` — was painted over by the
+gradient that shipped with it.
+
+```css
+/* after — the stage asks the theme */
+#stage { background: linear-gradient(160deg, var(--st-stage-a) 0%,
+                                             var(--st-stage-b) 55%,
+                                             var(--st-stage-c) 100%); }
+```
+
+with `--st-stage-a/b/c` per theme, and Starry night setting all three to
+`transparent` so `--st-starfield` shows through.
+
+**Generalise this.** *A themeable surface cannot own a literal colour.* If a
+value appears as a hex literal outside the palette file, it is not themeable, no
+matter how many tokens the theme defines. Grep for hex literals in layout CSS
+after any theming work.
+
+**The palette itself was rebuilt to the owner's words** (`src/styles/themes.css`):
+blood crimson `#b83024` and COLD IRON `#7b8792` as the second voice, on a
+`#2a100c / #140b09 / #070303` stage. Gold survives only as a rare warning edge —
+*"i dont like golden color much"*.
+
+**And the gating rule was revised by him after seeing it** — recorded because it
+reverses an earlier instruction in the same session: *"keep the starry sky of
+v1.0.57 as the default of starry night with fun mode off, with fun mode on the
+rest you are building now."* So the drifting star tile belongs to the THEME, and
+Fun mode adds the living scene on top.
+
+---
+
+## PROBLEM 146 — the constellations were not pressable, and the reason was in the spec I had just read
+
+**Symptom, from the owner:** *"Constellations are not pressable"*.
+
+**Root cause.** My pointer carve-out re-enabled `pointer-events` on
+`#keyboard-outer` — a fully transparent wrapper spanning `inset: 70px 30px 84px`,
+i.e. most of the window. A transparent element still takes every press inside
+its box.
+
+**The spec warns about this in the same section I transcribed the scene from**
+(design-system-overhaul-3.md §5b): *"Both content wrappers also need
+`pointer-events:none`, with `pointer-events:auto` on only the opaque panels
+inside them — a transparent full-page wrapper above the sky layer blocks hits
+across its whole box, not just where the panels are."* I read that line and
+shipped the thing it describes.
+
+**Exact file.** `src/styles/themes.css`, the carve-out:
+
+```css
+/* Every WRAPPER is transparent to the pointer … */
+body.nocturne[data-theme="starry"][data-fun="on"] #stage,
+… #topbar, … #keyboard-outer, … #gear-dock, … #specials-dock { pointer-events: none; }
+
+/* … and only the OPAQUE LEAVES take it back. */
+… #keyboard-scale, … #key-detail-panel, … #toast-container,
+… #topbar > *:not(.spacer), … #gear-dock > *, … #specials-dock > * { pointer-events: auto; }
+```
+
+**Verified:** the owner — *"constellations working now"*.
+
+**Generalise this.** *Hit-testing follows the box, not the paint.* Any wrapper
+that exists only to position its children must be `pointer-events: none`, and
+the children opt back in one by one. And: **reading a warning is not the same as
+applying it** — when a spec calls out a failure mode, check your own diff against
+that sentence before shipping.
+
+---
+
+## PROBLEM 147 — the sound kit arrived and nothing called it
+
+**Symptom, from the owner:** *"did you not get the sound files? where the sound
+effects?"* — then he supplied `design/sounds.js`.
+
+**Root cause.** There were no sound assets to find: the design synthesises every
+sound in WebAudio, so the "files" are one module. It had to be wired.
+
+**The module is copied BYTE-IDENTICAL** (`src/sounds.js`, verified with
+`diff -q` against `design/sounds.js`). CLAUDE.md's *transcribe, never paraphrase*
+applies to a handed-over design asset, and a retyped copy is one that silently
+drifts. Its types live beside it in `src/sounds.d.ts` rather than being woven in.
+
+**Exact files.** `src/sfx.ts` (new), `src/main.ts`,
+`src/components/settings-panel.ts`, `src/components/starry-sky.ts`,
+`src/components/special-cards.ts`.
+
+**Why the instance is its own module.** Three modules make sounds and `main.ts`
+already imports two of them, so hanging it off main would have made
+`starry-sky` import `main` while `main` imports `starry-sky` — a cycle whose
+failure mode is a silently `undefined` binding at first use, not a build error.
+
+```ts
+// src/sfx.ts — a leaf. It imports nothing from the app.
+let _get: () => AppConfig | null = () => null;
+export function bindSfxConfig(get: () => AppConfig | null): void { _get = get; }
+
+export const sfx = new Sfx({
+  enabled: () => _get()?.sound_enabled === true,
+  fun:     () => _get()?.fun_mode !== false,
+  volume:  () => 40,
+});
+```
+
+**The gates are closures over a GETTER, not values.** Flipping "Sound ticks" or
+"Fun mode" takes effect on the very next sound with nothing to re-register, and
+`appConfig` can be replaced wholesale (reload, reset to defaults) without leaving
+a stale object captured here gating sounds by a config nothing else reads.
+
+**WebAudio refuses to start before a real user gesture,** so `wireSfxUnlock()`
+rides the first pointer/key event in the capture phase and then removes itself.
+
+**Two call sites needed the module's own special cases, not logic of my own:**
+
+```ts
+// The switch you just enabled has to confirm itself — enabled() reads false
+// until the line above it, so sounds.js forces past its own mute gate.
+if (appConfig.sound_enabled) sfx.toggleOn("sound"); else sfx.toggleOff("sound");
+
+// Fun mode is the one switch that must be audible in EITHER gate state;
+// toggleOn/Off("fun") is special-cased inside sounds.js to do exactly that.
+if (appConfig.fun_mode) sfx.toggleOn("fun"); else sfx.toggleOff("fun");
+```
+
+**Generalise this.** *When a handed-over module documents where its sounds
+belong, follow that map instead of inventing one.* `sounds.js` ends with a
+"WHERE EACH SOUND BELONGS" table; every call site here comes from it. The two
+places where I first wrote my own equivalent were the two the module already
+handled better.
+
+---
+
+## PROBLEM 148 — the personality layer: characters, sliders, and the cards that explain a special key
+
+**Symptom.** Spec §2, §3 and §4 were unimplemented, and one part of that was a
+real usability hole rather than decoration: the bottom tray had been a row of
+INERT labels since V14. `␣ ⌫ — Force Close` names the keys and leaves the user
+to guess what it does. Nowhere in the app said.
+
+**Exact files.** `src/styles/characters.css` (new), `src/components/controls.ts`
+(new), `src/components/special-cards.ts` (new),
+`src/components/settings-panel.ts`, `src/components/keyboard-matrix.ts`,
+`src/main.ts`, `src/preview.ts`, `src/styles/design-system.css`.
+
+### §2 — the toggle characters
+
+Each switch performs a character when Fun is on: the engine ignites with a
+thruster flame, Fun mode and Run at startup hop over their tracks, the sound and
+overlay switches ping a sonar ring, Visual effects smears through a warp. The
+keyframes are the v3 lab's, transcribed:
+
+```css
+@keyframes thrustOn { 0% { transform: translateX(0); }  55% { transform: translateX(19px); } 100% { transform: translateX(16px); } }
+@keyframes orbitOn  { 0% { transform: translate(0,0); } 50% { transform: translate(8px,-16px) scale(1.18); } 100% { transform: translate(16px,0); } }
+@keyframes warpKOn  { 0% { transform: translateX(0) scaleX(1); } 45% { transform: translateX(6px) scaleX(2.3) scaleY(.6); } 100% { transform: translateX(16px) scaleX(1) scaleY(1); } }
+```
+
+**The one change the app's own CSS needed, and why it is load-bearing:** the
+thumb used to travel with `left: 2.5px → 18.5px`. A keyframe that animates
+`transform` cannot drive an element positioned by `left` — they fight, and
+`left` wins at the end, so the knob would snap back the instant the animation
+finished. `design-system.css` now travels by `transform: translateX(16px)` in
+EVERY mode, fun or not, so there is one truth about where the thumb is.
+
+**"First render = no animation" is enforced by a one-shot latch,** because
+`render()` re-runs after every toggle and without it, flipping one switch would
+replay all eight characters at once:
+
+```ts
+function wireToggle(id: string, onChange: () => void | Promise<void>): void {
+  const el = panelEl?.querySelector<HTMLInputElement>(`#set-${id}`);
+  el?.addEventListener("change", () => { markFlipped(id, el.checked); void onChange(); });
+}
+// …and toggleRow only stamps data-anim when the row ENDED where the user
+// pushed it. Several handlers revert on backend failure, and without this
+// guard the knob would finish its journey to ON and stay there — on a switch
+// that reads OFF:
+_flipped?.id === id && _flipped.on === on ? (on ? "on" : "off") : undefined
+```
+
+### §3 — the slider characters
+
+Typing speed grows a comet tail that flips to whichever side it is trailing;
+Guide HUD delay gets a planet with an elliptical orbit ring that spins in 5s at
+rest and 1.1s while dragging; Opacity floor becomes a starfield with a moon for
+a handle.
+
+**The sliders stay NATIVE `<input type="range">`.** The lab builds its own from
+a div and pointer listeners; copying that would have cost keyboard control, the
+arrow keys, screen-reader semantics and every existing input/change listener, to
+buy three decorations. The input keeps the job; a wrapper carries the
+personality, and one custom property positions all of it:
+
+```html
+<span class="sld" data-char="comet" style="--p:.34">
+  <input type="range" …>          <!-- still the real control -->
+  <i class="sld-tail"></i>        <!-- decoration, pointer-events:none -->
+</span>
+```
+
+```css
+.sld { --x: calc(7.5px + var(--p,0) * (100% - 15px)); }   /* the handle's centre */
+```
+
+**MEASUREMENT TRAP, recorded because it cost a round trip.** Checking this in
+`preview.html` appeared to show every decoration drifting ~4px across the track.
+It was not drifting. The preview scales its layout with a transform, so
+`getBoundingClientRect()` returns POST-transform pixels while `clientWidth` and
+every CSS length stay pre-transform — comparing the two is comparing different
+units. A JS-measured pixel `--x` was added to "fix" it and then reverted; both
+approaches had agreed all along. *When a verification says a value is wrong,
+check the units of the verification before you change the value.*
+
+### §4 — the special-key cards
+
+Pressing a tray chip, or the special key on the board, opens a 240px card above
+it: the combo, the name, what it actually does, and how to press it. Copy is
+verbatim from the lab's SPECIALS array. Eight entrance animations cycle by
+index, `ANIMS[i % 8]`, with tray index `i` and board index `i + 3` so the same
+key never performs the same entrance in both places. Fun OFF = `plainIn` 180ms.
+The sound is index-matched by `sfx.cardOpen(i)`, so the genie card gets the
+genie sound.
+
+**The card is `position: fixed` and placed in screen coordinates**, because the
+board key lives inside `#keyboard-scale`, which is TRANSFORMED to fit the
+window. A card positioned relative to that would be scaled with it, text and
+all. `getBoundingClientRect()` already reports post-transform screen pixels, so
+one code path serves both triggers.
+
+**A bug caught in verification, and worth keeping:** replacing one card with
+another left the outgoing card fading for 400ms — still in the DOM, still
+hit-testing, still findable by its own marker. Pressing eight chips in a row
+stacked eight cards. A REPLACE now removes the old card instantly and silently;
+only a real close fades, and the moment it starts fading it drops its
+`data-spec-card` marker and its pointer events.
+
+```ts
+export function closeSpecialCard(silent = false): void {
+  …
+  if (silent || reduced()) { card.remove(); return; }   // replaced -> leaves at once
+  sfx.cardClose();
+  card.removeAttribute("data-spec-card");
+  card.style.pointerEvents = "none";
+  …
+}
+```
+
+**Generalise this.** *An element that is leaving is still an element.* Anything
+kept alive for an exit animation must be removed from hit-testing, and from
+every selector that identifies the live one, on the same tick the exit starts.
+
+### The dev harness had drifted, and that is part of why this was possible
+
+`preview.html` was still rendering a hand-written "Dark mode" switch — three
+versions after the theme pill replaced it — so it could not have caught any of
+this. The switch markup and the slider shell now come from
+`src/components/controls.ts`, and the cards from
+`src/components/special-cards.ts`, which BOTH the app and the preview import, so
+they cannot disagree again.
+
+Those are LEAF modules for a concrete reason: the first attempt exported them
+from `settings-panel.ts`, and importing that into `preview.ts` dragged `main.ts`
+in behind it. Main's bootstrap ran inside the harness, failed on a missing Tauri
+`invoke`, and blanked the page with the fatal-error screen — the preview
+rendered nothing at all.
+
+**Verified in the harness** (`preview.html?gear&fun&specials`), by sampling the
+animations through the Web Animations API rather than by eye:
+
+| Check | Result |
+| --- | --- |
+| thrustOn at 0 / 231 / 420ms | `translateX(0)` → `19px` → `16px` |
+| orbitOff at 0 / 240 / 480ms | `16px` → `(8,-16) scale 1.18` → `0` |
+| ring on the sound switch | `ringOn`, `rgba(122,138,94,.55)`, at the knob's destination |
+| thruster track (Earthy) | `linear-gradient(90deg, #f6e2cf, #c67139)` — the lab's own values |
+| planet orbit vs handle, p = 0 / .5 / 1 | `7.5 / 123.4 / 239.3` vs `7.5 / 123.5 / 239.5` |
+| 8 tray cards | all 8 entrances in spec order, one card at a time, centred on the chip, 10px above |
+| board key Backspace (tray index 2) | `sky-unfurlIn` = index 5 — the +3 rule |
+
+---
+
+### Measurement trap (2026-08-20) — the ASCII-marker check no longer sees the frontend
+
+`CLAUDE.md` has told every session since PROBLEM 42 that "bundled CSS names are
+ASCII-searchable inside the exe", with `st-hud-glow` as the example. Measured on
+the 1.0.59 binary:
+
+```
+st-hud-glow      False        <- the file's own example
+toggle-thumb     False
+keyboard-scale   False
+spec-card        False        <- shipped in this very build
+Boss Key         True         <- only because it is ALSO a Rust string
+```
+
+Tauri v2 compresses the embedded `dist2` assets. Nothing frontend is findable in
+the exe any more, and the one marker that *is* found is found for the wrong
+reason — which is worse than a clean miss, because it looks like the check is
+working.
+
+**What to use instead**, and why each link is needed:
+
+1. grep the marker in `dist2/assets/*` — proves the BUNDLE has it;
+2. exe `LastWriteTime` > newest file in `dist2` — proves the bundle it embedded
+   is that one and not a previous build's;
+3. installed exe version stamp, read from OUTSIDE the agent sandbox — proves the
+   machine has that exe (PROBLEM 143);
+4. `dashboard-js: frontend ready` in the log after the new start — proves the
+   new modules loaded rather than throwing at import.
+
+`scripts/install-real.cmd` runs the install and steps 2-3 in one pass and writes
+its findings to `D:\`, a drive the container does not redirect.
+
+**Generalise this.** *A verification technique has a shelf life, and it expires
+silently.* This one did not start failing loudly — it started returning False
+for things that were present. Any check that has not been re-validated against a
+KNOWN-GOOD case is not a check; it is a habit. Re-run it against something you
+are certain about before trusting a negative.

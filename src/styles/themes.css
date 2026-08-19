@@ -1,0 +1,196 @@
+/* ===========================================================================
+   themes.css — the three looks (PROBLEM 144)
+   Spec: design/design-system-overhaul-3.md §5. Hex values transcribed, not
+   paraphrased (CLAUDE.md: the design is a specification, not a suggestion).
+
+   HOW THIS LAYERS, and why:
+
+     earthy   body[data-theme="earthy"]            nothing — the light default
+     warcry   body.nocturne[data-theme="warcry"]   dark base + iron/ember tint
+     starry   body.nocturne[data-theme="starry"]   dark base, tinted ONLY when
+                                                   fun mode is on
+
+   Every dark theme KEEPS `body.nocturne`, so every rule that already works in
+   the dark keeps working and a theme only ever re-tints on top. That also
+   keeps the overlay correct for free: the overlay knows nothing about themes
+   and reads `body.nocturne` alone (CLAUDE.md — "ONE setting drives
+   everything").
+
+   THE OWNER'S RULE FOR THE NIGHT THEME — REVISED 2026-08-19 after he saw
+   1.0.57: "keep the starry sky of v1.0.57 as the default of starry night with
+   fun mode off, with fun mode on the rest" — so the drifting star tile below
+   applies to the theme UNCONDITIONALLY, and Fun ON additionally builds the
+   living scene (constellations, ocean, pirate ship — starry-sky.ts). The
+   older fun-off-equals-plain-nocturne rule is superseded and recorded here so
+   nobody restores it from an earlier note.
+   =========================================================================== */
+
+/* ---------------------------------------------------------------------------
+   WARCRY — iron, embers and war-banners
+   --------------------------------------------------------------------------- */
+body.nocturne[data-theme="warcry"] {
+  /* Owner, 2026-08-19: "warcry is supposed to be giving out warrior, war,
+     fight, bloodshed, kings, kingdom type vibe, not this" — and "I don't like
+     golden color much". So: dried blood and cold iron. Gold survives only as a
+     rare warning edge, never as a second voice. */
+  --st-bg:          #140b09;
+  --st-surface:     #1f100d;
+  --st-card:        #2b1713;
+  --st-text:        #f0ded0;
+  --st-text-soft:   #c8a892;
+  --st-text-dim:    #a3826d;
+  --st-accent:      #b83024;   /* blood crimson */
+  --st-accent-deep: #e86a54;
+  --st-accent-tint: #3d130f;
+  --st-accent-brd:  #6e2118;
+  --st-accent-600:  #9c2820;
+  --st-accent-800:  #f3ad98;
+  --st-sage:        #7b8792;   /* cold iron — the second voice is STEEL */
+  --st-sage-tint:   #1d2429;
+  --st-sage-brd:    #39434c;
+  --st-sage-deep:   #b3bec7;
+  --st-danger:      #e8956a;
+  --st-danger-tint: #3d1f11;
+  --st-warning:     #c9902f;
+  --st-border:      #4a231b;
+  --st-hairline:    #331611;
+  --st-glow-rgb:    184, 48, 36;
+  --st-sage-rgb:    123, 135, 146;   /* cold iron */
+  --st-aura-2-rgb:  123, 135, 146;
+  --accent-bright:  #d1483a;
+  --accent-glow:    rgba(184, 48, 36, .40);
+  --accent-dim:     rgba(184, 48, 36, .18);
+  --shadow-sm:  0 2px 6px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.04);
+  --shadow-md:  0 10px 28px rgba(0,0,0,.68), inset 0 1px 0 rgba(255,255,255,.05);
+  --shadow-lg:  0 18px 50px rgba(0,0,0,.70);
+  --shadow-glow: 0 0 20px rgba(184, 48, 36, .22);
+  --shadow-key: 0 2px 6px rgba(0,0,0,.58), inset 0 1px 0 rgba(255,255,255,.05);
+
+  /* The stage itself: embers at the top, going black toward the floor. */
+  --st-stage-a: #2a100c;
+  --st-stage-b: #140b09;
+  --st-stage-c: #070303;
+}
+
+/* Two faint ember glows per spec: crimson bottom-left, gold top-right.
+   Gradients only — no filter anywhere (PROBLEM 37/80). */
+body.nocturne[data-theme="warcry"]::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(760px 520px at 8% 96%, rgba(193, 73, 43, .16), transparent 70%),
+    radial-gradient(680px 460px at 94% 4%, rgba(201, 154, 63, .12), transparent 70%);
+}
+
+/* ---------------------------------------------------------------------------
+   STARRY NIGHT — only when Fun mode is on.
+   Fun OFF deliberately falls through to plain nocturne (the owner's rule).
+   --------------------------------------------------------------------------- */
+body.nocturne[data-theme="starry"] {
+  /* Owner, 2026-08-19: "in starry night let assigned keys and other colors
+     stay the same as nocturne, not gold". So this theme deliberately inherits
+     the ENTIRE nocturne palette — accents, keys, borders, everything — and
+     changes exactly one thing: the sky behind it. The stage stops painting
+     itself so body::before can be seen at all. */
+  --st-stage-a: transparent;
+  --st-stage-b: transparent;
+  --st-stage-c: transparent;
+
+  /* 115 stars at TRULY random positions (fixed seed, so the sky is the
+     same every build), rejection-sampled only to avoid clumps — never
+     snapped to a grid, which the spec is explicit about. */
+  --st-starfield: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20width%3D%271400%27%20height%3D%27900%27%3E%3Cg%20fill%3D%27%23fff%27%3E%3Ccircle%20cx%3D%27469%27%20cy%3D%27551%27%20r%3D%271.76%27%20opacity%3D%270.47%27%2F%3E%3Ccircle%20cx%3D%27428%27%20cy%3D%27549%27%20r%3D%271.19%27%20opacity%3D%270.74%27%2F%3E%3Ccircle%20cx%3D%27375%27%20cy%3D%27843%27%20r%3D%271.49%27%20opacity%3D%270.79%27%2F%3E%3Ccircle%20cx%3D%271052%27%20cy%3D%27190%27%20r%3D%271.34%27%20opacity%3D%270.86%27%2F%3E%3Ccircle%20cx%3D%27579%27%20cy%3D%27602%27%20r%3D%270.82%27%20opacity%3D%270.47%27%2F%3E%3Ccircle%20cx%3D%27575%27%20cy%3D%2725%27%20r%3D%271.75%27%20opacity%3D%270.48%27%2F%3E%3Ccircle%20cx%3D%271005%27%20cy%3D%2733%27%20r%3D%271.32%27%20opacity%3D%270.4%27%2F%3E%3Ccircle%20cx%3D%27326%27%20cy%3D%27428%27%20r%3D%271.67%27%20opacity%3D%270.61%27%2F%3E%3Ccircle%20cx%3D%271310%27%20cy%3D%2764%27%20r%3D%270.86%27%20opacity%3D%270.88%27%2F%3E%3Ccircle%20cx%3D%271254%27%20cy%3D%27172%27%20r%3D%271.53%27%20opacity%3D%270.59%27%2F%3E%3Ccircle%20cx%3D%27209%27%20cy%3D%27213%27%20r%3D%271.04%27%20opacity%3D%270.52%27%2F%3E%3Ccircle%20cx%3D%271359%27%20cy%3D%27189%27%20r%3D%271.16%27%20opacity%3D%270.6%27%2F%3E%3Ccircle%20cx%3D%27188%27%20cy%3D%27557%27%20r%3D%270.94%27%20opacity%3D%270.81%27%2F%3E%3Ccircle%20cx%3D%271148%27%20cy%3D%27370%27%20r%3D%270.66%27%20opacity%3D%270.68%27%2F%3E%3Ccircle%20cx%3D%271197%27%20cy%3D%27890%27%20r%3D%270.72%27%20opacity%3D%270.36%27%2F%3E%3Ccircle%20cx%3D%27625%27%20cy%3D%27387%27%20r%3D%271.61%27%20opacity%3D%270.83%27%2F%3E%3Ccircle%20cx%3D%271148%27%20cy%3D%27459%27%20r%3D%271.5%27%20opacity%3D%270.59%27%2F%3E%3Ccircle%20cx%3D%271395%27%20cy%3D%27625%27%20r%3D%271.03%27%20opacity%3D%270.72%27%2F%3E%3Ccircle%20cx%3D%27508%27%20cy%3D%27180%27%20r%3D%271.83%27%20opacity%3D%270.8%27%2F%3E%3Ccircle%20cx%3D%27678%27%20cy%3D%27169%27%20r%3D%271.5%27%20opacity%3D%270.36%27%2F%3E%3Ccircle%20cx%3D%27332%27%20cy%3D%27307%27%20r%3D%270.76%27%20opacity%3D%270.49%27%2F%3E%3Ccircle%20cx%3D%271009%27%20cy%3D%2775%27%20r%3D%271.28%27%20opacity%3D%270.79%27%2F%3E%3Ccircle%20cx%3D%27106%27%20cy%3D%27893%27%20r%3D%271.11%27%20opacity%3D%270.43%27%2F%3E%3Ccircle%20cx%3D%271167%27%20cy%3D%27706%27%20r%3D%271.05%27%20opacity%3D%270.63%27%2F%3E%3Ccircle%20cx%3D%27104%27%20cy%3D%2790%27%20r%3D%271.43%27%20opacity%3D%270.45%27%2F%3E%3Ccircle%20cx%3D%27204%27%20cy%3D%2729%27%20r%3D%270.57%27%20opacity%3D%270.47%27%2F%3E%3Ccircle%20cx%3D%2780%27%20cy%3D%2710%27%20r%3D%270.86%27%20opacity%3D%270.43%27%2F%3E%3Ccircle%20cx%3D%27705%27%20cy%3D%27555%27%20r%3D%270.58%27%20opacity%3D%270.59%27%2F%3E%3Ccircle%20cx%3D%27645%27%20cy%3D%27117%27%20r%3D%270.88%27%20opacity%3D%270.65%27%2F%3E%3Ccircle%20cx%3D%27285%27%20cy%3D%27782%27%20r%3D%270.65%27%20opacity%3D%270.67%27%2F%3E%3Ccircle%20cx%3D%271232%27%20cy%3D%27349%27%20r%3D%270.57%27%20opacity%3D%270.79%27%2F%3E%3Ccircle%20cx%3D%2739%27%20cy%3D%27188%27%20r%3D%270.66%27%20opacity%3D%270.51%27%2F%3E%3Ccircle%20cx%3D%27549%27%20cy%3D%27564%27%20r%3D%271.13%27%20opacity%3D%270.55%27%2F%3E%3Ccircle%20cx%3D%27204%27%20cy%3D%27682%27%20r%3D%270.85%27%20opacity%3D%270.75%27%2F%3E%3Ccircle%20cx%3D%271330%27%20cy%3D%27366%27%20r%3D%271.5%27%20opacity%3D%270.44%27%2F%3E%3Ccircle%20cx%3D%27515%27%20cy%3D%27563%27%20r%3D%271.83%27%20opacity%3D%270.66%27%2F%3E%3Ccircle%20cx%3D%27646%27%20cy%3D%27618%27%20r%3D%271.34%27%20opacity%3D%270.42%27%2F%3E%3Ccircle%20cx%3D%27109%27%20cy%3D%27294%27%20r%3D%271.01%27%20opacity%3D%270.87%27%2F%3E%3Ccircle%20cx%3D%271325%27%20cy%3D%27754%27%20r%3D%271.53%27%20opacity%3D%270.73%27%2F%3E%3Ccircle%20cx%3D%27977%27%20cy%3D%27578%27%20r%3D%271.39%27%20opacity%3D%270.42%27%2F%3E%3Ccircle%20cx%3D%27850%27%20cy%3D%27712%27%20r%3D%271.03%27%20opacity%3D%270.68%27%2F%3E%3Ccircle%20cx%3D%27797%27%20cy%3D%27652%27%20r%3D%271.06%27%20opacity%3D%270.41%27%2F%3E%3Ccircle%20cx%3D%271220%27%20cy%3D%27239%27%20r%3D%270.62%27%20opacity%3D%270.87%27%2F%3E%3Ccircle%20cx%3D%271184%27%20cy%3D%27811%27%20r%3D%271.17%27%20opacity%3D%270.61%27%2F%3E%3Ccircle%20cx%3D%27127%27%20cy%3D%27539%27%20r%3D%271.24%27%20opacity%3D%270.71%27%2F%3E%3Ccircle%20cx%3D%27697%27%20cy%3D%27588%27%20r%3D%271.74%27%20opacity%3D%270.54%27%2F%3E%3Ccircle%20cx%3D%271194%27%20cy%3D%27770%27%20r%3D%270.68%27%20opacity%3D%270.38%27%2F%3E%3Ccircle%20cx%3D%2766%27%20cy%3D%27663%27%20r%3D%271.88%27%20opacity%3D%270.46%27%2F%3E%3Ccircle%20cx%3D%271259%27%20cy%3D%27749%27%20r%3D%271.22%27%20opacity%3D%270.48%27%2F%3E%3Ccircle%20cx%3D%27760%27%20cy%3D%27138%27%20r%3D%270.68%27%20opacity%3D%270.36%27%2F%3E%3Ccircle%20cx%3D%27295%27%20cy%3D%27427%27%20r%3D%271.08%27%20opacity%3D%270.68%27%2F%3E%3Ccircle%20cx%3D%2768%27%20cy%3D%27464%27%20r%3D%271.01%27%20opacity%3D%270.85%27%2F%3E%3Ccircle%20cx%3D%27726%27%20cy%3D%27826%27%20r%3D%271.06%27%20opacity%3D%270.45%27%2F%3E%3Ccircle%20cx%3D%27245%27%20cy%3D%27492%27%20r%3D%271.72%27%20opacity%3D%270.88%27%2F%3E%3Ccircle%20cx%3D%27226%27%20cy%3D%27529%27%20r%3D%270.79%27%20opacity%3D%270.57%27%2F%3E%3Ccircle%20cx%3D%27495%27%20cy%3D%27399%27%20r%3D%271.54%27%20opacity%3D%270.53%27%2F%3E%3Ccircle%20cx%3D%27225%27%20cy%3D%27165%27%20r%3D%271.7%27%20opacity%3D%270.51%27%2F%3E%3Ccircle%20cx%3D%27543%27%20cy%3D%27231%27%20r%3D%271.62%27%20opacity%3D%270.58%27%2F%3E%3Ccircle%20cx%3D%27214%27%20cy%3D%27313%27%20r%3D%271.43%27%20opacity%3D%270.62%27%2F%3E%3Ccircle%20cx%3D%27218%27%20cy%3D%27420%27%20r%3D%271.54%27%20opacity%3D%270.41%27%2F%3E%3Ccircle%20cx%3D%271290%27%20cy%3D%27470%27%20r%3D%270.71%27%20opacity%3D%270.75%27%2F%3E%3Ccircle%20cx%3D%27819%27%20cy%3D%27674%27%20r%3D%271.77%27%20opacity%3D%270.43%27%2F%3E%3Ccircle%20cx%3D%27791%27%20cy%3D%27754%27%20r%3D%271.78%27%20opacity%3D%270.88%27%2F%3E%3Ccircle%20cx%3D%27236%27%20cy%3D%27208%27%20r%3D%271.73%27%20opacity%3D%270.86%27%2F%3E%3Ccircle%20cx%3D%271382%27%20cy%3D%2714%27%20r%3D%271.19%27%20opacity%3D%270.47%27%2F%3E%3Ccircle%20cx%3D%27971%27%20cy%3D%27389%27%20r%3D%271.65%27%20opacity%3D%270.8%27%2F%3E%3Ccircle%20cx%3D%27812%27%20cy%3D%27360%27%20r%3D%270.92%27%20opacity%3D%270.65%27%2F%3E%3Ccircle%20cx%3D%271385%27%20cy%3D%27764%27%20r%3D%271.72%27%20opacity%3D%270.77%27%2F%3E%3Ccircle%20cx%3D%271025%27%20cy%3D%27129%27%20r%3D%271.9%27%20opacity%3D%270.53%27%2F%3E%3Ccircle%20cx%3D%271153%27%20cy%3D%2768%27%20r%3D%271.55%27%20opacity%3D%270.36%27%2F%3E%3Ccircle%20cx%3D%271371%27%20cy%3D%27338%27%20r%3D%270.99%27%20opacity%3D%270.36%27%2F%3E%3Ccircle%20cx%3D%271215%27%20cy%3D%27558%27%20r%3D%271.58%27%20opacity%3D%270.52%27%2F%3E%3Ccircle%20cx%3D%27352%27%20cy%3D%2775%27%20r%3D%270.99%27%20opacity%3D%270.42%27%2F%3E%3Ccircle%20cx%3D%27421%27%20cy%3D%27760%27%20r%3D%270.65%27%20opacity%3D%270.59%27%2F%3E%3Ccircle%20cx%3D%27815%27%20cy%3D%27618%27%20r%3D%271.79%27%20opacity%3D%270.47%27%2F%3E%3Ccircle%20cx%3D%27426%27%20cy%3D%27885%27%20r%3D%270.99%27%20opacity%3D%270.73%27%2F%3E%3Ccircle%20cx%3D%27898%27%20cy%3D%27166%27%20r%3D%270.54%27%20opacity%3D%270.89%27%2F%3E%3Ccircle%20cx%3D%27308%27%20cy%3D%27187%27%20r%3D%271.16%27%20opacity%3D%270.66%27%2F%3E%3Ccircle%20cx%3D%2721%27%20cy%3D%27401%27%20r%3D%270.6%27%20opacity%3D%270.65%27%2F%3E%3Ccircle%20cx%3D%271296%27%20cy%3D%27562%27%20r%3D%271.56%27%20opacity%3D%270.6%27%2F%3E%3Ccircle%20cx%3D%27675%27%20cy%3D%27418%27%20r%3D%271.24%27%20opacity%3D%270.58%27%2F%3E%3Ccircle%20cx%3D%27455%27%20cy%3D%27858%27%20r%3D%271.25%27%20opacity%3D%270.7%27%2F%3E%3Ccircle%20cx%3D%27580%27%20cy%3D%27113%27%20r%3D%270.63%27%20opacity%3D%270.52%27%2F%3E%3Ccircle%20cx%3D%27345%27%20cy%3D%27525%27%20r%3D%270.85%27%20opacity%3D%270.39%27%2F%3E%3Ccircle%20cx%3D%271318%27%20cy%3D%27175%27%20r%3D%270.97%27%20opacity%3D%270.51%27%2F%3E%3Ccircle%20cx%3D%27107%27%20cy%3D%27440%27%20r%3D%271.11%27%20opacity%3D%270.79%27%2F%3E%3Ccircle%20cx%3D%27220%27%20cy%3D%27364%27%20r%3D%271.65%27%20opacity%3D%270.83%27%2F%3E%3Ccircle%20cx%3D%27383%27%20cy%3D%27647%27%20r%3D%270.79%27%20opacity%3D%270.66%27%2F%3E%3Ccircle%20cx%3D%271286%27%20cy%3D%2719%27%20r%3D%270.57%27%20opacity%3D%270.64%27%2F%3E%3Ccircle%20cx%3D%27958%27%20cy%3D%2726%27%20r%3D%271.31%27%20opacity%3D%270.6%27%2F%3E%3Ccircle%20cx%3D%27268%27%20cy%3D%2783%27%20r%3D%270.79%27%20opacity%3D%270.38%27%2F%3E%3Ccircle%20cx%3D%27317%27%20cy%3D%27552%27%20r%3D%270.69%27%20opacity%3D%270.48%27%2F%3E%3Ccircle%20cx%3D%27823%27%20cy%3D%27255%27%20r%3D%270.8%27%20opacity%3D%270.74%27%2F%3E%3Ccircle%20cx%3D%271068%27%20cy%3D%27732%27%20r%3D%271.82%27%20opacity%3D%270.6%27%2F%3E%3Ccircle%20cx%3D%27937%27%20cy%3D%27808%27%20r%3D%271.47%27%20opacity%3D%270.62%27%2F%3E%3Ccircle%20cx%3D%2731%27%20cy%3D%27872%27%20r%3D%270.64%27%20opacity%3D%270.73%27%2F%3E%3Ccircle%20cx%3D%27813%27%20cy%3D%27106%27%20r%3D%271.81%27%20opacity%3D%270.47%27%2F%3E%3Ccircle%20cx%3D%2738%27%20cy%3D%27295%27%20r%3D%271.73%27%20opacity%3D%270.72%27%2F%3E%3C%2Fg%3E%3Cg%20fill%3D%27%23d6e2ff%27%3E%3Ccircle%20cx%3D%271085%27%20cy%3D%27505%27%20r%3D%270.85%27%20opacity%3D%270.41%27%2F%3E%3Ccircle%20cx%3D%271283%27%20cy%3D%27698%27%20r%3D%271.03%27%20opacity%3D%270.37%27%2F%3E%3Ccircle%20cx%3D%271230%27%20cy%3D%27666%27%20r%3D%271.53%27%20opacity%3D%270.36%27%2F%3E%3Ccircle%20cx%3D%27103%27%20cy%3D%27340%27%20r%3D%271.37%27%20opacity%3D%270.76%27%2F%3E%3Ccircle%20cx%3D%27411%27%20cy%3D%27722%27%20r%3D%271.48%27%20opacity%3D%270.56%27%2F%3E%3Ccircle%20cx%3D%2734%27%20cy%3D%27148%27%20r%3D%271.81%27%20opacity%3D%270.85%27%2F%3E%3Ccircle%20cx%3D%27703%27%20cy%3D%27848%27%20r%3D%271.11%27%20opacity%3D%270.45%27%2F%3E%3Ccircle%20cx%3D%2713%27%20cy%3D%27606%27%20r%3D%271.84%27%20opacity%3D%270.82%27%2F%3E%3Ccircle%20cx%3D%27858%27%20cy%3D%2747%27%20r%3D%271.36%27%20opacity%3D%270.41%27%2F%3E%3Ccircle%20cx%3D%271159%27%20cy%3D%2712%27%20r%3D%271.14%27%20opacity%3D%270.86%27%2F%3E%3Ccircle%20cx%3D%27989%27%20cy%3D%27229%27%20r%3D%270.79%27%20opacity%3D%270.44%27%2F%3E%3Ccircle%20cx%3D%27501%27%20cy%3D%27515%27%20r%3D%270.87%27%20opacity%3D%270.51%27%2F%3E%3Ccircle%20cx%3D%27987%27%20cy%3D%27860%27%20r%3D%271.74%27%20opacity%3D%270.75%27%2F%3E%3Ccircle%20cx%3D%27527%27%20cy%3D%2769%27%20r%3D%271.05%27%20opacity%3D%270.5%27%2F%3E%3Ccircle%20cx%3D%27614%27%20cy%3D%27544%27%20r%3D%270.79%27%20opacity%3D%270.53%27%2F%3E%3Ccircle%20cx%3D%27543%27%20cy%3D%2727%27%20r%3D%270.96%27%20opacity%3D%270.82%27%2F%3E%3Ccircle%20cx%3D%27379%27%20cy%3D%27330%27%20r%3D%270.74%27%20opacity%3D%270.86%27%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E");
+}
+
+/* The star field: ONE repeating SVG tile plus a single soft indigo nebula.
+   Positions are hand-scattered — no grid, no serial order, per spec.
+   Only `background-position` animates, so nothing composites a new layer per
+   frame; a tile drifts exactly one full tile per loop, which is seamless. */
+body.nocturne[data-theme="starry"]::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    radial-gradient(900px 600px at 78% 8%, rgba(84, 102, 180, .16), transparent 72%),
+    var(--st-starfield);
+  background-repeat: no-repeat, repeat;
+  background-size: auto, 1400px 900px;
+  animation: st-star-drift 240s linear infinite;
+}
+
+/* Fun ON: the tile must move at EXACTLY the constellation layer's speed and
+   axis (180s, horizontal) or the figures visibly slide against their own
+   stars. Fun OFF keeps 1.0.57's slow diagonal — the owner's chosen default. */
+body.nocturne[data-theme="starry"][data-fun="on"]::before {
+  animation: st-star-drift-h 180s linear infinite;
+}
+@keyframes st-star-drift-h {
+  from { background-position: 0 0, 0 0; }
+  to   { background-position: 0 0, -1400px 0; }
+}
+/* A card open, or the window unwatched, freezes the tile too. */
+body.sky-frozen[data-theme="starry"]::before { animation-play-state: paused; }
+
+@keyframes st-star-drift {
+  from { background-position: 0 0, 0 0; }
+  to   { background-position: 0 0, -1400px 900px; }
+}
+
+/* PROBLEM 134's lesson applied BEFORE it can bite again: this dashboard
+   composites in SOFTWARE on the owner's machine, and continuous compositing
+   there is exactly what starved the keyboard hook. The sky is decoration, so
+   it stops dead whenever the window is not the one being looked at.
+   `body.is-blurred` is set from the focus/visibility listeners in main.ts. */
+body.is-blurred[data-theme="starry"]::before,
+body.is-blurred[data-theme="warcry"]::before { animation-play-state: paused; }
+
+@media (prefers-reduced-motion: reduce) {
+  body.nocturne[data-theme="starry"]::before { animation: none; }
+}
+
+/* The sky sits behind everything. Stated explicitly rather than implied: a
+   stacking context that is only implied is one that changes the day someone
+   adds a transform somewhere above it. */
+#stage { position: relative; z-index: 3; }
+
+/* --------------------------------------------------------------------------
+   Constellation hit-through (PROBLEM 146).
+
+   The first version of this re-enabled pointer-events on every DIRECT CHILD
+   of #stage — and #keyboard-outer is a transparent centering wrapper spanning
+   `inset: 70px 30px 84px`, so it swallowed nearly every press and the owner
+   reported "constellations are not pressable". That is the exact failure the
+   spec warns about in §5b: "a transparent full-page wrapper above the sky
+   layer blocks hits across its whole box, not just where the panels are."
+
+   So the rule the spec prescribes, applied properly this time: every WRAPPER
+   is pointer-events none, and only the OPAQUE, genuinely interactive leaves
+   opt back in. #keyboard-scale is the real board box (its transformed bounds
+   are what hit-testing uses, so the opt-in tracks the visible board exactly);
+   the two docks re-enable their buttons and panels, not their full-width
+   strips; the topbar re-enables the brand and the pill, not its spacer.
+   -------------------------------------------------------------------------- */
+body[data-theme="starry"][data-fun="on"] #stage,
+body[data-theme="starry"][data-fun="on"] #topbar,
+body[data-theme="starry"][data-fun="on"] #keyboard-outer,
+body[data-theme="starry"][data-fun="on"] #gear-dock,
+body[data-theme="starry"][data-fun="on"] #specials-dock {
+  pointer-events: none;
+}
+body[data-theme="starry"][data-fun="on"] #keyboard-scale,
+body[data-theme="starry"][data-fun="on"] #key-detail-panel,
+body[data-theme="starry"][data-fun="on"] #toast-container,
+body[data-theme="starry"][data-fun="on"] #topbar > *:not(.spacer),
+body[data-theme="starry"][data-fun="on"] #gear-dock > *,
+body[data-theme="starry"][data-fun="on"] #specials-dock > *,
+body[data-theme="starry"][data-fun="on"] #editor-backdrop:not([hidden]),
+body[data-theme="starry"][data-fun="on"] #conflict-banner,
+body[data-theme="starry"][data-fun="on"] #undo-banner,
+body[data-theme="starry"][data-fun="on"] #context-menu {
+  pointer-events: auto;
+}

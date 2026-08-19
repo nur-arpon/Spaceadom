@@ -182,10 +182,22 @@ removes it with one permission prompt.
   test from the repo is how five hours of fixes failed to reach the user's
   startup (PROBLEM 42), leaving them booting a build that still had the
   overlay-killing glow.
-- You can prove which fixes a binary contains WITHOUT running it: `log::info!`
-  format strings and bundled CSS names are ASCII-searchable inside the exe.
+- You can prove which RUST fixes a binary contains WITHOUT running it:
+  `log::info!` format strings are ASCII-searchable inside the exe.
   `[Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))` then test
-  for markers like `url_focus:`, `aumid_focus:`, `st-hud-glow`.
+  for markers like `url_focus:`, `aumid_focus:`.
+- **This does NOT work for FRONTEND markers any more (measured 2026-08-20).**
+  Tauri v2 compresses the embedded `dist2` assets, so CSS class names and JS
+  strings are not findable in the exe. `st-hud-glow` — the example this file
+  used to give — now tests False in a binary that certainly contains it, and so
+  do `toggle-thumb`, `keyboard-scale` and every other frontend name. A frontend
+  string that IS found is one that also exists in the Rust source. **Do not
+  read a False here as "the fix did not ship."** Prove a frontend change with
+  the chain instead: grep the marker in `dist2/assets/*`, then confirm the
+  exe's `LastWriteTime` is LATER than the newest file in `dist2`, then confirm
+  the installed exe's version stamp — and read all of it from outside the
+  sandbox (PROBLEM 143). `scripts/install-real.cmd` does the install and the
+  proof in one pass.
 - **Debug symbols SHIP (PROBLEM 131). Do not remove any of this plumbing:**
   `src-tauri/symbols/spaceadom.pdb` → installed beside the exe via
   `bundle.resources`. `build.rs` writes an invalid STUB there if missing (it

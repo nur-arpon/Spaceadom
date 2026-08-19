@@ -9,6 +9,8 @@
  */
 import { initKeyboardMatrix, DESIGN_W, DESIGN_H } from "./components/keyboard-matrix";
 import type { AppConfig, KeyBinding } from "./types";
+import { toggleSwitchHtml, sliderShell } from "./components/controls";
+import { SPECIALS, toggleSpecialCard } from "./components/special-cards";
 
 const q = new URLSearchParams(location.search);
 
@@ -64,19 +66,20 @@ fit();
 new ResizeObserver(fit).observe(outer);
 
 // ---- specials tray ----
-const SPECIALS: [string, string][] = [
-  ["␣ Esc", "Boss Key"], ["␣ `", "PiP Cycle"], ["␣ ⌫", "Force Close"],
-  ["␣ ↑↑", "Scroll Top"], ["␣ ,", "Smart Search"], ["␣ .", "Pause"],
-  ["␣ RAlt", "Cycle Profile"], ["␣ Scroll", "Opacity"],
-];
+// Same list and same card the app uses (special-cards.ts), so the 8 entrance
+// animations of spec §4 can be watched here without the backend.
 const tray = document.getElementById("specials-tray")!;
-SPECIALS.forEach(([combo, what], i) => {
-  const item = document.createElement("span");
+SPECIALS.forEach((spec, i) => {
+  const item = document.createElement("button");
+  item.type = "button";
   item.className = "special-item";
+  item.dataset.spec = spec.id;
+  item.setAttribute("aria-expanded", "false");
   item.style.animationDelay = `${60 + i * 30}ms`;
-  const k = document.createElement("kbd"); k.textContent = combo;
-  const t = document.createElement("span"); t.textContent = what;
+  const k = document.createElement("kbd"); k.textContent = spec.combo;
+  const t = document.createElement("span"); t.textContent = spec.name;
   item.append(k, t);
+  item.addEventListener("click", (e) => { e.stopPropagation(); toggleSpecialCard(item, spec, i); });
   tray.appendChild(item);
 });
 
@@ -96,17 +99,50 @@ config.profiles.forEach((p, i) => {
 });
 
 // ---- settings panel ----
+//
+// The switches come from the component itself (toggleSwitchHtml), so this
+// harness cannot drift from the app — it went on showing a "Dark mode" switch
+// for three versions after the theme pill replaced it, which is exactly the
+// failure a preview is supposed to catch.
+//
+// ?fun turns the personality layer on, matching applyLook()'s gate, so the §2
+// characters can be watched without the backend. Flip a switch and its own
+// character plays; the others stay still.
+const PREVIEW_TOGGLES: [string, string, boolean][] = [
+  ["around",    "Show me around",   true],
+  ["engine",    "Engine active",    true],
+  ["fun",       "Fun mode",         q.has("fun")],
+  ["sound",     "Sound ticks",      false],
+  ["startup",   "Run at startup",   true],
+  ["motion",    "Visual effects",   true],
+  ["hideboard", "Hide the keyboard", false],
+  ["software",  "Software overlay", false],
+];
+document.body.dataset.fun = q.has("fun") ? "on" : "off";
+
 document.getElementById("settings-panel")!.innerHTML = `
   <div class="set-title">Settings</div>
   <div class="set-rows">
-    ${["Engine active", "Dark mode", "Sound ticks"].map((l, i) => `
-      <label class="set-row" style="animation-delay:${60 + i * 45}ms">
-        <span class="set-row-label">${l}</span>
-        <span class="toggle-switch"><input type="checkbox" ${i === 0 ? "checked" : ""}/>
-        <span class="toggle-track"><span class="toggle-thumb"></span></span></span>
-      </label>`).join("")}
+    ${PREVIEW_TOGGLES.map(([id, label, on], i) => `
+      <div class="set-item" style="animation-delay:${60 + i * 45}ms">
+        <div class="set-row">
+          <button type="button" class="set-row-label">${label}</button>
+          ${toggleSwitchHtml(id, on)}
+        </div>
+      </div>`).join("")}
   </div>
   <div class="divider" style="margin:14px 0 10px;"></div>
+  ${([["wpm", "Typing speed", 30, 150, 65],
+      ["huddelay", "Guide HUD delay", 100, 1000, 300],
+      ["opacity", "Opacity floor", 10, 90, 30]] as [string, string, number, number, number][])
+    .map(([id, label, lo, hi, v]) => `
+    <div class="set-row" style="flex-direction:column; align-items:stretch; gap:4px; cursor:default; margin-bottom:10px;">
+      <div style="display:flex; align-items:baseline; gap:8px;">
+        <span class="set-row-label">${label}</span>
+        <span style="font-size:11px; font-weight:700; color:var(--st-accent-deep);">${v}</span>
+      </div>
+      ${sliderShell(id, `<input type="range" id="set-${id}" min="${lo}" max="${hi}" value="${v}" />`, lo, hi, v)}
+    </div>`).join("")}
   <div class="set-row" style="flex-direction:column; align-items:stretch; gap:4px; margin-bottom:10px;">
     <div style="display:flex; align-items:baseline; gap:8px;">
       <span class="set-row-label">Rollover window</span>
@@ -118,6 +154,36 @@ document.getElementById("settings-panel")!.innerHTML = `
     <button class="btn">Reset to defaults</button>
     <button class="btn btn-danger">Clear all</button>
   </div>`;
+
+// The one-render-one-animation rule, mirrored: stamp the switch the user just
+// flipped and clear every other. The CHARACTER mapping is not duplicated here
+// — it rides along inside toggleSwitchHtml's data-char.
+document.getElementById("settings-panel")!.addEventListener("change", (e) => {
+  const box = e.target as HTMLInputElement;
+  if (!box.matches?.('.toggle-switch input')) return;
+  document.querySelectorAll(".toggle-switch[data-anim]").forEach((sw) => sw.removeAttribute("data-anim"));
+  box.closest(".toggle-switch")?.setAttribute("data-anim", box.checked ? "on" : "off");
+});
+
+// The sliders' live behaviour, mirrored from wireSliderChar(): --p drives the
+// fill and every decoration, data-dir points the comet's tail backwards.
+document.querySelectorAll<HTMLElement>(".sld").forEach((shell) => {
+  const el = shell.querySelector<HTMLInputElement>("input[type=range]");
+  if (!el) return;
+  const lo = parseFloat(el.min), hi = parseFloat(el.max);
+  let last = parseFloat(el.value);
+  const paint = () => {
+    const v = parseFloat(el.value);
+    const f = (v - lo) / (hi - lo);
+    shell.style.setProperty("--p", f.toFixed(4));
+    if (v !== last) shell.dataset.dir = v > last ? "1" : "-1";
+    last = v;
+  };
+  paint();
+  el.addEventListener("input", paint);
+  el.addEventListener("pointerdown", () => shell.classList.add("is-drag"));
+  window.addEventListener("pointerup", () => shell.classList.remove("is-drag"));
+});
 
 // ---- key editor ----
 document.getElementById("key-detail-panel")!.innerHTML = `

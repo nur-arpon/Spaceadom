@@ -1,0 +1,129 @@
+/* ===========================================================================
+   starry-sky.css — the full Starry night scene (PROBLEM 145)
+   Spec: design/design-system-overhaul-3.md §5b; keyframes and card entrances
+   transcribed VERBATIM from the lab (renamed with a sky- prefix so nothing in
+   the app's own motion namespace can collide).
+
+   Layer order, per spec, all positive (hit-testing follows paint order, so
+   negative z-index would swallow presses):
+       sky/constellations  z 1
+       ocean band          z 2
+       dashboard content   z 3   (themes.css)
+       info card           z 70
+   =========================================================================== */
+
+/* ---------------------------------------------------------------------------
+   Constellation layer — three side-by-side 1400px cells sailing together
+   --------------------------------------------------------------------------- */
+#st-sky { position: fixed; inset: 0; z-index: 1; pointer-events: none; overflow: hidden; }
+
+.sky-con-layer {
+  position: absolute;
+  inset: 0;
+  animation-duration: 180s;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+@keyframes sky-conDrift0 { from { transform: translateX(0); }      to { transform: translateX(-1400px); } }
+@keyframes sky-conDrift1 { from { transform: translateX(1400px); } to { transform: translateX(0); } }
+@keyframes sky-conDrift2 { from { transform: translateX(2800px); } to { transform: translateX(1400px); } }
+
+.sky-con-wrap { position: absolute; pointer-events: none; }
+
+.sky-con {
+  display: block;
+  overflow: visible;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: filter 900ms;
+}
+/* The glow when a figure lights. drop-shadow on a handful of 3px circles —
+   the dashboard already blurs the whole board while editing, so this is well
+   inside precedent (and it is DASHBOARD-only; the overlay bans filters). */
+.sky-con.is-lit { filter: drop-shadow(0 0 6px rgba(214, 226, 255, .65)); }
+
+/* Lines: invisible until their figure is lit or open (900ms breath). */
+.sky-con-line { opacity: 0; transition: opacity 900ms; }
+.sky-con.is-lit .sky-con-line,
+.sky-con.is-open .sky-con-line { opacity: .4; }
+
+/* Stars idle at 45%; brighten and twinkle (staggered per star) while lit. */
+.sky-con-star { opacity: .45; transition: opacity 900ms; }
+.sky-con.is-lit .sky-con-star,
+.sky-con.is-open .sky-con-star { opacity: 1; }
+.sky-con.is-lit .sky-con-star {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: sky-twinkle var(--tw-dur, 1.3s) ease-in-out var(--tw-del, 0s) infinite alternate;
+}
+@keyframes sky-twinkle {
+  from { opacity: .25; transform: scale(.7); }
+  to   { opacity: 1;   transform: scale(1.15); }
+}
+
+/* ---------------------------------------------------------------------------
+   Ocean band — bottom 200px; the markup inside is the lab's, verbatim
+   --------------------------------------------------------------------------- */
+.sky-ocean {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  height: 200px;
+  z-index: 2;
+  pointer-events: none;
+}
+/* The lab's inline styles reference these animations by name. Verbatim. */
+@keyframes birdFly { from { transform: translate(0, 0); }   to { transform: translate(-16px, -9px); } }
+@keyframes shipBob { from { transform: translateY(0) rotate(-2.6deg); } to { transform: translateY(9px) rotate(2.3deg); } }
+@keyframes waveA   { from { background-position-x: 0; } to { background-position-x: -520px; } }
+@keyframes waveB   { from { background-position-x: 0; } to { background-position-x: 520px; } }
+@keyframes waveC   { from { background-position-x: 0; } to { background-position-x: -520px; } }
+@keyframes waveBob { from { transform: translateY(-3px); } to { transform: translateY(3px); } }
+/* The lab's reflection streaks and lantern twinkle by this name too. */
+@keyframes twinkle {
+  from { opacity: .25; transform: scale(.7); }
+  to   { opacity: 1;   transform: scale(1.15); }
+}
+
+/* ---------------------------------------------------------------------------
+   Info card — fixed, clamped, z 70; entrance cycles the 8 lab animations
+   --------------------------------------------------------------------------- */
+.sky-card {
+  position: fixed;
+  z-index: 70;
+  width: 212px;
+  padding: 11px 13px;
+  border-radius: 16px;
+  background: var(--st-card);
+  border: 1px solid var(--st-accent-brd);
+  box-shadow: var(--shadow-lg);
+  transform-origin: top center;
+  transform: translateX(-50%);   /* every entrance ends at translate(-50%,0) */
+  pointer-events: auto;
+}
+.sky-card-name   { font-family: var(--st-font-heading); font-size: 14px; color: var(--st-text); }
+.sky-card-fact   { font-size: 11px; line-height: 1.5; color: var(--st-text-soft); margin-top: 4px; }
+.sky-card-season { font-size: 10px; font-weight: 700; color: var(--st-accent-deep); margin-top: 5px; }
+
+/* The 8 entrances, verbatim from the lab, sky- prefixed. All end at
+   translate(-50%,0) so the card centres itself under the figure. */
+@keyframes sky-genieIn { 0% { opacity: 0; transform: translate(-50%, 24px) scale(.05) rotate(-320deg); filter: blur(4px); } 60% { opacity: 1; transform: translate(-50%, -6px) scale(1.06) rotate(12deg); filter: blur(0); } 100% { opacity: 1; transform: translate(-50%, 0) scale(1) rotate(0deg); filter: none; } }
+@keyframes sky-warpDropIn { 0% { opacity: 0; transform: translate(-50%, -70px) scale(.5, 2.2); filter: blur(6px); } 60% { opacity: 1; transform: translate(-50%, 6px) scale(1.22, .72); filter: blur(0); } 80% { transform: translate(-50%, -3px) scale(.97, 1.08); } 100% { transform: translate(-50%, 0) scale(1); } }
+@keyframes sky-irisIn { 0% { opacity: 0; clip-path: circle(4% at 50% 100%); transform: translate(-50%, 8px) scale(.92); } 100% { opacity: 1; clip-path: circle(140% at 50% 100%); transform: translate(-50%, 0) scale(1); } }
+@keyframes sky-hingeIn { 0% { opacity: 0; transform: translate(-50%, 0) perspective(700px) rotateX(-88deg); } 55% { opacity: 1; transform: translate(-50%, 0) perspective(700px) rotateX(14deg); } 100% { opacity: 1; transform: translate(-50%, 0) perspective(700px) rotateX(0); } }
+@keyframes sky-slingIn { 0% { opacity: 0; transform: translate(-165%, 0) skewX(16deg) scaleX(.7); } 55% { opacity: 1; transform: translate(-42%, 0) skewX(-8deg) scaleX(1.06); } 100% { opacity: 1; transform: translate(-50%, 0); } }
+@keyframes sky-unfurlIn { 0% { opacity: 0; transform: translate(-50%, 0) scaleY(.04); filter: brightness(1.6); } 65% { opacity: 1; transform: translate(-50%, -4px) scaleY(1.09); filter: brightness(1); } 100% { opacity: 1; transform: translate(-50%, 0) scaleY(1); } }
+@keyframes sky-boingIn { 0% { opacity: 0; transform: translate(-50%, 14px) scale(.2) rotate(9deg); } 45% { opacity: 1; transform: translate(-50%, -8px) scale(1.16) rotate(-5deg); } 70% { transform: translate(-50%, 3px) scale(.94) rotate(2deg); } 100% { transform: translate(-50%, 0) scale(1) rotate(0); } }
+@keyframes sky-tvIn { 0% { opacity: 0; transform: translate(-50%, 0) scale(1.4, .015); filter: brightness(2.4); } 45% { opacity: 1; transform: translate(-50%, 0) scale(1.06, .02); filter: brightness(2); } 75% { transform: translate(-50%, 0) scale(.98, 1.06); filter: brightness(1.15); } 100% { transform: translate(-50%, 0) scale(1); filter: brightness(1); } }
+
+/* ---------------------------------------------------------------------------
+   Freeze and pause — the sky must never cost anything unwatched
+   --------------------------------------------------------------------------- */
+/* A card open = the WHOLE sky holds its breath (spec §5b): figures, ocean,
+   ship, gulls — and the star tile itself via themes.css. */
+body.sky-frozen #st-sky *,
+body.is-blurred #st-sky * { animation-play-state: paused !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sky-con-layer, .sky-ocean * { animation: none !important; }
+  .sky-card { animation: none !important; transform: translateX(-50%); }
+}

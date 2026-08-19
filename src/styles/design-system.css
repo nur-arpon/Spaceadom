@@ -56,6 +56,7 @@
   --srf-rgb:        253, 246, 233;
   /* Cursor-follow glow + ambient auras (terracotta in light, indigo in dark) */
   --st-glow-rgb:    198, 113, 57;
+  --st-sage-rgb:    122, 138, 94;   /* ring pulse (characters.css) */
   --st-aura-2-rgb:  176, 138, 62;
 
   /* ---- V13 token names, remapped onto the Earthy palette ---- */
@@ -181,6 +182,7 @@ body.nocturne {
   --st-hairline:    #232d3e;
   --srf-rgb:        19, 26, 41;
   --st-glow-rgb:    107, 140, 214;
+  --st-sage-rgb:    127, 147, 184;
   --st-aura-2-rgb:  70, 95, 170;
 
   --bg-card-hover: #232d3e;
@@ -467,10 +469,13 @@ kbd, .kbd {
   border-radius: 50%;
   background: #fff;
   box-shadow: 0 1px 3px rgba(90, 60, 30, .3);
-  transition: left var(--dur-standard) var(--ease-spring);
+  /* transform, NOT left — characters.css animates this thumb with keyframes
+     that translate it, and a keyframe cannot drive an element positioned by
+     `left`: the two would fight and `left` would win at the end. */
+  transition: transform var(--dur-standard) var(--ease-spring);
 }
 .toggle-switch input:checked + .toggle-track { background: var(--st-accent); }
-.toggle-switch input:checked + .toggle-track .toggle-thumb { left: 18.5px; }
+.toggle-switch input:checked + .toggle-track .toggle-thumb { transform: translateX(16px); }
 
 /* Native checkbox fallback, tinted so it can never render Windows blue */
 input[type="checkbox"], input[type="radio"] { accent-color: var(--st-accent); }

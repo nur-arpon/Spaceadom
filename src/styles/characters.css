@@ -1,0 +1,377 @@
+/* ===========================================================================
+   characters.css — Fun-mode personality for the settings controls
+   Spec: design/design-system-overhaul-3.md §2 (toggles) and §3 (sliders).
+   Every @keyframes below is transcribed VERBATIM from the v3 lab
+   (`design system overhaul-v3.dc.html`), which §4 of the spec names as the
+   source of record. Values are the lab's; only the delivery changed — the lab
+   is React with inline styles, this app is vanilla CSS, so what the lab
+   returns from `charToggle(kind,on)` is expressed here as rules keyed by
+   `[data-char]` on the switch.
+
+   THREE GATES, all required:
+     body[data-fun="on"]          the whole file is inert without it (spec §0)
+     [data-anim="on|off"] set for ONE render, by the row the user just
+                          flipped. The lab calls this `played`: "First render
+                          = no animation (static position)". Without it every
+                          re-render would replay eight animations at once,
+                          which is what a settings panel must never do.
+     prefers-reduced-motion / .reduced-motion  — final states, no motion.
+
+   GEOMETRY NOTE: the spec's track is 38x22 with an 18px knob; this app's
+   switch has been 36x20 with a 15px knob since the Earthy port, and the
+   keyboard, docks and profile pill are all measured against it. The one
+   number the lab's keyframes actually depend on is the 16px travel — which
+   is identical in both — so the app's geometry is kept and the motion is
+   transcribed unchanged. What moved is HOW the thumb travels: `left` became
+   `transform`, because a keyframe that animates `transform` cannot drive a
+   thumb positioned by `left` (they would fight, and `left` would win at the
+   end of the animation).
+   =========================================================================== */
+
+/* ---------------------------------------------------------------------------
+   §2 — the six keyframes the toggles use. Lab-verbatim.
+   --------------------------------------------------------------------------- */
+@keyframes thrustOn  { 0% { transform: translateX(0); }    55% { transform: translateX(19px); } 100% { transform: translateX(16px); } }
+@keyframes thrustOff { 0% { transform: translateX(16px); } 55% { transform: translateX(-3px); } 100% { transform: translateX(0); } }
+@keyframes orbitOn   { 0% { transform: translate(0, 0); }     50% { transform: translate(8px, -16px) scale(1.18); } 100% { transform: translate(16px, 0); } }
+@keyframes orbitOff  { 0% { transform: translate(16px, 0); }  50% { transform: translate(8px, -16px) scale(1.18); } 100% { transform: translate(0, 0); } }
+@keyframes warpKOn   { 0% { transform: translateX(0) scaleX(1); }    45% { transform: translateX(6px) scaleX(2.3) scaleY(.6); } 100% { transform: translateX(16px) scaleX(1) scaleY(1); } }
+@keyframes warpKOff  { 0% { transform: translateX(16px) scaleX(1); } 45% { transform: translateX(6px) scaleX(2.3) scaleY(.6); } 100% { transform: translateX(0) scaleX(1) scaleY(1); } }
+
+/* The thruster's exhaust, and the sonar ring. Lab-verbatim. */
+@keyframes flickA { from { transform: scaleY(1); } to { transform: scaleY(.68) translateY(1px); } }
+@keyframes fadeFA { 0%, 75% { opacity: 1; } 100% { opacity: 0; } }
+@keyframes ringOn  { 0% { box-shadow: 0 0 0 0 rgba(var(--st-sage-rgb), .55); opacity: 1; } 100% { box-shadow: 0 0 0 16px rgba(var(--st-sage-rgb), 0); opacity: 0; } }
+@keyframes ringOff { 0% { box-shadow: 0 0 0 0 rgba(var(--st-glow-rgb), .5);  opacity: 1; } 100% { box-shadow: 0 0 0 16px rgba(var(--st-glow-rgb), 0);  opacity: 0; } }
+
+/* The thumb's own travel lives in design-system.css and is `transform` in
+   every mode, fun or not, so there is exactly one truth about where it is. */
+
+/* The two extra pieces. Present in the markup always, invisible until their
+   character asks for them — building them on the fly would mean touching the
+   DOM from inside a re-render that is already replacing this node. */
+.toggle-flame, .toggle-ring { display: none; position: absolute; pointer-events: none; }
+
+/* ---------------------------------------------------------------------------
+   §2 — the characters. Fun ON only.
+   --------------------------------------------------------------------------- */
+
+/* ENGINE — thruster. Track becomes accent-100→accent; the knob overshoots to
+   19px and settles at 16; an exhaust flame flickers off the left of the knob
+   for five 200ms beats and is gone inside a second. */
+body[data-fun="on"] .toggle-switch[data-char="thr"] input:checked + .toggle-track {
+  background: linear-gradient(90deg, var(--st-accent-tint), var(--st-accent));
+}
+body[data-fun="on"] .toggle-switch[data-char="thr"][data-anim="on"]  .toggle-thumb { animation: thrustOn  420ms cubic-bezier(.3, 1.15, .4, 1) both; }
+body[data-fun="on"] .toggle-switch[data-char="thr"][data-anim="off"] .toggle-thumb { animation: thrustOff 420ms cubic-bezier(.3, 1.15, .4, 1) both; }
+body[data-fun="on"] .toggle-switch[data-char="thr"][data-anim="on"] .toggle-flame {
+  display: block;
+  right: 100%; top: 4px; margin-right: 1px;
+  width: 9px; height: 10px;
+  border-radius: 50% 50% 42% 42%;
+  background: radial-gradient(circle at 50% 28%, #ffe2a8, #e8913f 55%, rgba(232, 145, 63, 0) 78%);
+  transform: rotate(-90deg);
+  animation: flickA 200ms ease-in-out 5 alternate, fadeFA 1s forwards;
+}
+/* FUN MODE — orbit hop. Accent→sage track; the knob arcs over the track
+   instead of sliding through it. RUN AT STARTUP is the same hop on the plain
+   accent track (spec §2, "same as fun"). */
+body[data-fun="on"] .toggle-switch[data-char="fun"] input:checked + .toggle-track {
+  background: linear-gradient(90deg, var(--st-accent), var(--st-sage));
+  transition: background 300ms;
+}
+body[data-fun="on"] .toggle-switch[data-char="fun"][data-anim="on"]  .toggle-thumb,
+body[data-fun="on"] .toggle-switch[data-char="orb"][data-anim="on"]  .toggle-thumb { animation: orbitOn  480ms cubic-bezier(.3, 1.15, .4, 1) both; }
+body[data-fun="on"] .toggle-switch[data-char="fun"][data-anim="off"] .toggle-thumb,
+body[data-fun="on"] .toggle-switch[data-char="orb"][data-anim="off"] .toggle-thumb { animation: orbitOff 480ms cubic-bezier(.3, 1.15, .4, 1) both; }
+/* The hop leaves the track — the knob must ride above it, and the track must
+   not clip it. */
+body[data-fun="on"] .toggle-switch[data-char="fun"] .toggle-thumb,
+body[data-fun="on"] .toggle-switch[data-char="orb"] .toggle-thumb { z-index: 2; }
+
+/* SOUND TICKS / SOFTWARE OVERLAY — sonar ring. Sage track, a bouncy 320ms
+   slide, and a ring that expands 16px out of the knob's DESTINATION and
+   fades: sage arriving, terracotta leaving. */
+body[data-fun="on"] .toggle-switch[data-char="rng"] input:checked + .toggle-track {
+  background: var(--st-sage);
+  transition: background 250ms;
+}
+body[data-fun="on"] .toggle-switch[data-char="rng"] .toggle-thumb {
+  transition: transform 320ms cubic-bezier(.34, 1.3, .4, 1);
+}
+body[data-fun="on"] .toggle-switch[data-char="rng"][data-anim] .toggle-ring {
+  display: block;
+  top: 2.5px; width: 15px; height: 15px; border-radius: 50%;
+}
+body[data-fun="on"] .toggle-switch[data-char="rng"][data-anim="on"]  .toggle-ring { left: 18.5px; animation: ringOn  550ms ease-out both; }
+body[data-fun="on"] .toggle-switch[data-char="rng"][data-anim="off"] .toggle-ring { left: 2.5px;  animation: ringOff 550ms ease-out both; }
+
+/* VISUAL EFFECTS — warp stretch. The knob smears to 2.3x wide and .6 tall
+   mid-flight, as if it outran itself. */
+body[data-fun="on"] .toggle-switch[data-char="wrp"][data-anim="on"]  .toggle-thumb { animation: warpKOn  400ms cubic-bezier(.3, 1, .4, 1) both; }
+body[data-fun="on"] .toggle-switch[data-char="wrp"][data-anim="off"] .toggle-thumb { animation: warpKOff 400ms cubic-bezier(.3, 1, .4, 1) both; }
+
+/* ---------------------------------------------------------------------------
+   Reduced motion — final states only, per CLAUDE.md. The characters are
+   decoration; the switch must still read as on or off.
+   --------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .toggle-thumb, .toggle-flame, .toggle-ring { animation: none !important; }
+  .toggle-flame, .toggle-ring { display: none !important; }
+}
+.reduced-motion .toggle-thumb,
+.reduced-motion .toggle-flame,
+.reduced-motion .toggle-ring { animation: none !important; }
+.reduced-motion .toggle-flame,
+.reduced-motion .toggle-ring { display: none !important; }
+
+/* ===========================================================================
+   §3 — SLIDER CHARACTERS
+   Spec: design/design-system-overhaul-3.md §3.
+
+   The app's sliders stay NATIVE `<input type="range">`. The lab builds its own
+   from a div and pointer listeners; copying that would have cost keyboard
+   control, the arrow keys, screen-reader semantics and the existing
+   change/input wiring for three decorations. So the input keeps the job and a
+   wrapper carries the personality:
+
+       <span class="sld" data-char="comet" style="--p:.34">
+         <input type="range" …>          <- still the real control
+         <i class="sld-tail"></i>        <- decoration, pointer-events:none
+       </span>
+
+   `--p` is the value as 0..1, written by wireSliderChar() on every input; every
+   decoration is positioned from it, so nothing has to measure the DOM.
+   `--x` is the thumb's centre in the track's own coordinates.
+
+   -webkit- pseudo-elements only: this app ships in WebView2, which is
+   Chromium. `accent-color` (the old look) is left as the fallback for any
+   range NOT wrapped in `.sld`.
+   =========================================================================== */
+
+.sld {
+  /* The handle's centre. `100%` here is `.sld`'s padding box, which is also
+     the range's content box, which is exactly the width its thumb travels —
+     so this lands on the real handle with nothing measured.
+
+     MEASUREMENT TRAP, recorded because it cost a round trip: checking this in
+     preview.html appeared to show the decorations drifting ~4px across the
+     track. They were not. The preview scales its layout with a transform, so
+     getBoundingClientRect() returns POST-transform pixels while clientWidth
+     and every CSS length stay pre-transform. Comparing the two is comparing
+     different units. A pixel --x written from JS was added to "fix" it and
+     then reverted; both approaches agreed all along. */
+  --x: calc(7.5px + var(--p, 0) * (100% - 15px));
+  position: relative;
+  display: block;
+  width: 100%;
+}
+
+.sld input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  display: block;
+  width: 100%;
+  height: 22px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.sld input[type="range"]:focus { outline: none; }
+.sld input[type="range"]:focus-visible::-webkit-slider-thumb {
+  outline: 2px solid var(--st-accent-brd);
+  outline-offset: 2px;
+}
+
+/* Base track: the spec's 8px neutral pill, filled to the handle. */
+.sld input[type="range"]::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: var(--radius-full);
+  background:
+    linear-gradient(90deg,
+      var(--st-accent) 0 calc(var(--p, 0) * 100%),
+      var(--st-border)   calc(var(--p, 0) * 100%) 100%);
+}
+.sld input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 15px;
+  height: 15px;
+  margin-top: -3.5px;                 /* centre the 15px handle on an 8px track */
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(90, 60, 30, .35);
+  transition: box-shadow 200ms var(--ease-out);
+}
+
+/* Decorations never take the pointer — the input underneath must keep it. */
+.sld-tail, .sld-orbit, .sld-star { position: absolute; pointer-events: none; display: none; }
+
+/* ---------------------------------------------------------------------------
+   TYPING SPEED — comet. (The tier labels above the track already exist as
+   `.wpm-ticks`; §3's "active tier highlighted" is the `.is-active` rule.)
+   --------------------------------------------------------------------------- */
+body[data-fun="on"] .sld[data-char="comet"] input[type="range"]::-webkit-slider-runnable-track {
+  background:
+    linear-gradient(90deg,
+      var(--st-accent-800) 0, var(--st-accent) calc(var(--p, 0) * 100%),
+      var(--st-border)        calc(var(--p, 0) * 100%) 100%);
+}
+body[data-fun="on"] .sld[data-char="comet"].is-drag input[type="range"]::-webkit-slider-thumb {
+  box-shadow: 0 0 12px rgba(var(--st-glow-rgb), .85);
+}
+/* The tail: 30x3, behind the handle, and it swaps ends with the drag
+   direction so it always trails rather than leads. */
+body[data-fun="on"] .sld[data-char="comet"] .sld-tail {
+  display: block;
+  top: 11px;
+  width: 30px;
+  height: 3px;
+  margin-top: -1.5px;
+  border-radius: var(--radius-full);
+  opacity: 0;
+  transition: opacity 350ms var(--ease-out);
+}
+body[data-fun="on"] .sld[data-char="comet"].is-drag .sld-tail { opacity: 1; transition-duration: 90ms; }
+body[data-fun="on"] .sld[data-char="comet"][data-dir="1"] .sld-tail {
+  left: calc(var(--x) - 7px);
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, rgba(var(--st-glow-rgb), 0), rgba(var(--st-glow-rgb), .9));
+}
+body[data-fun="on"] .sld[data-char="comet"][data-dir="-1"] .sld-tail {
+  left: calc(var(--x) + 7px);
+  background: linear-gradient(90deg, rgba(var(--st-glow-rgb), .9), rgba(var(--st-glow-rgb), 0));
+}
+
+/* ---------------------------------------------------------------------------
+   GUIDE HUD DELAY — planet. Sage fill, sage handle, and an elliptical orbit
+   ring that spins slowly at rest and four times faster while dragging.
+   --------------------------------------------------------------------------- */
+@keyframes orbitSpin { from { transform: scaleY(.42) rotate(0deg); } to { transform: scaleY(.42) rotate(360deg); } }
+
+body[data-fun="on"] .sld[data-char="planet"] input[type="range"]::-webkit-slider-runnable-track {
+  background:
+    linear-gradient(90deg,
+      var(--st-sage) 0 calc(var(--p, 0) * 100%),
+      var(--st-border) calc(var(--p, 0) * 100%) 100%);
+}
+body[data-fun="on"] .sld[data-char="planet"] input[type="range"]::-webkit-slider-thumb {
+  background: radial-gradient(circle at 35% 32%, var(--st-sage-deep), var(--st-sage));
+}
+body[data-fun="on"] .sld[data-char="planet"] .sld-orbit {
+  display: block;
+  top: 11px;
+  left: var(--x);
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  border: 1px solid var(--st-sage-deep);
+  border-radius: 50%;
+  opacity: .75;
+  animation: orbitSpin 5s linear infinite;
+}
+body[data-fun="on"] .sld[data-char="planet"].is-drag .sld-orbit { animation-duration: 1.1s; }
+
+/* ---------------------------------------------------------------------------
+   OPACITY FLOOR — starfield. A thick night-coloured track with three
+   twinkling stars in it, and a moon for a handle. `twinkle` is the same
+   keyframe the starry sky uses (starry-sky.css) — one definition, both users.
+   --------------------------------------------------------------------------- */
+body[data-fun="on"] .sld[data-char="starfield"] input[type="range"]::-webkit-slider-runnable-track {
+  height: 12px;
+  background:
+    linear-gradient(90deg,
+      #3b3550 0 calc(var(--p, 0) * 100%),
+      #2b2733 calc(var(--p, 0) * 100%) 100%);
+}
+body[data-fun="on"] .sld[data-char="starfield"] input[type="range"]::-webkit-slider-thumb {
+  margin-top: -1.5px;                 /* the track is 12px here, not 8px */
+  background: radial-gradient(circle at 35% 35%, #fff, #e9dcc0);
+}
+body[data-fun="on"] .sld[data-char="starfield"] .sld-star {
+  display: block;
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: #fff;
+  animation: twinkle 1.6s ease-in-out infinite alternate;
+}
+body[data-fun="on"] .sld[data-char="starfield"] .sld-star:nth-of-type(1) { left: 22%; top: 8px;  animation-duration: 1.3s; }
+body[data-fun="on"] .sld[data-char="starfield"] .sld-star:nth-of-type(2) { left: 51%; top: 14px; animation-duration: 1.9s; animation-delay: .4s; }
+body[data-fun="on"] .sld[data-char="starfield"] .sld-star:nth-of-type(3) { left: 78%; top: 10px; animation-duration: 1.5s; animation-delay: .8s; }
+
+/* Reduced motion: the decorations are pure ornament, so they go entirely —
+   the slider still shows its value, its fill and its handle. */
+@media (prefers-reduced-motion: reduce) {
+  .sld-tail, .sld-orbit, .sld-star { display: none !important; }
+}
+.reduced-motion .sld-tail,
+.reduced-motion .sld-orbit,
+.reduced-motion .sld-star { display: none !important; }
+
+/* ===========================================================================
+   §4 — SPECIAL-KEY CARDS
+   Spec: design/design-system-overhaul-3.md §4. 240px, radius 16, anchored
+   above its trigger, 520ms, transform-origin bottom center.
+
+   The 8 entrance @keyframes are NOT here: they live in styles/starry-sky.css
+   and are shared with the constellation cards (components/special-cards.ts
+   CARD_ANIMS names them). One definition, two callers.
+   =========================================================================== */
+.spec-card {
+  position: fixed;
+  z-index: 70;
+  width: 240px;
+  padding: 11px 13px 12px;
+  border-radius: 16px;
+  background: var(--st-card);
+  border: 1px solid var(--st-accent-brd);
+  box-shadow: var(--shadow-lg);
+  transform-origin: bottom center;
+  transform: translateX(-50%);        /* every entrance ends here */
+}
+.spec-card-combo {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  background: var(--st-accent-tint);
+  border: 1px solid var(--st-accent-brd);
+  color: var(--st-accent-800);
+  font-size: 11px;
+  font-weight: 700;
+}
+.spec-card-name {
+  font-family: var(--st-font-heading);
+  font-size: 14px;
+  color: var(--st-text);
+  margin-top: 6px;
+}
+.spec-card-desc {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--st-text-soft);
+  margin-top: 4px;
+}
+.spec-card-how {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--st-accent-deep);
+  margin-top: 6px;
+}
+
+/* Fun OFF — the plain entrance, so the card still arrives rather than snapping
+   into existence. Lab-verbatim (plainIn), retargeted to this card's anchor. */
+@keyframes spec-plainIn {
+  from { opacity: 0; transform: translate(-50%, 6px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* The triggers. A special is now a real control, so it says so on hover, on
+   focus and to a screen reader — it was a plain <span> before. */
+.special-item, .key.special { cursor: pointer; }
+.special-item[aria-expanded="true"],
+.key.special[aria-expanded="true"] { border-color: var(--st-accent); }
+.special-item:focus-visible,
+.key.special:focus-visible { outline: 2px solid var(--st-accent-brd); outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) { .spec-card { animation: none !important; } }
+.reduced-motion .spec-card { animation: none !important; }

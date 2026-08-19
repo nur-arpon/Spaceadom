@@ -36,6 +36,9 @@ import {
   setPausedState,
 } from "./components/settings-panel";
 import { showToast } from "./components/toast";
+import { syncStarrySky } from "./components/starry-sky";
+import { sfx, bindSfxConfig, wireSfxUnlock } from "./sfx";
+import { SPECIALS, toggleSpecialCard } from "./components/special-cards";
 
 import type { AppConfig, HookStatus, KeyBinding } from "./types";
 
@@ -56,21 +59,45 @@ export let knownConflicts: Conflict[] = [];
 
 export let appConfig: AppConfig | null = null;
 
-/** Reference list shown in the bottom-centre tray. */
-const SPECIALS: [string, string][] = [
-  ["␣ Esc", "Boss Key"],
-  ["␣ `", "PiP Cycle"],
-  ["␣ ⌫", "Force Close"],
-  ["␣ ↑↑", "Scroll Top"],
-  ["␣ ,", "Smart Search"],
-  ["␣ .", "Pause"],
-  ["␣ RAlt", "Cycle Profile"],
-  ["␣ Scroll", "Opacity"],
-];
+// PROBLEM 147 — the sound kit (design/sounds.js, kept verbatim). The instance
+// lives in sfx.ts; this hands it a live view of the config. A getter, not the
+// object: `appConfig` is reassigned on reload and a captured reference would
+// go on gating sounds by a config nothing else is reading any more.
+bindSfxConfig(() => appConfig);
+
+
 
 // ---------------------------------------------------------------------------
 // Bootstrap
 // ---------------------------------------------------------------------------
+
+/**
+ * PROBLEM 134's lesson, applied to decoration: this dashboard composites in
+ * SOFTWARE on the owner's machine, and continuous compositing there is what
+ * starved the keyboard hook. `body.is-blurred` parks every ambient animation
+ * whenever the window is not the one being looked at — which, for a tray app,
+ * is nearly always.
+ */
+function wireAmbientPause(): void {
+  const set = (blurred: boolean) =>
+    document.body.classList.toggle("is-blurred", blurred);
+  window.addEventListener("focus", () => set(false));
+  window.addEventListener("blur", () => set(true));
+  document.addEventListener("visibilitychange", () =>
+    set(document.visibilityState !== "visible"),
+  );
+  set(!document.hasFocus());
+}
+
+/** Esc is the guaranteed way out of sky mode. */
+function wireSkyEscape(): void {
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && document.body.classList.contains("sky-mode")) {
+      e.preventDefault();
+      void leaveSkyMode();
+    }
+  });
+}
 
 async function bootstrap(): Promise<void> {
   try {
@@ -82,7 +109,11 @@ async function bootstrap(): Promise<void> {
   }
 
   // Theme first, so nothing paints in the wrong palette then snaps.
-  applyTheme(!!appConfig.dark_mode);
+  applyLook();
+  applySkyMode(appConfig.hide_keyboard === true);
+  wireAmbientPause();
+  wireSkyEscape();
+  wireSfxUnlock();
   applySound(!!appConfig.sound_enabled);
   const reduced = applyMotion(appConfig.motion);
   // Log the effective motion state at startup. A tester's "there are no
@@ -177,7 +208,11 @@ async function bootstrap(): Promise<void> {
 
   await listen<AppConfig>("config-updated", (event) => {
     appConfig = event.payload;
-    applyTheme(!!appConfig.dark_mode);
+    // applyLook(), not applyTheme(): a theme pushed from Rust must bring its
+    // palette AND its fun-gate with it, or the body keeps the old data-theme
+    // and only the nocturne class flips.
+    applyLook();
+    applySkyMode(appConfig.hide_keyboard === true);
     applySound(!!appConfig.sound_enabled);
     applyMotion(appConfig.motion);
     refreshBoard();
@@ -248,6 +283,70 @@ function refreshBoard(): void {
 /** ONE setting drives the dashboard AND the overlay (Rust re-emits on save). */
 export function applyTheme(dark: boolean): void {
   document.body.classList.toggle("nocturne", dark);
+}
+
+/**
+ * PROBLEM 144 — put the whole LOOK on <body>: which of the three themes, and
+ * whether the personality layer is on.
+ *
+ * Both live as data-attributes rather than classes because themes.css keys off
+ * them in combination — `[data-theme="starry"][data-fun="on"]` is the starry
+ * palette, and anything else with a dark theme falls through to plain
+ * nocturne. That combination IS the owner's rule: with fun on, Starry night is
+ * the new sky; with it off, Starry night is "the previous dark mode we have
+ * been using all along".
+ *
+ * `.nocturne` is still the single switch the overlay reads, so it is kept in
+ * lockstep here rather than being derived independently anywhere else.
+ */
+export function applyLook(): void {
+  const theme = appConfig?.theme || (appConfig?.dark_mode ? "starry" : "earthy");
+  const fun = appConfig?.fun_mode !== false;
+  document.body.dataset.theme = theme;
+  document.body.dataset.fun = fun ? "on" : "off";
+  applyTheme(theme !== "earthy");
+  // The living scene (constellations, ocean, ship) exists exactly when Starry
+  // night AND Fun are both on; fun off keeps 1.0.57's quiet drifting sky.
+  syncStarrySky(theme, fun);
+}
+
+/**
+ * PROBLEM 144 — "hide the keyboard layout so a person could enjoy the blank
+ * sky". The owner chose the full version: everything goes, leaving only the
+ * sky.
+ *
+ * Two things are non-negotiable when the entire UI can vanish, and both are
+ * here rather than assumed: Esc always returns, and a small corner control is
+ * always painted so a user who never thinks to press Esc is not stranded in an
+ * empty window with no way back.
+ */
+export function applySkyMode(on: boolean): void {
+  document.body.classList.toggle("sky-mode", on);
+  let back = document.getElementById("sky-return");
+  if (on && !back) {
+    const btn = document.createElement("button");
+    btn.id = "sky-return";
+    btn.type = "button";
+    back = btn;
+    back.title = "Show the dashboard again (Esc)";
+    back.setAttribute("aria-label", "Show the dashboard again");
+    back.textContent = "⤢";
+    back.addEventListener("click", () => void leaveSkyMode());
+    document.body.appendChild(back);
+  } else if (!on && back) {
+    back.remove();
+  }
+}
+
+/** Come back from sky mode, and remember that we did. */
+export async function leaveSkyMode(): Promise<void> {
+  if (!appConfig?.hide_keyboard) return;
+  appConfig.hide_keyboard = false;
+  // Escape and the return button leave by this path; the settings switch has
+  // its own. Same falling sweep either way (sounds.js §8a, "exiting a mode").
+  if (appConfig.fun_mode !== false) sfx.spaceFall();
+  applySkyMode(false);
+  await persistConfig();
 }
 
 /**
@@ -718,19 +817,36 @@ function renderConflictBanner(): void {
   el.hidden = false;
 }
 
+/**
+ * The bottom-centre reference tray (PROBLEM 148).
+ *
+ * These were inert <span>s: they named the keys and left the user to guess
+ * what "PiP Cycle" meant. Each is now a button that opens its card (spec §4).
+ * The list itself comes from special-cards.ts, so the tray, the board and the
+ * cards can never disagree about what a special is called.
+ */
 function renderSpecials(): void {
   const tray = document.getElementById("specials-tray");
   if (!tray) return;
   tray.innerHTML = "";
-  SPECIALS.forEach(([combo, what], i) => {
-    const item = document.createElement("span");
+  SPECIALS.forEach((spec, i) => {
+    const item = document.createElement("button");
+    item.type = "button";
     item.className = "special-item";
+    item.dataset.spec = spec.id;
+    item.setAttribute("aria-expanded", "false");
     item.style.animationDelay = `${60 + i * 30}ms`;
     const k = document.createElement("kbd");
-    k.textContent = combo;
+    k.textContent = spec.combo;
     const t = document.createElement("span");
-    t.textContent = what;
+    t.textContent = spec.name;
     item.append(k, t);
+    item.addEventListener("click", (e) => {
+      // #stage closes every popover on click (PROBLEM 98); this card is not
+      // a popover and must survive its own opening press.
+      e.stopPropagation();
+      toggleSpecialCard(item, spec, i);
+    });
     tray.appendChild(item);
   });
 }
