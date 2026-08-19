@@ -770,6 +770,17 @@ body.nocturne #conflict-banner {
   font-weight: 600;
   color: var(--st-text-soft);
   animation: st-pop-in 360ms var(--ease-spring) both;
+  /* This is a <button> since PROBLEM 148 (pressing it opens the card). There
+     is NO global button reset in this app — .set-row-label and #specials-btn
+     each carry their own — so without these five lines the tray renders as
+     grey Windows buttons with an outset black border, in Arial. That shipped
+     in 1.0.59 and is what the dev harness caught. */
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  font-family: inherit;
+  text-align: left;
 }
 
 #specials-btn {

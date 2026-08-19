@@ -8007,6 +8007,34 @@ export function closeSpecialCard(silent = false): void {
 kept alive for an exit animation must be removed from hit-testing, and from
 every selector that identifies the live one, on the same tick the exit starts.
 
+### The regression 1.0.59 shipped, and the harness that caught it (1.0.60)
+
+Making the tray chips pressable meant turning each `<span class="special-item">`
+into a `<button>`. **This app has no global button reset** — `.set-row-label`
+and `#specials-btn` each carry their own — so the eight chips along the bottom
+of the dashboard rendered as grey Windows buttons: `rgb(240,240,240)` fill, a
+1.8px `outset` black border, and Arial instead of Figtree. That shipped in
+1.0.59 and was installed on the owner's machine before it was found.
+
+```css
+.special-item {
+  …
+  appearance: none; background: none; border: 0; padding: 0;
+  font-family: inherit; text-align: left;
+}
+```
+
+**How it was caught:** by reading the computed style of the real element in the
+harness — `getComputedStyle(chip).backgroundColor` — not by looking at it. The
+same pass confirmed `.set-row-label` was already clean, which is why nobody had
+noticed the missing reset before.
+
+**Generalise this.** *Changing an element's TAG changes its default styling, and
+a rule written for the old tag will not mention the difference.* `span` → `button`,
+`div` → `a`, `span` → `input` all inherit a chrome the existing rule never had to
+override. After any tag change, read the computed background, border and font of
+the result before believing the class still describes it.
+
 ### The dev harness had drifted, and that is part of why this was possible
 
 `preview.html` was still rendering a hand-written "Dark mode" switch — three

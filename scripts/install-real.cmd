@@ -16,7 +16,8 @@ REM ===========================================================================
 setlocal
 set ROOT=D:\Claude-Projects\SpaceToggle-V14
 set OUT=%ROOT%\install-check.txt
-set SETUP=%ROOT%\src-tauri\target\release\bundle\nsis\Spaceadom_1.0.59_x64-setup.exe
+set PROOF=%ROOT%\install-proof.txt
+set SETUP=%ROOT%\src-tauri\target\release\bundle\nsis\Spaceadom_1.0.60_x64-setup.exe
 
 > "%OUT%" echo === install-real.cmd ===
 >>"%OUT%" echo when: %DATE% %TIME%
@@ -36,6 +37,11 @@ taskkill /IM spaceadom.exe /F >nul 2>&1
 >>"%OUT%" echo installer exit code: %ERRORLEVEL%   (NEVER trust this alone)
 
 REM --- prove it, from out here ------------------------------------------------
+REM FRONTEND markers are NOT searchable in the exe: Tauri v2 compresses the
+REM embedded assets, so even `st-hud-glow` tests False in a binary that plainly
+REM contains it (measured 2026-08-20; the old CLAUDE.md rule is corrected).
+REM The chain below replaces it — the marker is in the BUNDLE, and the exe was
+REM linked AFTER that bundle was written.
 set EXE=%LOCALAPPDATA%\Spaceadom\spaceadom.exe
 >>"%OUT%" echo installed path: %EXE%
 if not exist "%EXE%" (
@@ -43,19 +49,18 @@ if not exist "%EXE%" (
   exit /b 1
 )
 
-powershell -NoProfile -Command ^
-  "$e='%EXE%';" ^
-  "$v=(Get-Item $e).VersionInfo.FileVersion;" ^
-  "$t=(Get-Item $e).LastWriteTime;" ^
-  "$b=[Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($e));" ^
-  "$run=(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Spaceadom -EA SilentlyContinue).Spaceadom;" ^
-  "Add-Content '%OUT%' ('version: '+$v);" ^
-  "Add-Content '%OUT%' ('written: '+$t);" ^
-  "Add-Content '%OUT%' ('Run key: '+$run);" ^
-  "Add-Content '%OUT%' ('marker spec-card: '+($b -match 'spec-card'));" ^
-  "Add-Content '%OUT%' ('marker sld-tail:  '+($b -match 'sld-tail'));" ^
-  "Add-Content '%OUT%' ('marker thrustOn:  '+($b -match 'thrustOn'));" ^
-  "Add-Content '%OUT%' ('marker Boss Key:  '+($b -match 'Boss Key'))"
+REM The proof step writes its OWN file, which is then folded in here. Two
+REM earlier shapes of this line both failed, and both failed SILENTLY:
+REM   1. no -ExecutionPolicy: powershell refused the script and printed why to
+REM      a console nobody was reading, so the output file just stopped.
+REM   2. `>>"%OUT%" 2>&1` on this line: cmd holds %OUT% open for the whole
+REM      call, so every Add-Content inside the script hit "being used by
+REM      another process" and the file gained nothing but errors.
+REM Separate files, then concatenate. A verification that can fail silently is
+REM not a verification.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\scripts\install-proof.ps1" -Exe "%EXE%" -Root "%ROOT%" -Out "%PROOF%" 2>&1
+if exist "%PROOF%" (type "%PROOF%" >>"%OUT%") else (>>"%OUT%" echo PROOF STEP PRODUCED NOTHING - powershell never ran)
+del "%PROOF%" >nul 2>&1
 
 REM Start it, so the owner is looking at the build that was just installed.
 start "" "%EXE%"

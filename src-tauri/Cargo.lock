@@ -3362,7 +3362,7 @@ dependencies = [
 
 [[package]]
 name = "spaceadom"
-version = "1.0.59"
+version = "1.0.60"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
