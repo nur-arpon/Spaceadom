@@ -1,86 +1,97 @@
 /**
- * starry-sky.ts — the full Starry night scene (PROBLEM 145).
+ * starry-sky.ts — the full Starry night scene (PROBLEMS 145 and 150).
  *
- * Spec: design/design-system-overhaul-3.md §5b, geometry and ocean markup
- * transcribed VERBATIM from the lab (`design system overhaul-v3.dc.html`) —
- * the CONS array, the wave tiles, the galleon and its crew are the lab's own,
- * not re-drawn (CLAUDE.md: the design is a specification, not a suggestion).
+ * Sources, in order of authority:
+ *  - design/night-scene4.md   — the 2026-08-20 delta spec: moon, 20
+ *    constellations in exclusive bands, crest-field sea, rigged galleon,
+ *    storm. Every number below that is not attributed elsewhere is from it.
+ *  - design/moon.md           — the moon, in full detail.
+ *  - design/Help Lab v2-4.dc.html — the lab; generators (seaField, seaWave,
+ *    injectHeave, the band partition) are transcribed from it line for line,
+ *    and night-markup.ts is its ocean subtree extracted verbatim.
+ *  - src/constellations.js    — the 20 figures, byte-identical to the file
+ *    the owner extracted from the lab.
  *
- * GATING — the owner's final rule (2026-08-19): the 1.0.57 drifting star sky
- * is the DEFAULT for Starry night with Fun mode OFF. Fun ON adds everything
- * here: the twelve constellations sailing with the stars, the ocean, and the
- * pirate ship. So this module builds only under theme=starry AND fun=on, and
- * the palette + star tile live in themes.css unconditionally for the theme.
+ * SCALE — the owner's 2026-08-20 verdict was "smaller than today", while the
+ * lab GREW the ship. Resolution: the ocean band renders the lab's coordinate
+ * space verbatim inside `.sky-ocean-world` (200px tall, lab numbers intact)
+ * and the world is scaled 0.75 by CSS — band 150px, waterline 130.5px. The
+ * ship's width attribute is additionally 379 -> 320 in night-markup.ts, so it
+ * lands at 240px on screen. The moon is scaled by the same 0.75 numerically
+ * (it lives in the viewport, not the world). Constellation SVGs render at
+ * 0.85. The star tile got denser and finer in themes.css.
  *
- * STABILITY (PROBLEM 134's lesson, applied before it can bite):
- *  - This is DECORATION. It exists only in the dashboard webview; the overlay
- *    never loads this module.
- *  - Every animation is transform/background-position/opacity. The one
- *    `filter: drop-shadow` lights ONE constellation at a time, on a handful of
- *    3px circles — the dashboard already runs `blur(5px)` over the whole board
- *    while editing, so this is well inside precedent.
- *  - `body.is-blurred` (window unfocused/minimised) pauses every animation in
- *    the scene via CSS, and the lighting interval checks it too. For a tray
- *    app that is nearly always.
- *  - While a card is open the WHOLE sky freezes (`body.sky-frozen`), star
- *    tile included, per spec — and resumes the moment it closes.
+ * GATING unchanged: theme=starry AND fun=on builds this; fun off keeps the
+ * plain 1.0.57 drifting star tile from themes.css.
+ *
+ * STABILITY (PROBLEM 134's lesson): decoration only, dashboard webview only.
+ * `body.is-blurred` and `body.sky-frozen` pause every CSS animation in the
+ * scene, and every SCHEDULER below checks busy() before advancing, so a
+ * minimised tray app spends nothing on any of this.
  */
 
 import { sfx } from "../sfx";
 // The same 8 entrances the special-key cards use, in the same order — spec §4
-// and §5b are explicit that they share one list.
+// and §5b are explicit that they share one list. (Fun OFF collapses cards to
+// the iris, but this scene only exists with fun ON, so the variety stands.)
 import { CARD_ANIMS } from "./special-cards";
+import { CONSTELLATIONS, type Constellation } from "../constellations.js";
+import { OCEAN_WORLD_HTML } from "./night-markup";
 
-/** One constellation: scatter position in the 1400px sky cell (x px, y %),
- *  local star points, and which points join. Verbatim from the lab. */
-interface Con {
-  name: string;
-  season: string;
-  fact: string;
-  pos: [number, number];
-  pts: [number, number][];
-  lines: [number, number][];
-}
-
-const CONS: Con[] = [
-  { name: "Ursa Major", season: "Spring", fact: "The Great Bear. Its seven brightest stars are the Big Dipper — the two front bowl stars point straight to Polaris.", pos: [193, 50.5], pts: [[2,38],[20,30],[38,32],[54,40],[76,34],[86,54],[62,60]], lines: [[0,1],[1,2],[2,3],[3,4],[4,5],[5,6],[6,3]] },
-  { name: "Cassiopeia", season: "Autumn", fact: "The vain queen on her throne — an unmistakable W of five stars, circling the pole opposite the Big Dipper.", pos: [778, 39.6], pts: [[2,30],[20,8],[40,26],[60,4],[78,32]], lines: [[0,1],[1,2],[2,3],[3,4]] },
-  { name: "Cygnus", season: "Summer", fact: "The Swan, flying down the Milky Way. Its shape earns it the name Northern Cross; bright Deneb marks the tail.", pos: [370, 27.9], pts: [[44,2],[44,28],[44,54],[44,80],[12,40],[76,36]], lines: [[0,1],[1,2],[2,3],[4,1],[1,5]] },
-  { name: "Scorpius", season: "Summer", fact: "The scorpion that felled Orion — a long J-shaped hook low on the horizon, with red Antares as its heart.", pos: [307, 11], pts: [[70,4],[60,14],[52,26],[50,42],[54,58],[64,68],[78,72],[88,64]], lines: [[0,1],[1,2],[2,3],[3,4],[4,5],[5,6],[6,7]] },
-  { name: "Lyra", season: "Summer", fact: "The lyre of Orpheus. Tiny, but it holds Vega — one of the brightest stars in the whole sky.", pos: [138, 72.6], pts: [[30,4],[22,20],[40,24],[16,44],[34,48]], lines: [[0,1],[0,2],[1,2],[1,3],[2,4],[3,4]] },
-  { name: "Ursa Minor", season: "All year", fact: "The Little Bear. Polaris, the North Star, sits at the tip of its tail and barely moves all night.", pos: [576, 49], pts: [[50,6],[42,18],[36,30],[28,40],[14,36],[10,48],[24,52]], lines: [[0,1],[1,2],[2,3],[3,4],[4,5],[5,6],[6,3]] },
-  { name: "Orion", season: "Winter", fact: "The Hunter. Three belt stars in a perfect row; red Betelgeuse marks a shoulder, blue-white Rigel a foot.", pos: [1013, 55.6], pts: [[10,4],[54,10],[22,38],[32,44],[42,50],[6,84],[62,78]], lines: [[0,2],[1,4],[2,3],[3,4],[2,5],[4,6]] },
-  { name: "Gemini", season: "Winter", fact: "The Twins. Castor and Pollux head two parallel chains of stars, side by side like stick figures.", pos: [130, 7.7], pts: [[14,6],[10,26],[8,48],[6,68],[40,4],[44,24],[48,46],[52,66]], lines: [[0,1],[1,2],[2,3],[4,5],[5,6],[6,7],[0,4]] },
-  { name: "Taurus", season: "Winter", fact: "The Bull. A V of stars — the Hyades cluster — draws its face; orange Aldebaran is the bull's fiery eye.", pos: [1173, 60.1], pts: [[10,8],[26,30],[36,44],[48,34],[68,10]], lines: [[0,1],[1,2],[2,3],[3,4]] },
-  { name: "Canis Major", season: "Winter", fact: "The Great Dog at Orion's heel — home of Sirius, the brightest star in Earth's night sky.", pos: [1003, 10.8], pts: [[46,6],[38,20],[46,34],[30,44],[52,48],[40,62],[28,74],[50,74]], lines: [[0,1],[1,2],[2,3],[2,4],[4,5],[5,6],[5,7]] },
-  { name: "Leo", season: "Spring", fact: "The Lion. A backwards question mark — the Sickle — forms its mane, with Regulus at the heart.", pos: [1219, 16.8], pts: [[70,10],[58,4],[46,10],[44,24],[54,34],[74,36],[24,58],[6,64],[30,72]], lines: [[0,1],[1,2],[2,3],[3,4],[4,5],[5,8],[8,7],[7,6],[6,5]] },
-  { name: "Pegasus", season: "Autumn", fact: "The winged horse. Its Great Square of four stars is autumn's landmark — star-hop outward from its corners.", pos: [1185, 34.9], pts: [[20,10],[60,8],[64,46],[24,50],[86,62]], lines: [[0,1],[1,2],[2,3],[3,0],[2,4]] },
-];
-
-/** The 8 card entrances, cycled by constellation index (spec §4/§5b). */
 const SVG_NS = "http://www.w3.org/2000/svg";
-const LIGHT_EVERY_MS = 4200;
+
+// The ocean world's CSS scale is 0.75 (.sky-ocean-world, starry-sky.css); the
+// MOON_PATH numbers below are pre-multiplied by the same 0.75 by hand, since
+// the moon lives in viewport coordinates, not inside the scaled world.
+/** Constellation render scale ("~15% smaller", the owner's 2026-08-20 verdict). */
+const CON_SCALE = 0.85;
 
 let _root: HTMLDivElement | null = null;
 let _card: HTMLDivElement | null = null;
 let _openIdx: number | null = null;
 let _litIdx = -1;
-let _litTimer: number | undefined;
 let _outsideClose: ((e: PointerEvent) => void) | null = null;
+
+// Schedulers. All setTimeout chains, all cleared in destroyStarrySky().
+let _litT: number | undefined;
+let _fadeT: number | undefined;
+let _powT: number | undefined;
+let _moonT: number | undefined;
+let _heaveStyle: HTMLStyleElement | null = null;
+
+/** Constellation indices currently faded out of the sky. */
+const _hidden = new Set<number>();
+let _moonLeg = 0;
+let _pow = 0.34;              // moonPow: 0 = cloud wins, 1 = moon blazes
 
 function reduced(): boolean {
   return document.documentElement.classList.contains("reduced-motion");
 }
 
+/** True while nobody is watching — or while a card has the sky frozen.
+ *  Schedulers hold instead of advancing; CSS pauses the animations, and this
+ *  keeps the moon's wander (a transition, unpausable) from picking a NEW leg
+ *  under a frozen sky. */
+function busy(): boolean {
+  return document.hidden
+    || document.body.classList.contains("is-blurred")
+    || document.body.classList.contains("sky-frozen");
+}
+
+// ---------------------------------------------------------------------------
+// Constellations — 20 figures, each in exactly ONE of three drift bands
+// ---------------------------------------------------------------------------
+
 /** One constellation SVG. Rendering semantics are the lab's, line for line:
  *  bbox +8, a 22px-overhung hit rect, r=16 halo circles, hairline links,
- *  stars r 1.4 (key star 1.9). */
-function buildCon(c: Con, i: number): SVGSVGElement {
+ *  stars r 1.4 (key star 1.9). Rendered at CON_SCALE via width/height only,
+ *  so every local coordinate stays the lab's. */
+function buildCon(c: Constellation, i: number): SVGSVGElement {
   const w = Math.max(...c.pts.map((p) => p[0])) + 8;
   const h = Math.max(...c.pts.map((p) => p[1])) + 8;
   const svg = document.createElementNS(SVG_NS, "svg");
-  svg.setAttribute("width", String(w));
-  svg.setAttribute("height", String(h));
+  svg.setAttribute("width", (w * CON_SCALE).toFixed(1));
+  svg.setAttribute("height", (h * CON_SCALE).toFixed(1));
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
   svg.dataset.con = String(i);
   svg.classList.add("sky-con");
@@ -127,9 +138,12 @@ function buildCon(c: Con, i: number): SVGSVGElement {
     const star = document.createElementNS(SVG_NS, "circle");
     star.setAttribute("cx", String(p[0]));
     star.setAttribute("cy", String(p[1]));
-    star.setAttribute("r", k === 0 ? "1.9" : "1.4");
+    // r is a CSS property here, not an attribute — the lit/open +0.5 bump has
+    // to transition, and an attribute cannot. The class carries which star is
+    // the key one; starry-sky.css owns both radii and the bump.
     star.setAttribute("fill", "#fff");
     star.classList.add("sky-con-star");
+    if (k === 0) star.classList.add("is-key");
     // Per-star twinkle stagger, only meaningful while its figure is lit.
     star.style.setProperty("--tw-dur", `${(1.1 + (k % 4) * 0.25).toFixed(2)}s`);
     star.style.setProperty("--tw-del", `${((k % 5) * 0.18).toFixed(2)}s`);
@@ -144,11 +158,38 @@ function buildCon(c: Con, i: number): SVGSVGElement {
   return svg;
 }
 
+/**
+ * Partition the 20 figures across the three 1400px drift bands — lab-verbatim.
+ *
+ * THE BUG THIS FIXES: the three bands used to render the SAME list, so
+ * panning the sky showed every constellation three times. Now each belongs to
+ * exactly one band (shuffled 7/7/6), each in its own slot with jitter, so the
+ * full 4200px loop (~9 minutes) never repeats a figure and the layout is
+ * different every launch.
+ */
+function partitionBands(): { ci: number; x: number; y: number }[][] {
+  const idx = CONSTELLATIONS.map((_, i) => i);
+  for (let i = idx.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const t = idx[i]; idx[i] = idx[j]; idx[j] = t;
+  }
+  const bands: number[][] = [[], [], []];
+  idx.forEach((v, k) => bands[k % 3].push(v));
+  return bands.map((list) => {
+    const slot = 1400 / list.length;
+    return list.map((ci, k) => ({
+      ci,
+      x: Math.round(slot * k + 16 + Math.random() * Math.max(48, slot - 132)),
+      y: Math.round(Math.min(70, Math.max(3, CONSTELLATIONS[ci].pos[1] + (Math.random() * 11 - 5.5))) * 10) / 10,
+    }));
+  });
+}
+
 /** The info card, FIXED and clamped to the viewport, centred under the
  *  figure's live (mid-drift) position. Entrance cycles the 8 animations. */
 function openCard(i: number, svg: SVGSVGElement): void {
   closeCard(true);           // silent: the entrance below is the sound here
-  const c = CONS[i];
+  const c = CONSTELLATIONS[i];
   const r = svg.getBoundingClientRect();
   const vw = window.innerWidth || 1240;
   const vh = window.innerHeight || 1000;
@@ -158,6 +199,9 @@ function openCard(i: number, svg: SVGSVGElement): void {
   const card = document.createElement("div");
   card.dataset.conCard = "1";
   card.className = "sky-card";
+  // Same reason as the special-key card: it is a <body> child, and a click on
+  // it must not reach the document listener that closes every popover.
+  card.addEventListener("click", (e) => e.stopPropagation());
   card.style.left = `${x}px`;
   card.style.top = `${y}px`;
   const [anim, ease] = CARD_ANIMS[i % CARD_ANIMS.length];
@@ -200,17 +244,351 @@ function closeCard(silent = false): void {
   document.body.classList.remove("sky-frozen");
 }
 
-/** Every LIGHT_EVERY_MS one random figure lights up. Never the same one twice
- *  in a row, never while hidden/unfocused (the interval keeps ticking but the
- *  work is skipped — cheaper than tearing the timer up and down on focus). */
-function tickLighting(): void {
-  if (!_root || document.hidden || document.body.classList.contains("is-blurred")) return;
-  let i = Math.floor(Math.random() * CONS.length);
-  if (i === _litIdx) i = (i + 1) % CONS.length;
+/**
+ * One figure lights at a time. The beat is RANDOM (2.6–6s, lab-verbatim), not
+ * a fixed interval, and only ever picks from figures currently visible.
+ */
+function scheduleRelight(): void {
+  _litT = window.setTimeout(scheduleRelight, 2600 + Math.random() * 3400);
+  if (!_root || busy()) return;
+  const vis = CONSTELLATIONS.map((_, i) => i).filter((i) => !_hidden.has(i) && i !== _litIdx);
+  if (!vis.length) return;
+  const i = vis[Math.floor(Math.random() * vis.length)];
   _root.querySelectorAll(".sky-con.is-lit").forEach((s) => s.classList.remove("is-lit"));
   _root.querySelectorAll(`[data-con="${i}"]`).forEach((s) => s.classList.add("is-lit"));
   _litIdx = i;
 }
+
+function setHidden(i: number, hide: boolean): void {
+  if (hide) _hidden.add(i); else _hidden.delete(i);
+  _root?.querySelector<HTMLElement>(`.sky-con-wrap[data-wrap="${i}"]`)?.classList.toggle("is-hidden", hide);
+}
+
+/**
+ * Appear and vanish (spec §2): ~45% start hidden; every 5.2–12s one figure
+ * crosses over on a 3.4s opacity fade, keeping the hidden count floating
+ * between 30% and 55% — roughly 3–4 visible per band. Nothing vanishes while
+ * it is lit or while its card is open; hidden figures take no presses.
+ */
+function scheduleFade(): void {
+  _fadeT = window.setTimeout(scheduleFade, 5200 + Math.random() * 6800);
+  if (!_root || busy()) return;
+  const n = CONSTELLATIONS.length;
+  const hide = _hidden.size < n * 0.3 || (_hidden.size < n * 0.55 && Math.random() < 0.5);
+  if (hide) {
+    const vis = CONSTELLATIONS.map((_, i) => i)
+      .filter((i) => !_hidden.has(i) && i !== _openIdx && i !== _litIdx);
+    if (vis.length) setHidden(vis[Math.floor(Math.random() * vis.length)], true);
+  } else if (_hidden.size) {
+    const pool = Array.from(_hidden);
+    setHidden(pool[Math.floor(Math.random() * pool.length)], false);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The sea — three crest fields and a silhouette horizon, generated at load
+// (lab-verbatim: seaField / seaWave / injectHeave, values from night-scene §3)
+// ---------------------------------------------------------------------------
+
+interface FieldOpts {
+  h: number; n: number; bias: number; minW: number; maxW: number; maxH: number;
+  aTop: number; aBot: number; col: string; foam: number;
+}
+
+/** A 1560px transparent tile of individual crest marks — size, brightness and
+ *  density read as distance. Three mark kinds (swell/crest/chop), a dark
+ *  understroke for volume past t>.45, tapered foam lips, seamless wrap. */
+function seaField(o: FieldOpts): string {
+  const W = 1560, R = Math.random;
+  let s = "";
+  for (let i = 0; i < o.n; i++) {
+    const x = R() * W;
+    const t = Math.pow(R(), o.bias);
+    const y = 3 + t * (o.h - 8);
+    let w = (o.minW + t * (o.maxW - o.minW)) * (0.5 + R() * 1);
+    let h = (1.5 + t * o.maxH) * (0.55 + R() * 0.9);
+    const kind = R();
+    if (kind < 0.4) { h *= 0.34; w *= 1.55; }        // long shallow swell
+    else if (kind > 0.88) { h *= 1.6; w *= 0.42; }   // short steep chop
+    const a0 = (o.aTop + t * (o.aBot - o.aTop)) * (0.5 + R() * 0.8);
+    const k = 0.38 + R() * 0.4;
+    const px = x + w * k;
+    const lw = (0.5 + t * 1.2).toFixed(2);
+    const d = "M" + x.toFixed(1) + " " + y.toFixed(1) + " Q " + (x + w * k * 0.5).toFixed(1) + " " + (y - h).toFixed(1) +
+      " " + px.toFixed(1) + " " + (y - h * 0.76).toFixed(1) + " T " + (x + w).toFixed(1) + " " + (y + h * 0.2).toFixed(1);
+    let m = "";
+    if (t > 0.45 && R() < 0.4) m += "<path d='" + d + "' fill='none' stroke='rgba(2,5,12," + (a0 * 1.5).toFixed(3) +
+      ")' stroke-width='" + (+lw + 1.2).toFixed(2) + "' stroke-linecap='round' transform='translate(0," + (1.2 + t * 1.6).toFixed(1) + ")'/>";
+    m += "<path d='" + d + "' fill='none' stroke='rgba(" + o.col + "," + a0.toFixed(3) + ")' stroke-width='" + lw + "' stroke-linecap='round'/>";
+    if (t > 0.38 && R() < o.foam) {
+      m += "<path d='M" + (px - w * 0.14).toFixed(1) + " " + (y - h * 0.58).toFixed(1) + " Q " + px.toFixed(1) + " " + (y - h * 0.95).toFixed(1) +
+        " " + (px + w * 0.16).toFixed(1) + " " + (y - h * 0.5).toFixed(1) + "' fill='none' stroke='rgba(232,243,255," +
+        Math.min(0.62, a0 * 1.7).toFixed(3) + ")' stroke-width='" + (0.8 + t * 1.7).toFixed(2) + "' stroke-linecap='round'/>";
+      const dn = 1 + Math.round(R() * 3 * t);
+      for (let q = 0; q < dn; q++) m += "<circle cx='" + (px + (R() - 0.5) * w * 0.6).toFixed(1) + "' cy='" + (y - h - R() * 7 * t).toFixed(1) +
+        "' r='" + (0.35 + R() * 0.65).toFixed(1) + "' fill='rgba(226,239,255," + Math.min(0.5, a0 * 1.1).toFixed(3) + ")'/>";
+    }
+    s += m;
+    if (x + w > W) s += "<g transform='translate(-" + W + ",0)'>" + m + "</g>";
+  }
+  const svg = "<svg xmlns='http://www.w3.org/2000/svg' width='" + W + "' height='" + o.h + "'>" + s + "</svg>";
+  return 'url("data:image/svg+xml,' + encodeURIComponent(svg) + '")';
+}
+
+interface WaveOpts {
+  h: number; base: number; amp: number; harm: [number, number][];
+  c1: string; c2: string; line: string; lw: number;
+  foamR: number; foamA: number; spray: number;
+  chop?: [number, number][]; chopAmp?: number; deep?: number;
+}
+
+/** The horizon — the one place a filled silhouette is still correct: water
+ *  meeting sky. Sum of harmonics warped so crests peak and troughs stay
+ *  broad, foam only on the strongest third of crests. Lab-verbatim. */
+function seaWave(o: WaveOpts): string {
+  const W = 1560, R = Math.random, step = 6, N = Math.round(W / step);
+  const ph = o.harm.map(() => R() * 6.2832);
+  const tot = o.harm.reduce((s, h) => s + h[1], 0);
+  const ns: number[] = [], ys: number[] = [];
+  for (let k = 0; k <= N; k++) {
+    const x = k * step;
+    let s = 0;
+    o.harm.forEach((h, i) => { s += h[1] * Math.sin(6.2832 * h[0] * x / W + ph[i]); });
+    let n = s / tot;
+    n = n >= 0 ? Math.pow(n, 1.42) : -Math.pow(-n, 0.74);
+    ns.push(n);
+    ys.push(+(o.base - n * o.amp).toFixed(1));
+  }
+  let d = "M0 " + ys[0];
+  for (let k = 1; k <= N; k++) d += "L" + (k * step) + " " + ys[k];
+  let foam = "";
+  for (let k = 2; k < N - 1; k++) {
+    if (!(ns[k] > ns[k - 1] && ns[k] >= ns[k + 1] && ns[k] > 0.46)) continue;
+    const x = k * step, y = ys[k], s = Math.min(1, (ns[k] - 0.46) / 0.54);
+    const rx = +(o.foamR * (0.45 + s)).toFixed(1), ry = +(0.9 + s * 1.2).toFixed(1);
+    foam += "<ellipse cx='" + x + "' cy='" + (y + 1).toFixed(1) + "' rx='" + rx + "' ry='" + ry + "' fill='rgba(214,232,255," + (o.foamA * (0.4 + 0.6 * s)).toFixed(2) + ")'/>";
+    if (s > 0.4) foam += "<path d='M" + (x - rx * 0.95).toFixed(1) + " " + (y + 1.6).toFixed(1) + " Q " + x + " " + (y - 2.2 - s * 2.6).toFixed(1) + " " + (x + rx * 0.7).toFixed(1) + " " + (y + 0.4).toFixed(1) + "' fill='none' stroke='rgba(228,241,255," + (o.foamA * 0.85).toFixed(2) + ")' stroke-width='" + (0.65 + s * 0.65).toFixed(1) + "' stroke-linecap='round'/>";
+    const dn = Math.round(s * o.spray);
+    for (let q = 0; q < dn; q++) foam += "<circle cx='" + (x + (R() - 0.5) * rx * 2.6).toFixed(1) + "' cy='" + (y - 1 - R() * (3 + s * 8)).toFixed(1) + "' r='" + (0.5 + R() * 0.7).toFixed(1) + "' fill='rgba(222,238,255," + (0.12 + R() * 0.3).toFixed(2) + ")'/>";
+  }
+  let chop = "";
+  if (o.chop) {
+    const ph2 = o.chop.map(() => R() * 6.2832), t2 = o.chop.reduce((s, h) => s + h[1], 0);
+    let c = "";
+    for (let k = 0; k <= N; k++) {
+      const x = k * step;
+      let s = 0;
+      o.chop.forEach((h, i) => { s += h[1] * Math.sin(6.2832 * h[0] * x / W + ph2[i]); });
+      c += (k ? "L" : "M") + x + " " + (ys[k] - (s / t2) * (o.chopAmp ?? 0) + 1.8).toFixed(1);
+    }
+    chop = "<path d='" + c + "' fill='none' stroke='rgba(168,196,244,.15)' stroke-width='.7'/>";
+  }
+  // The lab supports a deep-tone band that FOLLOWS A WAVE PATH (never the old
+  // rectangle — spec §3 bans that outright). The line config passes no `deep`,
+  // so this stays dormant; it is ported so a future depth band cannot be
+  // "improved" back into a rect.
+  let deepPath = "";
+  if (o.deep && o.base + o.deep < o.h - 6) {
+    const phD = R() * 6.2832;
+    let dp = "";
+    for (let k = 0; k <= N; k++) {
+      const x = k * step;
+      const y = ys[k] * 0.5 + o.base * 0.5 + o.deep + Math.sin(6.2832 * 3 * x / W + phD) * 2.6 + Math.sin(6.2832 * 7 * x / W + phD * 1.9) * 1.3;
+      dp += (k ? "L" : "M") + x + " " + y.toFixed(1);
+    }
+    deepPath = "<path d='" + dp + "L" + W + " " + o.h + "L0 " + o.h + "Z' fill='" + o.c2 + "'/>";
+  }
+  const svg = "<svg xmlns='http://www.w3.org/2000/svg' width='" + W + "' height='" + o.h + "'>" +
+    "<path d='" + d + "L" + W + " " + o.h + "L0 " + o.h + "Z' fill='" + o.c1 + "'/>" + deepPath +
+    "<path d='" + d + "' fill='none' stroke='" + o.line + "' stroke-width='" + o.lw + "' stroke-linejoin='round'/>" + chop + foam + "</svg>";
+  return 'url("data:image/svg+xml,' + encodeURIComponent(svg) + '")';
+}
+
+/**
+ * The heave keyframes — the sea moves UP AND DOWN, not sideways. Generated at
+ * load from a sum of sines, 48 stops, one signal for the vertical and a
+ * DIFFERENT one for the horizontal so the axes are uncorrelated. Durations
+ * 71/59/47/37 are co-prime ON PURPOSE (~42h before the layers' relative phase
+ * repeats) — do not round them to nicer numbers. Lab-verbatim.
+ */
+function injectHeave(): HTMLStyleElement {
+  const cfg = [
+    { name: "heave0", dx: -1560, amp: 5, sc: 0.04, surge: 26, harm: [[1, 1], [2, 0.6], [3, 0.42], [5, 0.28]] as [number, number][] },
+    { name: "heave1", dx: 1560, amp: 8, sc: 0.06, surge: 40, harm: [[1, 1], [2, 0.66], [3, 0.46], [5, 0.3], [7, 0.18]] as [number, number][] },
+    { name: "heave2", dx: -1560, amp: 13, sc: 0.09, surge: 58, harm: [[1, 1], [2, 0.74], [3, 0.52], [4, 0.32], [7, 0.2]] as [number, number][] },
+    { name: "heave3", dx: 1560, amp: 19, sc: 0.13, surge: 80, harm: [[1, 1], [2, 0.82], [3, 0.58], [5, 0.36], [8, 0.22]] as [number, number][] },
+  ];
+  const N = 48;
+  const css = cfg.map((c) => {
+    const ph = c.harm.map(() => Math.random() * 6.2832);
+    const tot = c.harm.reduce((s, h) => s + h[1], 0);
+    let out = "@keyframes " + c.name + "{";
+    for (let k = 0; k <= N; k++) {
+      const t = k / N;
+      let s = 0, g = 0;
+      c.harm.forEach((h, i) => { s += h[1] * Math.sin(6.2832 * h[0] * t + ph[i]); });
+      c.harm.forEach((h, i) => { g += h[1] * Math.sin(6.2832 * (h[0] + 1) * t + ph[i] * 1.7 + 1.1); });
+      const n = s / tot, m = g / tot;
+      out += (t * 100).toFixed(2) + "%{transform:translateY(" + (n * c.amp).toFixed(2) + "px) scaleY(" +
+        (1 + Math.abs(n) * c.sc).toFixed(3) + ");background-position-x:" + (c.dx * t + m * c.surge).toFixed(1) + "px}";
+    }
+    return out + "}";
+  }).join("\n");
+  const el = document.createElement("style");
+  el.id = "st-heave";
+  el.textContent = css;
+  document.head.appendChild(el);
+  return el;
+}
+
+// ---------------------------------------------------------------------------
+// The moon — moon.md, every number scaled by WORLD_SCALE (0.75) because the
+// moonset geometry is measured against the waterline, and our waterline is
+// 174px * 0.75 = 130.5px above the viewport bottom.
+// ---------------------------------------------------------------------------
+
+interface MoonLeg {
+  /** Viewport-coordinate CSS values for the moon element (already scaled). */
+  x: string; y: string;
+  /** The SPEC'S ORIGINAL x, split for the moonbeam: the beam lives inside
+   *  .sky-ocean-world, which is a 1:1 replica of the lab's coordinate space
+   *  (the 0.75 happens in CSS), so the beam uses the UNSCALED numbers. */
+  wPct: number | null; wPx: number;
+  s: number; w: number; d: number; hold: number;
+}
+
+/** moon.md §5, ×0.75: disc 88px, path px offsets scaled, dwells unchanged. */
+const MOON_PATH: MoonLeg[] = [
+  { x: "calc(94% - 88px)", y: "150px",              wPct: 94, wPx: -118, s: 1.00, w: 0,    d: 60000, hold: 64000 },
+  { x: "66%",              y: "calc(100% - 425px)", wPct: 66, wPx: 0,    s: 1.03, w: 0.16, d: 58000, hold: 4000 },
+  { x: "38%",              y: "calc(100% - 299px)", wPct: 38, wPx: 0,    s: 1.07, w: 0.44, d: 56000, hold: 4000 },
+  { x: "63px",             y: "calc(100% - 222px)", wPct: null, wPx: 84, s: 1.10, w: 0.72, d: 50000, hold: 10000 },
+  { x: "14px",             y: "calc(100% - 155px)", wPct: null, wPx: 18, s: 1.14, w: 1.00, d: 34000, hold: 62000 },
+  { x: "20px",             y: "calc(100% - 242px)", wPct: null, wPx: 26, s: 1.10, w: 0.70, d: 40000, hold: 3000 },
+  { x: "44%",              y: "calc(100% - 390px)", wPct: 44, wPx: 0,    s: 1.04, w: 0.28, d: 52000, hold: 3000 },
+];
+const MOON_EASE = "cubic-bezier(.37,.02,.55,1)";
+
+/** moon.md §8 drop-in, glow insets/blurs and the disc ×0.75. The four glow
+ *  layers each run to 0 alpha at 100% with 6–7 stops — that is what keeps the
+ *  halo edgeless; do not "simplify" the gradients. */
+function moonHtml(): string {
+  return `
+  <div class="sky-moon" id="st-moon">
+    <div class="sky-moon-breathe" id="st-moon-inner">
+      <span class="sky-moon-glow" style="inset:-142px;filter:blur(26px);animation:moonHaze 17s ease-in-out infinite;background:radial-gradient(circle, rgba(196,214,255,.085) 0%, rgba(195,213,255,.055) 20%, rgba(193,211,253,.032) 37%, rgba(191,209,251,.016) 54%, rgba(189,207,250,.006) 72%, rgba(189,207,250,.001) 87%, rgba(189,207,250,0) 100%)"></span>
+      <span class="sky-moon-glow" style="inset:-72px;filter:blur(17px);background:radial-gradient(circle, rgba(224,237,255,.14) 0%, rgba(218,232,255,.098) 22%, rgba(211,227,254,.062) 40%, rgba(205,222,252,.032) 57%, rgba(201,219,251,.012) 74%, rgba(201,219,251,.003) 88%, rgba(201,219,251,0) 100%)"></span>
+      <span class="sky-moon-glow" style="inset:-30px;filter:blur(10px);background:radial-gradient(circle, rgba(247,251,255,.26) 0%, rgba(240,247,255,.19) 24%, rgba(230,241,255,.115) 43%, rgba(222,235,255,.055) 61%, rgba(216,231,255,.019) 79%, rgba(216,231,255,0) 100%)"></span>
+      <span class="sky-moon-glow" style="inset:-8px;filter:blur(5px);background:radial-gradient(circle, rgba(252,253,255,.40) 0%, rgba(246,250,255,.30) 46%, rgba(238,246,255,.14) 74%, rgba(232,242,255,0) 100%)"></span>
+      <span class="sky-moon-disc"></span>
+      <span class="sky-moon-wash">
+        <i style="left:2%;top:6%;width:52%;height:56%;border-radius:58% 42% 48% 52%;background:#b5aa96"></i>
+        <i style="left:42%;top:14%;width:44%;height:40%;border-radius:46% 54% 52% 48%;background:#b9af9b"></i>
+      </span>
+      <span class="sky-moon-maria">
+        <i style="left:4%;top:21%;width:27%;height:41%;border-radius:62% 38% 44% 56%;background:#b1a68f"></i>
+        <i style="left:19%;top:10%;width:27%;height:25%;border-radius:54% 46% 51% 49%;background:#aca18e"></i>
+        <i style="left:35%;top:19%;width:15%;height:13%;border-radius:48% 52% 46% 54%;background:#b6ab97"></i>
+        <i style="left:45%;top:21%;width:19%;height:20%;border-radius:51% 49% 44% 56%;background:#b0a591"></i>
+        <i style="left:54%;top:33%;width:22%;height:23%;border-radius:44% 56% 57% 43%;background:#ada291"></i>
+        <i style="left:73%;top:29%;width:10%;height:11%;border-radius:50%;background:#b7ac98"></i>
+        <i style="left:23%;top:51%;width:15%;height:13%;border-radius:53% 47% 49% 51%;background:#b9af96"></i>
+        <i style="left:62%;top:52%;width:12%;height:15%;border-radius:47% 53% 52% 48%;background:#bcb29b"></i>
+        <i style="left:12%;top:44%;width:9%;height:8%;border-radius:50%;background:#bdb39d"></i>
+      </span>
+    </div>
+  </div>`;
+}
+
+/** Apply one wander leg to the moon and its water reflection. First paint
+ *  passes instant=true so nothing animates into place. */
+function applyMoonLeg(leg: number, instant: boolean): void {
+  const p = MOON_PATH[leg];
+  const moon = document.getElementById("st-moon");
+  const beam = document.getElementById("st-moonbeam");
+  if (!moon || !beam) return;
+
+  moon.style.transition = instant ? "none"
+    : `left ${p.d}ms ${MOON_EASE}, top ${p.d}ms ${MOON_EASE}, transform ${p.d}ms ease-in-out, filter ${p.d}ms linear`;
+  moon.style.left = p.x;
+  moon.style.top = p.y;
+  moon.style.transform = `scale(${p.s})`;
+  // Warmth: atmospheric reddening near the horizon, on the whole group so the
+  // halo warms with the disc (moon.md §5).
+  moon.style.filter = `sepia(${(p.w * 0.4).toFixed(2)}) saturate(${(1 + p.w * 0.5).toFixed(2)}) brightness(${(1 - p.w * 0.05).toFixed(2)})`;
+
+  beam.style.transition = instant ? "none"
+    : `left ${p.d}ms ${MOON_EASE}, opacity ${p.d}ms linear, filter ${p.d}ms linear`;
+  beam.style.left = p.wPct !== null
+    ? `calc(${p.wPct}% + ${p.wPx - 16}px)`
+    : `${p.wPx - 16}px`;
+  beam.style.filter = `blur(7px) sepia(${(p.w * 0.4).toFixed(2)}) saturate(${(1 + p.w * 0.6).toFixed(2)})`;
+  // Beam opacity depends on BOTH the leg's warmth and moonPow, and moves on
+  // its own 13s clock — so applyPow writes the opacity transition last and
+  // the leg's left/filter transitions are restored right after it.
+  applyPow();
+  beam.style.transition = instant ? "none"
+    : `left ${p.d}ms ${MOON_EASE}, opacity 13s linear, filter ${p.d}ms linear`;
+}
+
+function moonNext(): void {
+  if (busy()) {
+    // Nobody is watching — hold this leg and look again soon rather than
+    // flying the moon around an invisible window.
+    _moonT = window.setTimeout(moonNext, 5000);
+    return;
+  }
+  _moonLeg = (_moonLeg + 1) % MOON_PATH.length;
+  const p = MOON_PATH[_moonLeg];
+  applyMoonLeg(_moonLeg, false);
+  _moonT = window.setTimeout(moonNext, p.d + p.hold);
+}
+
+/**
+ * Moonlight vs storm (night-scene §1): a cycle independent of position,
+ * weighted to the extremes — 36% cloud wins, 36% the moon blazes through,
+ * 28% ordinary night. Everything it drives transitions over 13s LINEAR so it
+ * reads as weather moving, not a switch.
+ */
+function schedulePow(): void {
+  _powT = window.setTimeout(schedulePow, 13000 + Math.random() * 17000);
+  if (busy()) return;
+  const r = Math.random();
+  _pow = r < 0.36 ? 0.05 + Math.random() * 0.15
+       : r < 0.72 ? 0.84 + Math.random() * 0.16
+       :            0.34 + Math.random() * 0.3;
+  applyPow();
+}
+
+function applyPow(): void {
+  const inner = document.getElementById("st-moon-inner");
+  const clouds = document.getElementById("st-clouds");
+  const beam = document.getElementById("st-moonbeam");
+  const pw = _pow;
+  if (inner) {
+    inner.style.transition = "filter 13s linear";
+    // Brightness on the GROUP, not the disc: the glow layers brighten with
+    // it, so the halo blazes rather than the disc just going white.
+    inner.style.filter = `brightness(${(1 + pw * 0.66).toFixed(3)}) contrast(${(1 + pw * 0.08).toFixed(3)}) saturate(${(1 - pw * 0.07).toFixed(3)})`;
+  }
+  if (clouds) {
+    clouds.style.transition = "opacity 13s linear";
+    clouds.style.opacity = (1 - pw * 0.64).toFixed(3);
+  }
+  if (beam) {
+    const w = MOON_PATH[_moonLeg].w;
+    // 13s linear like the other two — a pow change must not ride the current
+    // wander leg's 34-60s opacity transition (or snap instantly during the
+    // 64s home dwell, when no leg transition is set at all). applyMoonLeg
+    // re-arms the leg transition immediately after calling this.
+    beam.style.transition = "opacity 13s linear";
+    beam.style.opacity = Math.min(1, (0.45 + 0.55 * w) * (0.72 + 0.62 * pw)).toFixed(3);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Build / teardown
+// ---------------------------------------------------------------------------
 
 /** Build the whole scene. Idempotent: a second call while built is a no-op. */
 export function buildStarrySky(): void {
@@ -220,38 +598,80 @@ export function buildStarrySky(): void {
   root.id = "st-sky";
   root.setAttribute("aria-hidden", "true");
 
-  // Constellation layer: THREE side-by-side copies of the 1400px cell, each on
-  // its own conDrift keyframe, so every figure sails across with the star tile
-  // and comes around again seamlessly (spec: identical 180s period).
-  for (let copy = 0; copy < 3; copy++) {
+  // The moon FIRST, so everything else paints over it — that, plus the ocean
+  // band's higher z-index, is the whole occlusion model: when the moon sets
+  // it simply travels behind the water and the galleon, no masking anywhere.
+  root.insertAdjacentHTML("beforeend", moonHtml());
+
+  // Constellations: three 1400px drift bands, each owning its EXCLUSIVE
+  // subset of the 20 figures (partitionBands), sailing with the star tile.
+  const bands = partitionBands();
+  bands.forEach((band, copy) => {
     const layer = document.createElement("div");
     layer.className = "sky-con-layer";
     layer.style.animationName = `sky-conDrift${copy}`;
-    CONS.forEach((c, i) => {
+    band.forEach(({ ci, x, y }) => {
       const wrap = document.createElement("div");
       wrap.className = "sky-con-wrap";
-      wrap.style.left = `${c.pos[0]}px`;
-      wrap.style.top = `${c.pos[1]}%`;
-      wrap.appendChild(buildCon(c, i));
+      wrap.dataset.wrap = String(ci);
+      wrap.style.left = `${x}px`;
+      wrap.style.top = `${y}%`;
+      wrap.appendChild(buildCon(CONSTELLATIONS[ci], ci));
       layer.appendChild(wrap);
     });
     root.appendChild(layer);
-  }
+  });
 
-  // The ocean: water, horizon glow, three parallax wave strips, star
-  // reflections, the black galleon with her nine crew, and two gulls.
-  // Transcribed verbatim from the lab; OCEAN_HTML is injected at build time
-  // from the extracted file so it can never drift from the design by retyping.
+  // The ocean: the lab's 200px world, verbatim (night-markup.ts), scaled 0.75
+  // by .sky-ocean-world. The four wave layers get their generated tiles here;
+  // the heave keyframes must exist BEFORE the markup lands or the first
+  // frame plays the animations' absence.
+  if (!reduced()) _heaveStyle = injectHeave();
   const ocean = document.createElement("div");
   ocean.className = "sky-ocean";
-  ocean.innerHTML = OCEAN_HTML;
+  const world = document.createElement("div");
+  world.className = "sky-ocean-world";
+  world.innerHTML = OCEAN_WORLD_HTML;
+  ocean.appendChild(world);
   root.appendChild(ocean);
+
+  // night-scene §3 — the three fields and the horizon line, exact values.
+  const sea = {
+    line: seaWave({ h: 46, base: 30, amp: 6.5, harm: [[6, 1], [9, 0.72], [13, 0.5], [19, 0.3], [27, 0.18], [37, 0.11]], c1: "#0d1830", c2: "#0a1226", line: "rgba(158,188,244,.3)", lw: 0.8, foamR: 4, foamA: 0.22, spray: 2, chop: [[15, 1], [24, 0.6], [38, 0.32]], chopAmp: 1.4 }),
+    far: seaField({ h: 34, n: 150, bias: 1.5, minW: 16, maxW: 44, maxH: 3, aTop: 0.1, aBot: 0.26, col: "172,198,244", foam: 0.22 }),
+    mid: seaField({ h: 58, n: 120, bias: 1.2, minW: 28, maxW: 82, maxH: 5.4, aTop: 0.12, aBot: 0.34, col: "178,204,248", foam: 0.4 }),
+    near: seaField({ h: 104, n: 92, bias: 1, minW: 44, maxW: 148, maxH: 9.5, aTop: 0.14, aBot: 0.44, col: "186,210,250", foam: 0.58 }),
+  };
+  const bg = (id: string, url: string) => {
+    const el = world.querySelector<HTMLElement>(`#${id}`);
+    if (el) el.style.background = `${url} repeat-x`;
+  };
+  bg("st-wave-line", sea.line);
+  bg("st-wave-far", sea.far);
+  bg("st-wave-mid", sea.mid);
+  bg("st-wave-near", sea.near);
 
   document.body.appendChild(root);
   _root = root;
 
-  _litTimer = window.setInterval(tickLighting, LIGHT_EVERY_MS);
-  tickLighting();
+  // Start hidden: ~45% of figures, shuffled (spec §2) — the sky never opens
+  // with all 20 on screen.
+  _hidden.clear();
+  const startHidden = CONSTELLATIONS.map((_, i) => i)
+    .sort(() => Math.random() - 0.5)
+    .slice(0, Math.round(CONSTELLATIONS.length * 0.45));
+  startHidden.forEach((i) => setHidden(i, true));
+
+  // Schedulers. Reduced motion keeps the moon home, the clouds at an ordinary
+  // night and the sky static — final states, no motion (CLAUDE.md rule).
+  applyMoonLeg(0, true);
+  applyPow();
+  if (!reduced()) {
+    _litT = window.setTimeout(scheduleRelight, 2600 + Math.random() * 3400);
+    _fadeT = window.setTimeout(scheduleFade, 4000 + Math.random() * 4000);
+    _powT = window.setTimeout(schedulePow, 5500);
+    _moonT = window.setTimeout(moonNext, MOON_PATH[0].hold);
+  }
 
   // Press anywhere OUTSIDE the card (panels, sky, another figure handles its
   // own toggle) closes it. Capture phase, so panels cannot swallow it first.
@@ -267,9 +687,13 @@ export function buildStarrySky(): void {
 export function destroyStarrySky(): void {
   closeCard(true);   // silent: the theme/fun switch that tore the sky down
                      // has already made its own sound
-
-  window.clearInterval(_litTimer);
-  _litTimer = undefined;
+  window.clearTimeout(_litT);
+  window.clearTimeout(_fadeT);
+  window.clearTimeout(_powT);
+  window.clearTimeout(_moonT);
+  _litT = _fadeT = _powT = _moonT = undefined;
+  _heaveStyle?.remove();
+  _heaveStyle = null;
   if (_outsideClose) {
     document.removeEventListener("pointerdown", _outsideClose, true);
     _outsideClose = null;
@@ -277,6 +701,8 @@ export function destroyStarrySky(): void {
   _root?.remove();
   _root = null;
   _litIdx = -1;
+  _moonLeg = 0;
+  _hidden.clear();
 }
 
 /** Called from applyLook(): the scene exists exactly when Starry night AND
@@ -286,82 +712,3 @@ export function syncStarrySky(theme: string, fun: boolean): void {
   if (theme === "starry" && fun) buildStarrySky();
   else destroyStarrySky();
 }
-
-// Verbatim lab markup (design system overhaul-v3.dc.html), band root only
-// re-anchored from fixed to absolute inside .sky-ocean.
-const OCEAN_HTML = `<div style="position:absolute;inset:0;pointer-events:none">
-      <div style="position:absolute;left:0;right:0;top:26px;bottom:0;background:linear-gradient(180deg,#0b1226 0%,#070d1d 55%,#04070f 100%)"></div>
-      <div style="position:absolute;left:0;right:0;top:0;height:27px;background:radial-gradient(340px 34px at 50% 100%,rgba(190,210,255,.16),transparent 70%),linear-gradient(180deg,rgba(140,165,220,0),rgba(140,165,220,.12))"></div>
-      <span style="position:absolute;left:22%;top:70px;width:2px;height:13px;background:linear-gradient(180deg,rgba(214,226,255,.55),transparent);animation:twinkle 2.3s ease-in-out infinite alternate"></span>
-      <span style="position:absolute;left:57%;top:96px;width:2px;height:9px;background:linear-gradient(180deg,rgba(214,226,255,.4),transparent);animation:twinkle 1.7s ease-in-out .5s infinite alternate"></span>
-      <span style="position:absolute;left:81%;top:64px;width:2px;height:15px;background:linear-gradient(180deg,rgba(214,226,255,.5),transparent);animation:twinkle 2.8s ease-in-out .9s infinite alternate"></span>
-      <div style="position:absolute;left:0;right:0;top:14px;height:46px;background:url(data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20width%3D%27520%27%20height%3D%2746%27%3E%3Cdefs%3E%3ClinearGradient%20id%3D%27a%27%20x1%3D%270%27%20y1%3D%270%27%20x2%3D%270%27%20y2%3D%271%27%3E%3Cstop%20offset%3D%270%27%20stop-color%3D%27%23101c3a%27%2F%3E%3Cstop%20offset%3D%271%27%20stop-color%3D%27%230a1226%27%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Cpath%20d%3D%27M0%2030%20C%2010.8%2028.5%2021.1%2021.8%2027.1%2021.8%20C%2039.4%2022.2%2054.2%2031.4%2068.1%2031.4%20C%2084.8%2029.1%20100.6%2025.2%20109.8%2025.2%20C%20120.8%2025.4%20134.1%2031.4%20146.6%2031.4%20C%20158.5%2029.2%20169.8%2025.4%20176.3%2025.4%20C%20192.9%2025.7%20212.8%2030.2%20231.5%2030.2%20C%20244.9%2028.9%20257.6%2023.7%20265.0%2023.7%20C%20275.0%2024.0%20287.1%2030.9%20298.5%2030.9%20C%20309.1%2029.2%20319.2%2025.6%20325.1%2025.6%20C%20339.1%2025.9%20355.9%2030.6%20371.7%2030.6%20C%20390.8%2028.6%20408.9%2022.3%20419.4%2022.3%20C%20431.6%2022.7%20446.4%2031.8%20460.3%2031.8%20C%20473.8%2028.6%20486.7%2022.4%20494.2%2022.4%20C%20501.9%2022.7%20511.2%2032.2%20520.0%2030.0%20L520%2046%20L0%2046%20Z%27%20fill%3D%27url%28%2523a%29%27%2F%3E%3Cpath%20d%3D%27M0%2030%20C%2010.8%2028.5%2021.1%2021.8%2027.1%2021.8%20C%2039.4%2022.2%2054.2%2031.4%2068.1%2031.4%20C%2084.8%2029.1%20100.6%2025.2%20109.8%2025.2%20C%20120.8%2025.4%20134.1%2031.4%20146.6%2031.4%20C%20158.5%2029.2%20169.8%2025.4%20176.3%2025.4%20C%20192.9%2025.7%20212.8%2030.2%20231.5%2030.2%20C%20244.9%2028.9%20257.6%2023.7%20265.0%2023.7%20C%20275.0%2024.0%20287.1%2030.9%20298.5%2030.9%20C%20309.1%2029.2%20319.2%2025.6%20325.1%2025.6%20C%20339.1%2025.9%20355.9%2030.6%20371.7%2030.6%20C%20390.8%2028.6%20408.9%2022.3%20419.4%2022.3%20C%20431.6%2022.7%20446.4%2031.8%20460.3%2031.8%20C%20473.8%2028.6%20486.7%2022.4%20494.2%2022.4%20C%20501.9%2022.7%20511.2%2032.2%20520.0%2030.0%27%20fill%3D%27none%27%20stroke%3D%27rgba%28150%2C180%2C235%2C.16%29%27%20stroke-width%3D%270.7%27%20stroke-linecap%3D%27round%27%2F%3E%3C%2Fsvg%3E) repeat-x;background-size:520px 46px;animation:waveA 11s linear infinite,waveBob 4.6s ease-in-out infinite alternate"></div>
-      <div style="position:absolute;left:0;right:0;top:30px;height:60px;background:url(data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20width%3D%27520%27%20height%3D%2760%27%3E%3Cdefs%3E%3ClinearGradient%20id%3D%27b%27%20x1%3D%270%27%20y1%3D%270%27%20x2%3D%270%27%20y2%3D%271%27%3E%3Cstop%20offset%3D%270%27%20stop-color%3D%27%23132244%27%2F%3E%3Cstop%20offset%3D%271%27%20stop-color%3D%27%230a1226%27%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Cpath%20d%3D%27M0%2034%20C%2018.2%2031.3%2035.6%2019.3%2045.6%2019.3%20C%2055.0%2020.0%2066.2%2034.3%2076.8%2034.3%20C%2098.1%2032.6%20118.3%2026.1%20130.0%2026.1%20C%20152.3%2026.5%20179.0%2034.1%20204.2%2034.1%20C%20222.9%2031.2%20240.7%2018.2%20251.0%2018.2%20C%20261.0%2019.0%20273.1%2035.7%20284.4%2035.7%20C%20308.1%2032.4%20330.5%2025.1%20343.5%2025.1%20C%20354.9%2025.5%20368.6%2035.6%20381.5%2035.6%20C%20400.1%2031.8%20417.9%2022.0%20428.1%2022.0%20C%20436.0%2022.6%20445.5%2037.3%20454.4%2037.3%20C%20470.1%2031.8%20485.0%2021.9%20493.7%2021.9%20C%20501.6%2022.5%20511.0%2035.0%20520.0%2034.0%20L520%2060%20L0%2060%20Z%27%20fill%3D%27url%28%2523b%29%27%2F%3E%3Cpath%20d%3D%27M0%2034%20C%2018.2%2031.3%2035.6%2019.3%2045.6%2019.3%20C%2055.0%2020.0%2066.2%2034.3%2076.8%2034.3%20C%2098.1%2032.6%20118.3%2026.1%20130.0%2026.1%20C%20152.3%2026.5%20179.0%2034.1%20204.2%2034.1%20C%20222.9%2031.2%20240.7%2018.2%20251.0%2018.2%20C%20261.0%2019.0%20273.1%2035.7%20284.4%2035.7%20C%20308.1%2032.4%20330.5%2025.1%20343.5%2025.1%20C%20354.9%2025.5%20368.6%2035.6%20381.5%2035.6%20C%20400.1%2031.8%20417.9%2022.0%20428.1%2022.0%20C%20436.0%2022.6%20445.5%2037.3%20454.4%2037.3%20C%20470.1%2031.8%20485.0%2021.9%20493.7%2021.9%20C%20501.6%2022.5%20511.0%2035.0%20520.0%2034.0%27%20fill%3D%27none%27%20stroke%3D%27rgba%28160%2C190%2C240%2C.22%29%27%20stroke-width%3D%270.9%27%20stroke-linecap%3D%27round%27%2F%3E%3Cellipse%20cx%3D%2745.6%27%20cy%3D%2720.5%27%20rx%3D%277.4%27%20ry%3D%271.1%27%20fill%3D%27rgba%28205%2C225%2C255%2C0.19%29%27%2F%3E%3Ccircle%20cx%3D%2754.3%27%20cy%3D%2714.6%27%20r%3D%270.6%27%20fill%3D%27rgba%28215%2C232%2C255%2C0.23%29%27%2F%3E%3Ccircle%20cx%3D%2740.5%27%20cy%3D%2717.5%27%20r%3D%270.6%27%20fill%3D%27rgba%28215%2C232%2C255%2C0.54%29%27%2F%3E%3Ccircle%20cx%3D%2740.5%27%20cy%3D%2715.6%27%20r%3D%270.8%27%20fill%3D%27rgba%28215%2C232%2C255%2C0.23%29%27%2F%3E%3Cpath%20d%3D%27M35.3%2022.7%20q%2010.3%201.6%2020.6%200%27%20fill%3D%27none%27%20stroke%3D%27rgba%28190%2C214%2C255%2C.13%29%27%20stroke-width%3D%27.7%27%2F%3E%3Cellipse%20cx%3D%27251.0%27%20cy%3D%2719.4%27%20rx%3D%277.9%27%20ry%3D%271.1%27%20fill%3D%27rgba%28205%2C225%2C255%2C0.27%29%27%2F%3E%3Ccircle%20cx%3D%27251.4%27%20cy%3D%2714.9%27%20r%3D%270.6%27%20fill%3D%27rgba%28215%2C232%2C255%2C0.40%29%27%2F%3E%3Ccircle%20cx%3D%27244.0%27%20cy%3D%2716.9%27%20r%3D%270.8%27%20fill%3D%27rgba%28215%2C232%2C255%2C0.35%29%27%2F%3E%3Ccircle%20cx%3D%27260.8%27%20cy%3D%2712.8%27%20r%3D%270.8%27%20fill%3D%27rgba%28215%2C232%2C255%2C0.40%29%27%2F%3E%3Cpath%20d%3D%27M240.0%2021.6%20q%2011.0%201.6%2022.1%200%27%20fill%3D%27none%27%20stroke%3D%27rgba%28190%2C214%2C255%2C.13%29%27%20stroke-width%3D%27.7%27%2F%3E%3Cellipse%20cx%3D%27428.1%27%20cy%3D%2723.2%27%20rx%3D%276.0%27%20ry%3D%271.1%27%20fill%3D%27rgba%28205%2C225%2C255%2C0.24%29%27%2F%3E%3Ccircle%20cx%3D%27436.9%27%20cy%3D%2721.5%27%20r%3D%270.8%27%20fill%3D%27rgba%28215%2C232%2C255%2C0.44%29%27%2F%3E%3Ccircle%20cx%3D%27422.5%27%20cy%3D%2720.6%27%20r%3D%270.9%27%20fill%3D%27rgba%28215%2C232%2C255%2C0.44%29%27%2F%3E%3Ccircle%20cx%3D%27430.9%27%20cy%3D%2721.8%27%20r%3D%270.8%27%20fill%3D%27rgba%28215%2C232%2C255%2C0.31%29%27%2F%3E%3Cpath%20d%3D%27M419.7%2025.4%20q%208.4%201.6%2016.8%200%27%20fill%3D%27none%27%20stroke%3D%27rgba%28190%2C214%2C255%2C.13%29%27%20stroke-width%3D%27.7%27%2F%3E%3Cellipse%20cx%3D%27493.7%27%20cy%3D%2723.1%27%20rx%3D%276.1%27%20ry%3D%271.1%27%20fill%3D%27rgba%28205%2C225%2C255%2C0.34%29%27%2F%3E%3Ccircle%20cx%3D%27488.1%27%20cy%3D%2719.5%27%20r%3D%270.7%27%20fill%3D%27rgba%28215%2C232%2C255%2C0.44%29%27%2F%3E%3Ccircle%20cx%3D%27498.0%27%20cy%3D%2720.2%27%20r%3D%270.5%27%20fill%3D%27rgba%28215%2C232%2C255%2C0.35%29%27%2F%3E%3Ccircle%20cx%3D%27491.7%27%20cy%3D%2720.9%27%20r%3D%270.7%27%20fill%3D%27rgba%28215%2C232%2C255%2C0.37%29%27%2F%3E%3Cpath%20d%3D%27M485.2%2025.3%20q%208.5%201.6%2017.0%200%27%20fill%3D%27none%27%20stroke%3D%27rgba%28190%2C214%2C255%2C.13%29%27%20stroke-width%3D%27.7%27%2F%3E%3C%2Fsvg%3E) repeat-x;background-size:520px 60px;animation:waveB 8s linear infinite,waveBob 3.8s ease-in-out .6s infinite alternate"></div>
-      <div style="position:absolute;left:-24px;bottom:40px;animation:shipBob 3.8s ease-in-out infinite alternate">
-        <svg width="272" height="196" viewBox="0 0 250 180" style="transform:perspective(650px) rotateY(13deg) rotate(-15deg);transform-origin:40% 78%">
-          <path d="M16 96 L18 74 L46 70 L48 100 Z" fill="#04060f" stroke="rgba(155,180,232,.26)" stroke-width=".8"></path>
-          <path d="M14 120 C 16 146 46 156 110 156 C 170 156 210 145 226 114 L 244 100 L 208 118 C 186 136 68 140 36 124 Z" fill="#04060f" stroke="rgba(155,180,232,.26)" stroke-width="1"></path>
-          <path d="M34 122 C 70 134 182 130 206 116" fill="none" stroke="rgba(155,180,232,.14)" stroke-width=".7"></path>
-          <path d="M52 124 L 82 48 M100 130 L 124 24 M144 128 L 166 52 M82 48 L 20 92 M166 52 L 238 100 M124 24 L 84 46 M124 24 L 164 50" stroke="rgba(150,175,225,.13)" stroke-width=".6" fill="none"></path>
-          <path d="M80 136 L 83 44" stroke="#04060f" stroke-width="2.4"></path>
-          <path d="M122 140 L 126 22" stroke="#04060f" stroke-width="2.6"></path>
-          <path d="M164 134 L 167 50" stroke="#04060f" stroke-width="2.2"></path>
-          <path d="M64 56 Q 83 66 102 54 L 100 84 L 94 78 L 88 87 L 81 80 L 74 89 L 67 82 Z" fill="#05070f" stroke="rgba(155,180,232,.26)" stroke-width=".8"></path>
-          <path d="M62 94 Q 83 105 104 92 L 102 124 L 95 117 L 88 126 L 81 118 L 74 127 L 66 119 Z" fill="#05070f" stroke="rgba(155,180,232,.26)" stroke-width=".8"></path>
-          <path d="M106 32 Q 126 45 146 30 L 144 64 L 137 57 L 130 66 L 123 58 L 116 67 L 108 59 Z" fill="#05070f" stroke="rgba(155,180,232,.26)" stroke-width=".8"></path>
-          <path d="M104 72 Q 126 85 148 70 L 146 106 L 139 98 L 132 107 L 125 99 L 118 108 L 110 100 Z" fill="#05070f" stroke="rgba(155,180,232,.26)" stroke-width=".8"></path>
-          <path d="M150 56 Q 166 67 182 54 L 180 88 L 173 81 L 166 90 L 159 82 Z" fill="#05070f" stroke="rgba(155,180,232,.26)" stroke-width=".8"></path>
-          <path d="M226 114 L 248 94" stroke="#04060f" stroke-width="2.6"></path>
-          <path d="M224 108 L 244 96 L 228 116 Z" fill="#05070f"></path>
-          <path d="M126 10 L 166 17 L 159 24 L 166 31 L 126 38 Z" fill="#030510" stroke="rgba(175,200,248,.3)" stroke-width=".7"></path>
-          <circle cx="141" cy="22" r="3.6" fill="#e8ecf7"></circle>
-          <circle cx="139.5" cy="21.1" r="1" fill="#030510"></circle>
-          <circle cx="142.5" cy="21.1" r="1" fill="#030510"></circle>
-          <path d="M137.6 25.4 L 144.4 26.6 M137.6 26.6 L 144.4 25.4" stroke="#030510" stroke-width=".8"></path>
-          <path d="M134 30.5 L 148 33 M148 30.5 L 134 33" stroke="#e8ecf7" stroke-width="1.3"></path>
-          <rect x="70" y="127" width="7" height="5" fill="#0b1226" stroke="rgba(155,180,232,.26)" stroke-width=".5"></rect>
-          <path d="M64 131 L 76 130 M96 135 L 108 134 M126 137 L 138 136 M152 133 L 164 132" stroke="#1a2138" stroke-width="3.2" stroke-linecap="round"></path>
-          <circle cx="64" cy="131" r="3.4" fill="rgba(255,120,55,.22)"></circle>
-          <circle cx="64" cy="131" r="1.2" fill="#ff7a3c" opacity=".9"></circle>
-          <circle cx="58" cy="129" r="5.6" fill="rgba(200,210,230,.07)"></circle>
-          <circle cx="50" cy="126" r="4.2" fill="rgba(200,210,230,.05)"></circle>
-          <circle cx="28" cy="110" r="4.6" fill="rgba(255,130,60,.2)"></circle>
-          <circle cx="28" cy="110" r="1.7" fill="#ffab6a" opacity=".9"></circle>
-          <circle cx='30' cy='82' r='2.415' fill='#04060f'/><path d='M25.17 80.005 Q 30 75.49 34.83 80.005 L 33.57 78.955 Q 30 77.17 26.43 78.955 Z' fill='#04060f'/><path d='M28.005 84.52 q 1.9949999999999999 -1.05 3.9899999999999998 0 L 34.620000000000005 91.03 q -4.620000000000001 1.5750000000000002 -9.240000000000002 0 Z' fill='#04060f'/><path d='M28.53 91.03 L 27.06 97.96 M31.47 91.03 L 32.94 97.96' stroke='#04060f' stroke-width='1.9949999999999999' fill='none'/>
-          <path d="M31 85 L 45 76" stroke="#04060f" stroke-width="1.9"></path>
-          <path d="M45 76 L 58 68" stroke="#101c3a" stroke-width="3.3"></path>
-          <circle cx="59" cy="67.4" r="1.2" fill="#d6e2ff" opacity=".9"></circle>
-          <circle cx="72" cy="118" r="5" fill="none" stroke="#04060f" stroke-width="1.7"></circle>
-          <path d="M72 113 L 72 123 M67 118 L 77 118 M68.5 114.5 L 75.5 121.5 M75.5 114.5 L 68.5 121.5" stroke="#04060f" stroke-width=".9"></path>
-          <circle cx='62' cy='106' r='2.1849999999999996' fill='#04060f'/><path d='M59.53 104.67 q 2.4699999999999998 -1.52 4.9399999999999995 0 l 1.805 1.045 l -2.09 0.38 Z' fill='#04060f'/><path d='M60.195 108.28 q 1.805 -0.95 3.61 0 L 66.18 114.17 q -4.18 1.4249999999999998 -8.36 0 Z' fill='#04060f'/><path d='M60.67 114.17 L 59.34 120.44 M63.33 114.17 L 64.66 120.44' stroke='#04060f' stroke-width='1.805' fill='none'/>
-          <path d="M63.5 110 L 70 115" stroke="#04060f" stroke-width="1.7"></path>
-          <circle cx='98' cy='118' r='2.1849999999999996' fill='#04060f'/><path d='M95.53 116.67 q 2.4699999999999998 -1.52 4.9399999999999995 0 l 1.805 1.045 l -2.09 0.38 Z' fill='#04060f'/><path d='M96.195 120.28 q 1.805 -0.95 3.61 0 L 102.18 126.17 q -4.18 1.4249999999999998 -8.36 0 Z' fill='#04060f'/><path d='M96.67 126.17 L 95.34 132.44 M99.33 126.17 L 100.66 132.44' stroke='#04060f' stroke-width='1.805' fill='none'/>
-          <path d="M99 121 L 108 112" stroke="#04060f" stroke-width="1.7"></path>
-          <path d="M108 112 L 116 100" stroke="#101c3a" stroke-width="1.9"></path>
-          <circle cx="116.4" cy="99.6" r="1" fill="#d6e2ff" opacity=".85"></circle>
-          <circle cx='130' cy='124' r='2.07' fill='#04060f'/><path d='M127.66 122.74 q 2.3400000000000003 -1.4400000000000002 4.680000000000001 0 l 1.71 0.9900000000000001 l -1.9800000000000002 0.36000000000000004 Z' fill='#04060f'/><path d='M128.29 126.16 q 1.71 -0.9 3.42 0 L 133.96 131.74 q -3.9600000000000004 1.35 -7.920000000000001 0 Z' fill='#04060f'/><path d='M128.74 131.74 L 127.48 137.68 M131.26 131.74 L 132.52 137.68' stroke='#04060f' stroke-width='1.71' fill='none'/>
-          <path d="M131 127 L 141 130" stroke="#04060f" stroke-width="1.6"></path>
-          <path d="M141 130 L 152 133" stroke="#1c2438" stroke-width="1.4"></path>
-          <circle cx='158' cy='120' r='2.07' fill='#04060f'/><path d='M153.86 118.29 Q 158 114.42 162.14 118.29 L 161.06 117.39 Q 158 115.86 154.94 117.39 Z' fill='#04060f'/><path d='M156.29 122.16 q 1.71 -0.9 3.42 0 L 161.96 127.74 q -3.9600000000000004 1.35 -7.920000000000001 0 Z' fill='#04060f'/><path d='M156.74 127.74 L 155.48 133.68 M159.26 127.74 L 160.52 133.68' stroke='#04060f' stroke-width='1.71' fill='none'/>
-          <path d="M159 123 L 168 116 L 172 104" stroke="#04060f" stroke-width="1.5" fill="none"></path>
-          <circle cx='190' cy='112' r='2.07' fill='#04060f'/><path d='M185.86 110.29 Q 190 106.42 194.14 110.29 L 193.06 109.39 Q 190 107.86 186.94 109.39 Z' fill='#04060f'/><path d='M188.29 114.16 q 1.71 -0.9 3.42 0 L 193.96 119.74 q -3.9600000000000004 1.35 -7.920000000000001 0 Z' fill='#04060f'/><path d='M188.74 119.74 L 187.66 125.5' stroke='#04060f' stroke-width='1.71' fill='none'/><path d='M191.26 119.74 L 192.16 124.6 l -0.18000000000000002 0.9' stroke='#04060f' stroke-width='1.08' fill='none'/>
-          <path d="M191 115 L 200 106" stroke="#04060f" stroke-width="1.6"></path>
-          <circle cx="201" cy="105" r="1" fill="#d6e2ff" opacity=".7"></circle>
-          <path d="M75 46 L 91 46" stroke="#04060f" stroke-width="2.6"></path>
-          <circle cx='83' cy='38' r='1.8399999999999999' fill='#04060f'/><path d='M80.92 36.88 q 2.08 -1.2800000000000002 4.16 0 l 1.52 0.8800000000000001 l -1.7600000000000002 0.32000000000000006 Z' fill='#04060f'/><path d='M81.48 39.92 q 1.52 -0.8 3.04 0 L 86.52 44.88 q -3.5200000000000005 1.2000000000000002 -7.040000000000001 0 Z' fill='#04060f'/><path d='M81.88 44.88 L 80.76 50.16 M84.12 44.88 L 85.24 50.16' stroke='#04060f' stroke-width='1.52' fill='none'/>
-          <path d="M84 41 L 91 36" stroke="#101c3a" stroke-width="2.1"></path>
-          <circle cx="91.8" cy="35.6" r=".9" fill="#d6e2ff" opacity=".85"></circle>
-          <circle cx="226" cy="96" r="2.2" fill="#04060f"></circle>
-          <path d="M226 98 L 225 105 M225 105 L 221 111 M225 105 L 228 112" stroke="#04060f" stroke-width="1.7" fill="none"></path>
-          <g style="animation:birdFly 5.5s ease-in-out infinite alternate">
-            <path d="M200 44 q 7 -6 13 -1 q 6 -5 13 1" fill="none" stroke="#04060f" stroke-width="1.7" stroke-linecap="round"></path>
-            <path d="M209 48 q 4 -3 8 -1" fill="none" stroke="#04060f" stroke-width="1.2" stroke-linecap="round"></path>
-          </g>
-          <g style="animation:birdFly 7s ease-in-out .8s infinite alternate">
-            <path d="M172 26 q 5 -4 9 -.6 q 4 -3.6 9 .6" fill="none" stroke="#04060f" stroke-width="1.3" stroke-linecap="round"></path>
-          </g>
-        </svg>
-      </div>
-      <div style="position:absolute;left:0;right:0;bottom:0;height:132px;background:url(data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20width%3D%27520%27%20height%3D%27132%27%3E%3Cdefs%3E%3ClinearGradient%20id%3D%27c%27%20x1%3D%270%27%20y1%3D%270%27%20x2%3D%270%27%20y2%3D%271%27%3E%3Cstop%20offset%3D%270%27%20stop-color%3D%27%230c1730%27%2F%3E%3Cstop%20offset%3D%271%27%20stop-color%3D%27%2303060e%27%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Cpath%20d%3D%27M0%2040%20C%2027.4%2036.3%2053.5%2019.3%2068.6%2019.3%20C%2083.7%2020.4%20101.9%2044.1%20119.0%2044.1%20C%20156.0%2035.7%20191.1%2016.4%20211.4%2016.4%20C%20228.3%2017.6%20248.4%2044.8%20267.5%2044.8%20C%20295.4%2037.8%20321.9%2027.6%20337.3%2027.6%20C%20357.7%2028.2%20382.2%2042.5%20405.3%2042.5%20C%20429.8%2036.3%20453.0%2019.2%20466.5%2019.2%20C%20482.6%2020.2%20501.8%2041.2%20520.0%2040.0%20L520%20132%20L0%20132%20Z%27%20fill%3D%27url%28%2523c%29%27%2F%3E%3Cpath%20d%3D%27M0%2040%20C%2027.4%2036.3%2053.5%2019.3%2068.6%2019.3%20C%2083.7%2020.4%20101.9%2044.1%20119.0%2044.1%20C%20156.0%2035.7%20191.1%2016.4%20211.4%2016.4%20C%20228.3%2017.6%20248.4%2044.8%20267.5%2044.8%20C%20295.4%2037.8%20321.9%2027.6%20337.3%2027.6%20C%20357.7%2028.2%20382.2%2042.5%20405.3%2042.5%20C%20429.8%2036.3%20453.0%2019.2%20466.5%2019.2%20C%20482.6%2020.2%20501.8%2041.2%20520.0%2040.0%27%20fill%3D%27none%27%20stroke%3D%27rgba%28185%2C210%2C252%2C.4%29%27%20stroke-width%3D%271.1%27%20stroke-linecap%3D%27round%27%2F%3E%3Cellipse%20cx%3D%2768.6%27%20cy%3D%2720.5%27%20rx%3D%2710.3%27%20ry%3D%271.1%27%20fill%3D%27rgba%28205%2C225%2C255%2C0.26%29%27%2F%3E%3Ccircle%20cx%3D%2777.9%27%20cy%3D%2712.4%27%20r%3D%270.8%27%20fill%3D%27rgba%28215%2C232%2C255%2C0.37%29%27%2F%3E%3Ccircle%20cx%3D%2754.7%27%20cy%3D%2718.2%27%20r%3D%270.9%27%20fill%3D%27rgba%28215%2C232%2C255%2C0.21%29%27%2F%3E%3Ccircle%20cx%3D%2773.5%27%20cy%3D%2718.0%27%20r%3D%271.0%27%20fill%3D%27rgba%28215%2C232%2C255%2C0.40%29%27%2F%3E%3Cpath%20d%3D%27M54.1%2022.7%20q%2014.5%201.6%2028.9%200%27%20fill%3D%27none%27%20stroke%3D%27rgba%28190%2C214%2C255%2C.13%29%27%20stroke-width%3D%27.7%27%2F%3E%3Cellipse%20cx%3D%27211.4%27%20cy%3D%2717.6%27%20rx%3D%2711.8%27%20ry%3D%271.1%27%20fill%3D%27rgba%28205%2C225%2C255%2C0.32%29%27%2F%3E%3Ccircle%20cx%3D%27208.0%27%20cy%3D%277.4%27%20r%3D%270.8%27%20fill%3D%27rgba%28215%2C232%2C255%2C0.44%29%27%2F%3E%3Ccircle%20cx%3D%27195.2%27%20cy%3D%2716.0%27%20r%3D%270.9%27%20fill%3D%27rgba%28215%2C232%2C255%2C0.48%29%27%2F%3E%3Ccircle%20cx%3D%27211.6%27%20cy%3D%275.9%27%20r%3D%270.9%27%20fill%3D%27rgba%28215%2C232%2C255%2C0.38%29%27%2F%3E%3Cpath%20d%3D%27M194.9%2019.8%20q%2016.5%201.6%2033.1%200%27%20fill%3D%27none%27%20stroke%3D%27rgba%28190%2C214%2C255%2C.13%29%27%20stroke-width%3D%27.7%27%2F%3E%3Cellipse%20cx%3D%27466.5%27%20cy%3D%2720.4%27%20rx%3D%2710.4%27%20ry%3D%271.1%27%20fill%3D%27rgba%28205%2C225%2C255%2C0.29%29%27%2F%3E%3Ccircle%20cx%3D%27466.0%27%20cy%3D%2715.0%27%20r%3D%271.0%27%20fill%3D%27rgba%28215%2C232%2C255%2C0.30%29%27%2F%3E%3Ccircle%20cx%3D%27461.5%27%20cy%3D%2719.0%27%20r%3D%270.7%27%20fill%3D%27rgba%28215%2C232%2C255%2C0.29%29%27%2F%3E%3Ccircle%20cx%3D%27461.8%27%20cy%3D%2714.4%27%20r%3D%270.6%27%20fill%3D%27rgba%28215%2C232%2C255%2C0.42%29%27%2F%3E%3Cpath%20d%3D%27M451.9%2022.6%20q%2014.6%201.6%2029.2%200%27%20fill%3D%27none%27%20stroke%3D%27rgba%28190%2C214%2C255%2C.13%29%27%20stroke-width%3D%27.7%27%2F%3E%3C%2Fsvg%3E) repeat-x;background-size:520px 132px;animation:waveC 6s linear infinite,waveBob 3.2s ease-in-out .3s infinite alternate"></div>
-    </div>`;
-

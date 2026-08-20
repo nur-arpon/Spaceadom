@@ -46,7 +46,17 @@ export interface SpecialSpec {
   how: string;
 }
 
-/** Verbatim from the v3 lab's SPECIALS array. Order is the tray's order. */
+/**
+ * From the v3 lab's SPECIALS array, with two owner-ordered changes
+ * (2026-08-20):
+ *  - Scroll Bottom added — the lab never listed it, but the engine has had
+ *    ␣↓↓ since V13, and its board key was opening SCROLL TOP's card.
+ *  - Smart Search's copy rewritten. The lab said "searches the web for the
+ *    text you've highlighted", which is not what the feature has ever done —
+ *    it moves your CURSOR to the right box (v11's FocusInputEngine). The
+ *    card now describes the real behaviour, which was also retargeted the
+ *    same day (see focus_engine.rs).
+ */
 export const SPECIALS: SpecialSpec[] = [
   { id: "esc", combo: "␣ Esc", name: "Boss Key",
     desc: "Hides every window and mutes your PC in one hit. Press it again and everything comes back exactly as it was.",
@@ -60,8 +70,11 @@ export const SPECIALS: SpecialSpec[] = [
   { id: "up", combo: "␣ ↑↑", name: "Scroll Top",
     desc: "Jumps straight to the top of whatever you're reading.",
     how: "Hold Space, tap ↑ twice" },
+  { id: "down", combo: "␣ ↓↓", name: "Scroll Bottom",
+    desc: "Jumps straight to the bottom of whatever you're reading.",
+    how: "Hold Space, tap ↓ twice" },
   { id: "comma", combo: "␣ ,", name: "Smart Search",
-    desc: "Searches the web for the text you've highlighted, in one move.",
+    desc: "Puts your cursor where you'd type, in one press: YouTube and Spotify search, the address bar on other pages and new tabs, the message box in WhatsApp and Discord.",
     how: "Hold Space, tap comma" },
   { id: "period", combo: "␣ .", name: "Pause",
     desc: "Puts Spaceadom to sleep so Space acts normal for a while. The same keys wake it up.",
@@ -78,12 +91,10 @@ export const SPECIALS: SpecialSpec[] = [
  * The lab's `id` for Backspace is "back"; this app's keyboard-matrix calls the
  * key "backspace". The board is the older name and it is used in geometry,
  * bindings and logs, so the CARD adopts the board's id rather than the reverse.
- * `down` (Scroll Btm) is on the board but has no tray chip — it shares Scroll
- * Top's card, which describes the pair.
  */
 const BOARD_TO_SPECIAL: Record<string, string> = {
   grave: "grave", backspace: "backspace", comma: "comma",
-  period: "period", up: "up", down: "up", ralt: "ralt",
+  period: "period", up: "up", down: "down", ralt: "ralt",
 };
 
 let _card: HTMLElement | null = null;
@@ -96,7 +107,9 @@ function reduced(): boolean {
 }
 
 function fun(): boolean {
-  return document.body.dataset.fun !== "off";
+  // === "on": fun is off-by-default since 2026-08-20, so an unset attribute
+  // (a window that never ran applyLook) must read as OFF, not on.
+  return document.body.dataset.fun === "on";
 }
 
 /** Index of a special by id, or -1. */
@@ -169,6 +182,11 @@ export function openSpecialCard(trigger: HTMLElement, spec: SpecialSpec, i: numb
   card.dataset.specCard = "1";
   card.setAttribute("role", "dialog");
   card.setAttribute("aria-label", spec.name);
+  // The card lives on <body>, so its clicks reach the document listener that
+  // closes every popover (main.ts). Without this, pressing a card opened from
+  // the specials tray closed the tray underneath it (PROBLEM 98's rule, one
+  // more surface).
+  card.addEventListener("click", (e) => e.stopPropagation());
   // Half the card (120px) plus a 10px margin, so it never runs off an edge.
   card.style.left = `${Math.round(Math.min(Math.max(r.left + r.width / 2, 130), vw - 130))}px`;
   card.style.bottom = `${Math.round(Math.max(window.innerHeight - r.top + 10, 10))}px`;
@@ -179,8 +197,10 @@ export function openSpecialCard(trigger: HTMLElement, spec: SpecialSpec, i: numb
   } else if (fun()) {
     card.style.animation = `${anims[0]} 520ms ${anims[1]} both`;
   } else {
-    // Fun OFF: "plainIn 180ms + tick" (§4). Same end state, no personality.
-    card.style.animation = "spec-plainIn 180ms var(--ease-out) both";
+    // Fun OFF: every card opens with the IRIS wipe — the owner's rule of
+    // 2026-08-20 ("all cards use iris when fun toggle off"), which replaced
+    // the spec's plainIn. Fun ON keeps the full 8-animation variety above.
+    card.style.animation = `sky-irisIn 520ms ${CARD_ANIMS[2][1]} both`;
   }
 
   const combo = document.createElement("div");

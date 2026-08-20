@@ -1,5 +1,24 @@
-/// engine/actions/focus_engine.rs — Context-aware input field focus.
-/// Mirrors V11 FocusInputEngine().
+/// engine/actions/focus_engine.rs — Smart Search: context-aware input focus.
+///
+/// Started as a mirror of V11's FocusInputEngine(); RETARGETED 2026-08-20 on
+/// the owner's orders after he used it in anger:
+///
+///  - WhatsApp/Discord now aim for the MESSAGE BOX, not the app's search.
+///    v11 (and the first port) sent Ctrl+F / Ctrl+K, which he reported as
+///    landing in "start a new chat" and the quick switcher — technically as
+///    designed, but never what he wanted. Neither app has a compose-box
+///    shortcut, so we send ESC: both return focus to the message input when
+///    every transient panel is closed. (Discord side effect: Esc also jumps
+///    to the newest message, which is where you type anyway.)
+///  - Ordinary websites now get the ADDRESS BAR (Ctrl+L), not '/'. There is
+///    no universal "focus this site's search" key; '/' works on YouTube-class
+///    sites and silently dies on most others — his "hundreds of sites".
+///  - '/' is now a REAL key press. The first port injected it as a UNICODE
+///    character (KEYEVENTF_UNICODE = text input, VK 0, scan-only), and sites
+///    that bind their shortcut to a physical keydown ignore text input — the
+///    likely reason ␣, did nothing on YouTube while v11's AHK Send("/"),
+///    which presses the real key, worked. VkKeyScanW maps the char through
+///    the CURRENT layout so a non-US keyboard still produces '/'.
 
 #[cfg(windows)]
 use windows::Win32::{
@@ -11,7 +30,7 @@ use windows::Win32::{
     UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, KEYBDINPUT, INPUT_KEYBOARD,
         KEYEVENTF_KEYUP, KEYEVENTF_EXTENDEDKEY,
-        VK_ESCAPE, VK_CONTROL, VK_F, VK_K, VK_E, VK_L,
+        VK_ESCAPE, VK_CONTROL, VK_F, VK_E, VK_L,
         VIRTUAL_KEY,
     },
 };
@@ -36,6 +55,11 @@ unsafe fn focus_engine_win32() -> String {
 
     let proc_name = get_process_name(hwnd).to_lowercase();
     let win_title = get_window_title(hwnd).to_lowercase();
+    // One line per press: which window it saw and what it decided. Without
+    // this, "␣, does nothing on YouTube" and "␣, never fired" read identical.
+    let decide = |what: &str| {
+        log::info!("smart_search: proc='{}' title='{}' -> {}", proc_name, win_title, what);
+    };
 
     // Check for browser contexts first
     let is_browser = proc_name.contains("chrome")
@@ -46,44 +70,72 @@ unsafe fn focus_engine_win32() -> String {
     if is_browser {
         if win_title.contains("gemini") {
             // Escape to clear focus, then the Gemini input shortcut
+            decide("gemini: Esc + 'i'");
             send_key(VK_ESCAPE.0, false);
             std::thread::sleep(std::time::Duration::from_millis(50));
-            send_char('i');
+            send_slash_class_key('i');
             return "✨ Gemini Input Focused".into();
         } else if win_title.contains("youtube") {
-            send_char('/');
+            decide("youtube: real '/'");
+            send_slash_class_key('/');
             return "📺 YouTube Search".into();
         } else if win_title.contains("spotify") {
-            send_char('/');
+            decide("spotify: real '/'");
+            send_slash_class_key('/');
             return "🎵 Spotify Search".into();
-        } else if win_title == "new tab" || win_title == "home" {
-            // Focus address bar
-            send_ctrl(VK_L.0);
-            return "🌍 Address Bar".into();
         }
-        // Generic web page search
-        send_char('/');
-        return "🔍 Page Search".into();
+        // Everything else — new tab, home, and every ordinary page — gets the
+        // address bar. Typing there searches the web, and it works on all of
+        // the owner's "hundreds of sites" where '/' silently died.
+        decide("browser page: Ctrl+L address bar");
+        send_ctrl(VK_L.0);
+        return "🌍 Address Bar".into();
     }
 
-    if proc_name.contains("whatsapp") {
-        send_ctrl(VK_F.0);
-        return "💬 WhatsApp Search".into();
-    }
-
-    if proc_name.contains("discord") {
-        send_ctrl(VK_K.0);
-        return "💬 Discord Switcher".into();
+    if proc_name.contains("whatsapp") || proc_name.contains("discord") {
+        // The message box. Neither app has a focus-compose shortcut; Esc
+        // closes whatever transient panel holds focus and both apps then
+        // return it to the input you type in.
+        decide("chat app: Esc -> message box");
+        send_key(VK_ESCAPE.0, false);
+        return "💬 Message Box".into();
     }
 
     if proc_name.contains("explorer") {
+        decide("explorer: Ctrl+E");
         send_ctrl(VK_E.0);
         return "📁 Explorer Search".into();
     }
 
     // Generic fallback
+    decide("generic: Ctrl+F");
     send_ctrl(VK_F.0);
     "🎯 Find/Search Focused".into()
+}
+
+/// Press a character as a REAL key (down+up of the virtual key the current
+/// layout assigns it, with Shift wrapped around it when the layout needs
+/// Shift) — the difference between "the page saw text" and "the page saw the
+/// '/' KEY", which is what shortcut handlers listen for.
+#[cfg(windows)]
+unsafe fn send_slash_class_key(c: char) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VkKeyScanW, VK_SHIFT};
+    let scan = VkKeyScanW(c as u16);
+    if scan == -1 {
+        // The layout cannot type this character at all — fall back to text
+        // injection rather than doing nothing.
+        send_char(c);
+        return;
+    }
+    let vk = (scan & 0xFF) as u16;
+    let needs_shift = (scan & 0x0100) != 0;
+    let none = windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(0);
+    let mut inputs: Vec<INPUT> = Vec::with_capacity(4);
+    if needs_shift { inputs.push(make_key_input(VK_SHIFT.0, none)); }
+    inputs.push(make_key_input(vk, none));
+    inputs.push(make_key_input(vk, KEYEVENTF_KEYUP));
+    if needs_shift { inputs.push(make_key_input(VK_SHIFT.0, KEYEVENTF_KEYUP)); }
+    SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
 }
 
 #[cfg(windows)]

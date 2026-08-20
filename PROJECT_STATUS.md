@@ -1,6 +1,103 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-20 | evening (Claude Fable 5) - the bug round, and the night scene rebuilt from the v4 handoff
+
+Full technical record: PROBLEMS 149-152 in `V14_FIXES_AND_CODE.md`. Shipped as
+1.0.61, installed and verified on the REAL machine.
+
+Nur sent one long list of everything wrong with 1.0.60 plus a new design
+handoff (`Design system overhaul project 4.zip` -> night-scene4.md, moon.md),
+then the lab and the constellation geometry when I asked for them. He also
+answered four decisions up front: send the lab file, make the background
+SMALLER than today (not larger as the file specified), iris for every card
+with fun off and full variety with fun on, and Ctrl+L for Smart Search on
+ordinary sites.
+
+**The two bugs that were one bug (PROBLEM 149).** Nothing closed on an outside
+press in Starry night, and the profile rows could not be pressed at all - the
+press went through to the constellation behind them. Both are children of
+PROBLEM 146's carve-out: the close-everything listener lived ON `#stage`, which
+that carve-out sets to `pointer-events: none`, so it stopped firing entirely;
+and `#profile-popover` is a child of `#stage` (not of `#topbar`) so it was
+never added to the opt-in list. The listener moved to `document`; the popover
+and the sky-return button joined the list. **A listener on an element that can
+lose pointer-events is a listener that can silently stop existing.**
+
+**The night scene, v4 (PROBLEM 150).** Twenty constellations - each in exactly
+ONE of the three drift bands, so nothing appears twice and the full loop is
+nine minutes - fading in and out so the sky is never all of them at once. A
+real sea: the old Bezier ribbons are gone, replaced by three fields of
+individual crest marks with dark understrokes for volume, and vertical heave
+generated from summed sines on co-prime periods. A moon with an edgeless halo
+and nine clustered maria that sets behind the ship for a full minute every
+cycle. Storm clouds whose opacity, the moon's brightness and the moonbeam all
+move together on a 13-second weather clock. Rigging, torn sails and shot holes
+on the galleon.
+
+**On the scale contradiction:** the file scales the ship UP 40%; he wants the
+whole background smaller. Rather than rewriting fifty numbers by hand, the
+ocean band renders the lab's ENTIRE 200px coordinate space verbatim inside a
+wrapper and the wrapper is scaled 0.75 by CSS. Every number in the extracted
+markup is still the lab's, checkable against the spec value for value, and his
+"smaller" is one declaration. The ship gets one further trim (379 -> 320 in the
+markup, 240px on screen), the moon's numbers are pre-multiplied by the same
+0.75, constellations render at 0.85, and the star tile was regenerated denser
+and finer - 178 stars at r 0.4-1.4, up from 115 at up to r 1.9.
+
+**The settings panel (PROBLEM 151).** The entrance wave replayed on every
+toggle because `render()` rebuilds the panel and the cascade was unconditional
+- which is exactly what buried the character animations it was there to show.
+Open descriptions vanished whenever anything re-rendered, because their open
+state lives in the DOM and `innerHTML` replaces the DOM; that is the "I turned
+on fun mode and the show-me-around descriptions disappeared" report. The
+opacity slider painted both sides of the track in near-identical night tones,
+which in Earthy reads as one black bar. The typing-speed and conflicts prose
+now appear only with "Show me around" on, along with a new line under the
+special keys telling you they are pressable. And **fun mode and show me around
+are both OFF at first install now**, as he asked.
+
+**Smart Search (PROBLEM 152)** was doing exactly what v11 does - and v11 is
+what he has outgrown. WhatsApp and Discord went to their SEARCH boxes because
+that is what `FocusInputEngine()` sends (Ctrl+F / Ctrl+K); they now send Esc,
+which is the only thing that returns focus to the compose box in either app.
+Ordinary websites get the address bar instead of '/', because there is no
+universal "focus this site's search" key and '/' silently dies on most sites.
+And the YouTube case had a second fault: the '/' was injected as a unicode TEXT
+character, not as a key press, and pages that bind shortcuts to a physical
+keydown ignore text input - it now goes through `VkKeyScanW` as a real key.
+**This diverges from v11 on his explicit order**, recorded so nobody "fixes" it
+back in the name of fidelity.
+
+Scroll Bottom is in the tray now (it never was), and the board's down-arrow key
+opens its own card instead of Scroll Top's.
+
+**An 8-agent adversarial audit** of everything above against the specs found
+six more real defects after I had already declared the work done: the moon's
+wash and maria blurs left unscaled while every sibling pixel value was
+multiplied by 0.75, the moonbeam missing the 13-second transition its own
+comment claimed it had, the constellation fade using `linear` where the lab
+says `ease-in-out`, stars never growing when lit, hidden constellations still
+swallowing presses, and info cards on `<body>` closing the popover underneath
+them. All fixed before shipping. It also refuted several confident findings,
+which is the reason for running the verify pass rather than acting on the
+first list.
+
+**Verified:** tsc clean, 13/13 cargo tests, 0 warnings; the scene measured
+through the DOM and the Web Animations API in `preview.html?sky` (bands 7/7/6,
+9/20 hidden at start, heave keyframes seamless on all four layers, 65 rigging
+paths, 6 cloud masses, 7 crash bursts, freeze/unfreeze on card open/close);
+installed on the real machine through explorer.exe as 1.0.61 with the Run key
+set and a clean startup log.
+
+**NOT verified - hand-test items for Nur.** Injection cannot be exercised from
+this shell (UIPI + the container), so Smart Search's new behaviour needs a real
+press: Space+comma on YouTube in Brave, on a plain website, on a new tab, in
+WhatsApp, and in Discord. The log now names its decision on every press
+(`smart_search: proc= title= -> ...`), so a failure will say which branch it
+took. The night scene itself also wants his eyes - it has been measured, not
+looked at.
+
 ## Update: 2026-08-20 | (Claude Fable 5) - the design overhaul lands: descriptions, three themes, the living sky, sounds, and the personality layer
 
 Full technical record: PROBLEMS 144-148 in `V14_FIXES_AND_CODE.md`. Shipped as

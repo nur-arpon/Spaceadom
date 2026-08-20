@@ -278,10 +278,14 @@ body[data-fun="on"] .sld[data-char="planet"].is-drag .sld-orbit { animation-dura
    --------------------------------------------------------------------------- */
 body[data-fun="on"] .sld[data-char="starfield"] input[type="range"]::-webkit-slider-runnable-track {
   height: 12px;
+  /* Night sky for the FILLED side only; the empty side is the same neutral
+     grey every other slider uses. The first build painted both sides
+     near-identical night (#3b3550 vs #2b2733) — in Earthy that read as one
+     solid black bar with no visible position at all (owner, 2026-08-20). */
   background:
     linear-gradient(90deg,
-      #3b3550 0 calc(var(--p, 0) * 100%),
-      #2b2733 calc(var(--p, 0) * 100%) 100%);
+      #2b2733 0 calc(var(--p, 0) * 100%),
+      var(--st-border) calc(var(--p, 0) * 100%) 100%);
 }
 body[data-fun="on"] .sld[data-char="starfield"] input[type="range"]::-webkit-slider-thumb {
   margin-top: -1.5px;                 /* the track is 12px here, not 8px */
@@ -293,11 +297,20 @@ body[data-fun="on"] .sld[data-char="starfield"] .sld-star {
   height: 2px;
   border-radius: 50%;
   background: #fff;
-  animation: twinkle 1.6s ease-in-out infinite alternate;
+  /* sld-twinkle, NOT the ocean's `twinkle`: that one animates OPACITY, and a
+     running animation overrides the threshold opacity below — a star hidden
+     on the grey side would have twinkled itself visible anyway. This one only
+     scales, so the reveal threshold keeps authority over visibility. */
+  animation: sld-twinkle 1.6s ease-in-out infinite alternate;
 }
-body[data-fun="on"] .sld[data-char="starfield"] .sld-star:nth-of-type(1) { left: 22%; top: 8px;  animation-duration: 1.3s; }
-body[data-fun="on"] .sld[data-char="starfield"] .sld-star:nth-of-type(2) { left: 51%; top: 14px; animation-duration: 1.9s; animation-delay: .4s; }
-body[data-fun="on"] .sld[data-char="starfield"] .sld-star:nth-of-type(3) { left: 78%; top: 10px; animation-duration: 1.5s; animation-delay: .8s; }
+@keyframes sld-twinkle { from { transform: scale(.7); } to { transform: scale(1.2); } }
+/* Each star exists only once the night has been dragged past it — the
+   calc drives opacity way past 1 or below 0 and the browser clamps it, so
+   this is a clean threshold with no JS. White dots on the grey (empty) side
+   looked like dirt. */
+body[data-fun="on"] .sld[data-char="starfield"] .sld-star:nth-of-type(1) { left: 22%; top: 8px;  animation-duration: 1.3s; opacity: calc((var(--p, 0) - .25) * 40); }
+body[data-fun="on"] .sld[data-char="starfield"] .sld-star:nth-of-type(2) { left: 51%; top: 14px; animation-duration: 1.9s; animation-delay: .4s; opacity: calc((var(--p, 0) - .54) * 40); }
+body[data-fun="on"] .sld[data-char="starfield"] .sld-star:nth-of-type(3) { left: 78%; top: 10px; animation-duration: 1.5s; animation-delay: .8s; opacity: calc((var(--p, 0) - .81) * 40); }
 
 /* Reduced motion: the decorations are pure ornament, so they go entirely —
    the slider still shows its value, its fill and its handle. */
@@ -358,12 +371,9 @@ body[data-fun="on"] .sld[data-char="starfield"] .sld-star:nth-of-type(3) { left:
   margin-top: 6px;
 }
 
-/* Fun OFF — the plain entrance, so the card still arrives rather than snapping
-   into existence. Lab-verbatim (plainIn), retargeted to this card's anchor. */
-@keyframes spec-plainIn {
-  from { opacity: 0; transform: translate(-50%, 6px); }
-  to   { opacity: 1; transform: translate(-50%, 0); }
-}
+/* Fun OFF used to play a plainIn slide here; the owner replaced it on
+   2026-08-20 with the iris wipe (sky-irisIn, starry-sky.css) for EVERY card,
+   so no fun-off keyframe lives in this file any more. */
 
 /* The triggers. A special is now a real control, so it says so on hover, on
    focus and to a screen reader — it was a plain <span> before. */

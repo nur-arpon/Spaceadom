@@ -1,19 +1,22 @@
 /* ===========================================================================
-   starry-sky.css — the full Starry night scene (PROBLEM 145)
-   Spec: design/design-system-overhaul-3.md §5b; keyframes and card entrances
-   transcribed VERBATIM from the lab (renamed with a sky- prefix so nothing in
-   the app's own motion namespace can collide).
+   starry-sky.css — the full Starry night scene (PROBLEMS 145 + 150)
+   Specs: design/night-scene4.md + design/moon.md (2026-08-20 delta) over
+   design/design-system-overhaul-3.md §5b. Keyframes transcribed VERBATIM
+   from `Help Lab v2-4.dc.html` (renamed with a sky- prefix only where the
+   app's own motion namespace could collide; the ocean-band keyframes keep
+   the lab's names because night-markup.ts references them inline, verbatim).
 
    Layer order, per spec, all positive (hit-testing follows paint order, so
    negative z-index would swallow presses):
-       sky/constellations  z 1
-       ocean band          z 2
-       dashboard content   z 3   (themes.css)
-       info card           z 70
+       sky (moon, then constellations)  z 1
+       ocean band                       z 2
+       dashboard content                z 3   (themes.css)
+       info card                        z 70
    =========================================================================== */
 
 /* ---------------------------------------------------------------------------
-   Constellation layer — three side-by-side 1400px cells sailing together
+   Sky container — moon first (so everything occludes it), then three
+   EXCLUSIVE 1400px constellation bands sailing with the star tile
    --------------------------------------------------------------------------- */
 #st-sky { position: fixed; inset: 0; z-index: 1; pointer-events: none; overflow: hidden; }
 
@@ -28,7 +31,20 @@
 @keyframes sky-conDrift1 { from { transform: translateX(1400px); } to { transform: translateX(0); } }
 @keyframes sky-conDrift2 { from { transform: translateX(2800px); } to { transform: translateX(1400px); } }
 
-.sky-con-wrap { position: absolute; pointer-events: none; }
+.sky-con-wrap {
+  position: absolute;
+  pointer-events: none;
+  /* Appear/vanish (night-scene §2): one figure crosses over every 5.2-12s on
+     this fade, so the sky is never all 20 at once and never static. */
+  transition: opacity 3.4s ease-in-out;
+}
+.sky-con-wrap.is-hidden { opacity: 0; }
+/* !important is load-bearing: buildCon puts an INLINE pointer-events:auto on
+   the hit rect and every halo circle (that is what makes a 3px star pressable
+   at all), and an inline style beats a plain rule — so without this a faded
+   figure still swallowed presses meant for the sky behind it. */
+.sky-con-wrap.is-hidden .sky-con,
+.sky-con-wrap.is-hidden .sky-con * { pointer-events: none !important; cursor: default; }
 
 .sky-con {
   display: block;
@@ -48,9 +64,15 @@
 .sky-con.is-open .sky-con-line { opacity: .4; }
 
 /* Stars idle at 45%; brighten and twinkle (staggered per star) while lit. */
-.sky-con-star { opacity: .45; transition: opacity 900ms; }
+/* r as well as opacity: the lab grows every star by +0.5 while its figure is
+   lit or open, and that bump is most of what makes a lit figure read as lit.
+   SVG geometry properties are animatable in CSS in Chromium/WebView2. */
+.sky-con-star { opacity: .45; r: 1.4; transition: opacity 900ms, r 900ms; }
+.sky-con-star.is-key { r: 1.9; }
 .sky-con.is-lit .sky-con-star,
-.sky-con.is-open .sky-con-star { opacity: 1; }
+.sky-con.is-open .sky-con-star { opacity: 1; r: 1.9; }
+.sky-con.is-lit .sky-con-star.is-key,
+.sky-con.is-open .sky-con-star.is-key { r: 2.4; }
 .sky-con.is-lit .sky-con-star {
   transform-box: fill-box;
   transform-origin: center;
@@ -62,23 +84,95 @@
 }
 
 /* ---------------------------------------------------------------------------
-   Ocean band — bottom 200px; the markup inside is the lab's, verbatim
+   The moon — moon.md, disc and glow ×0.75. The wander is driven from
+   starry-sky.ts (left/top transitions over 34-60s legs); only the breathing
+   lives here. Outer element = position + wander; inner = breathe — putting
+   both on one element makes the transition and the keyframes overwrite each
+   other's transform (moon.md §6).
+   --------------------------------------------------------------------------- */
+.sky-moon { position: absolute; width: 88px; height: 88px; }
+.sky-moon-breathe { position: absolute; inset: 0; animation: moonBreathe 11s ease-in-out infinite alternate; }
+.sky-moon-glow { position: absolute; border-radius: 50%; }
+.sky-moon-disc {
+  position: absolute; inset: 0; border-radius: 50%;
+  background: radial-gradient(circle at 37% 33%, #fdfbf5 0%, #f7f2e6 40%, #ece4d3 68%, #d8cfba 89%, #c9c0aa 100%);
+  /* Terminator shading on the disc itself — the ONLY inner shadow; a border
+     or box-shadow spread would terminate at a hard radius and read as a ring
+     (moon.md §3). ×0.75 of the spec's -8/-7/22. */
+  box-shadow: inset -6px -5px 17px rgba(128, 123, 110, .24);
+}
+/* Maria: a broad blurred wash underneath, mottled seas on top, all clustered
+   upper-left-through-centre so no face can form (moon.md §4). */
+.sky-moon-wash  { position: absolute; inset: 0; border-radius: 50%; overflow: hidden; opacity: .17; filter: blur(8.25px); }
+.sky-moon-maria { position: absolute; inset: 0; border-radius: 50%; overflow: hidden; opacity: .25; filter: blur(3.375px); }
+.sky-moon-wash i, .sky-moon-maria i { position: absolute; }
+
+@keyframes moonBreathe { from { transform: translateY(0) scale(1); opacity: .95; }
+                         to   { transform: translateY(-4.5px) scale(1.012); opacity: 1; } }
+@keyframes moonHaze { 0%, 100% { transform: scale(1); opacity: .85; }
+                      50%      { transform: scale(1.06); opacity: 1; } }
+
+/* ---------------------------------------------------------------------------
+   Ocean band — 150px tall on screen; inside it, `.sky-ocean-world` is the
+   lab's 200px coordinate space VERBATIM (night-markup.ts), scaled 0.75. Every
+   number in the markup is the lab's; the one scale factor lives here.
+   overflow stays visible: the storm deliberately reaches above the band.
    --------------------------------------------------------------------------- */
 .sky-ocean {
   position: fixed;
   left: 0; right: 0; bottom: 0;
-  height: 200px;
+  height: 150px;
   z-index: 2;
   pointer-events: none;
 }
-/* The lab's inline styles reference these animations by name. Verbatim. */
-@keyframes birdFly { from { transform: translate(0, 0); }   to { transform: translate(-16px, -9px); } }
-@keyframes shipBob { from { transform: translateY(0) rotate(-2.6deg); } to { transform: translateY(9px) rotate(2.3deg); } }
-@keyframes waveA   { from { background-position-x: 0; } to { background-position-x: -520px; } }
-@keyframes waveB   { from { background-position-x: 0; } to { background-position-x: 520px; } }
-@keyframes waveC   { from { background-position-x: 0; } to { background-position-x: -520px; } }
-@keyframes waveBob { from { transform: translateY(-3px); } to { transform: translateY(3px); } }
-/* The lab's reflection streaks and lantern twinkle by this name too. */
+.sky-ocean-world {
+  position: absolute;
+  left: 0; bottom: 0;
+  width: 133.3334%;          /* 1 / 0.75 — so 100% of the viewport is covered */
+  height: 200px;
+  transform: scale(0.75);
+  transform-origin: bottom left;
+}
+
+/* Ocean-band keyframes — lab-verbatim, lab NAMES (night-markup.ts references
+   them from inline styles). heave0-3 are GENERATED at load by injectHeave(). */
+@keyframes shipBob   { from { transform: translateY(0) rotate(-2.6deg); } to { transform: translateY(9px) rotate(2.3deg); } }
+@keyframes birdFly   { from { transform: translate(0, 0); } to { transform: translate(-16px, -9px); } }
+@keyframes sailFlap  { from { transform: skewX(-4deg) rotate(-1.5deg); } to { transform: skewX(5deg) rotate(2deg); } }
+@keyframes cloudDrift { from { transform: translateX(-26px); } to { transform: translateX(26px); } }
+@keyframes crash {
+  0%   { opacity: 0;   transform: translateY(8px)  scale(.42, .24); }
+  9%   { opacity: .95; transform: translateY(-9px) scale(1.02, 1.14); }
+  24%  { opacity: .6;  transform: translateY(-3px) scale(1.28, .82); }
+  46%  { opacity: 0;   transform: translateY(6px)  scale(1.5, .4); }
+  100% { opacity: 0;   transform: translateY(8px)  scale(.42, .24); }
+}
+@keyframes splashUp {
+  0%       { opacity: 0;   transform: scale(.3, .2); }
+  7%       { opacity: .9;  transform: scale(1, 1.16); }
+  20%      { opacity: .62; transform: scale(1.22, .9); }
+  38%      { opacity: .12; transform: scale(1.46, .52); }
+  52%, 100% { opacity: 0;  transform: scale(.3, .2); }
+}
+@keyframes dropFly {
+  0%   { opacity: 0;  transform: translateY(0)     scale(.7); }
+  6%   { opacity: .9; }
+  44%  { opacity: .5; transform: translateY(-38px) scale(1); }
+  72%  { opacity: 0;  transform: translateY(-8px)  scale(.8); }
+  100% { opacity: 0;  transform: translateY(0)     scale(.7); }
+}
+@keyframes lightning {
+  0%, 4.4% { opacity: 0; }
+  4.7%     { opacity: .5; }
+  5%       { opacity: .05; }
+  5.4%     { opacity: .34; }
+  6%       { opacity: 0; }
+  42%      { opacity: 0; }
+  42.4%    { opacity: .22; }
+  43%      { opacity: 0; }
+  100%     { opacity: 0; }
+}
+/* The lab's reflection streaks and lantern twinkle by this name. */
 @keyframes twinkle {
   from { opacity: .25; transform: scale(.7); }
   to   { opacity: 1;   transform: scale(1.15); }
@@ -118,12 +212,20 @@
 /* ---------------------------------------------------------------------------
    Freeze and pause — the sky must never cost anything unwatched
    --------------------------------------------------------------------------- */
-/* A card open = the WHOLE sky holds its breath (spec §5b): figures, ocean,
-   ship, gulls — and the star tile itself via themes.css. */
+/* A card open = the WHOLE sky holds its breath (spec §5b): moon, figures,
+   waves, ship, storm — and the star tile itself via themes.css. The moon's
+   WANDER is a transition, not an animation; its scheduler checks busy() and
+   stops advancing instead. */
 body.sky-frozen #st-sky *,
 body.is-blurred #st-sky * { animation-play-state: paused !important; }
 
 @media (prefers-reduced-motion: reduce) {
-  .sky-con-layer, .sky-ocean * { animation: none !important; }
+  .sky-con-layer, .sky-ocean *, .sky-moon * { animation: none !important; }
+  .sky-con-wrap { transition: none !important; }
   .sky-card { animation: none !important; transform: translateX(-50%); }
 }
+.reduced-motion .sky-con-layer,
+.reduced-motion .sky-ocean *,
+.reduced-motion .sky-moon * { animation: none !important; }
+.reduced-motion .sky-con-wrap { transition: none !important; }
+.reduced-motion .sky-card { animation: none !important; transform: translateX(-50%); }

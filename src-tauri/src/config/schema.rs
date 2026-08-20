@@ -130,7 +130,11 @@ pub struct AppConfig {
     /// Starry night is the new sky; with it OFF, Starry night is "the previous
     /// dark mode we have been using all along" — i.e. plain nocturne, no star
     /// field. So this gates the starry PALETTE, not the theme choice itself.
-    #[serde(default = "default_true")]
+    /// OFF at first install since 2026-08-20 (the owner's decision): a new
+    /// user meets plain, quiet controls first and opts INTO the personality.
+    /// Frontend readers must therefore treat a missing value as false
+    /// (`=== true`, never `!== false`).
+    #[serde(default)]
     pub fun_mode: bool,
 
     /// PROBLEM 144 — hide the keyboard board and the whole dashboard chrome,
@@ -139,9 +143,10 @@ pub struct AppConfig {
     pub hide_keyboard: bool,
 
     /// PROBLEM 144 — "Show me around": when true every setting's description
-    /// is open. ON at first install so a first-time user is told what each
-    /// control does without having to go looking.
-    #[serde(default = "default_true")]
+    /// is open.
+    /// OFF at first install since 2026-08-20, same decision as fun_mode —
+    /// the descriptions are one label-press away rather than pre-opened.
+    #[serde(default)]
     pub show_me_around: bool,
 
     /// Whether the optional WebAudio sine-tick sound effects are enabled.
@@ -289,9 +294,9 @@ impl Default for AppConfig {
             special_keys: HashMap::new(),
             dark_mode: false,
             theme: "earthy".to_string(),
-            fun_mode: true,
+            fun_mode: false,
             hide_keyboard: false,
-            show_me_around: true,
+            show_me_around: false,
             sound_enabled: false,
             run_at_startup: true,
             motion: default_motion(),

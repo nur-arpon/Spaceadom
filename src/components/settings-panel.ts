@@ -93,6 +93,20 @@ function resetLabel(): string {
 
 function render(): void {
   if (!panelEl || !appConfig) return;
+
+  // The entrance cascade belongs to OPENING the panel, not to re-rendering it.
+  // .pop gates every st-pop-in in styles.css; without it, flipping one toggle
+  // replayed the whole wave and the character animation drowned in it.
+  panelEl.classList.toggle("pop", _freshOpen);
+
+  // Descriptions live in the DOM (.is-open), and innerHTML below replaces the
+  // DOM — so every re-render silently closed them all. That is the owner's
+  // "I turned on fun mode and the show-me-around descriptions disappeared".
+  // Snapshot what is open, restore it after the rebuild, without animation.
+  const openDescs = Array.from(
+    panelEl.querySelectorAll<HTMLElement>(".set-desc.is-open"),
+  ).map((b) => b.dataset.descFor ?? "").filter(Boolean);
+
   const sound = !!appConfig.sound_enabled;
 
   // run_at_startup is optional on configs migrated from V14 — treat missing
@@ -119,9 +133,12 @@ function render(): void {
   // personality layer AND (per the owner) whether Starry night is the new sky
   // or the plain nocturne this app has always had.
   const theme = appConfig.theme || (appConfig.dark_mode ? "starry" : "earthy");
-  const fun = appConfig.fun_mode !== false;
+  // === true, not !== false: since 2026-08-20 both personality switches are
+  // OFF at first install (the owner's decision) — a missing field means off.
+  const fun = appConfig.fun_mode === true;
   const hideBoard = appConfig.hide_keyboard === true;
-  const showAround = appConfig.show_me_around !== false;
+  const showAround = appConfig.show_me_around === true;
+  document.body.classList.toggle("show-around", showAround);
 
   panelEl.innerHTML = `
     <div class="set-title">Settings</div>
@@ -196,8 +213,9 @@ function render(): void {
   // "Show me around" — open or close every description as a convoy.
   wireToggle("around", async () => {
     if (!appConfig) return;
-    const on = !(appConfig.show_me_around !== false);
+    const on = !(appConfig.show_me_around === true);
     appConfig.show_me_around = on;
+    document.body.classList.toggle("show-around", on);
     convoyAll(on);
     if (on) sfx.convoyOn(); else sfx.convoyOff();
     await persistConfig();
@@ -206,7 +224,7 @@ function render(): void {
 
   wireToggle("fun", async () => {
     if (!appConfig) return;
-    appConfig.fun_mode = !(appConfig.fun_mode !== false);
+    appConfig.fun_mode = !(appConfig.fun_mode === true);
     // toggleOn/Off("fun") is special-cased inside sounds.js: it plays the
     // genie / wind-down in EITHER gate state, so the switch that controls the
     // personality layer is never the one switch you cannot hear.
@@ -223,7 +241,7 @@ function render(): void {
     // screen. sounds.js §8a documents spaceRise/spaceFall for exactly this
     // ("big reveals" / "exiting a mode"). They ignore fun() by design, so the
     // gate is ours — in plain mode it stays an ordinary flip.
-    const funNow = appConfig.fun_mode !== false;
+    const funNow = appConfig.fun_mode === true;
     if (appConfig.hide_keyboard) { if (funNow) sfx.spaceRise(); else sfx.toggleOn("hideboard"); }
     else                         { if (funNow) sfx.spaceFall(); else sfx.toggleOff("hideboard"); }
     applySkyMode(appConfig.hide_keyboard);
@@ -232,13 +250,32 @@ function render(): void {
   });
 
   wireDescriptions();
+
+  // Restore what the user had open BEFORE this render — instantly, no 380ms
+  // slide replay: the boxes get their transition suppressed for one frame.
+  openDescs.forEach((id) => {
+    const box = panelEl?.querySelector<HTMLElement>(`[data-desc-for="${id}"]`);
+    if (!box) return;
+    // Both, not just the transition: the grid-rows slide lives on the box and
+    // the convoy entrance lives on the child, so suppressing one still let the
+    // other replay on every re-render.
+    const inner = box.querySelector<HTMLElement>(".set-desc-in");
+    box.style.transition = "none";
+    if (inner) inner.style.animation = "none";
+    setDescOpen(id, true);
+    requestAnimationFrame(() => {
+      box.style.transition = "";
+      if (inner) inner.style.animation = "";
+    });
+  });
+
   // Auto-open ONCE per panel opening, not on every render.
   //
   // render() runs again after every toggle, so doing this unconditionally
   // would re-open any description the user had just closed by hand — the
   // setting would quietly fight them, which is the sort of thing that reads as
   // a bug rather than a feature.
-  if (_freshOpen && appConfig?.show_me_around !== false) convoyAll(true);
+  if (_freshOpen && appConfig?.show_me_around === true) convoyAll(true);
   _freshOpen = false;
 
   wireToggle("sound", async () => {
@@ -392,7 +429,7 @@ function renderConflicts(): void {
         proc.textContent = c.process;
 
         const why = document.createElement("span");
-        why.className = "conflict-row-why";
+        why.className = "conflict-row-why sma-note";
         why.textContent = c.detail;
 
         row.append(name, proc, why);
@@ -400,7 +437,7 @@ function renderConflicts(): void {
       });
 
       const hint = document.createElement("div");
-      hint.className = "set-note";
+      hint.className = "set-note sma-note";
       hint.textContent =
         "Close one of them — either the program above, or Spaceadom — so only " +
         "one owns the spacebar. Spaceadom never closes other programs for you.";
@@ -723,7 +760,7 @@ function typingSpeedRow(wpm: number): string {
       ${sliderShell("wpm", `
         <input type="range" id="set-wpm" min="${WPM_MIN}" max="${WPM_MAX}" step="5" value="${wpm}" />`,
         WPM_MIN, WPM_MAX, wpm)}
-      <span style="font-size:10.5px; color:var(--st-ink-soft); line-height:1.35;">
+      <span class="sma-note" style="font-size:10.5px; color:var(--st-ink-soft); line-height:1.35; margin-top:2px;">
         If apps launch by accident while you type, choose a SLOWER speed —
         Spaceadom then waits longer before treating Space+key as a shortcut.
       </span>

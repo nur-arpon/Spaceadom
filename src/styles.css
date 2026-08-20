@@ -613,8 +613,13 @@ body.nocturne #key-detail-panel { box-shadow: 0 24px 60px rgba(0, 0, 0, .55); }
   align-items: center;
   gap: 10px;
   cursor: pointer;
-  animation: st-pop-in 360ms var(--ease-spring) both;
 }
+/* The entrance wave plays ONLY while the panel carries .pop — set for the
+   first render after opening, removed after it. render() re-runs on every
+   toggle, and without this gate the whole panel replayed its cascade each
+   time, which is exactly what buried the toggle characters under a wave of
+   rows (owner, 2026-08-20). */
+#settings-panel.pop .set-row { animation: st-pop-in 360ms var(--ease-spring) both; }
 /* .set-row-label is redefined below — it is a <button> since PROBLEM 144. */
 
 /* Typing-speed tier labels sitting above the slider (PROBLEM 69). Absolutely
@@ -634,6 +639,19 @@ body.nocturne #key-detail-panel { box-shadow: 0 24px 60px rgba(0, 0, 0, .55); }
 }
 .wpm-tick.is-active { color: var(--st-accent-deep); opacity: 1; }
 .set-note { margin-top: 10px; font-size: 11px; color: var(--st-text-dim); line-height: 1.45; }
+/* Teaching prose (the typing-speed hint, the conflicts explainer, the
+   specials-tray note) exists only while "Show me around" is on — the owner's
+   rule: the panel must not read as a manual once you know it. body.show-around
+   is kept in sync by applySkyMode's sibling in main.ts and the toggle itself. */
+.sma-note { display: none; }
+body.show-around .sma-note { display: block; }
+.specials-note {
+  flex-basis: 100%;
+  text-align: center;
+  font-size: 11px;
+  color: var(--st-text-dim);
+  margin-top: 2px;
+}
 .set-actions { display: flex; gap: 7px; margin-top: 13px; }
 .set-actions .btn { flex: 1; justify-content: center; height: 34px; font-size: 12px; }
 
@@ -895,8 +913,9 @@ body.nocturne .confirm-box {
 
 /* A row and its description are one unit, so the panel's own 11px gap sits
    between SETTINGS rather than between a row and its own explanation. */
-.set-item { display: flex; flex-direction: column; animation: st-pop-in 360ms var(--ease-spring) both; }
-.set-item .set-row { animation: none; }
+.set-item { display: flex; flex-direction: column; }
+#settings-panel.pop .set-item { animation: st-pop-in 360ms var(--ease-spring) both; }
+.set-item .set-row { animation: none !important; }
 
 /* The label is a button now (it means "explain this"), so every button default
    has to be undone or it renders as a chip in the middle of the row. */

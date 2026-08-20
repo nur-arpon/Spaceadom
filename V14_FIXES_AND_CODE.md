@@ -8102,3 +8102,283 @@ silently.* This one did not start failing loudly — it started returning False
 for things that were present. Any check that has not been re-validated against a
 KNOWN-GOOD case is not a check; it is a habit. Re-run it against something you
 are certain about before trusting a negative.
+
+---
+
+## PROBLEM 149 — nothing closed on an outside press in Starry night, and the profile popover could not be pressed at all
+
+**Symptom, from the owner:** *"after opening settings panel, pressing elsewhere
+doesn't close it… I was not being able to press the other profiles. And when
+trying to press the other profiles, as there was a constellation behind the
+profile, I was getting the card of constellation instead. Pressing elsewhere
+wasn't closing the profiles tab either. The same not-closing thing, in case of
+starry night theme only."*
+
+**Root cause — BOTH are children of PROBLEM 146's fix.** The starry-night
+carve-out sets `#stage` to `pointer-events: none` so constellation presses can
+pass through the transparent wrappers. Two consequences were missed:
+
+1. The close-everything listener lived ON `#stage`
+   (`document.getElementById("stage").addEventListener("click", closeAllPopovers)`).
+   An element that does not take pointer events never fires a click — so in
+   Starry night, "press elsewhere" reached NOTHING and no popover ever closed.
+2. `#profile-popover` is a direct child of `#stage` (NOT of `#topbar` — the
+   markup places it after the topbar), and `pointer-events: none` **inherits**.
+   The opt-in list re-enabled `#topbar > *` and the two docks, but not the
+   popover — so its rows were transparent to the pointer, and every press fell
+   through to the constellation drifting behind it, which opened its card.
+
+**Exact files.** `src/main.ts` (wirePopovers), `src/styles/themes.css`.
+
+```ts
+// BEFORE — dead in starry night, #stage takes no pointer events there:
+document.getElementById("stage")!.addEventListener("click", () => closeAllPopovers());
+// AFTER — on the document. Everything that must survive its own click already
+// stops propagation (PROBLEM 98), so only genuine "elsewhere" clicks arrive:
+document.addEventListener("click", () => closeAllPopovers());
+```
+
+```css
+/* themes.css opt-in list gains: */
+body[data-theme="starry"][data-fun="on"] #profile-popover,
+body[data-theme="starry"][data-fun="on"] #sky-return,
+```
+
+**Generalise this.** Two reusable classes here:
+- *A listener on an element that can lose pointer-events is a listener that
+  can silently stop existing.* Anything that means "anywhere" belongs on
+  `document`, not on a surface.
+- *When a carve-out disables pointer events on a subtree, every interactive
+  thing inside it must appear in the opt-in list — grep for `popover`,
+  `button`, `input` under that subtree when adding one, and add new popovers
+  to the list in the same commit.*
+
+---
+
+## PROBLEM 150 — the night scene, v4: moon, twenty constellations, a real sea, a rigged galleon, and a storm
+
+**What the owner supplied (2026-08-20):** `night-scene4.md` + `moon.md` (a
+delta spec against the 1.0.59 scene), `Help Lab v2-4.dc.html` (the lab, source
+of record), and `constellations.js` (the 20 figures' geometry, extracted by him
+from the lab). Plus one verdict that CONTRADICTED the spec: the lab scales the
+galleon UP 40%, and he wants the whole background *"smaller… smaller ocean and
+smaller ship… the sky will also scale out so more stars and these new
+constellations have space."*
+
+**The scale resolution — one factor, applied once.** The ocean band renders
+the lab's ENTIRE 200px coordinate space verbatim inside a wrapper, and the
+wrapper is scaled by CSS:
+
+```css
+.sky-ocean       { height: 150px; }                    /* was 200px */
+.sky-ocean-world { width: 133.3334%; height: 200px;
+                   transform: scale(0.75); transform-origin: bottom left; }
+```
+
+So every number in the extracted markup IS the lab's number, checkable against
+the spec value for value, and the owner's "smaller" is exactly one declaration.
+The ship's width attribute is additionally `379 → 320` (→ 240px on screen);
+the moon's numbers are pre-multiplied by the same 0.75 (its geometry is tied
+to the waterline, which moved from 174px to 130.5px above the bottom);
+constellation SVGs render at 0.85; the star tile was regenerated denser and
+finer (178 stars r 0.4–1.4, seed 20260820 — was 115 at up to r 1.9) on the
+SAME 1400×900 tile, because `starDrift` and the constellation bands share that
+width and changing one desynchronises the sky.
+
+**Exact files.** `src/components/starry-sky.ts` (rewritten),
+`src/components/night-markup.ts` (new — the lab's ocean subtree extracted by
+script, six live slots turned into ids), `src/styles/starry-sky.css`
+(rewritten), `src/constellations.js` (byte-identical copy) + `.d.ts`,
+`src/styles/themes.css` (star tile), `src/preview.ts` (`?sky` harness mode).
+
+**What each spec section became:**
+
+- **§2 Constellations** — 20 figures, each in exactly ONE of the three 1400px
+  drift bands (shuffle → round-robin 7/7/6 → slot placement, lab-verbatim), so
+  nothing is ever visible twice and the full 4200px loop takes ~9 minutes.
+  ~45% start hidden; every 5.2–12s one crosses over on a 3.4s fade, the hidden
+  count floating between 30% and 55%; the highlight beat is 2.6–6s and picks
+  only from visible figures. Hidden figures take no presses.
+- **§3 Sea** — the old Bezier ribbon tiles and `waveA/B/C`/`waveBob` are GONE.
+  One water gradient, then three fields of individual crest marks
+  (`seaField`) and a silhouette horizon (`seaWave`), generated fresh each
+  launch; vertical motion comes from `injectHeave()` — four keyframe sets of
+  48 stops from summed sines, two uncorrelated signals per layer, co-prime
+  durations 71/59/47/37s (~42h before the layers' relative phase repeats).
+- **§4 Galleon** — same hull, crew, cannons, flag; now with generated rigging
+  (65 paths: 25 shrouds + 32 ratline rungs + 8 stays, alphas .27–.37 — the
+  readable range on this sky), 12 rip triangles, 5 shot holes, and four loose
+  ribbons on staggered `sailFlap`.
+- **§5 Storm** — six blurred cloud masses on lopsided radii drifting ±26px,
+  LIGHTER than the sky in their mid-tones (dark-on-dark is invisible), plus a
+  17s two-flicker lightning span. The whole container's opacity is driven by…
+- **§1 moonPow** — a 13–30s weather cycle weighted to the extremes (36% cloud
+  wins, 36% the moon blazes, 28% ordinary night), transitioning moon-group
+  brightness, cloud opacity and moonbeam strength over 13s LINEAR so it reads
+  as weather, not a switch.
+- **moon.md** — an 88px disc with four edgeless glow layers (every gradient
+  runs to 0 alpha at 100% — stopping short leaves a ring), nine clustered
+  maria over a blurred wash (unevenly sized, upper-left, so no face can form),
+  and a 7-leg wander: ~64s at home, slow 34–60s legs down the sky, ~62s sunk
+  behind the galleon — occluded by nothing more clever than the ocean band's
+  higher z-index.
+
+**How it was verified** (preview harness `preview.html?sky`, measured through
+the DOM and the Web Animations API, not by eye): bands 7/7/6 with 9/20 hidden
+at start; ship bounding box exactly matches 240×172.5 pre-rotation; heave
+keyframes seamless (first stop == last stop on all four); rigging counted 65
+paths, splash droplets 13 (6+4+3), crash bursts 7, cloud masses 6; card opens
+freeze every ocean animation and outside-press unfreezes; hidden figures
+report `pointer-events: none`. Plus a 7-agent adversarial audit of every spec
+section against the code (see PROJECT_STATUS entry for its findings).
+
+**Generalise this.** *When a spec and its owner disagree about scale, wrap the
+spec's coordinate space and scale the wrapper.* Rewriting fifty numbers by
+hand produces fifty chances to drift; one CSS transform produces none, keeps
+the file diff-able against the design forever, and makes the next scale
+verdict a one-line change.
+
+---
+
+## PROBLEM 151 — the settings panel: the wave that buried the characters, the descriptions that vanished, and the sky-black slider
+
+**Symptoms, from the owner (all 2026-08-20):** *"toggling the things in
+setting on or off refreshes the toggles in a wavy type way — no need that,
+because the toggle animation cannot be seen"*; *"I had Show me around on, then
+I turned on fun mode, then the descriptions of Show me around disappeared"*;
+*"the opacity floor slider full is sky black when using earthy… you can use
+grey"*; *"the typing speed description and the conflict description is not
+required — only show those when show me around is on"*; and *"ensure the first
+time it opens, it opens with fun mode off and show me around off."*
+
+**Root causes.**
+
+1. **The wave:** `.set-item`/`.set-row` carried `animation: st-pop-in` at all
+   times, and `render()` rebuilds the whole panel after EVERY toggle — so each
+   flip replayed the full entrance cascade, drowning the character animation
+   it existed to show. The entrance now plays only under `#settings-panel.pop`,
+   set for the first render after opening and removed after it.
+2. **The vanishing descriptions:** the open state lives in the DOM (`.is-open`)
+   and `render()` replaces the DOM — so every re-render silently closed every
+   description. Flipping Fun re-renders; hence "turning on fun mode wiped
+   show-me-around". `render()` now snapshots the open ids before `innerHTML`
+   and restores them after, with each box's transition suppressed for one
+   frame so the restore is instant rather than a replayed slide.
+3. **The sky-black slider:** the starfield character painted BOTH sides of the
+   track in near-identical night tones (#3b3550 / #2b2733) — in Earthy that
+   reads as one solid black bar with no position. The filled side is night
+   (#2b2733), the empty side is now the same `var(--st-border)` grey every
+   other slider uses, and the three stars only exist once the fill has been
+   dragged past them: `opacity: calc((var(--p) - .25) * 40)` — the browser
+   clamps to [0,1], so the calc is a clean threshold with no JS. **Trap
+   inside the fix:** the stars' twinkle animated OPACITY, and a running
+   animation overrides the declaration — a hidden star would have twinkled
+   itself visible. They now twinkle on a scale-only keyframe (`sld-twinkle`).
+4. **Teaching prose:** the typing-speed hint, the conflicts detail/explainer
+   and a new specials-tray note ("Press any of these to read what it does —
+   and try them out") carry `.sma-note`, shown only under `body.show-around`,
+   which is kept in sync at bootstrap, on the toggle, and on panel render.
+5. **First-install defaults:** `fun_mode` and `show_me_around` serde defaults
+   flipped to false (and the `Default` impl), and every frontend read flipped
+   from `!== false` to `=== true` — a missing field must read as OFF now. The
+   owner's own config already carries explicit values, so nothing changes for
+   him; new installs meet plain, quiet controls and opt INTO the personality.
+
+**Exact files.** `src/components/settings-panel.ts`, `src/styles.css`,
+`src/styles/characters.css`, `src/main.ts`, `src/sfx.ts`,
+`src/components/special-cards.ts`, `src-tauri/src/config/schema.rs`.
+
+**Generalise this.** Three classes:
+- *State that lives in the DOM dies with the DOM.* Anything `innerHTML`-
+  rebuilt must snapshot/restore its open/selected/scrolled state, or that
+  state silently resets on every render.
+- *An entrance animation on a re-rendered subtree replays on every render.*
+  Gate entrances on an explicit "fresh" marker, never on element creation.
+- *A CSS animation overrides same-property declarations.* If a property must
+  stay under declaration control (a threshold, a toggle), the animation may
+  not touch that property.
+
+---
+
+## PROBLEM 152 — Smart Search did what v11 did, which is not what the owner wanted; and its '/' never actually pressed a key
+
+**Symptom, from the owner:** *"smart search description is wrong; in WhatsApp
+it goes to the box of start-a-new-chat instead of going to type a message; in
+Discord it goes to 'where would you like to go' instead of the message box;
+inside Brave even though I am using YouTube, pressing it doesn't go to the
+search of YouTube, nor does it work on hundreds of other sites."* Plus:
+*"where's scroll bottom in special keys?"* and the board's ↓ key opened Scroll
+TOP's card.
+
+**Three distinct faults.**
+
+1. **WhatsApp/Discord behaved AS DESIGNED — and the design was v11's.** The
+   gold standard's `FocusInputEngine()` sends Ctrl+F (WhatsApp chat search)
+   and Ctrl+K (Discord switcher); the Rust port mirrored it faithfully, and
+   the card copy ("searches the web for the text you've highlighted") was the
+   lab's and described neither. The owner has now redefined the feature: chat
+   apps must land in the MESSAGE BOX. Neither app has a focus-compose
+   shortcut, so the engine sends ESC — both apps return focus to the compose
+   input once transient panels close. **This diverges from v11 on the owner's
+   explicit order** — recorded so nobody "fixes" it back to match v11.
+2. **YouTube '/' was injected as TEXT, not as a KEY.** v11's AHK `Send("/")`
+   presses the physical key; the Rust port used `KEYEVENTF_UNICODE`, which
+   synthesises a text character on VK 0 — and sites that bind their shortcut
+   to a physical keydown ignore text input. `send_slash_class_key()` now maps
+   the char through the CURRENT layout with `VkKeyScanW` (Shift wrapped when
+   the layout needs it, unicode fallback only when the layout cannot type the
+   char at all) and sends a real down/up, cookie-tagged as always.
+3. **Ordinary sites now get the ADDRESS BAR** (Ctrl+L — the owner's pick):
+   there is no universal "focus this site's search box" key, and '/' silently
+   dies on most of his "hundreds of sites". YouTube/Spotify keep '/',
+   Gemini keeps its sequence, Explorer keeps Ctrl+E, generic apps keep Ctrl+F.
+   Every press now logs `smart_search: proc= title= -> decision`, because
+   "does nothing on YouTube" and "never fired" used to read identical.
+
+**Scroll Bottom** joined the tray (␣ ↓↓, its own card, 9 chips now) and the
+board's ↓ key maps to it — it had been sharing Scroll Top's card via
+`down: "up"` in `BOARD_TO_SPECIAL`.
+
+**Exact files.** `src-tauri/src/engine/actions/focus_engine.rs`,
+`src/components/special-cards.ts`.
+
+**Honest limit:** injection cannot be exercised from the agent shell (UIPI +
+container, PROBLEM 143), so the retargeted behaviour is **hand-test items**
+for the owner: ␣, on YouTube-in-Brave, on a plain site, on a new tab, in
+WhatsApp, in Discord. The log line will name the decision either way.
+
+**Generalise this.** *"Injected the character" and "pressed the key" are
+different events, and web pages can tell them apart.* Anything meant to
+trigger a page's keyboard shortcut must send the layout-mapped virtual key,
+not a unicode packet. And: *when behaviour is a faithful port of a gold
+standard the owner has since outgrown, record the divergence AS a decision* —
+otherwise the next session restores the old behaviour in the name of fidelity.
+
+---
+
+## Measurement trap (2026-08-20) — a hit-test check that read the wrong element
+
+Verifying PROBLEM 150's "hidden constellations take no presses", the harness
+asked `getComputedStyle(hiddenSvg).pointerEvents` and got `"none"`. It was
+right about that element and wrong about the behaviour: `buildCon` puts an
+**inline** `pointer-events: auto` on the hit rect and on every halo circle —
+that is what makes a 3px star pressable — and an inline style beats a plain
+rule, so the CHILDREN still took every press. The fix is one selector
+(`.sky-con-wrap.is-hidden .sky-con *` with `!important`); the lesson is the
+check, not the CSS.
+
+**Generalise this.** *Hit-testing happens on the deepest element under the
+cursor, so a pointer-events check must be made on the element that actually
+receives the press, not on its container.* When the container's children carry
+their own inline pointer-events, the container's computed value tells you
+nothing.
+
+An 8-agent adversarial audit of this session's work against the specs found
+six further real defects — the moon's wash/maria blurs left unscaled while
+every sibling px was multiplied by 0.75, the moonbeam missing the 13s weather
+transition its own docstring claimed, the constellation fade using `linear`
+where the lab says `ease-in-out`, the stars never growing +0.5 when lit, and
+cards on `<body>` closing the popover underneath them. All are fixed in
+1.0.61. The audit also REFUTED several confident-sounding findings (the ship's
+320px width, the 0.75 world scale, the 0.85 constellation scale), which is the
+point of running the verify pass rather than acting on the first list.

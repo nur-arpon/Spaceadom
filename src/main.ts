@@ -110,6 +110,7 @@ async function bootstrap(): Promise<void> {
 
   // Theme first, so nothing paints in the wrong palette then snaps.
   applyLook();
+  document.body.classList.toggle("show-around", appConfig.show_me_around === true);
   applySkyMode(appConfig.hide_keyboard === true);
   wireAmbientPause();
   wireSkyEscape();
@@ -301,7 +302,7 @@ export function applyTheme(dark: boolean): void {
  */
 export function applyLook(): void {
   const theme = appConfig?.theme || (appConfig?.dark_mode ? "starry" : "earthy");
-  const fun = appConfig?.fun_mode !== false;
+  const fun = appConfig?.fun_mode === true;   // off-by-default since 2026-08-20
   document.body.dataset.theme = theme;
   document.body.dataset.fun = fun ? "on" : "off";
   applyTheme(theme !== "earthy");
@@ -344,7 +345,7 @@ export async function leaveSkyMode(): Promise<void> {
   appConfig.hide_keyboard = false;
   // Escape and the return button leave by this path; the settings switch has
   // its own. Same falling sweep either way (sounds.js §8a, "exiting a mode").
-  if (appConfig.fun_mode !== false) sfx.spaceFall();
+  if (appConfig.fun_mode === true) sfx.spaceFall();
   applySkyMode(false);
   await persistConfig();
 }
@@ -586,8 +587,13 @@ function wirePopovers(): void {
     el.addEventListener("click", (e) => e.stopPropagation()),
   );
 
-  // Click anywhere on the stage closes them all.
-  document.getElementById("stage")!.addEventListener("click", () => closeAllPopovers());
+  // Click anywhere OUTSIDE a popover closes them all. On DOCUMENT, not on
+  // #stage: in Starry night with Fun on, #stage is pointer-events:none (the
+  // PROBLEM 146 carve-out), so a click on empty sky never reached a #stage
+  // listener and the panels simply would not close — the owner's exact report.
+  // Everything that must survive its own click already stops propagation
+  // (PROBLEM 98), so the only clicks that arrive here are genuine "elsewhere".
+  document.addEventListener("click", () => closeAllPopovers());
 }
 
 function closeAllPopovers(): void {
@@ -849,6 +855,14 @@ function renderSpecials(): void {
     });
     tray.appendChild(item);
   });
+
+  // Teaching prose, visible only while "Show me around" is on (the owner's
+  // choice between "a button that opens all the cards" and "just tell them
+  // the chips are pressable" — this is the second, simpler one).
+  const note = document.createElement("div");
+  note.className = "sma-note specials-note";
+  note.textContent = "Press any of these to read what it does — and try them out.";
+  tray.appendChild(note);
 }
 
 // ---------------------------------------------------------------------------

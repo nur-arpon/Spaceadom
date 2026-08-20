@@ -25,7 +25,7 @@ export function bindSfxConfig(get: () => AppConfig | null): void {
 
 export const sfx = new Sfx({
   enabled: () => _get()?.sound_enabled === true,
-  fun: () => _get()?.fun_mode !== false,
+  fun: () => _get()?.fun_mode === true,   // off-by-default since 2026-08-20
   volume: () => 40,
 });
 
