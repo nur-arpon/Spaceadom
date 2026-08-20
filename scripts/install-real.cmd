@@ -17,7 +17,7 @@ setlocal
 set ROOT=D:\Claude-Projects\SpaceToggle-V14
 set OUT=%ROOT%\install-check.txt
 set PROOF=%ROOT%\install-proof.txt
-set SETUP=%ROOT%\src-tauri\target\release\bundle\nsis\Spaceadom_1.0.68_x64-setup.exe
+set SETUP=%ROOT%\src-tauri\target\release\bundle\nsis\Spaceadom_1.0.69_x64-setup.exe
 
 > "%OUT%" echo === install-real.cmd ===
 >>"%OUT%" echo when: %DATE% %TIME%

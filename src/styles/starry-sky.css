@@ -179,10 +179,13 @@
      a CSS px in here and its children is a real px on the display. Position is
      pre-divided by 0.75 because `left`/`bottom` resolve BEFORE the element's
      own transform.  screen left -120px, 120px above the viewport bottom. */
-  left: -160px !important;
-  bottom: 160px !important;
-  width: 500px !important;
-  height: 240px !important;
+  /* storm-clouds.md §1: left -110px, bottom 150px, 700x260 — in REAL screen
+     pixels. Pre-divided by 0.75 because `left`/`bottom` resolve before the
+     element's own transform. */
+  left: -146.667px !important;
+  bottom: 200px !important;
+  width: 700px !important;
+  height: 260px !important;
   transform: scale(1.33333);
   transform-origin: left bottom;
 }
@@ -271,6 +274,11 @@
    stops advancing instead. */
 body.sky-frozen #st-sky *,
 body.is-blurred #st-sky * { animation-play-state: paused !important; }
+
+/* storm-clouds.md §5 — the bolt is REMOVED under reduced motion, not merely
+   stopped: frozen mid-strike it is a bright blob sitting over the ship. */
+@media (prefers-reduced-motion: reduce) { #st-clouds [data-storm="bolt"] { display: none; } }
+.reduced-motion #st-clouds [data-storm="bolt"] { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
   .sky-con-layer, .sky-ocean *, .sky-moon * { animation: none !important; }

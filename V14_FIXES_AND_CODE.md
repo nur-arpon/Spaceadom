@@ -8980,3 +8980,62 @@ already there. Also: when two independent scalings act on the same appearance �
 here a 0.75 geometry scale and a 1.66 brightness multiplier — a value copied
 from a spec that assumed neither is going to be wrong, and it will be wrong
 quietly.
+
+### 5f. The storm, settled — `design/storm-clouds.md`, transcribed
+
+**The owner, after three failed attempts here:** *"use this, you got wrong
+enough times."* He wrote a standalone spec, `design/storm-clouds.md`, and that
+file is now the authority for this component. My 1.0.68 deviations — a 500px
+bank, repositioned masses, a greyed ramp — are gone.
+
+**What each attempt got wrong, because the sequence is the lesson:**
+
+| # | What I did | Why it was wrong |
+| --- | --- | --- |
+| 1.0.64 | Blamed blur cost, added a low-power mode | Triggered on software compositing — which is his machine's NORMAL state. Wrong signal entirely. |
+| 1.0.66 | Moved the storm out of the scaled world | Right size, wrong scene: a full bank over a 0.75 ship reads as sky, not as the ship's weather. |
+| 1.0.68 | Re-authored the masses myself to "cluster on the ship" | Invented geometry to satisfy a description, when a spec for it already existed. Also greyed the ramp, which attacks the one thing §2 is emphatic about. |
+| 1.0.69 | Transcribed `storm-clouds.md` | — |
+
+**Two rules in that spec that a well-meaning tidy-up destroys, and 1.0.68
+destroyed one of them:**
+
+- **§2: storm cloud on a night sky must be LIGHTER than the sky in its
+  mid-tones, not darker.** *"The first attempt used near-black masses and they
+  were completely invisible against a #131a2e sky."* The `48,62,96` and
+  `60,76,112` steps are what make the massing read; only the innermost core is
+  darker than the ground. My "a little more greyish" change pulled exactly
+  those steps toward slate.
+- **§2: lopsided radii are load-bearing.** A cloud on `border-radius: 50%` is a
+  smudged circle. All four corners must differ.
+
+Plus §2's falloff reaching 0 alpha at **88%**, before the element edge — stop it
+short and the blur reveals a circular seam.
+
+**Scale.** The container counter-scales out of the ocean world's 0.75, so
+§1's `left: -110px; bottom: 150px; 700x260` are REAL screen pixels and the blur
+radii are not resampled by an ancestor transform. It stays a CHILD of the
+world, in DOM order after the water and before the ship, which is §1's
+requirement and gives the checklist's *"masts and rigging read in front of the
+cloud; water reads behind it"*.
+
+**Verified against the spec's own §6 checklist**, measured in the harness:
+
+| Check | Result |
+| --- | --- |
+| container geometry | `left -110, 150px above the bottom, 700x260` — §1 exactly |
+| six masses | `320x158 / 360x142 / 268x110 / 300x128 / 230x104 / 214x98` — §2 table exactly |
+| blur radii | `12 / 15 / 10 / 13 / 12 / 14` — §2 exactly |
+| "the six masses do not pulse together" | durations `23/31/19/27/35/29`, all distinct |
+| masses form one bank, not spots | overlaps per mass `3, 5, 4, 3, 2, 3` — minimum 2 |
+| "masts read in front, water behind" | DOM order water(0) → clouds(9) → ship(10) |
+| lightning | `360x158`, `lightning 17s` |
+| moonlight thins the bank | container `opacity 0.782` at pw 0.34 = `1 − .34×.64`, `transition 13s` |
+| reduced motion | the bolt is REMOVED, not frozen — a stopped strike is a lamp over the ship |
+
+**Generalise this.** *When a component has been wrong three times, the problem
+is the absence of a spec, not the quality of the attempts.* Each fix here was a
+reasonable response to the last complaint and none of them converged, because
+"looks scary", "too far around" and "like spots" are descriptions of a result,
+not of a target. The moment a file existed with numbers in it, the work took
+one pass and was checkable line by line. **Ask for the spec earlier.**

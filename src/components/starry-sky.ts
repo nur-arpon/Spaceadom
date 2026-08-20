@@ -442,76 +442,68 @@ function injectHeave(): HTMLStyleElement {
 }
 
 /**
- * The storm — OWNER-DIRECTED, not the lab's (2026-08-20).
+ * The storm — `design/storm-clouds.md`, transcribed.
  *
- * The lab's six masses are spread across a 700px band, which is right for a
- * lab canvas and wrong here: this app's galleon renders at 0.75, so the lab's
- * bank reached far past the ship on both sides. The owner's brief, verbatim:
+ * The owner handed over that standalone spec after three wrong attempts here,
+ * with one instruction: *"use this, you got wrong enough times."* So every
+ * number below is its §5 drop-in, verbatim, and the deviations I invented in
+ * 1.0.68 (a 500px bank, repositioned masses, a greyed ramp) are GONE.
  *
- *   *"the clouds have gone too far around, the clouds need to come behind and
- *   beside the ship… the main job of the cloud and storms lightnings is to
- *   make the ship atmosphere look scary, whereas you spread it too far, and
- *   the clouds need to be a little bit more greyish, and the clouds right now
- *   have visible big big gaps in between instead of overlapping which makes
- *   them look like spots rather than helping make the atmosphere scarier."*
+ * Two things the spec is emphatic about, both of which a "tidy-up" would undo:
  *
- * Three changes, one per sentence:
+ *  - **Storm cloud on a night sky must be LIGHTER than the sky in its
+ *    mid-tones, not darker.** §2: "The first attempt used near-black masses
+ *    and they were completely invisible against a #131a2e sky." The
+ *    `48,62,96` and `60,76,112` steps are what make the massing read. Only the
+ *    innermost core is darker than the ground. My greyed ramp pulled those
+ *    steps toward slate and cost exactly that.
+ *  - **Lopsided radii are load-bearing.** A cloud on `border-radius: 50%` is a
+ *    smudged circle; all four corners must differ.
  *
- * 1. CLUSTERED ON THE SHIP. The container is 500x240 at screen left -120px
- *    (was 700x260 at -110). The galleon occupies roughly x -33..240 on
- *    screen, so the bank now covers it and reaches a little past its bow —
- *    "behind and beside", not across the whole window.
+ * The falloff reaching 0 alpha at 88% — before the element edge — is also
+ * deliberate: stop it short and the blur reveals a circular seam.
  *
- * 2. OVERLAPPING, NOT SCATTERED. Every mass shares area with at least two
- *    others, so they read as ONE body of weather. The lab's spacing left
- *    daylight between them, and at this tighter width that daylight is what
- *    made them "look like spots". Checked by arithmetic, not by eye — the
- *    rectangles form one connected chain (see the test in the harness).
- *
- * 3. GREYER. The lab's ramp is navy (10,15,30 -> 24,34,60 -> 48,62,96 ->
- *    60,76,112). Desaturated toward slate (18,20,26 -> 38,42,52 -> 72,78,92
- *    -> 96,102,118), rim cooled to (178,186,202). The GRADIENT STRUCTURE is
- *    untouched — same two radials, same stop positions — so only the hue
- *    moved, and night-scene4.md's rule still holds: storm cloud on a night
- *    sky must be LIGHTER than the sky in its mid-tones or the massing does
- *    not read at all.
- *
- * Blur radii and drift durations are the lab's, unchanged.
+ * SCALE: these are REAL SCREEN PIXELS. The container counter-scales out of the
+ * ocean world's 0.75 (see #st-clouds in starry-sky.css), so `left: -110px;
+ * bottom: 150px; 700x260` means what the spec says it means, and the blur
+ * radii are not resampled by an ancestor transform. It stays a CHILD of the
+ * world, after the water layers and before the ship, so the masts and rigging
+ * read in front of the bank and the water behind it (§1).
  */
 const STORM_MASSES: [number, number, number, number, string, number, number][] = [
-  // left, bottom, w, h, border-radius, blur px, drift s
-  [-70,  96, 190,  96, "48% 52% 56% 44%", 14, 29],
-  [-30,  40, 260, 150, "58% 42% 46% 54%", 12, 23],
-  [ 20,   6, 230, 108, "52% 48% 44% 56%", 10, 19],
-  [ 80,  86, 280, 138, "46% 54% 58% 42%", 15, 31],
-  [175,  26, 240, 124, "44% 56% 52% 48%", 13, 27],
-  [255,  78, 200, 100, "56% 44% 48% 52%", 12, 35],
+  // left, bottom, w, h, border-radius, blur px, drift s   — storm-clouds.md §2
+  [   0,  44, 320, 158, "58% 42% 46% 54%", 12, 23],
+  [ 160, 100, 360, 142, "46% 54% 58% 42%", 15, 31],
+  [  70,   4, 268, 110, "52% 48% 44% 56%", 10, 19],
+  [ 320,  24, 300, 128, "44% 56% 52% 48%", 13, 27],
+  [ 460,  88, 230, 104, "56% 44% 48% 52%", 12, 35],
+  [ -50, 108, 214,  98, "48% 52% 56% 44%", 14, 29],
 ];
 
-/** Alpha of the mid/outer/rim steps per mass — the lab varies these so the
- *  bank has depth instead of six identical stamps. Index-matched above. */
-const STORM_ALPHA: [number, number, number][] = [
-  [0.52, 0.21, 0.28],
-  [0.73, 0.29, 0.39],
-  [0.62, 0.25, 0.34],
-  [0.67, 0.27, 0.36],
-  [0.66, 0.27, 0.36],
-  [0.55, 0.21, 0.29],
+/** Per-mass alphas A/B/C/D from storm-clouds.md §2, same row order. */
+const STORM_ALPHA: [number, number, number, number][] = [
+  [0.90, 0.73, 0.29, 0.39],
+  [0.90, 0.67, 0.27, 0.36],
+  [0.90, 0.62, 0.25, 0.34],
+  [0.90, 0.66, 0.27, 0.36],
+  [0.78, 0.55, 0.21, 0.29],
+  [0.76, 0.52, 0.21, 0.28],
 ];
 
 function stormHtml(): string {
   const masses = STORM_MASSES.map(([x, y, w, h, radius, blur, drift], i) => {
-    const [mid, outer, rim] = STORM_ALPHA[i];
+    const [a, b, c, d] = STORM_ALPHA[i];
     return `<span data-storm="${i}" style="position:absolute;left:${x}px;bottom:${y}px;width:${w}px;height:${h}px;` +
       `border-radius:${radius};background:` +
-      `radial-gradient(ellipse 58% 62% at 42% 62%,rgba(18,20,26,.92),rgba(38,42,52,0.90) 38%,` +
-      `rgba(72,78,92,${mid}) 58%,rgba(96,102,118,${outer}) 74%,rgba(96,102,118,0) 88%),` +
-      `radial-gradient(ellipse 44% 32% at 66% 22%,rgba(178,186,202,${rim}),rgba(178,186,202,0) 68%);` +
+      `radial-gradient(ellipse 58% 62% at 42% 62%,rgba(10,15,30,.92),rgba(24,34,60,${a}) 38%,` +
+      `rgba(48,62,96,${b}) 58%,rgba(60,76,112,${c}) 74%,rgba(60,76,112,0) 88%),` +
+      `radial-gradient(ellipse 44% 32% at 66% 22%,rgba(158,182,228,${d}),rgba(158,182,228,0) 68%);` +
       `filter:blur(${blur}px);animation:cloudDrift ${drift}s ease-in-out infinite alternate"></span>`;
   }).join("");
 
-  // Distant lightning — the lab's span, re-centred on the tighter bank.
-  const bolt = `<span data-storm="bolt" style="position:absolute;left:40px;bottom:56px;width:300px;height:150px;` +
+  // §3 — two strikes per 17s cycle, the first a double-flicker. Gone in under
+  // half a second; a lingering flash reads as a lamp, not lightning.
+  const bolt = `<span data-storm="bolt" style="position:absolute;left:100px;bottom:56px;width:360px;height:158px;` +
     `border-radius:50%;background:radial-gradient(ellipse 50% 44% at 44% 42%,rgba(214,231,255,.55),` +
     `rgba(186,208,252,.18) 42%,transparent 72%);filter:blur(12px);animation:lightning 17s linear infinite"></span>`;
 
