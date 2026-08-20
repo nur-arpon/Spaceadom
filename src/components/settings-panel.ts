@@ -163,15 +163,28 @@ function render(): void {
 
 
     <div class="divider" style="margin:14px 0 10px;"></div>
-    <div class="set-title" style="font-size:13px; margin-bottom:8px;">Conflicts</div>
+    <button type="button" class="set-title set-row-label" data-desc="conflicts"
+            aria-expanded="false" style="font-size:13px; margin-bottom:8px;">Conflicts</button>
+    ${descBox("conflicts")}
     <div id="set-conflicts"></div>
 
     <div class="set-actions">
       <button class="btn" id="set-reset">${_armed === "def" ? "Confirm" : resetLabel()}</button>
       <button class="btn btn-danger" id="set-clear">${_armed === "clr" ? "Confirm clear" : "Clear all"}</button>
     </div>
+    ${descBox("reset")}
+    ${descBox("clear")}
     <button class="btn" id="set-presets" style="width:100%; justify-content:center; margin-top:7px; height:34px; font-size:12px;">Restore preset profiles</button>
+    ${descBox("presets")}
     <button class="btn" id="set-logs" style="width:100%; justify-content:center; margin-top:7px; height:34px; font-size:12px;">Open log folder</button>
+    ${descBox("logs")}
+    <!-- The four action buttons cannot BE their own description trigger: their
+         press already does something destructive or irreversible. Their
+         descriptions ride the "Show me around" convoy and the ⓘ row below
+         instead, which is why they have a box but no data-desc label. -->
+    <button type="button" class="set-help-all sma-note" id="set-help-all">
+      ⓘ What do these buttons do?
+    </button>
   `;
 
   // One render, one animation. Anything after this point sees a clean slate,
@@ -363,6 +376,17 @@ function render(): void {
     } catch (_) {
       showToast("⚠️ Could not restore the presets");
     }
+  });
+
+  // The four action buttons explain themselves through this one row, because
+  // pressing THEM is already an action (reset, clear, restore, open folder) —
+  // a destructive control must never double as its own help trigger.
+  panelEl.querySelector("#set-help-all")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const ids = ["reset", "clear", "presets", "logs"];
+    const opening = !isDescOpen("reset");
+    if (opening) sfx.bloomOpen(); else sfx.bloomClose();
+    ids.forEach((id, i) => window.setTimeout(() => setDescOpen(id, opening), i * CONVOY_STAGGER_MS));
   });
 
   panelEl.querySelector("#set-logs")!.addEventListener("click", () => {
@@ -752,7 +776,8 @@ function typingSpeedRow(wpm: number): string {
   return `
     <div class="set-row" style="flex-direction:column; align-items:stretch; gap:4px; cursor:default; margin-bottom:10px;">
       <div style="display:flex; align-items:baseline; gap:8px;">
-        <span class="set-row-label">Typing speed</span>
+        <button type="button" class="set-row-label" data-desc="wpm"
+                aria-expanded="false">Typing speed</button>
         <span style="font-size:11px; font-weight:700; color:var(--st-accent-deep);"
               id="set-wpm-val">${typingTierName(wpm)} · ${wpm} wpm</span>
       </div>
@@ -764,6 +789,7 @@ function typingSpeedRow(wpm: number): string {
         If apps launch by accident while you type, choose a SLOWER speed —
         Spaceadom then waits longer before treating Space+key as a shortcut.
       </span>
+      ${descBox("wpm")}
     </div>`;
 }
 
@@ -774,12 +800,14 @@ function sliderRow(
   return `
     <div class="set-row" style="flex-direction:column; align-items:stretch; gap:4px; cursor:default; margin-bottom:10px;">
       <div style="display:flex; align-items:baseline; gap:8px;">
-        <span class="set-row-label">${label}</span>
+        <button type="button" class="set-row-label" data-desc="${id}"
+                aria-expanded="false">${label}</button>
         <span style="font-size:11px; font-weight:700; color:var(--st-accent-deep);" id="set-${id}-val">${value}${unit}</span>
       </div>
       ${sliderShell(id, `
         <input type="range" id="set-${id}" min="${min}" max="${max}" step="${step}" value="${value}"
                data-unit="${unit}" />`, min, max, value)}
+      ${descBox(id)}
     </div>`;
 }
 

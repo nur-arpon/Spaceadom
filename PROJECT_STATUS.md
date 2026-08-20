@@ -1,6 +1,51 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-20 | late (Claude Fable 5) - Smart Search stops guessing, and eight descriptions that were unreachable
+
+Full technical record: PROBLEMS 153-154 in `V14_FIXES_AND_CODE.md`. Shipped as
+1.0.62, installed and verified on the REAL machine.
+
+Nur tested 1.0.61's Smart Search and reported the results app by app: Discord,
+YouTube-in-browser and a new browser tab worked; WhatsApp, Gemini-in-browser
+and the Spotify app did not. **That table splits perfectly along one line:
+every app where the keystroke was DOCUMENTED worked, and every app where I
+guessed one failed.** WhatsApp and Spotify publish no shortcut for their main
+input, and no browser key can reach a web app's own prompt box - so there was
+no better guess to make.
+
+The fix is to stop guessing: ask UI Automation, the same accessibility tree
+screen readers use, where the text box actually is. Electron (WhatsApp,
+Discord, Spotify) and Chromium (every browser page, Gemini included) both
+expose their inputs through it. Chat and prompt apps take the bottom-most box,
+everything else the top-most. Three filters are load-bearing - keyboard
+focusable, on-screen, not tiny - because Chromium trees are full of hidden
+inputs and focusing one looks exactly like the feature doing nothing.
+
+**Everything that already worked keeps its fast path**, so a tree walk is only
+paid where a keystroke cannot work, and UIA failure falls back to the old
+shortcut. It can only add behaviour. It runs on the engine actor and never on
+the hook thread, where a few hundred milliseconds would get the hook evicted.
+
+**Eight descriptions existed and could not be opened.** The DESC map has had
+copy for the sliders, Conflicts and the four action buttons all along, but only
+toggle rows and the theme pill render a pressable label - so that copy shipped
+unreachable. The sliders and the Conflicts heading are pressable now. The four
+action buttons deliberately are NOT their own trigger, because pressing them
+already resets, clears, restores or opens a folder; they share one small
+"What do these buttons do?" row instead.
+
+**The invisible keyboard was still taking presses** because a descendant's
+`pointer-events: auto` beats its ancestor's `none` - sky mode disabled
+`#keyboard-outer`, and the starry-night carve-out had re-enabled
+`#keyboard-scale` inside it. Two features managing pointer-events over the same
+subtree, and the deeper one wins regardless of which matters more.
+
+**NOT verified - hand-test items.** Injection cannot be exercised from this
+shell, so Smart Search needs Nur's own presses: WhatsApp, Spotify's app,
+Gemini in the browser, and a re-check that Discord/YouTube/new-tab still work.
+Every press now logs which branch it took, so a failure names its own cause.
+
 ## Update: 2026-08-20 | evening (Claude Fable 5) - the bug round, and the night scene rebuilt from the v4 handoff
 
 Full technical record: PROBLEMS 149-152 in `V14_FIXES_AND_CODE.md`. Shipped as

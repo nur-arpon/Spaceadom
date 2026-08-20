@@ -1,6 +1,6 @@
 [package]
 name = "spaceadom"
-version = "1.0.61"
+version = "1.0.62"
 description = "Spaceadom — hold Space + tap a key to launch, focus or minimise any app"
 authors = ["Spaceadom"]
 edition = "2021"
@@ -95,6 +95,12 @@ features = [
   # Feature-gated per-API as always: without this the import fails as
   # "could not find FileSystem in Storage" on a path that plainly exists.
   "Win32_Storage_FileSystem",
+  # PROBLEM 153 — UI Automation, used by Smart Search to FIND the foreground
+  # window's text input instead of guessing a keyboard shortcut for it. Every
+  # app where the shortcut was a guess (WhatsApp, Spotify, Gemini) failed;
+  # asking the accessibility tree works everywhere, including Electron and
+  # browser pages.
+  "Win32_UI_Accessibility",
   # Shell execute (runas elevation)
   "Win32_UI_Shell_Common",
   # SHGetPropertyStoreForWindow + PKEY_AppUserModel_ID — how Store/UWP

@@ -645,6 +645,21 @@ body.nocturne #key-detail-panel { box-shadow: 0 24px 60px rgba(0, 0, 0, .55); }
    is kept in sync by applySkyMode's sibling in main.ts and the toggle itself. */
 .sma-note { display: none; }
 body.show-around .sma-note { display: block; }
+.set-help-all {
+  width: 100%;
+  margin-top: 9px;
+  padding: 0;
+  background: none;
+  border: 0;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--st-text-dim);
+  cursor: pointer;
+  text-align: center;
+}
+.set-help-all:hover { color: var(--st-accent-deep); }
+.set-help-all:focus-visible { outline: 2px solid var(--st-accent-brd); outline-offset: 3px; border-radius: 4px; }
+
 .specials-note {
   flex-basis: 100%;
   text-align: center;
@@ -1066,6 +1081,12 @@ body.sky-mode .dock {
   pointer-events: none;
   transition: opacity 420ms var(--ease-out), transform 420ms var(--ease-out);
 }
+/* …and everything INSIDE them. The rule above only reaches #stage's direct
+   children, but the starry-night carve-out (themes.css) re-enables
+   pointer-events on #keyboard-scale and other leaves — and a child's
+   `pointer-events: auto` beats its parent's `none`. So an invisible keyboard
+   was still taking key presses in sky mode (owner, 2026-08-20). */
+body.sky-mode #stage > *:not(#sky-return) * { pointer-events: none !important; }
 body:not(.sky-mode) #stage > *,
 body:not(.sky-mode) .topbar,
 body:not(.sky-mode) .dock {

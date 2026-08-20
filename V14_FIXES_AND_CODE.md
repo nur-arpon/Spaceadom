@@ -8382,3 +8382,135 @@ cards on `<body>` closing the popover underneath them. All are fixed in
 1.0.61. The audit also REFUTED several confident-sounding findings (the ship's
 320px width, the 0.75 world scale, the 0.85 constellation scale), which is the
 point of running the verify pass rather than acting on the first list.
+
+---
+
+## PROBLEM 153 — Smart Search: every app where the shortcut was a GUESS failed, so stop guessing and find the box
+
+**Symptom, from the owner, testing 1.0.61:** *"space+, worked on discord,
+youtube inside browser, worked on browser new page, but not on whatsapp, nor in
+gemini chat inside browser"* — and then *"also didn't work in spotify app"*.
+
+**Root cause, and the pattern is exact.** Split the results by where the key
+came from:
+
+| App | Key sent | Where the key came from | Result |
+| --- | --- | --- | --- |
+| Discord | Esc | tested, real | works |
+| YouTube in browser | `/` | documented by YouTube | works |
+| New browser tab | Ctrl+L | documented by the browser | works |
+| WhatsApp | Esc | **a guess** | fails — backs out to the chat list |
+| Spotify app | Ctrl+F | **a guess** | fails — not its search |
+| Gemini in browser | Esc then `i` | **v11's guess, ported faithfully** | fails |
+
+Every documented shortcut worked; every guess failed. **There is no better
+guess available**: WhatsApp and Spotify publish no shortcut for their main
+input, and a web app's input is not the browser's to focus — no browser key
+can reach Gemini's prompt box.
+
+**The fix is to ask the accessibility tree where the box IS.** UI Automation
+is how screen readers find inputs, and both Electron (WhatsApp, Discord,
+Spotify) and Chromium (every browser page) expose theirs through it.
+
+**Exact file.** `src-tauri/src/engine/actions/focus_engine.rs`, plus
+`Win32_UI_Accessibility` in `src-tauri/Cargo.toml`.
+
+```rust
+unsafe fn focus_text_input_uia(hwnd: HWND, spot: InputSpot) -> bool {
+    let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    let uia: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?;
+    let root = uia.ElementFromHandle(hwnd)?;
+
+    // Edit FIRST, Document second: a Chromium contenteditable — Gemini's
+    // prompt, WhatsApp's compose box — reports as Document, not Edit.
+    for ctype in [UIA_EditControlTypeId, UIA_DocumentControlTypeId] {
+        let cond = uia.CreatePropertyCondition(UIA_ControlTypePropertyId,
+                                               &windows::core::VARIANT::from(ctype.0))?;
+        for el in root.FindAll(TreeScope_Descendants, &cond)? {
+            if !el.CurrentIsKeyboardFocusable()? { continue }   // caret can go there
+            if el.CurrentIsOffscreen()?          { continue }   // user can see it
+            let r = el.CurrentBoundingRectangle()?;
+            if r.right - r.left < 40 || r.bottom - r.top < 12 { continue }  // not a template
+            // InputSpot::Bottom -> largest r.top (compose box);
+            // InputSpot::Top    -> smallest r.top (search box).
+        }
+        if best.is_some() { break }
+    }
+    best.map(|el| el.SetFocus().is_ok()).unwrap_or(false)
+}
+```
+
+**Three details that are load-bearing:**
+
+1. **Document as well as Edit.** Searching only for `Edit` finds nothing in
+   WhatsApp or Gemini — their inputs are contenteditables, which UIA reports
+   as `Document`.
+2. **`InputSpot`.** With several text boxes on screen there is no
+   app-independent way to pick, so position decides: chat and prompt apps use
+   the BOTTOM-most box (the compose field), everything else the TOP-most (the
+   search field).
+3. **The three filters are not tidiness.** Chromium trees are full of
+   keyboard-unreachable, offscreen and zero-sized inputs; focusing one of them
+   looks exactly like the feature doing nothing.
+
+**Where it runs matters.** `FindAll` over a Chromium descendant tree costs
+tens to a few hundred milliseconds. That is fine on the ENGINE actor and would
+be fatal on the hook thread, where anything near a second gets the hook
+evicted by Windows (PROBLEM 134's law). This is engine-side only.
+
+**Everything confirmed working keeps its fast path** — Discord's Esc,
+YouTube's `/`, the address bar — so a tree walk is only paid where a key
+cannot work, and UIA failure falls back to the old shortcut, which means this
+can only add behaviour.
+
+**Generalise this.** *When a table of results splits cleanly along "was this
+value researched or invented?", the fix is not a better invention — it is a
+mechanism that does not need one.* Six apps, six guesses, three failures, and
+the three failures were exactly the three guesses.
+
+**Honest limit:** injection cannot be exercised from the agent shell (UIPI +
+container, PROBLEM 143), so this is a HAND-TEST item. Every press logs its
+branch — `smart_search: proc= title= -> UIA -> bottom-most input` or
+`-> UIA found nothing -> Ctrl+F` — so a failure names its own cause.
+
+---
+
+## PROBLEM 154 — settings with descriptions nobody could open, and an invisible keyboard that still took presses
+
+**Symptoms, from the owner:** *"guide hud and opacity floor needs [description]
+and there are other stuff in the settings which need description too"*; and
+*"when keyboard hidden, pressing in the place of keyboard still gets keyboard
+presses"*.
+
+**Root cause 1 — the copy existed and had no trigger.** `DESC` already carried
+all sixteen entries (wpm, huddelay, opacity, conflicts, reset, clear, presets,
+logs among them). But only `toggleRow()` and the theme pill emit a
+`data-desc` label; `sliderRow()`, `typingSpeedRow()`, the Conflicts heading and
+the four action buttons render a plain `<span>` or a `<button>` that does
+something else. Eight descriptions were written, shipped, and unreachable.
+
+Sliders and the Conflicts heading now render a `data-desc` button plus their
+`descBox`. **The four action buttons deliberately do NOT become their own
+trigger** — pressing them already resets, clears, restores or opens a folder,
+and a destructive control must never double as its own help. They share one
+`ⓘ What do these buttons do?` row that opens all four as a small convoy.
+
+**Root cause 2 — a child's `pointer-events: auto` beats its parent's `none`.**
+Sky mode sets `pointer-events: none` on `#stage`'s direct children, which
+covers `#keyboard-outer`. But the starry-night carve-out (PROBLEM 146)
+re-enables it on `#keyboard-scale`, a descendant — and CSS has no inheritance
+contest here: the deeper declaration simply wins. So the invisible board went
+on taking every press.
+
+```css
+/* the rule that only reached the direct children */
+body.sky-mode #stage > *:not(#sky-return) { pointer-events: none; }
+/* …and the one that reaches what the carve-out re-enabled */
+body.sky-mode #stage > *:not(#sky-return) * { pointer-events: none !important; }
+```
+
+**Generalise this.** *`pointer-events: none` on an ancestor is a default, not a
+lock.* Any descendant may opt back in, and two features that each manage
+pointer-events over the same subtree will silently fight — the one that runs
+deeper wins, regardless of which is conceptually "more important". When a mode
+must make a subtree inert, it has to say so about the descendants too.

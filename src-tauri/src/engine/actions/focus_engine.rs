@@ -68,19 +68,26 @@ unsafe fn focus_engine_win32() -> String {
         || proc_name.contains("firefox");
 
     if is_browser {
-        if win_title.contains("gemini") {
-            // Escape to clear focus, then the Gemini input shortcut
-            decide("gemini: Esc + 'i'");
-            send_key(VK_ESCAPE.0, false);
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            send_slash_class_key('i');
-            return "✨ Gemini Input Focused".into();
-        } else if win_title.contains("youtube") {
+        // A chat/prompt web app: its input is the PAGE's, not the browser's,
+        // so no browser key can reach it. Ask the page's accessibility tree.
+        // (Esc + 'i' — v11's guess, ported faithfully — never worked: the
+        // owner tested it on 2026-08-20.)
+        if is_prompt_site(&win_title) {
+            if focus_text_input_uia(hwnd, InputSpot::Bottom) {
+                decide("prompt site: UIA -> bottom-most input");
+                return "✨ Chat Box".into();
+            }
+            decide("prompt site: UIA found nothing -> Ctrl+L");
+            send_ctrl(VK_L.0);
+            return "🌍 Address Bar".into();
+        }
+        if win_title.contains("youtube") {
             decide("youtube: real '/'");
             send_slash_class_key('/');
             return "📺 YouTube Search".into();
-        } else if win_title.contains("spotify") {
-            decide("spotify: real '/'");
+        }
+        if win_title.contains("spotify") {
+            decide("spotify web: real '/'");
             send_slash_class_key('/');
             return "🎵 Spotify Search".into();
         }
@@ -92,13 +99,38 @@ unsafe fn focus_engine_win32() -> String {
         return "🌍 Address Bar".into();
     }
 
-    if proc_name.contains("whatsapp") || proc_name.contains("discord") {
-        // The message box. Neither app has a focus-compose shortcut; Esc
-        // closes whatever transient panel holds focus and both apps then
-        // return it to the input you type in.
-        decide("chat app: Esc -> message box");
+    // Discord: Esc genuinely lands in the compose box — CONFIRMED working by
+    // the owner on 2026-08-20, so it keeps the fast path and never pays for a
+    // tree walk.
+    if proc_name.contains("discord") {
+        decide("discord: Esc -> message box");
         send_key(VK_ESCAPE.0, false);
         return "💬 Message Box".into();
+    }
+
+    // WhatsApp: Esc does NOT reach the compose box (owner, same test) — it
+    // backs out to the chat list. There is no published shortcut for it, so
+    // find the box.
+    if proc_name.contains("whatsapp") {
+        if focus_text_input_uia(hwnd, InputSpot::Bottom) {
+            decide("whatsapp: UIA -> bottom-most input");
+            return "💬 Message Box".into();
+        }
+        decide("whatsapp: UIA found nothing -> Esc");
+        send_key(VK_ESCAPE.0, false);
+        return "💬 WhatsApp".into();
+    }
+
+    // Spotify's own app: Ctrl+F is not its search, and the '/' that works on
+    // the WEB player does nothing here.
+    if proc_name.contains("spotify") {
+        if focus_text_input_uia(hwnd, InputSpot::Top) {
+            decide("spotify app: UIA -> top-most input");
+            return "🎵 Spotify Search".into();
+        }
+        decide("spotify app: UIA found nothing -> Ctrl+L");
+        send_ctrl(VK_L.0);
+        return "🎵 Spotify".into();
     }
 
     if proc_name.contains("explorer") {
@@ -107,10 +139,27 @@ unsafe fn focus_engine_win32() -> String {
         return "📁 Explorer Search".into();
     }
 
-    // Generic fallback
-    decide("generic: Ctrl+F");
+    // Everything else: look for the box first, and only fall back to Ctrl+F —
+    // which is a FIND bar in most apps, not their search field.
+    if focus_text_input_uia(hwnd, InputSpot::Top) {
+        decide("generic: UIA -> top-most input");
+        return "🎯 Search Focused".into();
+    }
+    decide("generic: UIA found nothing -> Ctrl+F");
     send_ctrl(VK_F.0);
     "🎯 Find/Search Focused".into()
+}
+
+/// Browser tabs whose input belongs to the PAGE and sits at the bottom.
+/// Matched on the window title, which carries the tab's title in every
+/// Chromium browser.
+#[cfg(windows)]
+fn is_prompt_site(title: &str) -> bool {
+    const PROMPT_SITES: [&str; 8] = [
+        "gemini", "chatgpt", "claude", "copilot", "perplexity",
+        "web.whatsapp", "whatsapp", "messenger",
+    ];
+    PROMPT_SITES.iter().any(|s| title.contains(s))
 }
 
 /// Press a character as a REAL key (down+up of the virtual key the current
@@ -248,4 +297,105 @@ unsafe fn get_window_title(hwnd: HWND) -> String {
     let mut buf = vec![0u16; (len + 1) as usize];
     GetWindowTextW(hwnd, &mut buf);
     String::from_utf16_lossy(&buf[..len as usize])
+}
+
+// ---------------------------------------------------------------------------
+// PROBLEM 153 — finding the text box instead of guessing its shortcut
+//
+// The owner's 2026-08-20 test of the shortcut approach, verbatim: Discord,
+// YouTube-in-browser and a new browser tab worked; WhatsApp, Spotify and
+// Gemini did not. The pattern is exact — every app where a REAL shortcut is
+// documented worked, and every app where the key was a guess failed. There is
+// no shortcut left to guess better: WhatsApp and Spotify simply do not publish
+// one for their main input, and a web app's input is not the browser's to
+// focus.
+//
+// So ask the accessibility tree where the box IS. UI Automation is how screen
+// readers do it; Electron (WhatsApp, Discord, Spotify) and Chromium (every
+// browser page, Gemini included) both expose their inputs through it.
+//
+// COST: FindAll over a Chromium descendant tree takes tens to a few hundred
+// milliseconds. That is fine HERE and nowhere else — this runs on the engine
+// actor, never on the hook thread, where anything over ~1s gets the hook
+// evicted by Windows (PROBLEM 134's law).
+// ---------------------------------------------------------------------------
+
+/// Where the app's main input lives on screen, which is the only way to pick
+/// between several text boxes without knowing the app.
+#[cfg(windows)]
+#[derive(Clone, Copy, PartialEq)]
+enum InputSpot {
+    /// Chat and prompt apps: the compose box sits at the BOTTOM.
+    Bottom,
+    /// Everything else: the search box sits at the TOP.
+    Top,
+}
+
+/// Focus the foreground window's main text input via UI Automation.
+/// Returns false if nothing usable was found — callers keep their old
+/// shortcut as the fallback, so this can only ever add behaviour.
+#[cfg(windows)]
+unsafe fn focus_text_input_uia(hwnd: HWND, spot: InputSpot) -> bool {
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, IUIAutomationElement, TreeScope_Descendants,
+        UIA_ControlTypePropertyId, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
+    };
+
+    // The engine thread may already be initialised (boss_key uses MTA); an
+    // RPC_E_CHANGED_MODE here is harmless — COM stays usable either way.
+    let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+
+    let uia: IUIAutomation = match CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
+        Ok(u) => u,
+        Err(e) => { log::warn!("smart_search: UIA unavailable ({e})"); return false; }
+    };
+    let root = match uia.ElementFromHandle(hwnd) {
+        Ok(r) => r,
+        Err(e) => { log::warn!("smart_search: ElementFromHandle failed ({e})"); return false; }
+    };
+
+    // Edit first, Document second. A Chromium contenteditable (Gemini's prompt,
+    // WhatsApp's compose box) reports as Document, not Edit — searching only
+    // for Edit is what a first attempt would miss.
+    let mut best: Option<(IUIAutomationElement, i32)> = None;
+    for ctype in [UIA_EditControlTypeId, UIA_DocumentControlTypeId] {
+        let cond = match uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &windows::core::VARIANT::from(ctype.0)) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let found = match root.FindAll(TreeScope_Descendants, &cond) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        let n = found.Length().unwrap_or(0);
+        for i in 0..n {
+            let el = match found.GetElement(i) { Ok(e) => e, Err(_) => continue };
+            // Only somewhere the caret can actually go, and only somewhere the
+            // user can actually see — an offscreen or zero-sized box is a
+            // hidden template, and focusing it looks like nothing happened.
+            if el.CurrentIsKeyboardFocusable().unwrap_or_default().as_bool() != true { continue; }
+            if el.CurrentIsOffscreen().unwrap_or_default().as_bool() { continue; }
+            let r = match el.CurrentBoundingRectangle() { Ok(r) => r, Err(_) => continue };
+            if r.right - r.left < 40 || r.bottom - r.top < 12 { continue; }
+            let score = match spot {
+                InputSpot::Bottom => r.top,      // largest top  = lowest on screen
+                InputSpot::Top => -r.top,        // smallest top = highest
+            };
+            if best.as_ref().map_or(true, |(_, b)| score > *b) {
+                best = Some((el, score));
+            }
+        }
+        if best.is_some() { break; }   // Edits win outright when any exist
+    }
+
+    match best {
+        Some((el, _)) => match el.SetFocus() {
+            Ok(()) => true,
+            Err(e) => { log::warn!("smart_search: SetFocus failed ({e})"); false }
+        },
+        None => false,
+    }
 }
