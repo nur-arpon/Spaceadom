@@ -103,8 +103,19 @@
 }
 /* Maria: a broad blurred wash underneath, mottled seas on top, all clustered
    upper-left-through-centre so no face can form (moon.md §4). */
-.sky-moon-wash  { position: absolute; inset: 0; border-radius: 50%; overflow: hidden; opacity: .17; filter: blur(8.25px); }
-.sky-moon-maria { position: absolute; inset: 0; border-radius: 50%; overflow: hidden; opacity: .25; filter: blur(3.375px); }
+/* OPACITIES RAISED from moon.md's .17 / .25, and the reason is arithmetic
+   rather than taste (owner, 2026-08-20: "the moon random spots disappeared").
+   All nine maria and both wash shapes were present and correctly sized the
+   whole time — they were being washed out. moonPow multiplies the WHOLE
+   group's brightness by up to 1.66x (night-scene4.md §1, and that is right:
+   the halo has to blaze, not just the disc), and a 25%-opacity dark spot does
+   not survive being multiplied by 1.66 on a disc that is also 0.75 of the
+   size moon.md assumed. .34 and .23 are the spec's values pre-divided by the
+   cycle's mean brightness, so they read the same at 118px unscaled and here.
+
+   If moonPow's range ever changes, these two move with it. */
+.sky-moon-wash  { position: absolute; inset: 0; border-radius: 50%; overflow: hidden; opacity: .23; filter: blur(8.25px); }
+.sky-moon-maria { position: absolute; inset: 0; border-radius: 50%; overflow: hidden; opacity: .34; filter: blur(3.375px); }
 .sky-moon-wash i, .sky-moon-maria i { position: absolute; }
 
 @keyframes moonBreathe { from { transform: translateY(0) scale(1); opacity: .95; }
@@ -164,8 +175,14 @@
    reads as sky, which is exactly what the owner rejected. Do not move it.
    --------------------------------------------------------------------------- */
 #st-clouds {
-  left: -146.667px !important;
-  bottom: 200px !important;
+  /* Authored in SCREEN pixels: the counter-scale cancels the world's 0.75, so
+     a CSS px in here and its children is a real px on the display. Position is
+     pre-divided by 0.75 because `left`/`bottom` resolve BEFORE the element's
+     own transform.  screen left -120px, 120px above the viewport bottom. */
+  left: -160px !important;
+  bottom: 160px !important;
+  width: 500px !important;
+  height: 240px !important;
   transform: scale(1.33333);
   transform-origin: left bottom;
 }

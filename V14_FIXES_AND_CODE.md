@@ -8922,3 +8922,61 @@ plausible theories — blur cost, low-power mode, layer ownership — for a
 component whose markup was byte-identical to the design the whole time. The
 diff took one command and pointed straight at the only thing that was
 different: the coordinate space it was measured in.
+
+### 5e. The storm, re-authored to the ship — and the moon spots that were never missing
+
+**The owner, after the size fix landed (2026-08-20):** *"the clouds have gone
+too far around, the clouds need to come behind and beside the ship… the main
+job of the cloud and storms lightnings is to make the ship atmosphere look
+scary, whereas you spread it too far, and the clouds need to be a little bit
+more greyish, and the clouds right now have visible big big gaps in between
+instead of overlapping which makes them look like spots rather than helping
+make the atmosphere scarier."*
+
+**This is the point at which the lab stops being the answer.** Its six masses
+are spread across 700px, which is right on a lab canvas and wrong here,
+because this app's galleon renders at 0.75. Restoring the lab's size (5d) gave
+a bank that reached far past the ship on both sides — technically faithful,
+and it lost the thing the storm exists for.
+
+`STORM_MASSES` in `starry-sky.ts` is now **owner-directed and marked as such**,
+with the lab's version left byte-identical in `night-markup.ts` so the original
+stays diff-able. Three changes, one per sentence of the brief:
+
+| Sentence | Change | Measured result |
+| --- | --- | --- |
+| "behind and beside the ship" | container 500×240 at screen −120px (was 700×260 at −110) | storm spans −120..380, ship −72..201 — covers it, reaches just past the bow, rises to 360px against the ship's 231px |
+| "gaps… look like spots" | masses repositioned so every one shares area with others | overlaps per mass: 3, 4, 4, 5, 4, 2 — **minimum 2**, one connected body |
+| "a little bit more greyish" | ramp desaturated navy → slate: `10,15,30 → 18,20,26`, `24,34,60 → 38,42,52`, `48,62,96 → 72,78,92`, `60,76,112 → 96,102,118`, rim `158,182,228 → 178,186,202` | gradient STRUCTURE untouched — same two radials, same stop positions, so night-scene4.md's "lighter than the sky in its mid-tones" still holds |
+
+Blur radii and drift durations are the lab's, unchanged. The overlap check is
+arithmetic (rectangle intersection over the six live bounding boxes), not an
+eyeball — "they look like spots" is exactly the kind of judgement that needs a
+number behind it.
+
+### The moon's maria were never missing
+
+**Owner:** *"the moon random spots disappeared, bring them back."*
+
+Measured before touching anything: **9 maria and 2 wash shapes present, correct
+sizes, correct positions.** They were being washed out, not removed.
+
+`moonPow` multiplies the whole moon group's brightness by up to **1.66×**
+(night-scene4.md §1 — and that is correct, the halo has to blaze rather than
+the disc just going white). A 25%-opacity dark spot does not survive being
+multiplied by 1.66, and this disc is also 0.75 of the size `moon.md` assumed.
+Both effects push the same way.
+
+```css
+/* moon.md's values, pre-divided by the brightness cycle's mean */
+.sky-moon-wash  { opacity: .23; }   /* was .17 */
+.sky-moon-maria { opacity: .34; }   /* was .25 */
+```
+
+**Generalise this.** *"It disappeared" and "it is present but invisible" are
+different bugs with different fixes, and the DOM can tell you which in one
+query.* Reaching for "bring them back" would have re-added elements that were
+already there. Also: when two independent scalings act on the same appearance —
+here a 0.75 geometry scale and a 1.66 brightness multiplier — a value copied
+from a spec that assumed neither is going to be wrong, and it will be wrong
+quietly.
