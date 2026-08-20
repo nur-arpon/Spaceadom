@@ -8,7 +8,8 @@
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build",
     "beforeBundleCommand": "node scripts/stage-symbols.mjs --real",
-    "frontendDist": "../dist2"
+    "frontendDist": "../dist2",
+    "afterBundleCommand": "node scripts/archive-build.mjs"
   },
   "app": {
     "withGlobalTauri": true,
@@ -64,7 +65,7 @@
       "symbols/spaceadom.pdb": "spaceadom.pdb"
     },
     "externalBin": [],
-    "copyright": "\u00a9 2026 Spaceadom",
+    "copyright": "© 2026 Spaceadom",
     "category": "Utility",
     "shortDescription": "Hold Space + tap a key to launch, focus or minimise any app.",
     "longDescription": "Spaceadom turns your Spacebar into a system-wide modifier: hold Space and tap a key to launch, focus or minimise any app or website. Space alone still types a space.",

@@ -9070,3 +9070,64 @@ eighteen.
 *Generalise this: when a spec's geometry is right but its SCALE does not suit
 its surroundings, scale the container. Editing the contents to compensate
 destroys the only copy you can verify.*
+
+---
+
+## PROBLEM 158 — the archive and the share folder went stale because keeping them fresh was my habit, not the build's
+
+**Symptom.** Asked whether 1.0.70 was ready to hand to a friend, three things
+were wrong at once:
+
+- `all-versions/` stopped at **1.0.65** — five versions behind — while its own
+  header promised *"Every installer ever built lives in this folder."*
+- `all-versions/WHAT-CHANGED.md` had no row for **1.0.64** or **1.0.66**.
+- `share-spaceadom/` was still handing out **1.0.65**, with a README describing
+  features that had since changed, and referencing a `PRIVACY.md` that was not
+  in the folder.
+
+**Root cause, and it is not carelessness in the interesting sense.** Archiving
+and refreshing the share folder were separate manual commands I ran after each
+build. They were run faithfully for 1.0.59 through 1.0.65 and then skipped for
+five consecutive versions — **because the build cycle sped up**. During the
+storm iterations a version took four minutes end to end, and the steps that
+survive that pace are the ones the build performs, not the ones the operator
+remembers.
+
+*A manual step gets skipped exactly when the cycle speeds up, which is when it
+matters most.*
+
+**Exact files.** `scripts/archive-build.mjs` (new),
+`src-tauri/tauri.conf.json` (`afterBundleCommand`).
+
+```jsonc
+"build": {
+  "beforeBuildCommand":  "npm run build",
+  "beforeBundleCommand": "node scripts/stage-symbols.mjs --real",
+  "afterBundleCommand":  "node scripts/archive-build.mjs"   // <- new
+}
+```
+
+The script copies both installers into `all-versions/`, replaces whatever is
+in `share-spaceadom/` with the current pair, copies `PRIVACY.md` in beside them
+(the share README tells friends to read it), and **warns without failing** when
+the README or the changelog has no mention of the version just built.
+
+**Two deliberate design choices:**
+
+1. **It can never fail the build.** The whole body is wrapped in one
+   `try/catch` that logs and swallows. A broken bookkeeping step must not cost
+   a working installer — that trade is always wrong in this direction.
+2. **The share folder is emptied of every non-current installer**, rather than
+   just having the new one added. Leaving old ones there is precisely how
+   someone sends a friend a build from five versions ago.
+
+**The config edit went through parse → mutate → re-serialise with a
+duplicate-key detector**, not a text substitution — PROBLEM 139's lesson, where
+a duplicated `"wix"` key was legal JSON, the parser kept the last one, and a
+template pointer vanished silently. Verified after writing: 3 lines changed,
+nothing reformatted.
+
+**Generalise this.** *If a step must happen after every build, it belongs IN
+the build.* And when a folder's README states an invariant — "every installer
+ever built lives here" — something has to enforce it, or the README becomes a
+lie at the exact moment the project gets busy.
