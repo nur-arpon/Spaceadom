@@ -1,167 +1,167 @@
-# RELEASE READINESS — SpaceToggle OS V13
+# Release readiness — Spaceadom
 
-**Assessed:** 2026-08-10 by Claude Fable 5 (via Claude Code), against the
-build installed and verified that day.
-**Verdict: WORKS ON THIS MACHINE. NOT READY FOR MASS PUBLIC RELEASE.**
+**Rewritten 2026-08-20 for 1.0.71.** The previous version of this file was
+written for 1.0.0 and had gone false in three places: it said
+`bundle.targets` was `["msi"]` (it is `["nsis", "msi"]`), that the app needs an
+administrator account (it has not since PROBLEM 61 removed elevation), and that
+it "currently cannot start at all" on a standard user account. None of that was
+true. That is the failure mode of a readiness document — it describes the day
+it was written and is read as describing today.
 
-Nothing here is a design flaw — the app does what CORE_AIM promises, and the
-core loop is verified working on real hardware. What is missing is the layer
-between "works for its author" and "works for a stranger on their laptop".
+Two questions, answered separately, because they have very different answers:
 
-Each item says WHY it blocks, WHERE the evidence is, and WHAT fixing it takes.
-Tick them off in order; P0 items are release-blocking.
-
----
-
-## Will it run on other Windows laptops?
-
-**Technically yes**, with these requirements:
-- Windows 10 1809+ / Windows 11, **x64 only** (no ARM64 target is built —
-  `bundle.targets` is `["msi"]`, built x64; Surface Pro X-class ARM devices
-  will not run it natively).
-- WebView2 runtime — preinstalled on Win11; on Win10 the installer uses
-  `downloadBootstrapper`, so **first install needs an internet connection**.
-- An **administrator account** — see P0-2. On a standard user account the app
-  currently cannot start at all.
-
-**Untested on any machine but the author's** (single 2560×1440 display,
-Win11, 100%-ish scaling): laptop resolutions, 125%/150% DPI, multi-monitor,
-Windows 10, non-US keyboard layouts.
+1. **Can Nur hand this to a friend with a Windows laptop?** — Yes, today, with
+   caveats they should be told.
+2. **Can it go in the Microsoft Store?** — Not yet. Two hard blockers, both
+   solvable, one costs money.
 
 ---
 
-## P0 — release blockers
+## 1. Sharing with friends — READY, with three things to say out loud
 
-### P0-1. The installer is unsigned → SmartScreen will block it
-`src-tauri/tauri.conf.json` → `"certificateThumbprint": null`.
-Every downloader sees *"Windows protected your PC"*. For an app that installs
-a **global keyboard hook**, a scary unsigned warning is fatal to trust — a
-large share of users will assume a keylogger and delete it.
-**Fix:** buy an OV or EV code-signing certificate and set the thumbprint +
-`timestampUrl`. EV gets instant SmartScreen reputation; OV builds reputation
-over time/downloads. This is a purchase, not a code change.
+`share-spaceadom/` holds the current installers, `READ-ME-FIRST.txt` and
+`PRIVACY.md`, and is refreshed automatically by `scripts/archive-build.mjs`
+(npm `posttauri`) so it can no longer drift behind the build.
 
-### P0-2. Forced UAC elevation on EVERY launch
-`src-tauri/src/lib.rs:39` calls `startup::maybe_relaunch_elevated()`
-unconditionally, before anything else.
-Consequences for a public user:
-- A UAC prompt at **every single launch** — and since V13 now autostarts,
-  **at every boot**.
-- On a **standard (non-admin) user account** — extremely common on family,
-  school and work laptops — they get an admin-password prompt they cannot
-  satisfy. **The app is unusable for them.**
-Elevation buys exactly one thing: the hook keeps working while an *elevated*
-window has focus (UIPI). That is a nice-to-have, not a reason to demand
-admin at launch.
-**Fix:** run unelevated by default and make elevation opt-in ("Run with
-administrator rights so shortcuts work over admin apps"), or implement the
-scheduled-task approach in `FEATURES_NOW_POSSIBLE.md` #2 (elevated at logon,
-no prompt). Either way, the app must work — degraded — without admin.
+**Tell them these three things**, all of which are in the README:
 
-### P0-3. Writes the autostart registry key on every launch, without asking
-`src-tauri/src/lib.rs:54` calls `startup::register_startup()` unconditionally;
-it writes `HKCU\...\CurrentVersion\Run\SpaceToggleOS` pointing at the current
-exe path (`startup.rs:23`).
-Silently adding yourself to a stranger's autostart is user-hostile, is what
-security tooling looks for, and nothing removes the key on uninstall — a
-dead entry pointing at a deleted exe remains forever.
-**Fix:** make it a Settings toggle (default OFF, or ON only after asking on
-first run) and delete the value on uninstall.
+| What they will hit | Why | What to say |
+| --- | --- | --- |
+| **SmartScreen: "Windows protected your PC"** | The installer is unsigned. Windows warns about every unsigned installer from a publisher it has not seen before. | "Click More info → Run anyway." |
+| **Antivirus may look twice** | An app that watches every keystroke looks, to a scanner, exactly like one that records them. | It records nothing and sends nothing; `PRIVACY.md` says precisely what the local log contains. |
+| **Shortcuts pause over an admin window** | Windows UIPI: a non-elevated hook receives nothing while an elevated window has focus. | Affects every app of this kind, including PowerToys. Click a normal window and it resumes. |
 
-### P0-4. The default profiles are the author's personal setup
-`src-tauri/src/config/defaults.rs` seeds Founders with `cinemaos.live`,
-uTorrent, and a personal Google workflow; Gamers/Professionals likewise.
-A stranger's first run shows 26 bindings to sites they never chose and apps
-they do not have.
-**Fix:** ship neutral defaults (browser, file explorer, terminal, mail,
-calculator — things that exist on every Windows box) and add a short first-run
-onboarding that offers to detect installed apps. Keep the author's set as an
-importable preset if desired.
+**Known limits worth being honest about, also in the README:** Smart Search
+cannot reach the text box in WhatsApp or the Spotify desktop app (neither
+publishes a way in); Guide HUD is primary-monitor-only by explicit decision.
 
 ---
 
-## P1 — will generate support tickets
+## 2. Stability on an arbitrary laptop — what is done, and what is left
 
-### P1-5. Non-US keyboard layouts show the wrong letters
-`hook/mod.rs:531 vk_to_char()` maps VK `0x41–0x5A` straight to `a–z`. VK codes
-are **positional**, so on AZERTY the physical `A` key reports `VK_Q`, and on
-QWERTZ `Y`/`Z` swap. The dashboard matrix and the HUD will disagree with the
-user's keycaps.
-**Fix:** translate for DISPLAY with `ToUnicodeEx`/`MapVirtualKeyEx` against
-the active layout (`GetKeyboardLayout`), keeping VK as the storage key.
+### Already handled
 
-### P1-6. DPI, small screens and multi-monitor are untested
-The Guide HUD is a fixed 680×600, primary-monitor only (an accepted decision
-for the author's single 1440p display). On a 1366×768 laptop at 150% scaling
-that panel is enormous and may clip; `devicePixelRatio` measured a non-obvious
-**1.09** on the author's machine, so DPI handling is clearly not trivial here.
-**Fix:** size the HUD as a percentage of the *work area* with min/max clamps,
-and test at 100/125/150% and 1366×768.
+- **WebView2** — `embedBootstrapper`, so the runtime is fetched at install
+  time on the rare machine without it. Windows 11 always has it; Windows 10
+  usually does.
+- **Small screens** — Rust clamps the window to 92% of the monitor and the
+  frontend scales the board on both axes.
+- **No GPU path** — a pixel self-test detects a machine that cannot composite
+  the transparent overlay and relaunches the webview with `--disable-gpu`.
+  Software compositing is treated as normal, **not** as a reason to degrade
+  visuals (that mistake shipped in 1.0.64 and was corrected in 1.0.65).
+- **Low-power scene** — `body.lite-scene`, driven by the Visual effects switch
+  or Windows' reduced-motion setting, halves the storm's blur radii.
+- **Display changes** — `display_watch.rs` rebuilds the overlay when the
+  monitor set changes and re-homes an off-screen dashboard.
+- **Hook eviction** — a watchdog re-installs the hook, and after two failed
+  attempts rebuilds the whole hook thread.
+- **Crash reporting** — one panic hook, symbols shipped, last-action context.
+- **Corrupt config** — since 1.0.71 the newest backup that parses is restored
+  rather than factory-resetting the user (PROBLEM 159), covered by four tests.
+- **Two installs at once** — detected, and removable in one prompt.
 
-### P1-7. Antivirus false positives are likely
-Global `WH_KEYBOARD_LL` hook + `SendInput` injection + self-elevation +
-unsigned binary is the exact profile heuristic AV flags.
-**Fix:** P0-1 signing removes most of it; submit the binary to Microsoft and
-major vendors for whitelisting before launch.
+### Known gaps, worst first
 
-### P1-8. Windows 10 is unverified
-`DWMWA_BORDER_COLOR` / `DWMWA_WINDOW_CORNER_PREFERENCE` (lib.rs overlay setup)
-are Windows 11 attributes. The calls are `let _ =`-guarded so they degrade
-harmlessly, but **overlay transparency itself has never been tested on Win10**
-— and transparency is exactly what broke on this project before.
-**Fix:** test the overlay on a Win10 VM before claiming Win10 support.
+These came out of a 61-agent audit on 2026-08-20. Each was adversarially
+verified against the source before being written down here.
 
-### P1-9. No auto-updater
-There is no way to ship a fix to users who already installed. For an app that
-hooks the keyboard, being unable to push a fix is a real risk.
-**Fix:** `tauri-plugin-updater` + a signed release feed.
+| # | Gap | Effect on a friend | Effort |
+| --- | --- | --- | --- |
+| 1 | **A dead hook is invisible.** Rust knows (`HOOK_INSTALLED`) and the frontend discards it. If the hook never installs, the app looks perfectly healthy and no shortcut works. | "It just doesn't do anything" with no explanation and nothing to report. | hours |
+| 2 | **The key editor has no `max-height` and no scroll.** At 1280×720 or 1366×768 with 150% scaling, Assign/Done can sit below the window. | Cannot finish assigning an app on a common cheap laptop. | hours |
+| 3 | **A webview that fails to rebuild at startup leaves a working tray icon that opens nothing**, permanently and silently. | Tray icon does nothing; only the log says why. | hours |
+| 4 | **Sea tiles are ~129 KB of generated SVG regenerated under a fresh URL on every scene rebuild**, so the image cache never helps. Toggling theme/fun repeatedly re-pays it. | A stutter on each toggle on a weak machine. | hours |
+| 5 | **`shell:allow-execute` is granted to the webview with no scope.** Not exploitable today (no untrusted content is loaded), but it is a broad grant with no caller that needs it. | None today; it is a latent hazard and a Store reviewer will ask. | minutes |
 
----
-
-## P2 — polish, legal, known gaps
-
-- **Ship the font licence.** Outfit is bundled from `src/assets/fonts/`;
-  `OUTFIT-LICENSE.txt` lives there but only the `.woff2` reaches `dist/`.
-  OFL requires the licence to travel with the font. Add it to bundle
-  resources or an in-app About box.
-- **Publish a plain-English privacy statement.** This app hooks every
-  keystroke; users deserve an explicit "keystrokes are never recorded or
-  transmitted". **Verified true today:** the release logger runs at Info and
-  the per-key `log::debug!` calls are compiled out — 0 DEBUG lines in the
-  live log after the latest install, and no key content anywhere in it.
-  Say so publicly, and keep it true.
-- **Store apps don't minimise on second press** (known limitation, logged
-  2026-08-10). Launch and focus work; cascade parity needs AUMID→window
-  mapping.
-- **No hook watchdog.** Windows evicts a low-level hook that ever exceeds its
-  timeout. The callback is disciplined, but an all-day tray app should detect
-  eviction and reinstall the hook rather than go quietly dead.
-- **Uninstall leaves** `%APPDATA%\SpaceToggleOS\` (config + logs). Acceptable,
-  but offer a "remove my settings too" checkbox.
+None of these is a reason to withhold the app from a friend. All five are
+reasons not to submit it to the Store yet.
 
 ---
 
-## What is already production-grade (verified, don't re-litigate)
+## 3. Microsoft Store — two hard blockers
 
-- Core loop verified on real hardware: typing protection, tap-vs-hold,
-  rollover, smart cascade launch/focus/minimise, Boss Key with true Core Audio
-  mute, PiP, profile cycling, Guide HUD, force close.
-- Logging: Info level, 5 MB rotation, 2 backups, **no keystroke content**.
-- Config safety: tolerates a UTF-8 BOM and preserves an unparseable file as
-  `config.json.corrupt` instead of destroying it.
-- Hook discipline follows the skill's iron laws (dwExtraInfo cookie only,
-  dedicated pump thread, no COM/IPC/alloc in the callback).
-- `NATIVE_SAFETY.md` rules are enforced in code (shell-window protection,
-  click-through fail-closed).
-- Single-instance, tray lifecycle, offline-only assets (no CDN).
+An unpackaged Win32 app **can** be listed: you submit an HTTPS download URL to
+your own installer rather than an MSIX package
+([App package requirements for MSI/EXE apps](https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msi/app-package-requirements)).
+Registration is free for individuals. Two of that page's requirements are not
+met today.
+
+### Blocker 1 — the installer is unsigned (Store Policy 10.2.9)
+
+> "The binary and all of its Portable Executable (PE) files must be digitally
+> signed with a code signing certificate that chains up to a certificate issued
+> by a Certificate Authority (CA) that is part of the Microsoft Trusted Root
+> Program."
+
+Spaceadom's installers are unsigned. This is also what causes the SmartScreen
+warning friends see, so fixing it solves both problems at once.
+
+**Options** ([code signing options](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/code-signing-options)):
+**Azure Trusted Signing** is the cheapest current route (a Microsoft-run
+service, monthly, no hardware token, and individuals are eligible if the
+identity check passes); a traditional **OV/EV certificate** from a CA costs
+several hundred USD a year and EV ships on a hardware token. Signing must
+cover `spaceadom.exe`, the NSIS `setup.exe` and the `.msi`.
+
+### Blocker 2 — the installer downloads WebView2 at install time
+
+> "The installer is a standalone installer and is not a downloader stub/web
+> installer that downloads bits when run."
+
+`webviewInstallMode` is `embedBootstrapper`, which embeds Microsoft's
+*bootstrapper* — and the bootstrapper downloads the runtime. That is precisely
+a downloader.
+
+**Fix:** switch to `offlineInstaller`, which Tauri v2 supports
+(`WebviewInstallMode::OfflineInstaller`). It embeds the full WebView2
+installer, so nothing is fetched at install time.
+
+**Cost:** the installer grows from ~5.6 MB to roughly 130 MB. That is a bad
+trade for handing a file to a friend and the right trade for the Store, so
+this should be a **separate build target**, not a change to the default.
+
+### Also required before submitting, none of them blockers
+
+- **One installer URL, not two.** The Store takes exactly one. Submit the
+  NSIS `setup.exe` (per-user, no UAC). Publishing both would also fight the
+  app's own two-installs detector.
+- **Silent install must work.** NSIS supports `/S` and the app is installed
+  that way on every build, so this is already exercised.
+- **Publisher name must differ from the product name.** "Spaceadom" cannot be
+  both, and a name that implies a company you do not have will be rejected.
+- **Disclose the keyboard hook and the process-closing feature** in the
+  description and in the certification notes, and give reviewers steps to
+  reproduce. A remapper is acceptable — PowerToys is in the Store — but a
+  global hook plus terminating other processes plus a `runas` elevation will
+  get a manual review, and an undisclosed one gets rejected.
+- **Privacy policy URL.** `PRIVACY.md` exists and now covers the
+  process-closing capability; it needs to be reachable at a public URL.
+- **Age rating, screenshots, description.**
+
+### The honest recommendation
+
+Do the signing first, on its own. It removes the SmartScreen warning for every
+friend, which is the single biggest thing standing between this app and someone
+who does not already trust it — and it is a prerequisite for the Store anyway.
+Then close gaps 1–3 above, then build the offline-installer variant and submit.
 
 ---
 
-## Suggested order of work
+## How to check this file is still true
 
-1. P0-2 elevation (biggest UX + reach win, pure code)
-2. P0-3 autostart consent (small, and it is a trust issue)
-3. P0-4 neutral defaults + first-run onboarding
-4. P1-5 keyboard layout, P1-6 DPI/laptop testing
-5. P0-1 code signing + P1-7 AV submissions (purchase + lead time — start early)
-6. P1-9 updater, then P2 polish
+Everything above is checkable from the repo:
+
+```bash
+# blocker 2: still a downloader?
+grep -A2 webviewInstallMode src-tauri/tauri.conf.json
+
+# blocker 1: is anything signed?
+powershell -c "Get-AuthenticodeSignature 'src-tauri\target\release\bundle\nsis\Spaceadom_*_x64-setup.exe' | Format-List Status,SignerCertificate"
+
+# gap 1: does the frontend use the hook status it is given?
+grep -rn "installed" src/main.ts src/components/*.ts | grep -i hook
+```
+
+If any of those answers change, edit this file in the same commit. A readiness
+document that is not maintained is worse than none, because it is believed.

@@ -9131,3 +9131,111 @@ nothing reformatted.
 the build.* And when a folder's README states an invariant — "every installer
 ever built lives here" — something has to enforce it, or the README becomes a
 lie at the exact moment the project gets busy.
+
+---
+
+## PROBLEM 159 — a corrupt config factory-reset the user while a good backup sat unread
+
+**Symptom (found by audit, not by a user — which is the point).** If
+`config.json` fails to parse, the old code preserved it as `.json.corrupt`,
+logged a line, and called `generate_defaults()`. Meanwhile
+`%LOCALAPPDATA%\SpaceadomBackups\` holds a timestamped copy of every save from
+the last hour, one per hour for a day, one per day for a week — maintained
+since PROBLEM 102 and, until now, **never read back by anything**.
+
+The log told the user a backup existed and left them to copy it by hand. A
+friend who has never opened that folder will not do that; they will see an app
+that forgot every binding they ever made.
+
+**Exact file.** `src-tauri/src/config/mod.rs`.
+
+```rust
+// BEFORE — preserve the broken file, then discard the working one
+let backup = path.with_extension("json.corrupt");
+let _ = std::fs::copy(&path, &backup);
+generate_defaults()
+
+// AFTER
+match newest_valid_backup() {
+    Some((cfg, from)) => {
+        log::warn!("config: recovered from backup {} — the unreadable file is at {}",
+                   from.display(), backup.display());
+        let _ = save_to_disk(&cfg, &path);   // if this launch crashes, the next
+        cfg                                  // one must not decide again
+    }
+    None => { log::error!("config: no usable backup either — regenerating defaults");
+              generate_defaults() }
+}
+```
+
+**Two details that are the whole difficulty:**
+
+1. **Sort by MODIFIED TIME, not by filename.** The names carry a timestamp
+   today; sorting by a naming convention breaks silently the day that changes.
+2. **Skip a backup that does not parse and keep looking.** Corruption tends to
+   hit the most recent write — which is exactly the file a naive "restore the
+   latest backup" would restore.
+
+**Tested, because this is a RECOVERY branch** — the class of code that ships
+unexercised and fails the one time it runs (PROBLEM 118's lesson, and
+CLAUDE.md's stated rule for when a test is warranted). `newest_valid_backup_in`
+takes the directory so it can be driven from a temp dir; four tests cover
+newest-wins, corrupt-newest-falls-back, no-backups, and all-corrupt. Each uses
+its own scratch directory because `cargo test` runs them on parallel threads
+(PROBLEM 130 was a flaky test caused by four tests sharing one static).
+
+**Generalise this.** *A backup nothing reads is not a backup, it is a
+reassuring file.* If recovery requires the user to know the folder exists, find
+it, identify the right file and copy it over the broken one, then for most
+users the feature does not exist.
+
+---
+
+## PROBLEM 160 — I fixed the "manual step gets skipped" problem with a build hook that broke the build
+
+**Symptom.** PROBLEM 158 wired `scripts/archive-build.mjs` into
+`tauri.conf.json` as `afterBundleCommand`, and the next `cargo check` died:
+
+```
+thread 'main' panicked at build.rs:54:10:
+failed to run tauri-build with the app manifest: unknown field `afterBundleCommand`,
+expected one of `runner`, `devUrl`, `frontendDist`, `beforeDevCommand`,
+`beforeBuildCommand`, `beforeBundleCommand`, `features`, ...
+```
+
+**There is no `afterBundleCommand` in Tauri v2.** `beforeBundleCommand` exists;
+its counterpart does not. And `tauri-build` rejects unknown config keys by
+PANICKING at build-script time, so the mistake does not degrade the build — it
+stops every build, including `cargo check` and `cargo test`.
+
+**Root cause of the ROOT CAUSE:** I verified the script by running
+`node scripts/archive-build.mjs` and watching it archive correctly. **I never
+re-ran a build.** The thing I changed was the build, and the thing I tested was
+not. It shipped in one commit and would have blocked the very next build.
+
+**The fix** — npm's `posttauri`, which runs after any `npm run tauri …`, the
+command CLAUDE.md documents:
+
+```json
+"scripts": { "tauri": "tauri", "posttauri": "node scripts/archive-build.mjs" }
+```
+
+That also fires on `npm run tauri dev`, so the script now exits early when
+there are no installers for the current version, rather than emptying the
+share folder on a dev run.
+
+**Verified the way it should have been the first time:** a full
+`npm run tauri build`, which printed the archive step's own output — including
+its two warnings that the README and changelog had no mention of the new
+version, both of which were then true and are now fixed.
+
+**Generalise this.** *Test the thing you changed, through the interface you
+changed it in.* A build-system change is verified by running a build; a script
+that a build calls is not verified by calling the script. This is the same
+family as PROBLEM 143 ("a verification performed by the sandboxed process
+cannot detect the sandbox") — in both cases the check ran somewhere the fault
+could not appear.
+
+Second lesson, smaller: **a config parser that rejects unknown keys is a
+feature.** Tauri panicking here is why this cost one commit instead of shipping
+silently as a hook that never ran.

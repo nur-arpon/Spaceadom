@@ -33,6 +33,14 @@ try {
   mkdirSync(archive, { recursive: true });
   mkdirSync(share, { recursive: true });
 
+  // No installers for this version means this was `tauri dev`, or a build that
+  // failed. Either way there is nothing to archive and nothing to publish —
+  // and touching the share folder in that state is how it ends up empty.
+  if (![nsis, msi].some(existsSync)) {
+    say(`no installers for ${version} — nothing to do`);
+    process.exit(0);
+  }
+
   let kept = 0;
   for (const src of [nsis, msi]) {
     if (!existsSync(src)) { say(`MISSING, not archived: ${src}`); continue; }

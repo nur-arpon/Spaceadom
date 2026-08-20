@@ -1,6 +1,62 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-20 | night, the storm sequence (Claude Fable 5) - four wrong turns on one component, and what ended it
+
+Full technical record: PROBLEM 157 sub-sections 5d-5g in `V14_FIXES_AND_CODE.md`.
+Shipped across 1.0.66 through 1.0.70. **This entry exists because an audit
+caught me breaking the two-file rule**: those four versions had entries in
+V14_FIXES and WHAT-CHANGED but nothing in this log, which is the file an AI
+reads chronologically to answer "what happened". The most expensive sequence of
+the day was invisible here.
+
+Nur's complaints, in order, each one after I shipped a fix for the last:
+*"you messed up the clouds and storms animation now"*; *"the clouds and storms
+are still messed up and does not look as good as previous"*; *"noooo - the
+storm was supposed to be behind the ship to give it scary atmosphere, never for
+sky"*; *"the clouds have gone too far around... visible big big gaps in between
+instead of overlapping which makes them look like spots"*; and finally
+*"ugh, just scale the clouds down by half and closer to the ship"*.
+
+**Four attempts, and each was a reasonable answer to the previous complaint:**
+
+1. **1.0.64** - blamed the cost of `filter: blur()` and added a low-power mode.
+   Its trigger included software compositing, which is HIS machine's normal
+   state, so it switched itself on for the one person it was not for and
+   flattened the storm. Software compositing means "no GPU path", not "no
+   headroom".
+2. **1.0.66** - moved the storm out of the 0.75-scaled ocean world so it would
+   render full size. Right size, wrong scene: a full-size bank over a
+   three-quarter-size ship reads as sky weather over a toy boat, which is
+   exactly what he rejected.
+3. **1.0.68** - re-authored the six masses myself to "cluster on the ship".
+   Invented geometry to satisfy a description when a spec for it already
+   existed, and greyed the gradient ramp - which attacks the one thing the
+   spec is emphatic about (storm cloud must be LIGHTER than the sky in its
+   mid-tones or it is invisible).
+4. **1.0.69/1.0.70** - he wrote `design/storm-clouds.md` and said *"use this,
+   you got wrong enough times."* Transcribed it, then halved the container with
+   one transform so the bank suits a 0.75 galleon without touching any of its
+   eighteen authored values.
+
+**What actually ended it was a diff, not a theory.** Extracting the lab's cloud
+subtree and comparing it span-for-span against ours returned "7 spans, all
+IDENTICAL". Nothing about the clouds had ever been wrong. Two builds went to
+plausible theories - blur cost, layer ownership - about markup that matched the
+design byte for byte the whole time. The only difference was which coordinate
+space it was measured in.
+
+**The lesson, and it is mine:** when a component has been wrong three times,
+the problem is the absence of a spec, not the quality of the attempts. "Looks
+scary", "too far around" and "like spots" describe a result, not a target. I
+should have asked for the spec several builds earlier instead of theorising,
+and I should diff a transcribed component against its source BEFORE forming a
+hypothesis about why it looks wrong.
+
+`design/storm-clouds.md` is now the authority for this component, and
+`starry-sky.ts` must stay diff-able against it - which is why 1.0.70's halving
+is a container transform rather than eighteen edited numbers.
+
 ## Update: 2026-08-20 | end of day (Claude Fable 5) - the sharing pass: archive backfilled, README rebuilt, privacy policy catches up with the app
 
 No new features. This is the pass that makes 1.0.70 something Nur can hand to a

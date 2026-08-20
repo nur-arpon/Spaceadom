@@ -534,11 +534,6 @@ pub fn run() {
                 // version resource, neither of which belongs before the
                 // first paint (PROBLEM 55).
                 rival_install::scan();
-                // PROBLEM 141 - look for a SECOND install here, off the
-                // startup path: this stats Program Files and reads a PE
-                // version resource, neither of which belongs before the
-                // first paint (PROBLEM 55).
-                rival_install::scan();
                 startup::remove_legacy_run_entries();
             })
             .ok();

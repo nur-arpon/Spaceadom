@@ -123,14 +123,38 @@ pub fn load_or_init() -> SharedConfig {
                     let backup = path.with_extension("json.corrupt");
                     match std::fs::copy(&path, &backup) {
                         Ok(_) => log::error!(
-                            "config: JSON parse error ({e}) — original preserved at {}, regenerating defaults",
+                            "config: JSON parse error ({e}) — original preserved at {}",
                             backup.display()
                         ),
                         Err(be) => log::error!(
-                            "config: JSON parse error ({e}) AND backup failed ({be}) — regenerating defaults"
+                            "config: JSON parse error ({e}) AND backup failed ({be})"
                         ),
                     }
-                    generate_defaults()
+                    // PROBLEM 159 — this used to go straight to defaults, which
+                    // is a FACTORY RESET while a perfectly good copy of the
+                    // user's profiles sits in the backup folder that PROBLEM
+                    // 102 exists to maintain. Preserving the broken file and
+                    // then ignoring the working one is the worst of both.
+                    //
+                    // Try the newest backup that parses. Only if none does —
+                    // or there are none — do we regenerate.
+                    match newest_valid_backup() {
+                        Some((cfg, from)) => {
+                            log::warn!(
+                                "config: recovered from backup {} — the unreadable file is at {}",
+                                from.display(), backup.display()
+                            );
+                            // Write it back immediately: if this launch crashes
+                            // before the first save, the next one must not have
+                            // to make this decision again.
+                            let _ = save_to_disk(&cfg, &path);
+                            cfg
+                        }
+                        None => {
+                            log::error!("config: no usable backup either — regenerating defaults");
+                            generate_defaults()
+                        }
+                    }
                 }
             },
             Err(e) => {
@@ -267,6 +291,44 @@ pub fn backup_dir() -> PathBuf {
 /// Best-effort throughout: a backup failure must never break a config save.
 /// Only writes when the content actually differs from the newest backup, so
 /// an idle app does not churn the disk.
+/// The newest backup that actually parses, with the path it came from.
+///
+/// PROBLEM 159. `write_backup` has kept timestamped copies since PROBLEM 102,
+/// and until now nothing ever read them back automatically — the log told the
+/// user a backup existed and left them to copy it by hand. A friend who has
+/// never opened that folder will not do that; they will see an app that forgot
+/// their bindings.
+///
+/// Newest first, and a backup that does not parse is SKIPPED rather than
+/// aborting the search: corruption tends to hit the most recent write, which
+/// is exactly the one a naive "restore the latest" would pick.
+fn newest_valid_backup() -> Option<(AppConfig, std::path::PathBuf)> {
+    newest_valid_backup_in(&backup_dir())
+}
+
+/// The testable half. Split out because this is a RECOVERY branch — a user
+/// only reaches it after something has already gone wrong, which is precisely
+/// the kind of code that ships unexercised and fails when it finally runs
+/// (PROBLEM 118's lesson, and CLAUDE.md's rule for when to add a test).
+fn newest_valid_backup_in(dir: &std::path::Path) -> Option<(AppConfig, std::path::PathBuf)> {
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+        .collect();
+    // By MODIFIED TIME, not by filename: the name carries a timestamp today,
+    // and sorting by a naming convention breaks silently the day it changes.
+    files.sort_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+    for p in files.into_iter().rev() {
+        let Ok(raw) = std::fs::read_to_string(&p) else { continue };
+        if let Ok(cfg) = serde_json::from_str::<AppConfig>(raw.trim_start_matches('\u{feff}')) {
+            return Some((cfg, p));
+        }
+    }
+    None
+}
+
 fn write_backup(json: &str) {
     // Retention is handled by prune_backups (PROBLEM 102) — every save from
     // the last hour, one per hour for a day, one per day for a week.
@@ -516,4 +578,75 @@ fn parse_map_body(body: &str) -> std::collections::HashMap<String, schema::KeyBi
         }
     }
     map
+}
+
+#[cfg(test)]
+mod backup_recovery_tests {
+    use super::*;
+    use std::io::Write;
+
+    /// A unique scratch dir per test — these run on parallel threads
+    /// (PROBLEM 130: four tests sharing one static was a flaky-test bug here
+    /// before), so nothing may share a path.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("spaceadom-bk-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        let p = dir.join(name);
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+        f.sync_all().unwrap();
+        // Windows timestamps are coarse; without this the "newest" ordering is
+        // a coin flip and the test passes or fails at random.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        p
+    }
+
+    fn valid_json(profile: &str) -> String {
+        let mut c = AppConfig::default();
+        c.active_profile = profile.to_string();
+        serde_json::to_string(&c).unwrap()
+    }
+
+    #[test]
+    fn picks_the_newest_backup_that_parses() {
+        let d = scratch("newest");
+        write(&d, "a.json", &valid_json("Older"));
+        write(&d, "b.json", &valid_json("Newer"));
+        let (cfg, from) = newest_valid_backup_in(&d).expect("a backup must be found");
+        assert_eq!(cfg.active_profile, "Newer", "the NEWEST valid backup wins");
+        assert!(from.ends_with("b.json"));
+    }
+
+    /// The case the whole feature exists for: corruption hits the most recent
+    /// write, so a naive "restore the latest" restores the broken one.
+    #[test]
+    fn skips_a_corrupt_newest_and_falls_back() {
+        let d = scratch("skip");
+        write(&d, "a.json", &valid_json("Good"));
+        write(&d, "b.json", "{ this is not json");
+        let (cfg, from) = newest_valid_backup_in(&d).expect("must fall back past the corrupt one");
+        assert_eq!(cfg.active_profile, "Good");
+        assert!(from.ends_with("a.json"));
+    }
+
+    #[test]
+    fn no_backups_at_all_is_none_not_a_panic() {
+        assert!(newest_valid_backup_in(&scratch("empty")).is_none());
+        // A directory that does not exist must also be None, not a panic —
+        // a first-run machine has no backup folder yet.
+        assert!(newest_valid_backup_in(std::path::Path::new(r"Z:\no\such\dir")).is_none());
+    }
+
+    #[test]
+    fn every_backup_corrupt_is_none() {
+        let d = scratch("allbad");
+        write(&d, "a.json", "nope");
+        write(&d, "b.json", r#"{"version":"#);
+        assert!(newest_valid_backup_in(&d).is_none(), "must regenerate, not half-restore");
+    }
 }
