@@ -134,6 +134,42 @@
   transform-origin: bottom left;
 }
 
+/* ---------------------------------------------------------------------------
+   THE STORM — the lab's exact size, still in the ship's world
+
+   The seven spans in night-markup.ts are BYTE-IDENTICAL to the lab (verified
+   by diffing them span for span, 2026-08-20), so nothing about the clouds
+   themselves was ever wrong. What changed them was the world's 0.75 scale:
+   the bank rendered 525x195 instead of 700x260, which is why it stopped
+   looming and started reading as a few puffs.
+
+   The owner's two constraints look contradictory and are not:
+     "the storm was supposed to be behind the ship to give it scary
+      atmosphere, never for sky"      -> it must stay a child of the world,
+                                         so it paints behind the galleon and
+                                         belongs to the ship's scene
+     "change just the clouds and storm based on this [the lab]"
+                                      -> it must render at the lab's size
+
+   Both hold if the container counter-scales inside the world. 1/0.75 = 1.3333
+   about its bottom-left corner, with left/bottom pre-divided by 0.75 so the
+   result lands exactly where the lab puts it: 700x260 at left -110px, 150px
+   above the viewport bottom.
+
+     lab:  left -110px       bottom 150px       700 x 260
+     here: left -146.667px   bottom 200px       x 1.33333 -> the same pixels
+
+   A previous attempt moved the storm OUT of the world instead. That gave the
+   right size and the wrong scene — a full-size bank towering over a 0.75 ship
+   reads as sky, which is exactly what the owner rejected. Do not move it.
+   --------------------------------------------------------------------------- */
+#st-clouds {
+  left: -146.667px !important;
+  bottom: 200px !important;
+  transform: scale(1.33333);
+  transform-origin: left bottom;
+}
+
 /* Ocean-band keyframes — lab-verbatim, lab NAMES (night-markup.ts references
    them from inline styles). heave0-3 are GENERATED at load by injectHeave(). */
 @keyframes shipBob   { from { transform: translateY(0) rotate(-2.6deg); } to { transform: translateY(9px) rotate(2.3deg); } }

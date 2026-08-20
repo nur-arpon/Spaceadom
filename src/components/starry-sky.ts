@@ -646,6 +646,15 @@ export function buildStarrySky(): void {
     const el = world.querySelector<HTMLElement>(`#${id}`);
     if (el) el.style.background = `${url} repeat-x`;
   };
+  // THE STORM STAYS INSIDE THE SCALED WORLD, WITH THE SHIP.
+  //
+  // It was briefly moved out to render at the lab's full size, on my reading
+  // that a storm is sky. The owner corrected that immediately and he is right:
+  // *"the storm was supposed to be behind the ship to give it scary
+  // atmosphere, never for sky."* It is the galleon's weather, so it scales
+  // with the galleon — a full-size storm behind a 0.75 ship is a different
+  // scene, not a bigger one. Do not move it again.
+
   bg("st-wave-line", sea.line);
   bg("st-wave-far", sea.far);
   bg("st-wave-mid", sea.mid);

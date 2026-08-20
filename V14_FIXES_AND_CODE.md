@@ -8870,3 +8870,55 @@ on when they installed.
 **To see the true first-run experience** on a machine that already has a
 config, rename `%APPDATA%\Spaceadom\config.json` and start the app — it will
 write a fresh one. Renaming rather than deleting keeps the bindings.
+
+### 5d. The storm, third attempt — and the diff that ended the guessing
+
+**The owner, after two wrong fixes:** *"the clouds and storms are still messed
+up and does not look as good as previous"*, then *"the storm was supposed to be
+behind the ship to give it scary atmosphere, never for sky"*, then *"change
+just the clouds and storm based on this [the lab], don't touch anything else."*
+
+**Stop guessing, diff it.** Extracting the lab's `{{ cloudStyle }}` subtree and
+comparing it span for span against `night-markup.ts`:
+
+```
+lab spans: 7   current spans: 7
+span 0: identical … span 6: identical
+```
+
+**Nothing about the clouds was ever wrong.** Every gradient stop, radius, blur
+radius and drift duration was already the lab's. The only thing altering them
+was the world's `transform: scale(0.75)`, which rendered the bank at 525×195
+instead of 700×260 — which is why it stopped looming and started reading as a
+few small puffs.
+
+**The two constraints only LOOK contradictory.** "Behind the ship, never for
+sky" means it must stay a child of the scaled world, so it paints behind the
+galleon and belongs to the ship's scene. "Match the lab" means it must render
+at the lab's size. Both hold if the container counter-scales in place:
+
+```css
+#st-clouds {
+  left: -146.667px !important;   /* -110 / 0.75 */
+  bottom: 200px !important;      /*  150 / 0.75 */
+  transform: scale(1.33333);     /*    1 / 0.75 */
+  transform-origin: left bottom;
+}
+```
+
+Measured after: `left -110, 700×260, 150px above the viewport bottom` — the
+lab's numbers exactly — with all seven masses at their authored sizes and the
+ship still 273×231.
+
+**The failed attempt is recorded because its reasoning was seductive:** moving
+the storm OUT of the world gave the right size and the wrong scene. A full-size
+bank towering over a 0.75 ship reads as sky, which is precisely what the owner
+rejected. Size and scene are separate properties, and the scaled-wrapper trick
+is what buys both.
+
+**Generalise this.** *When the owner says a transcribed thing "looks wrong",
+diff it against the source BEFORE theorising.* Two builds were spent on
+plausible theories — blur cost, low-power mode, layer ownership — for a
+component whose markup was byte-identical to the design the whole time. The
+diff took one command and pointed straight at the only thing that was
+different: the coordinate space it was measured in.
