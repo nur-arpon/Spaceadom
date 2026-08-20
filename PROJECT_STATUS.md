@@ -1,6 +1,51 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-20 | night (Claude Fable 5) - Spaceadom can close the conflicting program now, and four small bugs
+
+Full technical record: PROBLEMS 155-156 in `V14_FIXES_AND_CODE.md`. Shipped as
+1.0.63, installed and verified on the REAL machine.
+
+**The conflict button reverses a decision this app had written down.**
+`renderConflicts()` has carried a comment since PROBLEM 96 saying Spaceadom
+never closes another program for you, "it is malware behaviour besides". Nur
+overruled it with a good reason: a user who does not know what PowerToys IS
+cannot act on a banner telling them to close it. What separates the two cases
+is not the action but the consent around it - so the consent machinery is the
+feature. Two presses, never one; the armed label states the consequence; the
+other button hides while one is armed so a stray press cannot fire the wrong
+thing; and if Windows refuses without elevation the button CHANGES to say a
+permission prompt is coming before it raises one, which is what he asked for.
+The backend refuses any process not already on the known-conflicts list, asks
+politely (WM_CLOSE) before forcing, and never elevates silently. "Permanently"
+removes the HKCU Run entry and the Startup shortcut and reports exactly what it
+removed; Scheduled Tasks are deliberately left alone, because PowerToys' task
+belongs to its installer and breaking it breaks a program he chose to install.
+
+**Four small ones.** (1) "After confirming it still shows Confirm" was real:
+`arm()` re-rendered and `disarm()` did not. (2) The description convoy took too
+long to close because PROBLEM 154 doubled the row count and the stagger was a
+flat 80ms per row - it is budgeted now, whole convoy out inside 300ms however
+many rows exist. (3) He was right that a theme animation was missing: spec §5's
+450ms whole-app cross-fade was never ported, because CSS custom properties do
+not transition and a token swap is instant by nature. (4) The
+"never closes programs for you" sentence appeared twice AND had just been made
+false; both are rewritten, and the Conflicts description is no longer hidden
+behind "Show me around" - a live fault should explain itself unasked.
+
+**Smart Search: he closed it.** UI Automation did not fix WhatsApp or Spotify
+and he said to leave them. That is recorded as UNDIAGNOSED rather than dropped,
+with what is known and a note not to re-attempt from scratch without first
+reading the `smart_search:` log line. Google was added to the class that has a
+100% record - apps whose shortcut is DOCUMENTED - since '/' is Google's own
+focus-search key.
+
+**NOT verified - hand-test items.** The conflict close button cannot be
+exercised from this shell: it ends a real process and, for PowerToys, raises a
+real UAC prompt. Nur has both PowerToys and spacedesk running, so the buttons
+will be live in his Settings > Conflicts. Recommend trying "Close it now" on
+spacedesk first (unelevated, low stakes) before PowerToys.
+
 ## Update: 2026-08-20 | late (Claude Fable 5) - Smart Search stops guessing, and eight descriptions that were unreachable
 
 Full technical record: PROBLEMS 153-154 in `V14_FIXES_AND_CODE.md`. Shipped as

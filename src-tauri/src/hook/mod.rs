@@ -8,6 +8,7 @@
 
 pub mod fullscreen;
 pub mod conflicts;
+pub mod conflict_close;
 
 use crossbeam_channel::Sender;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

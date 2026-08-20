@@ -121,3 +121,12 @@ pub fn detect() -> Vec<Conflict> {
 
 #[cfg(not(windows))]
 pub fn detect() -> Vec<Conflict> { Vec::new() }
+
+/// Every process name this app recognises as a keyboard conflict.
+///
+/// PROBLEM 155 — `conflict_close` validates against this before it will end
+/// anything. That command is reachable from the webview, so without a closed
+/// list it would be a "terminate any process by name" primitive.
+pub fn known_process_names() -> Vec<&'static str> {
+    KNOWN.iter().map(|(p, _, _)| *p).collect()
+}

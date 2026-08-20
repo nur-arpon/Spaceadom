@@ -645,6 +645,50 @@ body.nocturne #key-detail-panel { box-shadow: 0 24px 60px rgba(0, 0, 0, .55); }
    is kept in sync by applySkyMode's sibling in main.ts and the toggle itself. */
 .sma-note { display: none; }
 body.show-around .sma-note { display: block; }
+/* --------------------------------------------------------------------------
+   THEME CROSS-FADE (spec §5: "whole app cross-fades background/color 450ms")
+
+   Custom properties do not transition, so the themes' token swap is instant
+   by nature — every surface snapped to the new palette in one frame and the
+   change read as a flicker rather than a change. This class is added by
+   applyLook() for the 450ms of the switch and removed again, so the cost is
+   paid only while the theme is actually moving.
+
+   `background-image` is in the list on purpose: #stage's gradient is the
+   biggest surface in the app, and all three themes declare it with the same
+   structure (3 stops, same angle), which is the condition under which a
+   browser can interpolate one gradient into another.
+   -------------------------------------------------------------------------- */
+body.theme-xfade,
+body.theme-xfade *:not(.toggle-thumb):not(.theme-seg-ind) {
+  transition:
+    background-color 450ms linear,
+    background-image 450ms linear,
+    color 450ms linear,
+    border-color 450ms linear,
+    fill 450ms linear !important;
+}
+
+/* The close-it controls under a detected conflict (PROBLEM 155). Full width
+   inside the conflict row's grid, so the two buttons and the result sentence
+   stack under the program they belong to and can never be mistaken for a
+   control belonging to the row below. */
+.conflict-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 7px;
+}
+.conflict-actions .btn { flex: 1 1 auto; justify-content: center; font-size: 11px; height: 28px; }
+.conflict-result {
+  flex-basis: 100%;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--st-text-dim);
+  margin-top: 3px;
+}
+
 .set-help-all {
   width: 100%;
   margin-top: 9px;

@@ -8514,3 +8514,144 @@ lock.* Any descendant may opt back in, and two features that each manage
 pointer-events over the same subtree will silently fight — the one that runs
 deeper wins, regardless of which is conceptually "more important". When a mode
 must make a subtree inert, it has to say so about the descendants too.
+
+---
+
+## PROBLEM 155 — Spaceadom can close the conflicting program now, and the reason it must ask is written down
+
+**The owner's request, 2026-08-20:** *"I was wondering of giving a button
+asking to temporary or permanently close those when show me around on or
+someone presses conflicts… just to make the experience seamless for users who
+don't know how to close the conflicting thing, confirm before closing, let them
+know if any prompt they have to accept."*
+
+**This REVERSES a documented decision, and that is the point of the entry.**
+`renderConflicts()` carried this comment since PROBLEM 96: *"Spaceadom never
+closes another program for you… it is malware behaviour besides."* That was
+right as a DEFAULT and wrong as an absolute — a user who does not know what
+PowerToys is cannot act on a banner telling them to close it. What makes the
+difference is not the action but the consent around it.
+
+**Exact files.** `src-tauri/src/hook/conflict_close.rs` (new),
+`src-tauri/src/hook/conflicts.rs` (`known_process_names()`),
+`src-tauri/src/commands.rs`, `src-tauri/src/lib.rs`,
+`src/components/settings-panel.ts` (`conflictActions()`), `src/styles.css`.
+
+**Three rules the backend will not break, and why each exists:**
+
+```rust
+// 1. A CLOSED LIST. This command is reachable from the webview, so without
+//    this it is a "terminate any process by name" primitive.
+fn is_known_conflict(process: &str) -> bool {
+    let p = process.to_ascii_lowercase();
+    crate::hook::conflicts::known_process_names().iter().any(|k| *k == p)
+}
+
+// 2. ASK POLITELY FIRST. taskkill WITHOUT /F sends WM_CLOSE, so the program
+//    saves its state and shuts down properly; /T takes its children, which
+//    matters for PowerToys — the Keyboard Manager engine is a child, and the
+//    child is what actually holds the hook. Force is the second attempt only.
+
+// 3. NEVER ELEVATE SILENTLY. A non-elevated app cannot end an elevated one,
+//    and PowerToys usually IS elevated. That returns needs_permission, the UI
+//    changes its button to say a prompt is coming, and only the NEXT press
+//    raises it via ShellExecuteExW("runas").
+```
+
+**"Permanently" is bounded, and it reports what it did.** `remove_autostart()`
+touches exactly two places a user-level program registers itself — the HKCU
+`Run` key and the Startup folder — and returns a human-readable list of what
+it removed, which the UI shows. **Scheduled Tasks are deliberately not
+touched**: PowerToys' task is created by its installer under the machine
+account, deleting it needs elevation, and getting it wrong breaks a program the
+user chose to install.
+
+**The UI is slow and loud on purpose.** Two presses, never one; the armed label
+states the consequence (`Yes — close PowerToys now` vs
+`Yes — close it and stop it starting`) so the second press is informed; the
+other button hides while one is armed, so a stray press cannot fire the wrong
+action; the result sentence is whatever Rust reported, **including the
+failures** ("the permission prompt was declined, or Windows refused").
+
+**Generalise this.** *A default of "we never do X" is not the same as "X is
+wrong".* When the reason for the ban is consent, the fix is to build the
+consent, not to keep the ban — but then the consent machinery IS the feature,
+and it must be as carefully built as the action.
+
+---
+
+## PROBLEM 156 — four small ones the owner found in 1.0.62
+
+**1. "After pressing clear this profile it shows Confirm, then after confirming
+it still shows Confirm — which feels like a bug."** It was one. `arm()` set the
+state and called `render()`; `disarm()` set the state and did not — so the
+button kept the armed label after the action had already fired.
+
+```rust,ignore
+function disarm(): void { _armed = null; window.clearTimeout(_armTimer); render(); }
+//                                                                      ^^^^^^^^ was missing
+```
+
+*Generalise: a state-changing pair must be symmetric about its side effects.
+If one half re-renders, the other half has to, and the missing one is always
+the "undo" — it gets written second and tested least.*
+
+**2. "The Show me around button when turned off, all the descriptions
+minimising takes too much time. It wasn't the problem in other builds."** It
+was not: PROBLEM 154 took the description count from 8 to 16, and the convoy
+stagger was a flat 80ms per row — so closing went from ~0.6s to ~1.3s of
+stagger before the last row even started. Closing is now BUDGETED rather than
+per-row: `min(CONVOY_STAGGER_MS * 0.65, CONVOY_OUT_MS / rows)`, so the whole
+convoy is out inside 300ms however many rows exist.
+
+*Generalise: a per-item delay is a hidden multiplication by a count that will
+grow. Budget the total, then divide.*
+
+**3. "You might have compromised on the animations when moving between themes.
+There was a cool animation which I think you missed."** Correct — spec §5's
+*"whole app cross-fades background/color 450ms"* was never ported. CSS custom
+properties do not transition, so a token swap is instant by nature and the
+theme change read as a flicker. `body.theme-xfade` is added by `applyLook()`
+for 450ms and removed, transitioning the properties the tokens feed:
+
+```css
+body.theme-xfade, body.theme-xfade *:not(.toggle-thumb):not(.theme-seg-ind) {
+  transition: background-color 450ms linear, background-image 450ms linear,
+              color 450ms linear, border-color 450ms linear, fill 450ms linear !important;
+}
+```
+
+Two details: `background-image` is included because `#stage`'s gradient is the
+largest surface in the app and all three themes declare it with the same
+structure (3 stops, same angle), which is the condition for a browser to
+interpolate one gradient into another. And it is applied ONLY when the theme
+actually changes — `applyLook()` also runs at boot and on the fun switch, and a
+450ms transition on every surface during first paint fades the dashboard in
+from nothing.
+
+**4. "In describing you said twice Spaceadom doesn't close program for them."**
+The Conflicts description and the conflicts hint said the same sentence, and
+PROBLEM 155 made both of them false. Deduplicated and rewritten. The Conflicts
+description is also **no longer gated behind "Show me around"**, per the owner:
+a live fault on this machine should explain itself whether or not you asked for
+a tour.
+
+---
+
+## Measurement note (2026-08-20) — Smart Search, closed by the owner
+
+He tested 1.0.62's UI-Automation focuser and reported: *"it still doesn't work
+in whatsapp, spotify, it's okay, just leave it. just ensure it works on google
+search while inside browser."*
+
+**So UIA did not fix WhatsApp or Spotify, and the reason is not diagnosed.**
+Recorded rather than quietly dropped, with what is known: the tree walk finds
+*something* (the fallback path did not log), so the likely causes are that the
+element found is not the compose box (WhatsApp's is one of several
+contenteditables), or that `SetFocus()` succeeds at the UIA layer while the app
+re-routes focus itself. **Do not re-attempt from scratch** without first
+reading the `smart_search:` log line, which names the branch taken.
+
+Google was added to the DOCUMENTED-shortcut class it belongs in — `/` is
+Google's own focus-search key, on both the home page and results pages — which
+is the same class as YouTube, and that class has a 100% success record.

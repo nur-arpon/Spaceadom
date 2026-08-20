@@ -81,6 +81,15 @@ unsafe fn focus_engine_win32() -> String {
             send_ctrl(VK_L.0);
             return "🌍 Address Bar".into();
         }
+        // Google DOCUMENTS '/' as focus-the-search-box, on both the home page
+        // and results pages — so it belongs with YouTube in the class that
+        // works, not with the pages that get the address bar. Titles are
+        // "Google" (home) and "<query> - Google Search" (results).
+        if win_title == "google" || win_title.ends_with("google search") {
+            decide("google: real '/'");
+            send_slash_class_key('/');
+            return "🔍 Google Search".into();
+        }
         if win_title.contains("youtube") {
             decide("youtube: real '/'");
             send_slash_class_key('/');

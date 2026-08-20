@@ -638,6 +638,7 @@ pub fn run() {
             commands::get_rival_install,
             commands::repair_rival_install,
             commands::get_conflicts,
+            commands::close_conflict,
             commands::set_startup_enabled,
         ])
         // --- App setup callback ---

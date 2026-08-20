@@ -300,8 +300,20 @@ export function applyTheme(dark: boolean): void {
  * `.nocturne` is still the single switch the overlay reads, so it is kept in
  * lockstep here rather than being derived independently anywhere else.
  */
+let _xfadeTimer: number | undefined;
+
 export function applyLook(): void {
   const theme = appConfig?.theme || (appConfig?.dark_mode ? "starry" : "earthy");
+  // Cross-fade the whole app between palettes (spec §5). Only when the theme
+  // ACTUALLY changes — applyLook also runs on boot and on the fun switch, and
+  // a 450ms transition on every surface during the first paint would fade the
+  // dashboard in from nothing.
+  if (document.body.dataset.theme && document.body.dataset.theme !== theme
+      && !document.documentElement.classList.contains("reduced-motion")) {
+    document.body.classList.add("theme-xfade");
+    window.clearTimeout(_xfadeTimer);
+    _xfadeTimer = window.setTimeout(() => document.body.classList.remove("theme-xfade"), 480);
+  }
   const fun = appConfig?.fun_mode === true;   // off-by-default since 2026-08-20
   document.body.dataset.theme = theme;
   document.body.dataset.fun = fun ? "on" : "off";

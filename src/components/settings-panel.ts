@@ -17,6 +17,7 @@ import {
   appConfig, persistConfig, applySound, applyMotion,
   applyLook, applySkyMode, knownConflicts, refreshConflicts,
 } from "../main";
+import type { Conflict } from "../main";
 import { sfx } from "../sfx";
 import { toggleSwitchHtml, sliderShell } from "./controls";
 import { showToast } from "./toast";
@@ -165,7 +166,7 @@ function render(): void {
     <div class="divider" style="margin:14px 0 10px;"></div>
     <button type="button" class="set-title set-row-label" data-desc="conflicts"
             aria-expanded="false" style="font-size:13px; margin-bottom:8px;">Conflicts</button>
-    ${descBox("conflicts")}
+    ${descBox("conflicts", true)}
     <div id="set-conflicts"></div>
 
     <div class="set-actions">
@@ -457,14 +458,24 @@ function renderConflicts(): void {
         why.textContent = c.detail;
 
         row.append(name, proc, why);
+
+        // PROBLEM 155 — the offer to close it. Two-step like every other
+        // destructive control here: the first press arms and SAYS what will
+        // happen, the second does it. The owner's reason for this existing at
+        // all: a user who does not know what PowerToys is cannot act on a
+        // banner telling them to close it.
+        row.appendChild(conflictActions(c, draw));
         box.appendChild(row);
       });
 
       const hint = document.createElement("div");
       hint.className = "set-note sma-note";
+      // The old text said "Spaceadom never closes other programs for you" —
+      // which the Conflicts description above ALSO said, and which stopped
+      // being true on 2026-08-20 when the owner asked for the button below.
       hint.textContent =
-        "Close one of them — either the program above, or Spaceadom — so only " +
-        "one owns the spacebar. Spaceadom never closes other programs for you.";
+        "Only one program can own the spacebar. Close one of them — or use the " +
+        "button below and Spaceadom will do it for you.";
       box.appendChild(hint);
     }
 
@@ -523,8 +534,11 @@ const DESC: Record<string, string> = {
     "How long you hold Space before the shortcut guide appears. Shorter shows help sooner; longer keeps it out of your way.",
   opacity:
     "The limit for Space+Scroll window fading. The floor stops a window from ever turning fully invisible.",
+  // NOT gated behind "Show me around" like the other teaching prose: a
+  // conflict is a live fault on this machine, and the owner wants its
+  // explanation there whenever it is (2026-08-20).
   conflicts:
-    "Other remapping software that's also holding your keyboard. Spaceadom only reports — it never closes anything for you.",
+    "Other remapping software that's also holding your keyboard — only one program can own the spacebar. Spaceadom can close one for you, and always asks first.",
   reset:
     "Puts a preset profile back to its factory bindings. On a profile you created, it clears it instead — you confirm first.",
   clear:
@@ -539,6 +553,8 @@ const DESC: Record<string, string> = {
 const HOVER_LINGER_MS = 2000;
 /** Gap between rows when "Show me around" opens them all as a convoy. */
 const CONVOY_STAGGER_MS = 80;
+/** Total stagger budget for CLOSING the convoy, however many rows exist. */
+const CONVOY_OUT_MS = 300;
 
 /** Descriptions that were opened by hovering, so they can close on leave.
  *  One opened by a CLICK stays put — that was a deliberate act. */
@@ -546,9 +562,15 @@ const _hoverOpened = new Set<string>();
 let _hoverTimer: number | undefined;
 
 /** The collapsing box under a row. Empty when there is no copy for the id. */
-function descBox(id: string): string {
+/** @param openByDefault  starts expanded and stays expanded through renders —
+ *  only Conflicts uses it, because a live fault should explain itself without
+ *  being asked (owner, 2026-08-20). */
+function descBox(id: string, openByDefault = false): string {
   const copy = DESC[id];
   if (!copy) return "";
+  if (openByDefault) {
+    return `<div class="set-desc is-open" data-desc-for="${id}"><div class="set-desc-in"><div class="set-desc-body">${copy}</div></div></div>`;
+  }
   // The visual box is a CHILD of the clipped wrapper, never the wrapper
   // itself — see the .set-desc-in note in styles.css for why.
   return `<div class="set-desc" data-desc-for="${id}"><div class="set-desc-in"><div class="set-desc-body">${copy}</div></div></div>`;
@@ -581,10 +603,20 @@ function convoyAll(open: boolean): void {
   );
   const order = open ? boxes : boxes.slice().reverse();
   const reduced = document.documentElement.classList.contains("reduced-motion");
+  // The stagger is a flourish on the way IN and a wait on the way OUT. There
+  // are sixteen descriptions now, so a flat 80ms each meant 1.3s of stagger
+  // plus the slide before the panel was clear — the owner's "minimising takes
+  // too much time; it wasn't the problem in other builds" (there were fewer
+  // rows then). Closing is now BUDGETED: the whole convoy is out inside
+  // CONVOY_OUT_MS however many rows there are, which is also the design's
+  // "exits run at ~65% of entrance time".
+  const step = open
+    ? CONVOY_STAGGER_MS
+    : Math.min(CONVOY_STAGGER_MS * 0.65, CONVOY_OUT_MS / Math.max(1, order.length));
   order.forEach((box, i) => {
     const id = box.dataset.descFor ?? "";
     if (reduced) { setDescOpen(id, open); return; }
-    window.setTimeout(() => setDescOpen(id, open), i * CONVOY_STAGGER_MS);
+    window.setTimeout(() => setDescOpen(id, open), i * step);
   });
 }
 
@@ -658,6 +690,121 @@ function markFlipped(id: string, on: boolean): void {
   panelEl?.querySelector<HTMLElement>(`#set-${id}`)
     ?.closest<HTMLElement>(".toggle-switch")
     ?.setAttribute("data-anim", on ? "on" : "off");
+}
+
+/**
+ * The close-it controls under one detected conflict (PROBLEM 155).
+ *
+ * Everything about this is deliberately slow and loud:
+ *  - two presses, never one;
+ *  - the armed label states the consequence ("Close it" vs "Close and stop it
+ *    starting"), so the second press is informed;
+ *  - if Windows refuses without elevation the button changes to say a
+ *    permission prompt is coming BEFORE it raises one — the owner asked for
+ *    exactly that ("let them know if any prompt they have to accept");
+ *  - the result sentence is whatever Rust reported, including the failures.
+ */
+function conflictActions(c: Conflict, redraw: () => void): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "conflict-actions";
+
+  const say = document.createElement("div");
+  say.className = "conflict-result";
+  say.hidden = true;
+
+  // null = not armed. "now"/"perm" = armed for that action. "elevate" = the
+  // unelevated attempt was refused and the next press raises the prompt.
+  let armed: "now" | "perm" | "elevate" | null = null;
+  let armTimer: number | undefined;
+
+  const btnNow = document.createElement("button");
+  btnNow.className = "btn btn-sm";
+  const btnPerm = document.createElement("button");
+  btnPerm.className = "btn btn-sm";
+
+  const paint = () => {
+    btnNow.textContent =
+      armed === "now" ? `Yes — close ${c.product} now`
+      : armed === "elevate" ? "Yes — show me the permission prompt"
+      : "Close it now";
+    btnPerm.textContent = armed === "perm" ? `Yes — close it and stop it starting` : "Close it and stop it starting";
+    btnNow.classList.toggle("btn-danger", armed === "now" || armed === "elevate");
+    btnPerm.classList.toggle("btn-danger", armed === "perm");
+    // While one is armed the other is meaningless — hide it rather than let a
+    // stray press fire the wrong one.
+    btnPerm.hidden = armed === "now" || armed === "elevate";
+    btnNow.hidden = armed === "perm";
+  };
+
+  const disarmSoon = () => {
+    window.clearTimeout(armTimer);
+    armTimer = window.setTimeout(() => { armed = null; paint(); }, 4000);
+  };
+
+  const run = async (permanent: boolean, elevate: boolean) => {
+    say.hidden = false;
+    say.textContent = elevate
+      ? "Windows will ask your permission — choose Yes."
+      : `Closing ${c.product}…`;
+    try {
+      const r = await invoke<{ closed: boolean; needsPermission: boolean; message: string }>(
+        "close_conflict",
+        { process: c.process, permanent, elevate },
+      );
+      say.textContent = r.message;
+      if (r.needsPermission) {
+        // Not a failure yet — it needs elevation, and the NEXT press is the
+        // one that raises the prompt the user was just warned about.
+        armed = "elevate";
+        paint();
+        disarmSoon();
+        return;
+      }
+      armed = null;
+      paint();
+      if (r.closed) {
+        sfx.confirm();
+        // Re-detect rather than assume: the list must show what is true now.
+        await refreshConflicts();
+        window.setTimeout(redraw, 900);
+      }
+    } catch (e) {
+      console.error("close_conflict failed:", e);
+      say.textContent = "Spaceadom could not reach the part of itself that closes programs.";
+      armed = null;
+      paint();
+    }
+  };
+
+  btnNow.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (armed === "elevate") { void run(false, true); return; }
+    if (armed !== "now") {
+      armed = "now"; paint(); sfx.arm(); disarmSoon();
+      say.hidden = false;
+      say.textContent = `${c.product} will close. It starts again next time you restart your PC.`;
+      return;
+    }
+    window.clearTimeout(armTimer);
+    void run(false, false);
+  });
+
+  btnPerm.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (armed !== "perm") {
+      armed = "perm"; paint(); sfx.arm(); disarmSoon();
+      say.hidden = false;
+      say.textContent = `${c.product} will close, and Spaceadom will remove its start-with-Windows entry. ` +
+        `You can put that back from ${c.product}'s own settings.`;
+      return;
+    }
+    window.clearTimeout(armTimer);
+    void run(true, false);
+  });
+
+  paint();
+  wrap.append(btnNow, btnPerm, say);
+  return wrap;
 }
 
 function toggleRow(id: string, label: string, on: boolean, i: number): string {
@@ -932,4 +1079,9 @@ function arm(which: "def" | "clr"): void {
 function disarm(): void {
   _armed = null;
   window.clearTimeout(_armTimer);
+  // render(), same as arm(). Without it the button kept reading "Confirm"
+  // after the action had already fired — the owner's "after confirming it
+  // still shows Confirm, which feels like a bug" (2026-08-20). arm() always
+  // re-rendered; its opposite never did.
+  render();
 }

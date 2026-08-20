@@ -887,6 +887,22 @@ pub fn get_conflicts() -> Vec<crate::hook::conflicts::Conflict> {
     crate::hook::conflicts::detect()
 }
 
+/// PROBLEM 155 — close a conflicting keyboard program, on the user's request.
+///
+/// NEVER automatic: the settings panel arms, confirms, and tells the user in
+/// advance when Windows will ask permission. `close_conflict` refuses any
+/// process that is not on the known-conflicts list, so this cannot be used as
+/// a general "kill by name" from the webview.
+#[tauri::command]
+pub fn close_conflict(
+    process: String,
+    permanent: bool,
+    elevate: bool,
+) -> crate::hook::conflict_close::CloseOutcome {
+    crate::hook::conflict_close::close_conflict(&process, permanent, elevate)
+}
+
+
 /// Size + position the overlay window to fit the toast stack, bottom-centre,
 /// then show it. Called by the overlay page AFTER it has rendered and
 /// measured its content (layout works in hidden webviews; painting doesn't —
