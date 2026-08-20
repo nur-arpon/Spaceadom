@@ -9039,3 +9039,34 @@ reasonable response to the last complaint and none of them converged, because
 "looks scary", "too far around" and "like spots" are descriptions of a result,
 not of a target. The moment a file existed with numbers in it, the work took
 one pass and was checkable line by line. **Ask for the spec earlier.**
+
+### 5g. …then halved, with one number
+
+**Owner:** *"ugh, just scale the clouds down by half and closer to the ship."*
+
+`storm-clouds.md` was written for a full-size galleon; ours renders at 0.75, so
+the spec's 700px bank out-reached the ship on both sides even when transcribed
+perfectly. The fix is the container's transform, and **nothing inside the storm
+changes**:
+
+```css
+#st-clouds {
+  left: -106.667px; bottom: 173.333px;   /* screen -80px / 130px, pre-divided by .75 */
+  transform: scale(0.66667);             /* 0.5 (halve) / 0.75 (undo the world) */
+  transform-origin: left bottom;
+}
+```
+
+Measured: **350x130 at left -80**, spanning -80..270 against a galleon at
+-72..201, rising to 260 just past mastheads at 231.
+
+**Why a transform and not six edited masses.** Rewriting the table would mean
+changing eighteen numbers and permanently losing the ability to diff this
+component against `storm-clouds.md` — which is the thing that finally ended
+four rounds of guessing. Scaling the container keeps every authored value
+intact and checkable, and makes the next size change one number instead of
+eighteen.
+
+*Generalise this: when a spec's geometry is right but its SCALE does not suit
+its surroundings, scale the container. Editing the contents to compensate
+destroys the only copy you can verify.*
