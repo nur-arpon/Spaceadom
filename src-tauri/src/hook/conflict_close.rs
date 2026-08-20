@@ -45,10 +45,9 @@ pub struct CloseOutcome {
 /// keyboard conflict. Rule 1, and the only thing standing between this command
 /// and a remote-kill primitive.
 fn is_known_conflict(process: &str) -> bool {
-    let p = process.to_ascii_lowercase();
-    crate::hook::conflicts::known_process_names()
-        .iter()
-        .any(|k| *k == p)
+    // Delegates to detect()'s OWN matcher — see is_known_process for why this
+    // must not be re-implemented here (PROBLEM 157).
+    crate::hook::conflicts::is_known_process(process)
 }
 
 #[cfg(windows)]
@@ -107,18 +106,32 @@ pub fn close_conflict(process: &str, permanent: bool, elevate: bool) -> CloseOut
                 denied = true;
             }
             std::thread::sleep(std::time::Duration::from_millis(600));
-            if still_running(process) {
-                let needs_permission = denied;
-                log::info!("conflict_close: '{process}' survived (needs_permission={needs_permission})");
+
+            // PROBLEM 157 — if Windows refused for want of rights, raise the
+            // prompt NOW. The user already confirmed they want this closed;
+            // making them press a third time for a prompt they consented to is
+            // how the owner ended up reporting "it did nothing, and I was not
+            // given any prompt to approve". The UI's confirm step already says
+            // a prompt may appear.
+            if still_running(process) && denied {
+                log::info!("conflict_close: '{process}' needs elevation — raising the prompt");
+                let ok = run_elevated("taskkill", &format!("/IM {process} /T /F"));
+                std::thread::sleep(std::time::Duration::from_millis(900));
+                if !ok || still_running(process) {
+                    return CloseOutcome {
+                        closed: false,
+                        needs_permission: false,
+                        autostart_removed: vec![],
+                        message: format!("{process} is still running — the permission prompt was declined, or Windows refused it."),
+                    };
+                }
+            } else if still_running(process) {
+                log::info!("conflict_close: '{process}' survived and it is not a rights problem");
                 return CloseOutcome {
                     closed: false,
-                    needs_permission,
+                    needs_permission: true,   // the UI offers Task Manager
                     autostart_removed: vec![],
-                    message: if needs_permission {
-                        format!("{process} runs with administrator rights, so Windows will ask your permission before Spaceadom can close it.")
-                    } else {
-                        format!("Spaceadom could not close {process}. You can end it from Task Manager.")
-                    },
+                    message: format!("Spaceadom could not close {process} — it restarts itself, or Windows is protecting it."),
                 };
             }
         }
@@ -252,3 +265,26 @@ pub fn close_conflict(_process: &str, _permanent: bool, _elevate: bool) -> Close
         message: "Closing programs is only supported on Windows.".into(),
     }
 }
+
+/// Open Task Manager on its Start-up apps tab — the fallback when Spaceadom
+/// cannot close something itself (owner, 2026-08-20: *"if you cannot close it,
+/// then direct the user to startup menu of task manager so that they can just
+/// turn it off"*).
+///
+/// `/0 /startup` is Task Manager's own documented switch for that tab, so the
+/// user lands where the fix is rather than on a process list they must search.
+#[cfg(windows)]
+pub fn open_startup_manager() -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let ok = std::process::Command::new("taskmgr.exe")
+        .args(["/0", "/startup"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .is_ok();
+    log::info!("conflict_close: opened Task Manager startup tab: {ok}");
+    ok
+}
+
+#[cfg(not(windows))]
+pub fn open_startup_manager() -> bool { false }

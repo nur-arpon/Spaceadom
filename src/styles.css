@@ -659,8 +659,22 @@ body.show-around .sma-note { display: block; }
    structure (3 stops, same angle), which is the condition under which a
    browser can interpolate one gradient into another.
    -------------------------------------------------------------------------- */
+/* NAMED SURFACES, not `*` (owner, 2026-08-20: "I still didn't feel the smooth
+   transition between the themes"). The first version transitioned five
+   properties on EVERY element in the document for 450ms — on a machine
+   compositing in software that is thousands of simultaneous interpolations,
+   and the result was slower, not smoother. These are the surfaces that
+   actually carry the palette. */
 body.theme-xfade,
-body.theme-xfade *:not(.toggle-thumb):not(.theme-seg-ind) {
+body.theme-xfade #stage,
+body.theme-xfade #topbar,
+body.theme-xfade .popover,
+body.theme-xfade .key,
+body.theme-xfade .btn,
+body.theme-xfade .special-item,
+body.theme-xfade .profile-row,
+body.theme-xfade .set-desc-body,
+body.theme-xfade .toggle-track {
   transition:
     background-color 450ms linear,
     background-image 450ms linear,
@@ -669,25 +683,50 @@ body.theme-xfade *:not(.toggle-thumb):not(.theme-seg-ind) {
     fill 450ms linear !important;
 }
 
-/* The close-it controls under a detected conflict (PROBLEM 155). Full width
-   inside the conflict row's grid, so the two buttons and the result sentence
-   stack under the program they belong to and can never be mistaken for a
-   control belonging to the row below. */
-.conflict-actions {
+/* The conflict ROW is a button now (PROBLEM 157) — pressing a program raises
+   the offer at the top of the screen rather than parking two buttons under
+   every conflict forever. */
+.conflict-row { cursor: pointer; transition: background-color 160ms var(--ease-out); }
+.conflict-row:hover { background: var(--st-accent-tint); }
+.conflict-row:focus-visible { outline: 2px solid var(--st-accent-brd); outline-offset: 2px; }
+.conflict-row-cta {
   grid-column: 1 / -1;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 7px;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--st-accent-deep);
+  margin-top: 4px;
 }
-.conflict-actions .btn { flex: 1 1 auto; justify-content: center; font-size: 11px; height: 28px; }
-.conflict-result {
-  flex-basis: 100%;
-  font-size: 11px;
-  line-height: 1.45;
-  color: var(--st-text-dim);
-  margin-top: 3px;
+
+/* The offer itself — top centre, where every other transient message in this
+   app appears. Enters on transform/opacity ONLY: this is the one surface that
+   shows up on a machine already struggling, so it must not cost a layout. */
+.conflict-prompt {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  z-index: 90;
+  width: min(420px, calc(100vw - 32px));
+  padding: 13px 15px 14px;
+  border-radius: var(--radius-lg);
+  background: var(--st-card);
+  border: 1px solid var(--st-accent-brd);
+  box-shadow: var(--shadow-lg);
+  opacity: 0;
+  transform: translate(-50%, -12px) scale(.97);
+  transition: opacity 260ms var(--ease-out), transform 260ms var(--ease-spring);
 }
+.conflict-prompt.is-in { opacity: 1; transform: translate(-50%, 0) scale(1); }
+.conflict-prompt.is-leaving {
+  opacity: 0;
+  transform: translate(-50%, -8px) scale(.98);
+  transition-duration: 170ms;              /* exits ~65% of entrance */
+  transition-timing-function: var(--ease-in);
+}
+.conflict-prompt-title { font-family: var(--st-font-heading); font-size: 14px; color: var(--st-text); }
+.conflict-prompt-body { font-size: 11.5px; line-height: 1.5; color: var(--st-text-soft); margin-top: 5px; }
+.conflict-prompt-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.conflict-prompt-row .btn { flex: 1 1 auto; justify-content: center; font-size: 11px; height: 29px; }
+.conflict-prompt-row[hidden] { display: none; }
 
 .set-help-all {
   width: 100%;
@@ -1017,7 +1056,11 @@ body.nocturne .confirm-box {
 .set-desc {
   display: grid;
   grid-template-rows: 0fr;
-  transition: grid-template-rows 380ms cubic-bezier(.3, .9, .3, 1);
+  /* 240ms, not 380 (owner, 2026-08-20: "the wait is still too long and the
+     animation is not smooth enough, it feels laggy"). A grid-rows transition
+     costs a LAYOUT PASS PER FRAME, so the honest lever is fewer frames, not a
+     nicer curve — and this app has to run on machines with no GPU to spare. */
+  transition: grid-template-rows 240ms cubic-bezier(.3, .9, .3, 1);
 }
 .set-desc > .set-desc-in { overflow: hidden; min-height: 0; }
 .set-desc.is-open { grid-template-rows: 1fr; }
@@ -1025,8 +1068,13 @@ body.nocturne .confirm-box {
 /* The visible box. Margins per spec (7 top / 6 bottom) so a description never
    touches the control above it — including under the action buttons. */
 .set-desc-in > * { display: block; }
+/* The inner runs a transform/opacity entrance — compositor-only, so it is
+   nearly free and it is what makes the box read as arriving rather than the
+   layout just growing. It is SHORTER than the row transition on purpose: it
+   must finish inside it, or the tail of the keyframe animates a box that has
+   already stopped moving, which is precisely the "not smooth" feeling. */
 .set-desc.is-open > .set-desc-in {
-  animation: st-convoy-a 460ms cubic-bezier(.3, 1.2, .35, 1) both;
+  animation: st-convoy-a 230ms cubic-bezier(.3, 1.2, .35, 1) both;
 }
 /* THE COLLAPSED-STATE BUG (owner, 2026-08-19: "when the descriptions are not
    expanded there's a visual bug, it's not clean").

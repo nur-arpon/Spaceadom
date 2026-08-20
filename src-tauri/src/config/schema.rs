@@ -356,3 +356,48 @@ pub struct ConflictResult {
     pub conflicting_combo: Option<String>,
     pub description: Option<String>,
 }
+
+#[cfg(test)]
+mod first_install_tests {
+    use super::*;
+
+    /// PROBLEM 157 — the owner has now asked for these three defaults twice
+    /// ("when someone installs it, it should install with fun mode off and
+    /// show me around off… and it should open up the earthy theme first"), and
+    /// they are the first thing a stranger sees. They are also easy to flip by
+    /// accident: three bools/strings among thirty fields, changed by anyone
+    /// adding a feature that "should obviously be on".
+    ///
+    /// Both paths are checked, because they can drift APART: `Default` is what
+    /// a fresh install writes, and the serde defaults are what an OLD config
+    /// missing the field falls back to. A mismatch means the same user gets a
+    /// different app depending on when they installed.
+    #[test]
+    fn first_install_is_quiet_and_earthy() {
+        let d = AppConfig::default();
+        assert!(!d.fun_mode, "fun_mode must be OFF at first install");
+        assert!(!d.show_me_around, "show_me_around must be OFF at first install");
+        assert!(!d.hide_keyboard, "the keyboard must be visible at first install");
+        assert_eq!(d.theme, "earthy", "first install opens in Earthy");
+        assert!(!d.dark_mode, "Earthy is the light theme");
+    }
+
+    #[test]
+    fn a_config_missing_the_new_fields_also_lands_quiet_and_earthy() {
+        // Build the fixture by DELETING the three fields from a current config
+        // rather than hand-writing a 1.0.40 one: a literal would need every
+        // field that has no serde default (rollover_ms and friends), and would
+        // rot the moment someone adds another. This stays honest for free.
+        let mut v = serde_json::to_value(AppConfig::default()).expect("serialise");
+        let obj = v.as_object_mut().expect("object");
+        obj.remove("fun_mode");
+        obj.remove("show_me_around");
+        obj.remove("theme");
+        let c: AppConfig = serde_json::from_value(v).expect("a config without the new fields must still parse");
+        assert!(!c.fun_mode, "a missing fun_mode must read as OFF");
+        assert!(!c.show_me_around, "a missing show_me_around must read as OFF");
+        // theme's serde default is deliberately EMPTY so migration can tell
+        // "never set" from "set to earthy" — see config/mod.rs.
+        assert_eq!(c.theme, "", "theme's absence must stay distinguishable");
+    }
+}

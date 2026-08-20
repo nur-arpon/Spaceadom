@@ -8655,3 +8655,218 @@ reading the `smart_search:` log line, which names the branch taken.
 Google was added to the DOCUMENTED-shortcut class it belongs in — `/` is
 Google's own focus-search key, on both the home page and results pages — which
 is the same class as YouTube, and that class has a 100% success record.
+
+---
+
+## PROBLEM 157 — the close button that silently refused, and three animations the owner could feel were wrong
+
+**Symptoms, from the owner testing 1.0.63:** *"I tried pressing it and it did
+nothing. It's still running. It's doing nothing… and I was not given any prompt
+to approve."* Plus: *"this thing always staying there in the settings isn't
+worth it — this thing can just pop up when someone presses the thing that is
+conflicting"*, *"the satisfying animation of the slider of the themes moving
+between the names sliding smoothly is not there anymore"*, *"when closing the
+wait is still too long and the animation is not smooth enough, it feels
+laggy"*, and *"I still didn't feel the smooth transition between the themes"*.
+
+### 1. The close silently refused, because two matchers had to agree and lived apart
+
+`Conflict.process` carries the **real running exe name**. For spacedesk that is
+`spacedeskservice.exe`, while its entry in `KNOWN` is the prefix `spacedesk` —
+`detect()` matches it with `name.starts_with(...)`. The guard in
+`conflict_close` compared for **equality** against the list keys:
+
+```rust
+// BEFORE — refused every spacedesk close, silently
+known_process_names().iter().any(|k| *k == process.to_ascii_lowercase())
+// "spacedeskservice.exe" == "spacedesk"  ->  false
+```
+
+The refusal was one line of small grey text under the button, which is why it
+read as "it did nothing".
+
+```rust
+// AFTER — conflicts.rs owns ONE matcher and both callers use it
+pub fn is_known_process(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    KNOWN.iter().any(|(p, _, _)| if *p == "spacedesk" { n.starts_with("spacedesk") } else { n == *p })
+}
+```
+
+**And no prompt appeared** because the elevation flow needed a THIRD press: the
+unelevated attempt returned `needs_permission`, the button changed its label,
+and only the next press raised UAC. The user has already confirmed they want
+the program closed — the prompt is now raised on the same press, and the
+confirm text says in advance that Windows may ask.
+
+*Generalise this: two matchers that must agree and live in different files
+will disagree, and the failure will be silent because the second one is a
+guard — guards only speak when they refuse, and a refusal looks like nothing
+happening.* One matcher, exported, both callers.
+
+### 2. The buttons moved out of Settings and became a prompt
+
+Two permanent buttons under every conflict, for an action you take once, in a
+panel you open often. The conflict ROW is the trigger now
+(`role="button"`, Enter/Space, a "Press to close it →" cue), and it raises
+`conflict-prompt.ts` at top centre — where every other transient message in
+this app already appears. Entrance is transform/opacity only, because this is
+the one surface that shows up on a machine already in trouble.
+
+**When it cannot close the program it now GUIDES instead of refusing** (the
+owner's instruction): the buttons are replaced by *"Open Windows Start-up
+settings"*, which runs `taskmgr.exe /0 /startup` — Task Manager's own switch
+for that tab — and the text tells the user to find the program, choose Disable,
+and restart.
+
+**Also restored:** the per-app one-liner (`c.detail`), which had been gated
+behind "Show me around". It is the thing that actually explains the conflict,
+which is why the long Conflicts description could be cut to one sentence and
+put back behind the tour.
+
+### 3. The theme slider stopped sliding because the element stopped surviving
+
+`.theme-seg-ind` has always carried `transition: transform 480ms
+cubic-bezier(.34,1.45,.36,1)`. The CSS never broke. The handler called
+`render()`, which rebuilds the panel — **destroying the indicator and creating
+a new one already at the new position.** A brand-new element has nothing to
+transition FROM.
+
+```ts
+// AFTER — update in place, never re-render
+const seg = panelEl?.querySelector<HTMLElement>(".theme-seg");
+seg?.style.setProperty("--seg-i", String(["earthy","warcry","starry"].indexOf(next)));
+seg?.querySelector<HTMLElement>(".theme-seg-ind")?.setAttribute("data-seg", next);
+panelEl?.querySelectorAll<HTMLElement>("[data-theme-set]").forEach((o) => { … });
+// no render()
+```
+
+*Generalise this: a transition needs the SAME element to exist before and
+after. If a state change re-renders the subtree, every transition inside it
+becomes a jump — and the CSS will look perfectly correct while you debug it.*
+This is the third bug in this family (the toggle characters in PROBLEM 148, the
+open descriptions in PROBLEM 151, this).
+
+### 4. The two "not smooth" animations were both too much work, not too little
+
+**The convoy:** a `grid-template-rows` transition costs a LAYOUT PASS PER
+FRAME, and 1.0.63 ran sixteen of them staggered, each also running a 460ms
+keyframe entrance on its child. Closing is now **unstaggered** — sixteen boxes
+collapsing together is the same total layout work as sixteen staggered, one
+pass per frame either way, but it is over in 240ms instead of a second of
+waiting. The row transition went 380 → 240ms, and the child's entrance 460 →
+230ms so it finishes INSIDE the row transition rather than animating a box that
+has already stopped moving.
+
+**The cross-fade:** 1.0.63 applied it as `body.theme-xfade *`, five properties
+on every element in the document. On a machine compositing in software that is
+thousands of simultaneous interpolations, and the result was slower, not
+smoother. It is scoped to the ten surfaces that actually carry the palette.
+
+*Generalise this: when motion feels laggy, the first question is how many
+elements are animating and whether the property forces layout — not what the
+curve is.*
+
+### 5. Low-power mode, because this has to run on any laptop
+
+The owner's standing requirement: *"the whole app needs to be running in any
+Windows laptop… optimized enough to run on any device which may or may not have
+that much of graphical capabilities."*
+
+The night scene's real cost is not its element count — it is `filter: blur()`.
+Seven blurred surfaces (six storm masses at 10–15px, plus the lightning), all
+of which MOVE on `cloudDrift`, so the compositor re-blurs them every frame.
+`body.lite-scene` drops those blurs and lets the gradient stops carry the
+softness, which is CLAUDE.md's own overlay rule applied to the dashboard.
+
+It is decided once at boot from the three signals that mean "nothing spare":
+
+```ts
+const lite = appConfig.motion === "reduced"
+  || appConfig.overlay_compositing === "software"
+  || window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+```
+
+…and logged, so a "the sky is stuttering" report can be answered without
+guessing which branch the machine took.
+
+### 6. A hidden window never gets a frame
+
+`openConflictPrompt` added its `.is-in` class inside `requestAnimationFrame`.
+**rAF does not fire in a window that is not compositing** — the class would
+never land and the prompt would sit at `opacity: 0` forever, which is
+indistinguishable from the feature not existing. Reading `host.offsetWidth`
+flushes layout synchronously, which is all a transition needs for a "from"
+state, and it does not depend on a frame ever arriving.
+
+*Generalise this: never gate VISIBILITY on rAF. Use it for work that can wait
+for a frame, never for the step that makes something appear.* This is the same
+family as PROBLEM 135 (a page cannot observe that its own window is hidden).
+
+### 5b. …and the low-power trigger was wrong, within the hour
+
+**Symptom, from the owner:** *"you messed up the clouds and storms animation
+now."*
+
+**Two mistakes in one feature.**
+
+1. **Software compositing was a trigger.** His machine composites in software
+   as its NORMAL state — the overlay self-test set that back in PROBLEM 92 — so
+   lite mode switched itself on for the one person it was not meant for.
+   *Software compositing means "no GPU path", not "no headroom".* The trigger is
+   now only the two signals the USER controls: Windows' reduced-effects setting
+   and this app's own Visual effects switch.
+2. **`filter: none` was too blunt.** The storm masses are gradients whose
+   SOFTNESS is their shape; removing the blur leaves hard elliptical edges that
+   do not read as cloud at all. That is not an optimisation, it is a different
+   picture. Lite mode uses `blur(5px)` instead — blur cost grows with radius,
+   so 5px is a fraction of 10–15px while the masses keep their form.
+
+*Generalise this: a performance signal is not the same as a user preference.
+Deciding to show someone less should be driven by what they asked for, not by
+what their hardware happens to report — and an optimisation that changes what
+a thing LOOKS LIKE is a design change wearing a performance costume.*
+
+### 5c. "First install should be quiet" — it is, and here is why the owner's own machine is not
+
+**His report:** *"when starting at first install, it was supposed to start with
+fun mode off and show me around off, the user turns on if they want."*
+
+**It does. His machine is not a first install.** Read from outside the sandbox
+on 2026-08-20, his live `config.json`:
+
+```
+fun_mode=True  show_me_around=False  theme=starry  dark_mode=True
+```
+
+Those are HIS choices, made while testing 1.0.56–1.0.59, and they are stored.
+A default only applies where a value is absent — overwriting a stored value
+with a new default would mean every future default change silently rewrites
+what the user picked, which is a far worse bug than the one being reported.
+
+**This is now enforced rather than asserted** (`config/schema.rs`,
+`first_install_tests`), because the owner has asked for it twice and it is
+three flags among thirty that anyone adding a feature could flip:
+
+```rust
+#[test] fn first_install_is_quiet_and_earthy() {
+    let d = AppConfig::default();
+    assert!(!d.fun_mode);  assert!(!d.show_me_around);
+    assert_eq!(d.theme, "earthy");  assert!(!d.dark_mode);
+}
+#[test] fn a_config_missing_the_new_fields_also_lands_quiet_and_earthy() {
+    // Fixture built by DELETING the three fields from a serialised default —
+    // a hand-written old config would need every field lacking a serde
+    // default, and would rot the moment someone adds another.
+    …
+}
+```
+
+Both paths are checked because they can drift APART: `Default` is what a fresh
+install writes; the serde defaults are what an OLD config missing the field
+falls back to. A mismatch means the same person gets a different app depending
+on when they installed.
+
+**To see the true first-run experience** on a machine that already has a
+config, rename `%APPDATA%\Spaceadom\config.json` and start the app — it will
+write a fresh one. Renaming rather than deleting keeps the bindings.

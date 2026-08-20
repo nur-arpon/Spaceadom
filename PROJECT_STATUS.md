@@ -1,6 +1,77 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-20 | late night (Claude Fable 5) - the close button that refused silently, and three animations he could feel were wrong
+
+Full technical record: PROBLEM 157 in `V14_FIXES_AND_CODE.md`. Shipped as
+1.0.65, installed and verified on the REAL machine.
+
+**The close button did nothing, and the reason is a class of bug worth
+remembering.** `Conflict.process` carries the REAL exe name -
+`spacedeskservice.exe` - while the known-conflicts list stores the prefix
+`spacedesk` and `detect()` matches it with `starts_with`. The guard in
+`conflict_close` compared for EQUALITY against the list keys, so every
+spacedesk close was refused. Two matchers that had to agree, living in
+different files. And the refusal was one line of small grey text, which is
+exactly why it read as "it did nothing" - guards only speak when they refuse,
+and a refusal looks like nothing happening. There is one matcher now, exported
+from conflicts.rs, used by both.
+
+No prompt appeared because the elevation flow needed a THIRD press. He has
+already confirmed he wants it closed; the prompt is raised on the same press
+now, and the confirm text says in advance that Windows may ask.
+
+**The buttons left Settings.** He was right that a once-in-a-lifetime action
+does not belong permanently in a panel you open constantly. The conflict ROW is
+the trigger, and it raises a prompt at top centre where every other transient
+message appears. **And when Spaceadom cannot close something it now guides
+instead of refusing** - the buttons become "Open Windows Start-up settings",
+which opens Task Manager directly on that tab with instructions.
+
+**The theme slider stopped sliding because the element stopped surviving.** The
+CSS was never wrong: the handler called `render()`, which rebuilds the panel and
+destroys the indicator, and a brand-new element has nothing to transition from.
+It updates in place now. **This is the third bug in this family** - the toggle
+characters, the open descriptions, and now this - and the pattern is always the
+same: the CSS looks perfectly correct while you debug it.
+
+**Both "not smooth" animations were too much work, not too little.** The convoy
+ran sixteen `grid-template-rows` transitions - a layout pass per frame each -
+staggered, each also running a 460ms keyframe on its child. Closing is
+unstaggered now (the same total work, over 240ms instead of a second) and the
+child's entrance finishes inside the row transition instead of animating a box
+that has already stopped. The cross-fade was applied as `body.theme-xfade *` -
+five properties on every element in the document, which on a software-
+compositing machine is thousands of interpolations and slower, not smoother. It
+is scoped to ten surfaces.
+
+**Low-power mode, for his standing requirement that this run on any laptop -
+and I got its trigger wrong on the first try.** The night scene's real cost is
+`filter: blur()` on seven surfaces that all MOVE, so the compositor re-blurs
+them every frame. `body.lite-scene` halves the radius. I first triggered it on
+software compositing as well, which is exactly wrong: HIS machine composites in
+software as its normal state, so lite mode switched itself on for him and
+flattened the storm - "you messed up the clouds and storms animation now".
+Software compositing means "no GPU path", not "no headroom". The trigger is now
+only the two signals the USER controls: Windows' reduced-effects setting and
+this app's Visual effects switch. And the first version REMOVED the blur
+entirely, which left hard gradient edges - the softness is the shape here, so
+deleting it is not an optimisation, it is a different picture.
+
+**One more, found while verifying:** the prompt added its visible class inside
+requestAnimationFrame, and rAF does not fire in a window that is not
+compositing - the class would never land and the prompt would sit invisible
+forever. Same family as PROBLEM 135.
+
+**Confirmed unchanged:** first install is Earthy, Fun mode OFF, Show me around
+OFF. He asked me to make sure; it was already true and is now covered by a
+check that fails the build if the three defaults drift.
+
+**NOT verified - hand-test.** The close prompt ends a real process and raises a
+real UAC prompt, so it cannot run from this shell. spacedesk should now
+actually close (that was the silent-refusal bug); PowerToys should raise the
+Windows prompt on the same press.
+
 ## Update: 2026-08-20 | night (Claude Fable 5) - Spaceadom can close the conflicting program now, and four small bugs
 
 Full technical record: PROBLEMS 155-156 in `V14_FIXES_AND_CODE.md`. Shipped as

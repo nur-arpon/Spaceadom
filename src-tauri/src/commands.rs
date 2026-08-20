@@ -902,6 +902,13 @@ pub fn close_conflict(
     crate::hook::conflict_close::close_conflict(&process, permanent, elevate)
 }
 
+/// Open Task Manager's Start-up apps tab — where the user turns a program off
+/// themselves when Spaceadom cannot (PROBLEM 157).
+#[tauri::command]
+pub fn open_startup_manager() -> bool {
+    crate::hook::conflict_close::open_startup_manager()
+}
+
 
 /// Size + position the overlay window to fit the toast stack, bottom-centre,
 /// then show it. Called by the overlay page AFTER it has rendered and

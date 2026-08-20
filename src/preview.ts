@@ -11,6 +11,7 @@ import { initKeyboardMatrix, DESIGN_W, DESIGN_H } from "./components/keyboard-ma
 import type { AppConfig, KeyBinding } from "./types";
 import { toggleSwitchHtml, sliderShell } from "./components/controls";
 import { SPECIALS, toggleSpecialCard } from "./components/special-cards";
+import { openConflictPrompt } from "./components/conflict-prompt";
 import { buildStarrySky } from "./components/starry-sky";
 
 const q = new URLSearchParams(location.search);
@@ -50,6 +51,15 @@ document.body.classList.toggle("nocturne", !!config.dark_mode);
 // ?sky — the full Starry night scene without the backend: moon, 20-figure
 // bands, crest-field sea, rigged galleon, storm. This is how the scene's
 // geometry is MEASURED before it ever reaches the real app.
+// ?conflict — the top-centre close offer, without the backend.
+if (q.has("conflict")) {
+  openConflictPrompt({
+    process: "spacedeskservice.exe",
+    product: "spacedesk",
+    detail: "spacedesk forwards input to a second display and can intercept keys.",
+  });
+}
+
 if (q.has("sky")) {
   document.body.classList.add("nocturne");
   document.body.dataset.theme = "starry";

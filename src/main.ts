@@ -111,6 +111,24 @@ async function bootstrap(): Promise<void> {
   // Theme first, so nothing paints in the wrong palette then snaps.
   applyLook();
   document.body.classList.toggle("show-around", appConfig.show_me_around === true);
+
+  // Low-power scene (see starry-sky.css). Decided ONCE at boot from the three
+  // signals that mean "this machine has nothing spare": Windows asking for
+  // reduced effects, the user turning Visual effects off, and the app running
+  // in software compositing — which is exactly the case the owner's own laptop
+  // is in, and the case the app must survive on any machine.
+  // SOFTWARE COMPOSITING IS NOT A TRIGGER. It was, for one build, and it was
+  // wrong: the owner's own machine composites in software as its NORMAL state
+  // (the overlay self-test set that), so lite mode switched itself on for him
+  // and flattened the storm — "you messed up the clouds and storms animation
+  // now". Software compositing means "no GPU path", not "no headroom".
+  // The two signals that really mean the user wants less are the two the user
+  // controls: Windows' reduced-effects setting, and this app's own Visual
+  // effects switch.
+  const lite = appConfig.motion === "reduced"
+    || (appConfig.motion !== "full" && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  document.body.classList.toggle("lite-scene", lite);
+  void invoke("frontend_log", { msg: `scene: lite=${lite} (motion=${appConfig.motion ?? "auto"})` });
   applySkyMode(appConfig.hide_keyboard === true);
   wireAmbientPause();
   wireSkyEscape();

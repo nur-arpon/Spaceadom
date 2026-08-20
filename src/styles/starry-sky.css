@@ -229,3 +229,37 @@ body.is-blurred #st-sky * { animation-play-state: paused !important; }
 .reduced-motion .sky-moon * { animation: none !important; }
 .reduced-motion .sky-con-wrap { transition: none !important; }
 .reduced-motion .sky-card { animation: none !important; transform: translateX(-50%); }
+
+/* ---------------------------------------------------------------------------
+   LOW-POWER MODE — `body.lite-scene`
+   The owner's standing requirement (2026-08-20): *"the whole app needs to be
+   running in any Windows laptop… the app needs to be optimized enough to run
+   on any device which may or may not have that much of graphical
+   capabilities."*
+
+   The scene's real cost is not its element count, it is `filter: blur()`:
+   SEVEN blurred surfaces (six storm masses at 10-15px plus the lightning),
+   each of which the compositor must re-blur whenever it moves — and they all
+   move, on cloudDrift. On a machine with no GPU headroom that is the single
+   most expensive thing this app draws.
+
+   So: drop the blurs and let the gradients carry the softness, which is
+   CLAUDE.md's own rule for the overlay ("bake softness into gradient stops
+   instead") applied here. The clouds stay, their edges harden slightly, and
+   the frame cost falls off a cliff. Everything else in the scene is already
+   transform/opacity/background-position only.
+
+   `main.ts` sets this class when Windows asks for reduced effects, when the
+   user turns Visual effects off, or when the app is running in software
+   compositing — the machines that need it, without a setting to find.
+   --------------------------------------------------------------------------- */
+/* REDUCED, not removed. `filter: none` leaves the storm masses with hard
+   gradient edges and they stop reading as cloud at all — the softness IS the
+   shape here, so deleting it is not an optimisation, it is a different
+   picture. 5px still costs a fraction of 10-15px because blur cost grows with
+   the radius, and the masses keep their form. */
+body.lite-scene .sky-ocean [style*="blur"] { filter: blur(5px) !important; }
+/* The moon's four halo layers are blurred too, but they NEVER move relative to
+   each other and the disc is small — the compositor caches them. Only the
+   widest one, which also animates (moonHaze), is worth dropping. */
+body.lite-scene .sky-moon-glow:first-child { animation: none !important; }

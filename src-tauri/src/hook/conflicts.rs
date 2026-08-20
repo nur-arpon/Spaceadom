@@ -130,3 +130,22 @@ pub fn detect() -> Vec<Conflict> { Vec::new() }
 pub fn known_process_names() -> Vec<&'static str> {
     KNOWN.iter().map(|(p, _, _)| *p).collect()
 }
+
+/// Is `name` a process this app recognises as a keyboard conflict?
+///
+/// **Uses the SAME matching rule as `detect()`, and that is the whole point.**
+/// `Conflict.process` carries the REAL running exe name, which for spacedesk
+/// is `spacedeskservice.exe` while its list key is `spacedesk` — so a plain
+/// equality check against the keys refused every spacedesk close silently
+/// (PROBLEM 157: the owner pressed the button, nothing happened, and the
+/// refusal was one line of small grey text he never saw).
+///
+/// Any future prefix entry inherits this for free. If `detect()`'s rule ever
+/// changes, change it HERE too — two matchers that must agree and live apart
+/// are exactly how this broke.
+pub fn is_known_process(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    KNOWN.iter().any(|(proc_name, _, _)| {
+        if *proc_name == "spacedesk" { n.starts_with("spacedesk") } else { n == *proc_name }
+    })
+}
