@@ -111,6 +111,43 @@ children, and it collects no information from anyone, of any age.
 
 ---
 
+## The one thing Spaceadom can change outside its own folder
+
+Added 2026-08-20, with version 1.0.63. It is the only capability in this app
+that reaches beyond Spaceadom's own files, so it is spelled out in full.
+
+**What it is.** Only one program on a PC can own the spacebar. If another
+keyboard program — PowerToys, AutoHotkey, spacedesk and similar — is running,
+Spaceadom lists it under Settings → Conflicts. Pressing that entry offers to
+close it for you.
+
+**What it can do, exactly:**
+
+- **"Close it now"** ends that program. It asks the program to close properly
+  first (the same request Windows sends when you click a window's ✕), and only
+  forces it if that is refused. If the program runs with administrator rights,
+  Windows shows you its own permission prompt — Spaceadom cannot get past that
+  and does not try to.
+- **"Close it and stop it from restarting"** does the above, and additionally
+  removes that program's start-with-Windows entry from two places: your own
+  `HKCU\…\CurrentVersion\Run` registry key, and your Startup folder. It tells
+  you which entries it removed. Nothing else on your system is touched — in
+  particular, Scheduled Tasks are deliberately left alone, and no program is
+  uninstalled or modified.
+
+**What it will not do:**
+
+- It never acts on its own. Both actions need two presses and a confirmation
+  that states what will happen.
+- It will only ever act on a program from its own built-in list of known
+  keyboard conflicts. A request naming any other program is refused, and the
+  refusal is written to the log.
+- It never elevates silently. If Windows requires permission, you see the
+  standard Windows prompt and can decline it.
+
+**Where to check this yourself:** `src-tauri/src/hook/conflict_close.rs`. The
+list of programs it will act on is `KNOWN` in `src-tauri/src/hook/conflicts.rs`.
+
 ## Changes to this policy
 
 If a future version of Spaceadom ever collects or transmits anything, this

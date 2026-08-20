@@ -1,6 +1,43 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## Update: 2026-08-20 | end of day (Claude Fable 5) - the sharing pass: archive backfilled, README rebuilt, privacy policy catches up with the app
+
+No new features. This is the pass that makes 1.0.70 something Nur can hand to a
+friend, and it found three gaps that had opened during a fast evening.
+
+**The archive had holes and the changelog had holes, in different places.**
+`all-versions/` stopped at 1.0.65 because the archive step is a separate manual
+command from the build, and I stopped running it once the storm iterations got
+fast. `WHAT-CHANGED.md` was missing rows for 1.0.64 and 1.0.66. Both are
+backfilled - every installer 1.0.50 through 1.0.70 is now in the folder, and
+the wrong turns (1.0.64, 1.0.66, 1.0.67, 1.0.68) have rows saying what each one
+got wrong rather than being quietly dropped. The folder's header promised
+"every installer ever built lives here" and that promise was false for about
+two hours.
+
+**The share folder was shipping 1.0.65 to friends** - five versions behind, and
+its README described features that had since changed. Rebuilt: current
+installers, a FIRST RUN section (Earthy, Fun mode off, Show me around off - so
+a stranger meets something plain), a section on what to do when another program
+already owns the spacebar, and an honest KNOWN LIMITS entry covering the admin-
+window pause, Smart Search's WhatsApp/Spotify gap, and the fact that antivirus
+software may look twice at any app that watches the whole keyboard.
+
+**PRIVACY.md did not mention that the app can now end another program.** That
+is the only capability in Spaceadom that reaches outside its own files, and it
+arrived in 1.0.63 without the policy catching up. It now documents exactly what
+"close it" and "close it and stop it from restarting" touch (the program, the
+HKCU Run key, the Startup folder - and nothing else, explicitly not Scheduled
+Tasks), what it will not do, and where in the source to check. PRIVACY.md now
+ships INSIDE the share folder, because the README told friends to read it and
+it was not there.
+
+**Generalise, and this is the useful part:** a step that is manual and separate
+from the build will be skipped exactly when the build cycle speeds up - which
+is when it matters most. Archiving and share-folder refresh belong in the build
+script, not in my habits.
+
 ## Update: 2026-08-20 | late night (Claude Fable 5) - the close button that refused silently, and three animations he could feel were wrong
 
 Full technical record: PROBLEM 157 in `V14_FIXES_AND_CODE.md`. Shipped as
