@@ -295,6 +295,20 @@ interface FieldOpts {
   aTop: number; aBot: number; col: string; foam: number;
 }
 
+/**
+ * The four generated sea tiles, kept for the lifetime of the window.
+ *
+ * PROBLEM 163 — these are ~129 KB of SVG in total, and every rebuild of the
+ * scene produced a DIFFERENT random tile, therefore a different `data:` URL,
+ * therefore a full decode with no cache hit. The scene rebuilds whenever the
+ * theme or Fun mode changes, so flipping a switch twice paid for it twice.
+ *
+ * Generated once and reused. The randomness is per-LAUNCH rather than
+ * per-rebuild, which is also better behaviour: the sea should not silently
+ * become a different sea because you looked at the settings panel.
+ */
+let _seaCache: { line: string; far: string; mid: string; near: string } | null = null;
+
 /** A 1560px transparent tile of individual crest marks — size, brightness and
  *  density read as distance. Three mark kinds (swell/crest/chop), a dark
  *  understroke for volume past t>.45, tapered foam lips, seamless wrap. */
@@ -712,12 +726,13 @@ export function buildStarrySky(): void {
   root.appendChild(ocean);
 
   // night-scene §3 — the three fields and the horizon line, exact values.
-  const sea = {
+  const sea = _seaCache ?? {
     line: seaWave({ h: 46, base: 30, amp: 6.5, harm: [[6, 1], [9, 0.72], [13, 0.5], [19, 0.3], [27, 0.18], [37, 0.11]], c1: "#0d1830", c2: "#0a1226", line: "rgba(158,188,244,.3)", lw: 0.8, foamR: 4, foamA: 0.22, spray: 2, chop: [[15, 1], [24, 0.6], [38, 0.32]], chopAmp: 1.4 }),
     far: seaField({ h: 34, n: 150, bias: 1.5, minW: 16, maxW: 44, maxH: 3, aTop: 0.1, aBot: 0.26, col: "172,198,244", foam: 0.22 }),
     mid: seaField({ h: 58, n: 120, bias: 1.2, minW: 28, maxW: 82, maxH: 5.4, aTop: 0.12, aBot: 0.34, col: "178,204,248", foam: 0.4 }),
     near: seaField({ h: 104, n: 92, bias: 1, minW: 44, maxW: 148, maxH: 9.5, aTop: 0.14, aBot: 0.44, col: "186,210,250", foam: 0.58 }),
   };
+  _seaCache = sea;
   const bg = (id: string, url: string) => {
     const el = world.querySelector<HTMLElement>(`#${id}`);
     if (el) el.style.background = `${url} repeat-x`;

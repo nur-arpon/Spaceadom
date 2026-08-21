@@ -1,9 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "SpaceToggle OS default capabilities — settings window AND the HUD overlay. The overlay MUST be listed here: without it the overlay webview has no core:event permission, listen() rejects silently, and the HUD renders as an empty dark box (root cause found 2026-08-10 after chasing emit targets, paint order and CSP).",
+  "description": "SpaceToggle OS default capabilities — settings window AND the HUD overlay. The overlay MUST be listed here: without it the overlay webview has no core:event permission, listen() rejects silently, and the HUD renders as an empty dark box (root cause found 2026-08-10 after chasing emit targets, paint order and CSP). PROBLEM 164: shell:allow-execute was removed 2026-08-20 — it grants the webview arbitrary process execution and had no caller; every shell-out here is a Rust command instead. Do not re-add it without one.",
   "local": true,
-  "windows": ["settings", "overlay"],
+  "windows": [
+    "settings",
+    "overlay"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-hide",
@@ -25,7 +28,6 @@
     "autostart:allow-enable",
     "autostart:allow-disable",
     "autostart:allow-is-enabled",
-    "shell:allow-execute",
     "shell:allow-open",
     "dialog:allow-open",
     "dialog:allow-ask",

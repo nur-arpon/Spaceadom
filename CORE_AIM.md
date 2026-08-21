@@ -12,7 +12,11 @@ The **undeniable, non-negotiable** goal is to provide a "layman-friendly" visual
 - **Rollover Protection**: Fast typing (e.g., hitting a letter slightly before releasing Space) must pass through as normal typing, not trigger a shortcut.
 
 ### The App Interface (Dashboard)
-- The application must have a visual settings interface (Dashboard) accessible via the system tray or a dedicated shortcut (e.g., `Space + ,`).
+- The application must have a visual settings interface (Dashboard) accessible via the system tray. (This line used to say "or a dedicated
+  shortcut, e.g. `Space + ,`" — that combo is Smart Search and has been since
+  V13, and NO combo opens the dashboard. Corrected 2026-08-20 rather than
+  implemented: a shortcut that opens a window would have to steal a key from
+  the twenty-six the user owns.)
 - The interface must allow users to map specific keys to specific apps or URLs across different profiles.
 
 ### Smart Cascade (Summon & Vanish)

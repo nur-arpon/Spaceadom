@@ -1509,6 +1509,12 @@ is very annoying."*
 Settings copy says so outright: *"Close one of them — either the program
 above, or Spaceadom — so only one owns the spacebar. Spaceadom never closes
 other programs for you."* Reasons: terminating another running program is not
+
+> **Superseded 2026-08-20 (PROBLEM 155).** That sentence is no longer the
+> app's behaviour or its text: the owner asked for a close button, and the
+> Conflicts row now offers to end the program on request. The reasoning above
+> is kept because it is still the right DEFAULT — what changed is that the
+> consent was built rather than the capability withheld.
 this app's business, a false positive would close something the user wanted,
 and doing it silently is malware behaviour.
 
@@ -7036,6 +7042,86 @@ away.
 
 ---
 
+## PROBLEM 136 — the landing pad: a re-fit after a slingshot threw the toast back out from under it
+
+**Written 2026-08-20, long after the fix.** An audit found this number cited
+four times in `src/components/toast.ts` (lines 91, 467, 615, 1913) and twice in
+`src-tauri/src/commands.rs` (the `overlay_fit_handover` doc-comment), with **no
+entry here at all.** An AI reading that code hits a named problem number, comes
+to the index-of-record, and finds nothing — which reads as "never written up"
+rather than "number skipped". Reconstructed from the code and the 2026-08-18
+log entries.
+
+**Symptom, from the owner:** *"pausing in the middle before jumping to toast"* —
+the slingshot arrived beautifully and then the toast leapt sideways.
+
+**Root cause.** A slingshot LANDS on the staged stack, so once it touches down
+the toast is already at its final screen position. Re-fitting the overlay after
+that does two things at once: `setStageAnchor(false)` re-anchors the stack
+(`top: 50% + 239px` → `bottom: 74px`), and the WINDOW moves under it. Between
+them the toast is thrown out from under the place the pill just landed.
+
+**Exact file.** `src/components/toast.ts`.
+
+```ts
+_slingStaged = true;    // line 615 — this stack is a landing pad now
+…
+_slingStaged = false;   // line 467 — the landing pad is gone
+```
+
+While `_slingStaged` is set, every `overlay_fit` is suppressed: the geometry
+that the flight computed IS the answer, and re-deriving it can only disagree.
+
+**How it was verified.** Owner-confirmed on 1.0.49 — *"the sling is working
+now"*.
+
+**Generalise this.** *An animation that computes a final position owns that
+position until it is over.* Any layout pass that runs mid-flight is a second
+opinion about something already decided, and the two will differ by exactly the
+amount the user sees as a jump.
+
+**Related trap, same family:** `_stageMode` left set blocks every subsequent
+`overlay_fit` — that is PROBLEM 113, and 1.0.46 re-created it exactly. A
+suppression flag needs a guaranteed clearing path on every exit, including the
+error ones.
+
+---
+
+## PROBLEM 137 — the handover window: flying to a midpoint instead of the real slot
+
+**Also written 2026-08-20.** Cited at `toast.ts` 618, 1651, 1778 and in
+`commands.rs`. Unlike 136 this one IS explained in prose — inside PROBLEM 138,
+under a heading that does not name it, so a grep for "PROBLEM 137" lands there
+by luck rather than by index. This entry exists so the number resolves.
+
+**Symptom.** On release, the pill flew to a point that was not its slot, then
+settled — a two-stage motion where there should have been one.
+
+**Root cause.** A toast's final home is BELOW the HUD window's bottom edge. The
+overlay window is sized for the HUD, so "fly to the bottom-centre slot" aimed
+at a position outside the window and got clamped to a midpoint.
+
+**Exact file.** `src/components/toast.ts` + `overlay_fit_handover` in
+`src-tauri/src/commands.rs`.
+
+The fix is a HANDOVER window: grow the overlay DOWNWARD first — top edge fixed,
+new bottom edge = `overlay_fit`'s own bottom (`ms.height - 64.0`) — and pin
+`#st-hud` to its original height so the ring does not stretch while the window
+does. The flight then targets a slot that genuinely exists inside the window,
+and `toast.ts:1651` unpins on the way out.
+
+**The identity that makes it seamless:** the handover window's bottom edge and
+`overlay_fit`'s bottom edge are the SAME number. If they ever drift apart the
+toast jumps at the moment of handover, which is precisely the artefact this
+removed.
+
+**Generalise this.** *You cannot animate to a coordinate outside the window.*
+When a flight crosses a window boundary, the window has to move first — and the
+two geometries must be computed from one expression, not two that happen to
+agree today.
+
+---
+
 ## PROBLEM 138 — thruster up, slingshot down: the toast ⇄ HUD handover, both directions
 
 **Owner's spec, 2026-08-18**, delivered as `THRUSTER_SLING.md` inside
@@ -9239,3 +9325,155 @@ could not appear.
 Second lesson, smaller: **a config parser that rejects unknown keys is a
 feature.** Tauri panicking here is why this cost one commit instead of shipping
 silently as a hook that never ran.
+
+---
+
+## PROBLEM 161 — a dead keyboard hook was completely invisible
+
+**Symptom.** If `SetWindowsHookExW` fails, or Windows evicts the hook and the
+watchdog cannot get it back, **nothing works and nothing says so.** No
+shortcut fires, the dashboard looks perfectly healthy, the tray icon is normal,
+and the only evidence is a line in `%APPDATA%\Spaceadom\debug.log`. On a
+friend's laptop that reads as "this app just doesn't do anything".
+
+**Root cause.** Rust has always known — `HOOK_INSTALLED` is stored by
+`install_hooks()` and exposed as `HookStatus.installed` (that was PROBLEM 66's
+fix). The dashboard fetched the struct and **used one field of it**:
+
+```ts
+const status = await invoke<HookStatus>("get_hook_status");
+setPausedState(status.bypass_active);   // and `installed` was dropped
+```
+
+**Exact files.** `src/main.ts` (`applyHookState`), `src-tauri/src/hook/mod.rs`
+(`request_hook_rebuild`), `src-tauri/src/commands.rs` (`reinstall_hook`),
+`src-tauri/src/lib.rs`.
+
+A banner, not a toast — a toast announces an EVENT, and this is a persistent
+STATE. It stays until the state changes, and it carries two buttons: *Try
+again*, and *Open log folder*.
+
+**"Try again" asks for a THREAD rebuild, not a re-hook**, and that distinction
+is PROBLEM 132's whole lesson: re-hooking from a thread that is itself wedged
+produces a hook that looks healthy and receives nothing. So the button sets the
+same `ESCALATE_RESTART` flag the watchdog raises after two failed attempts.
+
+**Banner ownership.** The conflicts banner and this one share
+`#conflict-banner`, so both now stamp `dataset.owner`. A conflicts refresh that
+finds nothing no longer wipes a hook warning, and a detected conflict — the
+likelier explanation of a dead hook, with more useful text — is not overwritten
+by it.
+
+**Generalise this.** *A status field that nothing reads is a status field that
+does not exist.* The backend had been reporting this correctly for dozens of
+versions. Grep for the fields of any status struct and check each one has a
+consumer; the ones that do not are silent failures waiting.
+
+**Honest limit:** the banner cannot be triggered on demand — making
+`SetWindowsHookExW` fail is not something a test can arrange here — so it is
+verified by wiring and by code review, **not by having seen it appear.**
+
+---
+
+## PROBLEM 162 — the key editor could not be used on the commonest cheap laptop
+
+**Symptom.** `#key-detail-panel` had no `max-height` and no `overflow`. It is
+centred with `translate(-50%, -50%)`, so a panel taller than the window grows
+off **both** edges — taking Assign/Done with it.
+
+**Measured:** at 1366×768 with 150% scaling — 911×512 CSS pixels, the most
+common cheap Windows laptop — a key with a long detected-apps list could not be
+finished at all.
+
+**Exact file.** `src/styles.css`.
+
+```css
+max-height: min(560px, calc(100vh - 32px));
+overflow-y: auto;
+overscroll-behavior: contain;
+```
+
+`min()` so nothing changes on a large screen; `overflow-y` on the PANEL rather
+than an inner box so the padding scrolls with the content instead of the last
+row hiding beneath it.
+
+**Verified** in the harness at 911×512: `max-height` computes to 480px, the
+panel's rect is fully inside the viewport, and `scrollHeight > clientHeight`.
+
+**Generalise this.** *Anything centred with a translate must be bounded.* A
+centred element that outgrows its container escapes in two directions at once,
+and the half that leaves the top is the half nobody notices in testing.
+
+---
+
+## PROBLEM 163 — the sea was redrawn from scratch on every theme toggle
+
+**Symptom.** `seaField`/`seaWave` generate ~129 KB of SVG across four tiles.
+They ran on every `buildStarrySky()`, and the scene is rebuilt whenever the
+theme or Fun mode changes — so each flip paid full generation AND a full image
+decode, under a **new `data:` URL each time**, which means the image cache
+could never help.
+
+**Exact file.** `src/components/starry-sky.ts` — a module-level `_seaCache`,
+filled on first build and reused.
+
+**A second, better reason than performance:** the randomness is now per-LAUNCH
+rather than per-rebuild. The sea should not silently become a different sea
+because you opened the settings panel.
+
+**Generalise this.** *A generated `data:` URL defeats every cache by design* —
+the cache key is the content, and the content is new every time. Anything
+expensive that is regenerated identically-in-spirit but differently-in-bytes
+should be generated once and held.
+
+---
+
+## PROBLEM 164 — the webview could run any program on the machine, for no caller
+
+**Symptom.** `src-tauri/capabilities/default.json` granted
+`shell:allow-execute` — permission for the WEBVIEW to execute arbitrary
+processes — with **no caller anywhere**. Every shell-out in this app
+(`conflict_close`, the log folder, Task Manager) is a Rust command, which needs
+no webview permission at all.
+
+Not exploitable today: the webview loads only local assets and the CSP allows
+no external hosts. It is a standing grant with no user, which is the definition
+of unnecessary attack surface, and a Store reviewer looking at a keyboard-hook
+app will ask about exactly this.
+
+**Fix:** removed, with the reason recorded in the capability file's own
+description so it is not re-added by reflex.
+
+**Generalise this.** *A permission with no caller is not "harmless", it is
+unaudited.* Grep every permission for a consumer before shipping; the ones with
+none cost nothing to remove and everything to explain later.
+
+---
+
+## PROBLEM 165 — the Store build and the friend build had the same filename
+
+**Symptom (caught before it shipped).** `npm run store` writes an installer
+that embeds the entire WebView2 runtime — **209.8 MB** versus the friend
+build's 5.6 MB — to the *same path*:
+`bundle/nsis/Spaceadom_<v>_x64-setup.exe`.
+
+Two silent failures follow. `scripts/install-real.cmd` installs whatever is at
+that path, so a local install after a Store build quietly installs the 210 MB
+variant. And the 210 MB file gets copied into `share-spaceadom/` or attached to
+a release, and friends download 210 MB for nothing.
+
+**Fix.** `scripts/label-store-build.mjs`, wired as npm's `poststore`, renames
+the output to `…-setup-STORE.exe` and leaves the normal path EMPTY — so the
+next `tauri build` is the only way to get a friend installer back. An obvious
+failure instead of a silent substitution.
+
+It also **refuses to label a build under 100 MB**: a small file means the
+offline config did not apply, and that installer would be rejected by the
+Store as a downloader stub. Better to say so than to label it convincingly.
+
+**Verified:** both files now coexist, `5.6 MB` and `209.8 MB`, correctly named.
+
+**Generalise this.** *Two build variants that share an output path will be
+confused, and the confusion is silent because the filename is the only thing
+anyone checks.* Give every variant a distinct name at the moment it is
+produced, and make the wrong one impossible to pick up by accident.

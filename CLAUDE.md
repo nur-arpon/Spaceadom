@@ -38,6 +38,18 @@ Source files live in
 | `handoff/motion.css` | Tokens + keyframes |
 | `handoff/DESIGN_SPEC.md` | Written spec + file mapping |
 
+The 2026-08-20 overhaul added four more, all in `..\design\`, and these are
+the authority for the night scene — do not re-derive any of it:
+
+| File | What it governs |
+| --- | --- |
+| `design-system-overhaul-3.md` | Settings descriptions, toggle/slider characters, the special-key cards, the 3-way theme pill |
+| `night-scene4.md` | The night scene delta: moon cycle, 20 constellations in exclusive bands, the crest-field sea, the rigged galleon |
+| `moon.md` | The moon in full — glow construction, maria tables, the 7-leg wander |
+| `storm-clouds.md` | The storm. **Standalone and authoritative.** Four attempts were made without it; `starry-sky.ts`'s `STORM_MASSES` must stay diff-able against it |
+| `constellations.js` | The 20 figures' geometry, copied byte-identical to `src/constellations.js` |
+| `sounds.js` | The WebAudio kit, copied byte-identical to `src/sounds.js` |
+
 In this repo: `V13_TO_V14_METHOD.md` (how two earlier attempts failed and
 why), `OVERLAY_ACHIEVED.md` (the confirmed-correct overlay — do not
 re-derive it), `OVERLAY_RUST_HTML_CHANGES.md` (the exact non-TS edits).
@@ -81,17 +93,22 @@ alone and the keyboard ran off the display — that is the failure the user saw.
 config so the dashboard can be inspected without the backend. Dev-only; not a
 Vite build input, so it never ships.
 
-A control that does nothing is worse than a missing control. The mockup's
-"Run at startup" toggle is deliberately absent: there is no backend command
-for it. Add the command first, then the toggle.
+**A control that does nothing is worse than a missing control.** That rule
+still stands; the example it used to give is stale. "Run at startup" now HAS a
+backend command (`set_startup_enabled`, which flips the HKCU Run value and
+persists the config in one call) and the toggle ships. The rule is what to
+keep: add the command first, then the toggle.
 
 ## Required reading, in this order, before changing anything
 
 0. **`V14_FIXES_AND_CODE.md` — every V14 problem with its root cause, the
    exact file, the exact code that fixed it, and how it was verified.** Read
    this before re-diagnosing anything; it exists so you do not have to search.
-1. `AI_HANDOFF.md` — self-contained orientation: history, hard rules, build
-   environment, testing traps.
+1. `RELEASE_READINESS.md` — what is done, what is left, and the two
+   Microsoft Store blockers. Rewritten 2026-08-20.
+   (`AI_HANDOFF.md`, `FINAL_RELEASE_README.md` and `HANDOVER_PROMPT.md` are
+   V12/V13 fossils, marked SUPERSEDED at the top of each. Read them for the
+   reasoning they record, never for current fact.)
 2. `CORE_AIM.md` — the non-negotiable feature contract. Never remove or
    simplify a listed feature; fix it natively.
 3. `NATIVE_SAFETY.md` — do-not-touch table for Win32 calls. This app once
@@ -241,11 +258,31 @@ src-tauri/src/
                    (PROBLEM 61 removed it).
   display_watch.rs Rebuilds the overlay when the display setup changes
                    (PROBLEM 117/118) and re-homes an off-screen dashboard.
+  hook/conflicts.rs        Detects other keyboard programs. ONE matcher
+                           (`is_known_process`) shared with:
+  hook/conflict_close.rs   Closes one, on request only. Closed list, WM_CLOSE
+                           before force, never elevates silently (PROBLEM 155).
 src/               Dashboard UI (vanilla TS): keyboard-matrix, key-detail-panel,
                    profile-editor, settings-panel; main.ts wires them.
                    (V14 removed hook-status-bar.ts and app-picker.ts — the
                    status bar is gone from the design and the picker became
                    the editor's inline app grid.)
+
+  Added 2026-08-20, all LEAF modules (they import nothing from main.ts, so the
+  preview harness can render them — see PROBLEM 148 for what happens otherwise):
+    sfx.ts + sounds.js       The sound kit. sounds.js is byte-identical to the
+                             design's; its types live in sounds.d.ts.
+    components/controls.ts   The settings switch and slider markup + which
+                             Fun-mode character each one performs.
+    components/special-cards.ts   The nine special shortcuts and their cards.
+    components/conflict-prompt.ts The top-centre "close it?" offer.
+    components/starry-sky.ts      The whole night scene (moon, constellations,
+                             sea generators, storm).
+    components/night-markup.ts    The lab's ocean band, extracted VERBATIM.
+    constellations.js        20 figures, byte-identical to the design's.
+    styles/themes.css        The three palettes + the starry pointer carve-out.
+    styles/characters.css    Fun-mode toggle/slider motion + the special cards.
+    styles/starry-sky.css    The night scene's CSS.
 src/overlay.ts +
 overlay.html       The on-demand HUD/toast surface (see window rules below).
 ```

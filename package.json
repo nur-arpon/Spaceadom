@@ -1,14 +1,16 @@
 {
   "name": "spaceadom",
   "private": true,
-  "version": "1.0.71",
+  "version": "1.0.72",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build --outDir dist2",
     "preview": "vite preview",
     "tauri": "tauri",
-    "posttauri": "node scripts/archive-build.mjs"
+    "posttauri": "node scripts/archive-build.mjs",
+    "store": "tauri build --config src-tauri/tauri.store.conf.json",
+    "poststore": "node scripts/label-store-build.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

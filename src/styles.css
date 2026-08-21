@@ -437,6 +437,18 @@ body.nocturne #editor-backdrop { background: rgba(0, 0, 0, .42); }
   left: 50%; top: 50%;
   z-index: 9;
   width: 460px;
+  /* PROBLEM 162 — this had no height limit and no scroll. The panel is
+     centred with translate(-50%,-50%), so anything taller than the window
+     grows off BOTH edges and takes Assign/Done with it. On 1366x768 at 150%
+     scaling — the commonest cheap Windows laptop, and 512 CSS px tall — a key
+     with a long app list could not be finished at all.
+
+     `min()` not a fixed value: on a big screen nothing changes. `overflow-y`
+     is on the panel rather than a child so the padding scrolls with the
+     content instead of the last row hiding under it. */
+  max-height: min(560px, calc(100vh - 32px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 20px;
   background: rgba(var(--srf-rgb), .97);
   border: 1px solid var(--st-border);

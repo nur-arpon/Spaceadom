@@ -1,3 +1,12 @@
+> **SUPERSEDED — historical only.** This file describes SpaceToggle OS **V13**, two identities ago and is kept for
+> the reasoning it records, not as current guidance. Several of its statements
+> are FALSE for the app as it ships today.
+>
+> For anything current, read in this order: **`CLAUDE.md`** (architecture and
+> hard rules), **`V14_FIXES_AND_CODE.md`** (every problem with its fix),
+> **`PROJECT_STATUS.md`** (the dated log), **`RELEASE_READINESS.md`** (what is
+> left before release). Marked 2026-08-20 during the release-readiness pass.
+
 # AI HANDOFF — SpaceToggle OS V13
 
 **Written:** 2026-08-10 by Claude Opus 5 (via Claude Code)
@@ -134,7 +143,8 @@ If `dist/` is missing you get a bare **`error: proc macro panicked`** at
 `lib.rs:184` that names no cause whatsoever. That is all it means.
 
 Current state: **0 errors, 0 warnings.** Keep it that way.
-Installer output: `src-tauri	argeteleaseundle
+Installer output: `src-tauri	arget
+eleaseundle
 sis\Spaceadom_<version>_x64-setup.exe`
 
 (The `.msi` target was REMOVED in 1.0.41 - PROBLEM 129. Tauri's WiX bundler is

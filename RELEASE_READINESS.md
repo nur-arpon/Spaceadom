@@ -1,6 +1,6 @@
 # Release readiness — Spaceadom
 
-**Rewritten 2026-08-20 for 1.0.71.** The previous version of this file was
+**Updated 2026-08-22 for 1.0.72.** Originally rewritten 2026-08-20. The previous version of this file was
 written for 1.0.0 and had gone false in three places: it said
 `bundle.targets` was `["msi"]` (it is `["nsis", "msi"]`), that the app needs an
 administrator account (it has not since PROBLEM 61 removed elevation), and that
@@ -12,8 +12,8 @@ Two questions, answered separately, because they have very different answers:
 
 1. **Can Nur hand this to a friend with a Windows laptop?** — Yes, today, with
    caveats they should be told.
-2. **Can it go in the Microsoft Store?** — Not yet. Two hard blockers, both
-   solvable, one costs money.
+2. **Can it go in the Microsoft Store?** — One thing left, and it is the
+   signature. Everything else on the checklist is done.
 
 ---
 
@@ -41,9 +41,9 @@ publishes a way in); Guide HUD is primary-monitor-only by explicit decision.
 
 ### Already handled
 
-- **WebView2** — `embedBootstrapper`, so the runtime is fetched at install
-  time on the rare machine without it. Windows 11 always has it; Windows 10
-  usually does.
+- **WebView2** — the friend build uses `embedBootstrapper` (fetches the
+  runtime at install time on the rare machine without it; Windows 11 always
+  has it). The Store build embeds it whole — see §3.
 - **Small screens** — Rust clamps the window to 92% of the monitor and the
   frontend scales the board on both axes.
 - **No GPU path** — a pixel self-test detects a machine that cannot composite
@@ -61,31 +61,36 @@ publishes a way in); Guide HUD is primary-monitor-only by explicit decision.
   rather than factory-resetting the user (PROBLEM 159), covered by four tests.
 - **Two installs at once** — detected, and removable in one prompt.
 
-### Known gaps, worst first
+### Known gaps — ALL FIXED 2026-08-22 (1.0.72)
 
-These came out of a 61-agent audit on 2026-08-20. Each was adversarially
-verified against the source before being written down here.
+The five gaps this section used to list were closed in the release-readiness
+pass. Kept here as a record of what they were:
 
-| # | Gap | Effect on a friend | Effort |
-| --- | --- | --- | --- |
-| 1 | **A dead hook is invisible.** Rust knows (`HOOK_INSTALLED`) and the frontend discards it. If the hook never installs, the app looks perfectly healthy and no shortcut works. | "It just doesn't do anything" with no explanation and nothing to report. | hours |
-| 2 | **The key editor has no `max-height` and no scroll.** At 1280×720 or 1366×768 with 150% scaling, Assign/Done can sit below the window. | Cannot finish assigning an app on a common cheap laptop. | hours |
-| 3 | **A webview that fails to rebuild at startup leaves a working tray icon that opens nothing**, permanently and silently. | Tray icon does nothing; only the log says why. | hours |
-| 4 | **Sea tiles are ~129 KB of generated SVG regenerated under a fresh URL on every scene rebuild**, so the image cache never helps. Toggling theme/fun repeatedly re-pays it. | A stutter on each toggle on a weak machine. | hours |
-| 5 | **`shell:allow-execute` is granted to the webview with no scope.** Not exploitable today (no untrusted content is loaded), but it is a broad grant with no caller that needs it. | None today; it is a latent hazard and a Store reviewer will ask. | minutes |
+| # | Gap | Fixed in |
+| --- | --- | --- |
+| 1 | A dead hook was invisible — Rust reported it, the frontend dropped the field | PROBLEM 161 |
+| 2 | Key editor unusable at 1366×768 @150% — no max-height, no scroll | PROBLEM 162 |
+| 3 | Sea tiles regenerated per rebuild under a fresh URL, defeating the cache | PROBLEM 163 |
+| 4 | `shell:allow-execute` granted to the webview with no caller | PROBLEM 164 |
+| 5 | Store and friend installers shared a filename (210 MB vs 5.6 MB) | PROBLEM 165 |
 
-None of these is a reason to withhold the app from a friend. All five are
-reasons not to submit it to the Store yet.
+**Gap 3 from the original list — "a webview that fails to rebuild at startup
+leaves a tray icon that opens nothing" — is NOT fixed.** It is genuinely rare
+(it needs the webview to fail twice at startup), the log records it, and the
+change would touch `lib.rs`'s startup ordering, which is the most
+consequence-heavy code in the app. Recorded here rather than done quietly.
+
+
 
 ---
 
-## 3. Microsoft Store — two hard blockers
+## 3. Microsoft Store — one blocker left, and it needs your signature
 
 An unpackaged Win32 app **can** be listed: you submit an HTTPS download URL to
 your own installer rather than an MSIX package
 ([App package requirements for MSI/EXE apps](https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msi/app-package-requirements)).
-Registration is free for individuals. Two of that page's requirements are not
-met today.
+Registration is free for individuals. One of that page's requirements is still
+unmet; the other was fixed on 2026-08-22.
 
 ### Blocker 1 — the installer is unsigned (Store Policy 10.2.9)
 
@@ -104,22 +109,24 @@ identity check passes); a traditional **OV/EV certificate** from a CA costs
 several hundred USD a year and EV ships on a hardware token. Signing must
 cover `spaceadom.exe`, the NSIS `setup.exe` and the `.msi`.
 
-### Blocker 2 — the installer downloads WebView2 at install time
+### Blocker 2 — SOLVED: `npm run store`
 
 > "The installer is a standalone installer and is not a downloader stub/web
 > installer that downloads bits when run."
 
-`webviewInstallMode` is `embedBootstrapper`, which embeds Microsoft's
-*bootstrapper* — and the bootstrapper downloads the runtime. That is precisely
-a downloader.
+`webviewInstallMode: embedBootstrapper` embeds Microsoft's *bootstrapper*, and
+the bootstrapper downloads the runtime — precisely a downloader stub.
 
-**Fix:** switch to `offlineInstaller`, which Tauri v2 supports
-(`WebviewInstallMode::OfflineInstaller`). It embeds the full WebView2
-installer, so nothing is fetched at install time.
+**Fixed 2026-08-22.** `src-tauri/tauri.store.conf.json` overrides it to
+`offlineInstaller`, and `npm run store` builds with it. **Verified by
+building:** 209.8 MB against the friend build's 5.6 MB, and the difference is
+the embedded runtime.
 
-**Cost:** the installer grows from ~5.6 MB to roughly 130 MB. That is a bad
-trade for handing a file to a friend and the right trade for the Store, so
-this should be a **separate build target**, not a change to the default.
+`poststore` renames the output to `Spaceadom_<v>_x64-setup-STORE.exe` and
+leaves the normal path empty, so the 210 MB file can never be handed to a
+friend or installed locally by accident (PROBLEM 165). It also refuses to
+label a build under 100 MB, which would mean the offline config silently did
+not apply.
 
 ### Also required before submitting, none of them blockers
 
@@ -128,8 +135,8 @@ this should be a **separate build target**, not a change to the default.
   app's own two-installs detector.
 - **Silent install must work.** NSIS supports `/S` and the app is installed
   that way on every build, so this is already exercised.
-- **Publisher name must differ from the product name.** "Spaceadom" cannot be
-  both, and a name that implies a company you do not have will be rejected.
+- ~~**Publisher name must differ from the product name.**~~ **Done** —
+  `bundle.publisher` is now `Nur Ifran Arpon`, product stays `Spaceadom`.
 - **Disclose the keyboard hook and the process-closing feature** in the
   description and in the certification notes, and give reviewers steps to
   reproduce. A remapper is acceptable — PowerToys is in the Store — but a
@@ -139,12 +146,39 @@ this should be a **separate build target**, not a change to the default.
   process-closing capability; it needs to be reachable at a public URL.
 - **Age rating, screenshots, description.**
 
-### The honest recommendation
+### Disclosure text, ready to paste into certification notes
 
-Do the signing first, on its own. It removes the SmartScreen warning for every
-friend, which is the single biggest thing standing between this app and someone
-who does not already trust it — and it is a prerequisite for the Store anyway.
-Then close gaps 1–3 above, then build the offline-installer variant and submit.
+> Spaceadom is a keyboard productivity tool. It installs a global low-level
+> keyboard hook (`WH_KEYBOARD_LL`) so that holding the spacebar acts as a
+> modifier: Space+letter launches, focuses or minimises an app. Tapping Space
+> alone always types a space. The hook reads key codes only; nothing is
+> recorded, stored or transmitted — the app is fully offline and contacts no
+> server. It also uses `SendInput` to send the shortcut keystrokes that focus a
+> text box (for example `/` on YouTube), tagged with a private `dwExtraInfo`
+> cookie so it never re-processes its own input.
+>
+> Spaceadom detects other keyboard-remapping programs (PowerToys, AutoHotkey,
+> spacedesk and similar), because only one program can own the spacebar. On
+> the user's explicit request — two confirmations, never automatically — it can
+> close one of them, and optionally remove that program's start-with-Windows
+> entry from HKCU\…\Run and the Startup folder. It will only ever act on a
+> program from its own built-in list, and it never elevates without showing the
+> standard Windows permission prompt.
+>
+> To reproduce: install, hold Space to see the shortcut guide, click a key on
+> the on-screen keyboard to bind an app, then hold Space and tap that key.
+
+### What is left, in order
+
+1. **Sign.** Yours to buy. Sign `spaceadom.exe`, the NSIS `setup.exe` and the
+   `.msi`. This removes the SmartScreen warning for every friend as well — it
+   is the single biggest thing between this app and someone who does not
+   already trust you.
+2. **Build the Store variant** — `npm run store` — and host
+   `…-setup-STORE.exe` at a versioned HTTPS URL that never changes content.
+3. **Submit** with the disclosure text above in the certification notes.
+
+Nothing else is outstanding.
 
 ---
 

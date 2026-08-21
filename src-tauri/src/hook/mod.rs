@@ -247,6 +247,19 @@ static BLIND_WHILE_OWN_FG: AtomicU32 = AtomicU32::new(0);
 /// Set by the watchdog, read by the message pump: tear this whole thread down
 /// so the PROBLEM 82 supervisor rebuilds it with a fresh pump and fresh hooks.
 static ESCALATE_RESTART: AtomicBool = AtomicBool::new(false);
+
+/// PROBLEM 161 — let the USER ask for the repair the watchdog performs.
+///
+/// The dashboard shows a banner when `HOOK_INSTALLED` is false, and its "Try
+/// again" button lands here. It sets the same escalation flag the watchdog
+/// uses after two failed re-hooks, so the hook THREAD is rebuilt rather than
+/// the hook merely re-installed on a thread that may itself be wedged — which
+/// is the distinction PROBLEM 132 was about: re-hooking from a jammed thread
+/// produces something that looks healthy and receives nothing.
+pub fn request_hook_rebuild() {
+    log::info!("hook: rebuild requested by the user from the dashboard banner");
+    ESCALATE_RESTART.store(true, Ordering::Relaxed);
+}
 /// `true` while the WH_KEYBOARD_LL hook is believed installed. Set by the
 /// hook thread; read by get_hook_status so the dashboard tells the truth
 /// (it used to hardcode `installed: true`).

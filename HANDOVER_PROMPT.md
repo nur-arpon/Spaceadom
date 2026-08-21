@@ -1,3 +1,12 @@
+> **SUPERSEDED — historical only.** This file describes a **V12** deployment brief and is kept for
+> the reasoning it records, not as current guidance. Several of its statements
+> are FALSE for the app as it ships today.
+>
+> For anything current, read in this order: **`CLAUDE.md`** (architecture and
+> hard rules), **`V14_FIXES_AND_CODE.md`** (every problem with its fix),
+> **`PROJECT_STATUS.md`** (the dated log), **`RELEASE_READINESS.md`** (what is
+> left before release). Marked 2026-08-20 during the release-readiness pass.
+
 # MISSION: ARCHITECTURAL FINALIZATION (V12 DEPLOYMENT)
 
 **[CRITICAL INSTRUCTION]:** You are taking over a high-stakes Rust/Tauri development project. Do not start by guessing; start by "downloading" the current reality from the project logs.

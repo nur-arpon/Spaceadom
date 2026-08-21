@@ -57,6 +57,71 @@ hypothesis about why it looks wrong.
 `starry-sky.ts` must stay diff-able against it - which is why 1.0.70's halving
 is a container transform rather than eighteen edited numbers.
 
+## Update: 2026-08-22 | (Claude Fable 5) - the release-readiness pass: five real defects, the doc fossils, and the Store build
+
+Full technical record: PROBLEMS 161-165 in `V14_FIXES_AND_CODE.md`. Shipped as
+1.0.72, installed and verified on the REAL machine. Nur's instruction: "fix all
+issues and make the app release ready, then I will get it signed."
+
+**The five code defects, all found by the 61-agent audit and all confirmed by
+reading the source before touching anything:**
+
+1. **A dead keyboard hook was completely invisible** (PROBLEM 161). Rust has
+   reported `HOOK_INSTALLED` since PROBLEM 66; the dashboard fetched the struct
+   and used ONE field of it, dropping `installed`. So the total failure - no
+   shortcut works at all - looked exactly like a healthy app, and the only
+   evidence was a log line. There is a banner now, with a Try again button that
+   asks for a hook THREAD rebuild rather than a re-hook (PROBLEM 132: re-hooking
+   from a wedged thread produces something that looks healthy and receives
+   nothing). **Honest limit: I cannot make SetWindowsHookExW fail, so this is
+   verified by wiring and review, not by having watched it appear.**
+
+2. **The key editor could not be used on a 1366x768 laptop at 150%** (PROBLEM
+   162). No max-height, no overflow, centred with a translate - so it grew off
+   BOTH edges and took the Assign button with it. Measured at 911x512 CSS px,
+   which is exactly that machine. Now capped and scrollable, verified in the
+   harness at that size.
+
+3. **The sea was regenerated on every theme/fun toggle** (PROBLEM 163) - 129 KB
+   of SVG under a fresh data: URL each time, so the image cache never helped.
+   Generated once per launch now, which is also better behaviour: the sea should
+   not become a different sea because you opened the settings.
+
+4. **The webview had permission to run any program** (PROBLEM 164), with no
+   caller - every shell-out here is a Rust command. Removed. Not exploitable
+   today; it is unaudited surface, and a Store reviewer looking at a
+   keyboard-hook app will ask about exactly this.
+
+5. **The Store build and the friend build had the same filename** (PROBLEM 165),
+   210 MB vs 5.6 MB. Caught before it shipped. The Store output is renamed to
+   -STORE.exe now and the normal path left empty, so the wrong one cannot be
+   picked up silently.
+
+**Documentation.** PROBLEMS 136 and 137 were cited by name at six sites in
+shipped code and had NO entry here - an AI reading toast.ts would hit a number
+and find nothing. Both written. `AI_HANDOFF.md`, `FINAL_RELEASE_README.md` and
+`HANDOVER_PROMPT.md` are V12/V13 fossils that contradict current fact; each now
+carries a SUPERSEDED banner, and CLAUDE.md's required-reading list points at
+RELEASE_READINESS.md instead. CLAUDE.md also gained the six 2026-08-20 design
+specs and the twelve frontend modules it was missing, and lost a stale claim
+that the Run-at-startup toggle does not exist. CORE_AIM said the dashboard
+opens on Space+comma - that is Smart Search, and no combo opens the dashboard.
+The version history's opening paragraph still said the .msi was dropped; it came
+back at 1.0.54.
+
+**Store preparation.** `npm run store` produces the compliant variant:
+`offlineInstaller` instead of `embedBootstrapper`, because Microsoft's rules say
+plainly that the installer must not be "a downloader stub that downloads bits
+when run" - and the bootstrapper downloads. Verified by building it: 209.8 MB
+against 5.6 MB, and the difference IS the embedded runtime. Publisher changed
+from "Spaceadom" to "Nur Ifran Arpon", because a publisher name identical to the
+product name is a named rejection cause.
+
+**What is left is the signature, and that is Nur's to buy.** Everything else on
+the Store checklist is done: one installer URL, silent install (exercised on
+every build), the disclosure text for the keyboard hook and the process-closing
+feature, and a privacy policy that now covers both.
+
 ## Update: 2026-08-20 | end of day (Claude Fable 5) - the sharing pass: archive backfilled, README rebuilt, privacy policy catches up with the app
 
 No new features. This is the pass that makes 1.0.70 something Nur can hand to a

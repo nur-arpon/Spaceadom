@@ -52,7 +52,8 @@ fn main() {
             tauri_build::Attributes::new().windows_attributes(windows),
         )
         .expect("failed to run tauri-build with the app manifest");
-        return;
+        // The cfg block below is the non-Windows path; on Windows this arm is
+        // the whole function, so the early return is redundant (clippy).
     }
 
     #[cfg(not(target_os = "windows"))]

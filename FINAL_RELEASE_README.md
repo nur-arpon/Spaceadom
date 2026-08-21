@@ -1,3 +1,12 @@
+> **SUPERSEDED — historical only.** This file describes SpaceToggle OS **V12** and is kept for
+> the reasoning it records, not as current guidance. Several of its statements
+> are FALSE for the app as it ships today.
+>
+> For anything current, read in this order: **`CLAUDE.md`** (architecture and
+> hard rules), **`V14_FIXES_AND_CODE.md`** (every problem with its fix),
+> **`PROJECT_STATUS.md`** (the dated log), **`RELEASE_READINESS.md`** (what is
+> left before release). Marked 2026-08-20 during the release-readiness pass.
+
 # SpaceToggle OS V12 — Final Release
 
 Welcome to **SpaceToggle OS V12**. This release marks the complete architectural migration from AutoHotkey V11 to a robust, high-performance Rust and Tauri foundation, while achieving 1:1 functional parity with the original scripts.

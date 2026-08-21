@@ -223,6 +223,7 @@ async function bootstrap(): Promise<void> {
   try {
     const status = await invoke<HookStatus>("get_hook_status");
     setPausedState(status.bypass_active);
+    applyHookState(status.installed);
   } catch (_) { /* status is informational */ }
 
   await listen<AppConfig>("config-updated", (event) => {
@@ -252,6 +253,7 @@ async function bootstrap(): Promise<void> {
     try {
       const s = await invoke<HookStatus>("get_hook_status");
       setPausedState(s.bypass_active);
+      applyHookState(s.installed);
     } catch (_) { /* ignore */ }
   });
 
@@ -797,9 +799,13 @@ function renderConflictBanner(): void {
   if (!el) return;
 
   if (knownConflicts.length === 0) {
-    el.hidden = true;
+    // Only clear the strip if it is OURS — the dead-hook banner (PROBLEM 161)
+    // shares this element and outranks nothing, but must not be wiped by a
+    // conflicts refresh that found nothing to say.
+    if (el.dataset.owner !== "hook") { el.hidden = true; el.dataset.owner = ""; }
     return;
   }
+  el.dataset.owner = "conflicts";
   // Shown ONCE per distinct set of programs, then never again — the user was
   // explicit: "no need to warn all the time, only on first install", and the
   // full list lives permanently in Settings › Conflicts.
@@ -861,6 +867,71 @@ function renderConflictBanner(): void {
  * The list itself comes from special-cards.ts, so the tray, the board and the
  * cards can never disagree about what a special is called.
  */
+/**
+ * PROBLEM 161 — say so when the keyboard hook is not installed.
+ *
+ * Rust has always known (`HOOK_INSTALLED`, surfaced as `HookStatus.installed`
+ * since PROBLEM 66) and the dashboard has always thrown the value away. The
+ * failure it hides is total and silent: no shortcut works, every part of the
+ * UI looks perfectly healthy, and the only evidence is a line in a log file
+ * the user does not know exists. On someone else's laptop that reads as "this
+ * app just doesn't do anything".
+ *
+ * Deliberately a BANNER and not a toast: a toast is a notification of an
+ * event, and this is a persistent state. It stays until the state changes.
+ */
+function applyHookState(installed: boolean): void {
+  const el = document.getElementById("conflict-banner");
+  if (!el) return;
+
+  // Never fight the conflicts banner for the same strip: a detected conflict
+  // is the LIKELIER explanation of a dead hook and its text is more useful.
+  if (installed) {
+    if (el.dataset.owner === "hook") { el.hidden = true; el.dataset.owner = ""; el.innerHTML = ""; }
+    return;
+  }
+  if (el.dataset.owner && el.dataset.owner !== "hook") return;
+
+  el.dataset.owner = "hook";
+  el.innerHTML = "";
+  const txt = document.createElement("span");
+  txt.className = "conflict-text";
+  txt.textContent =
+    "Spaceadom is not receiving key presses, so no shortcut will work. " +
+    "This usually means another keyboard program took the spacebar first, " +
+    "or Windows blocked the connection. Restarting Spaceadom from its tray " +
+    "icon fixes it most of the time.";
+
+  const retry = document.createElement("button");
+  retry.className = "btn btn-sm";
+  retry.textContent = "Try again";
+  retry.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    retry.disabled = true;
+    retry.textContent = "Trying…";
+    try {
+      await invoke("reinstall_hook");
+      const s = await invoke<HookStatus>("get_hook_status");
+      applyHookState(s.installed);
+      if (!s.installed) { retry.disabled = false; retry.textContent = "Try again"; }
+    } catch (_) {
+      retry.disabled = false;
+      retry.textContent = "Try again";
+    }
+  });
+
+  const logs = document.createElement("button");
+  logs.className = "btn btn-sm";
+  logs.textContent = "Open log folder";
+  logs.addEventListener("click", (e) => {
+    e.stopPropagation();
+    void invoke("open_log_folder");
+  });
+
+  el.append(txt, retry, logs);
+  el.hidden = false;
+}
+
 function renderSpecials(): void {
   const tray = document.getElementById("specials-tray");
   if (!tray) return;

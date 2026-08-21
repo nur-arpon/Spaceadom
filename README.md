@@ -37,7 +37,15 @@ bound. Tap one.
 | `Space` + `` ` `` | Picture-in-picture cycle |
 | `Space` + scroll | Fade the window under the cursor |
 | `Space` + `.` | Pause Spaceadom |
+| `Space` + `,` | Smart Search — put the cursor where you type on this app or page |
+| `Space` + `⌫` | Force close the app in front, even when it is frozen |
+| `Space` + `↑↑` | Jump to the top of what you are reading |
+| `Space` + `↓↓` | Jump to the bottom |
 | `Space` alone | A space. Always. |
+
+Every one of these is also explained inside the app: the row along the bottom
+of the dashboard is pressable, and so is each of those keys on the on-screen
+keyboard.
 
 Bindings are edited from the dashboard — click any key on the on-screen
 keyboard and pick an app, or paste a URL.

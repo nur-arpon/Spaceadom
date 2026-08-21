@@ -904,6 +904,16 @@ pub fn close_conflict(
 
 /// Open Task Manager's Start-up apps tab — where the user turns a program off
 /// themselves when Spaceadom cannot (PROBLEM 157).
+/// PROBLEM 161 — the "Try again" button on the dead-hook banner.
+///
+/// Returns immediately: the rebuild happens on the hook thread's own watchdog
+/// tick, because re-hooking has to be done FROM that thread (PROBLEM 132).
+/// The UI re-reads `get_hook_status` after this and shows what it finds.
+#[tauri::command]
+pub fn reinstall_hook() {
+    crate::hook::request_hook_rebuild();
+}
+
 #[tauri::command]
 pub fn open_startup_manager() -> bool {
     crate::hook::conflict_close::open_startup_manager()

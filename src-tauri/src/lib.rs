@@ -635,6 +635,7 @@ pub fn run() {
             commands::get_conflicts,
             commands::close_conflict,
             commands::open_startup_manager,
+            commands::reinstall_hook,
             commands::set_startup_enabled,
         ])
         // --- App setup callback ---
