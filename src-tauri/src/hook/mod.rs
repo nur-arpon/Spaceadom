@@ -222,6 +222,47 @@ static HOOK_THREAD_ID: AtomicU64 = AtomicU64::new(0);
 /// GetTickCount64 ms of the last genuine event seen by the KEYBOARD hook.
 /// Stamped before any filtering so a fully-bypassed keystroke still counts.
 static LAST_KB_EVENT: AtomicU64 = AtomicU64::new(0);
+/// PROBLEM 173 — how long the app can be deaf before the watchdog notices.
+///
+/// These were a 3000 ms timer against an 8000 ms silence threshold, so the
+/// worst case was ~11 SECONDS during which holding Space did nothing at all:
+/// no HUD, no shortcuts, no sign anything was wrong. The owner's 2026-08-24
+/// log has that happening **17 times in one day**, every entry reading
+/// `kb 9000ms / mouse 9000ms`, with spacedesk AND PowerToys both running (two
+/// more low-level keyboard hooks on the same machine, which is the classic
+/// cause of Windows evicting ours). That is the measured explanation for
+/// *"space hud doesn't appear all the time"* — for those seconds the app is
+/// not slow or hidden, it is simply not receiving the keystroke.
+///
+/// 1000/3000 puts the worst case at ~4 s instead of ~11 s.
+///
+/// WHY NOT LOWER. The threshold is what separates "our hook is deaf" from
+/// "this person just is not typing right now", and PROBLEM 101 is the record
+/// of getting that wrong: 260 false alarms in two days from a test that could
+/// not tell those apart. Three seconds of BOTH hooks silent while
+/// `GetLastInputInfo` says the user was active within the last two seconds is
+/// still genuinely anomalous — a mouse move alone stamps the mouse hook, so
+/// silence on both means input is going somewhere we cannot see. Going much
+/// below this starts measuring the gap between two keystrokes.
+///
+/// The cost of a false positive here is one hook reinstall, bounded by the
+/// 60-second cooldown below. The cost of a miss is the app being dead in the
+/// user's hands. The asymmetry is what justifies the tightening.
+const WATCHDOG_TICK_MS: u32 = 1000;
+const BLIND_MS: u64 = 3_000;
+
+/// GetTickCount64 ms of the last keyboard event the hook saw.
+///
+/// Exposed for `smart_cascade`'s post-launch raise (PROBLEM 170): after
+/// launching an app it watches for that app's window and pulls it to the
+/// front, and must STAND DOWN the moment the user starts typing somewhere
+/// else. This static already answers "when did a key last move?" for the
+/// eviction watchdog; reading it costs one atomic load and adds nothing to the
+/// hook path.
+pub fn last_keyboard_event_tick() -> u64 {
+    LAST_KB_EVENT.load(Ordering::Relaxed)
+}
+
 /// PROBLEM 78 — tick of the watchdog's last reinstall, for its 60s cooldown.
 static WATCHDOG_LAST_REINSTALL: AtomicU64 = AtomicU64::new(0);
 /// Same for the MOUSE hook. Kept separate: the two hooks are evicted
@@ -266,6 +307,15 @@ pub fn request_hook_rebuild() {
 pub static HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 /// Count of watchdog reinstalls, drained into the log by the engine thread.
 pub static HOOK_REINSTALLS: AtomicU32 = AtomicU32::new(0);
+/// The same count, but for the whole session and **never drained**.
+///
+/// PROBLEM 173 — `HOOK_REINSTALLS` above is `swap(0)`-ed on every Space
+/// release (`drain_hook_diagnostics`), which is right for a log line and
+/// useless for a UI: anything asking "how often has this happened?" would
+/// almost always read zero, because the user pressed Space between the
+/// eviction and the question. A counter that is reset by an unrelated event
+/// cannot answer a question about history.
+pub static HOOK_EVICTIONS_TOTAL: AtomicU32 = AtomicU32::new(0);
 
 // ---------------------------------------------------------------------------
 // Win32 Virtual Key constants we care about
@@ -467,7 +517,7 @@ fn hook_thread_main(tx: Sender<HookEvent>) {
         // NULL-hwnd SetTimer IGNORES the id you pass and returns a fresh
         // system id; WM_TIMER carries THAT id. Compare against the RETURN
         // VALUE or the watchdog silently never fires.
-        let timer_id = SetTimer(None, 0, 3000, None);
+        let timer_id = SetTimer(None, 0, WATCHDOG_TICK_MS, None);
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             if msg.message == WM_TIMER && msg.wParam.0 == timer_id {
@@ -733,7 +783,7 @@ unsafe fn watchdog_check(
     // (an elevated window has focus and this app runs unelevated) rather than
     // eviction — a reinstall cannot cure that, which is why the log line below
     // no longer claims it can.
-    let both_dead = kb_silence > 8_000 && ms_silence > 8_000;
+    let both_dead = kb_silence > BLIND_MS && ms_silence > BLIND_MS;
     if !both_dead {
         // Events are arriving: whatever was wrong has cleared. Reset the
         // streak so escalation only ever fires for CONTINUOUS blindness.
@@ -756,6 +806,7 @@ unsafe fn watchdog_check(
     *kb = nkb;
     *ms = nms;
     HOOK_REINSTALLS.fetch_add(1, Ordering::Relaxed);
+    HOOK_EVICTIONS_TOTAL.fetch_add(1, Ordering::Relaxed);
     // PROBLEM 101 — WARN, not ERROR, and it no longer asserts a cause it
     // cannot know. 260 of these were logged at ERROR in two days with not one
     // demonstrable eviction among them, which made the log's error channel

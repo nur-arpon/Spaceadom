@@ -41,7 +41,34 @@ const LEAVE_MS = 380;
    hideGuideHud are now flightThruster / flightSlingDown from THRUSTER_SLING.md
    - the pairing he chose and supplied himself. flightWarp remains only for the
    §4.3 grace-window ejection. */
-const WARP = true;
+/* PROBLEM 174 — WARP and SLING are now the USER'S choice, not a build-time
+   constant, and they default to OFF.
+
+   The owner, 2026-08-24, relaying his testers: *"some people gave me feedback
+   that they found it disturbing, too much time consuming and doesn't add much
+   to the functionality… just have an on off switch for this specific space hud
+   to toast, off by default, if off then it has toasts and space hud like
+   before, but ensure no twitches or buggy feel."*
+
+   ONE switch drives BOTH, deliberately. Asked whether "off" should keep the
+   inbound absorb, he chose "Everything — full 1.0.27". That is also the safer
+   half of the answer: WARP and SLING share `_stageMode`, `_slingStaged` and
+   `_hudBusy`, so leaving one on leaves the whole state machine live — and that
+   state machine is what latched `hudBusy=true` for three minutes in his log
+   (PROBLEM 175). Off means none of it runs.
+
+   Nothing is reconstructed from memory. The plain path both flags fall back to
+   has been present and correct all along — `absorbIntoSpace` documents its own
+   fallback as "always correct, just less pretty" — so OFF is the code that
+   shipped in 1.0.27, not a re-implementation of it.
+
+   Seeded from `get_config` on load and updated by the "flight-changed" event,
+   the same two-way arrangement the theme and sound settings use: an event that
+   only fires on CHANGE leaves a freshly-opened overlay with the wrong value
+   (the rule CLAUDE.md records for the theme).
+
+   `let`, not `const`. Read at the call sites, never captured. */
+let WARP = false;
 
 /* ---------------------------------------------------------------------------
    SLINGSHOT — the HUD -> toast arrival, and ONLY that direction.
@@ -52,7 +79,7 @@ const WARP = true;
    absorb and the return-on-release stay off, exactly as he left them.
    He is writing the opposite direction (toast -> HUD) himself.
    --------------------------------------------------------------------------- */
-const SLING = true;
+let SLING = false;
 const SLING_MS = 940;      // door to door - slow ON PURPOSE, this is the set piece
 const SLING_BOW = 150;     // px the arc swings out past the chord
 const SLING_SAMPLES = 22;  // bezier keyframes; 22 is smooth, more buys nothing
@@ -164,6 +191,8 @@ function sweep(from: number, to: number, ms: number): void {
 let _hudActive = false;
 /** True from hide() until the 220ms HUD exit finishes — blocks window fits. */
 let _hudBusy = false;
+/** PROBLEM 175 — deadline timer that unsticks `_hudBusy` if nothing else does. */
+let _hudBusyGuard: number | undefined;
 
 /* ---- PROBLEM 112 state ---- */
 type Rect = { x: number; y: number; w: number; h: number };
@@ -1648,6 +1677,12 @@ function shockAt(at: FlightGeo): void {
 
 function showGuideHud(payload: GuideHudPayload): void {
   _slingHeld = false;
+  /* PROBLEM 175 — a fresh hold is proof the previous one finished, so nothing
+     from it may still be "busy". Without this, the latch described in
+     hideGuideHud survives every subsequent hold: the user's own attempt to
+     make the HUD appear again is exactly the event that used to be blocked. */
+  window.clearTimeout(_hudBusyGuard);
+  _hudBusy = false;
   if (_hudEl) {                 // PROBLEM 137 - undo the handover pin
     _hudEl.style.top = "";
     _hudEl.style.bottom = "";
@@ -1823,6 +1858,7 @@ function hideGuideHud(actionPending = false): void {
 
     window.setTimeout(() => {
       _hudBusy = false;
+      window.clearTimeout(_hudBusyGuard); // PROBLEM 175 — a real clear retires the deadline
       if (_hudActive) return;           // re-held mid-flight
       if (_hudEl) { _hudEl.innerHTML = ""; _hudEl.classList.remove("handoff"); }
 
@@ -1869,7 +1905,59 @@ function hideGuideHud(actionPending = false): void {
      Both are bounded, and `_slingHeld` makes stage 1 strictly one-shot so this
      can never defer forever. Cost on a plain release with no shortcut: the ring
      lingers SLING_HANDOVER_MS. The owner asked for MORE time, not less. */
+  /* PROBLEM 175 — THE LATCH. `_hudBusy` is set true at the top of this
+     function and cleared ONLY inside the timeout at the bottom. Both SLING
+     branches below `return` without reaching it; each schedules another
+     `hideGuideHud(false)`, but guarded by `if (!_hudActive)` — so re-holding
+     Space inside the grace window skips the rescheduled call and `_hudBusy`
+     stays true for the rest of the session.
+
+     `_hudBusy` gates `fitToStack()` and `requestFit()`, and `overlay_fit` is
+     what SIZES AND SHOWS the overlay window. Latched, it means no toast and no
+     HUD placement ever again until the app restarts.
+
+     This is not a theory. The owner's 2026-08-24 log, from the overlay's own
+     instrumentation:
+
+       22:08:31.493  sling: "PiP: Top-Left"   hudActive=false hudBusy=true
+       22:11:16.709  sling: "PiP: Top-Right"  hudActive=false hudBusy=true
+       22:11:34.665  sling: "Frame Restored"  hudActive=false hudBusy=true
+
+     `hudActive=false` with `hudBusy=true`, held across three minutes and many
+     keypresses — and he confirmed restarting the app clears it until it happens
+     again, which is exactly a session-scoped latch.
+
+     The fix is a DEADLINE, not more `return` bookkeeping. Every deferral below
+     is bounded (flightLeft, or SLING_HANDOVER_MS), so if `_hudBusy` is still
+     set well past the longest of them, no path is coming to clear it and the
+     flag is simply stuck. Clearing it then costs nothing: `_hudActive` is
+     checked independently everywhere `_hudBusy` is, so an early clear can only
+     permit a fit that the HUD's own state already allows.
+
+     Generalise: a flag set on entry and cleared on ONE exit path is a latch
+     waiting for a second exit path to be added. Either clear it on every
+     return, or give it a deadline. This one has both now.  */
+  const armBusyDeadline = (): void => {
+    window.clearTimeout(_hudBusyGuard);
+    _hudBusyGuard = window.setTimeout(() => {
+      if (!_hudBusy || _hudActive) return;
+      console.warn("toast: _hudBusy was still set with no HUD — clearing a stuck latch");
+      _hudBusy = false;
+      _stageMode = false;
+      _slingStaged = false;
+      _slingHeld = false;
+      if (_isOverlay) {
+        invoke("overlay_log", {
+          msg: "toast: cleared a stuck _hudBusy latch (PROBLEM 175)",
+        }).catch(() => {});
+      }
+      if (_toasts.length) requestFit();
+      else if (_isOverlay) invoke("overlay_toasts_done").catch(() => {});
+    }, SLING_HANDOVER_MS + SLING_MS + 600);
+  };
+
   if (SLING && !REDUCED()) {
+    armBusyDeadline();
     const flightLeft = Math.max(0, _slingUntil - performance.now());
     if (flightLeft > 0) {
       // A flight is in the air: fold the ring away UNDER it (pure visuals -
@@ -1894,6 +1982,7 @@ function hideGuideHud(actionPending = false): void {
   sweep(760, 280, 150);
   window.setTimeout(() => {
     _hudBusy = false;
+    window.clearTimeout(_hudBusyGuard); // PROBLEM 175 — a real clear retires the deadline
     if (_hudActive) return;             // re-held mid-fade; the HUD keeps the window
     if (_hudEl) { _hudEl.innerHTML = ""; _hudEl.classList.remove("handoff", "landed"); }
     anchorGlow(_stageMode ? "hud" : "toast");
@@ -1965,6 +2054,37 @@ export function applySound(on: boolean): void {
   _soundOn = on;
 }
 
+/**
+ * PROBLEM 174 — "Guide-to-toast motion" on/off, from the user's setting.
+ *
+ * Turning it OFF mid-hold cannot be allowed to strand the machinery it was
+ * driving. `_stageMode` blocks every window fit and `_absorbed` pills do not
+ * age, so a flight that is in the air when the switch flips would leave the
+ * overlay unfittable and a pill frozen wearing SPACE's identity — the exact
+ * shape of the bug this setting exists to avoid. So: clear the flags, put any
+ * absorbed pill back into the ordinary stack, and let the next fit run.
+ *
+ * `_flying` is deliberately NOT cleared. It counts flights that are physically
+ * mid-animation and will decrement themselves; zeroing it would let a fit run
+ * underneath one.
+ */
+export function applyFlight(on: boolean): void {
+  const was = WARP || SLING;
+  WARP = on;
+  SLING = on;
+  if (was && !on) {
+    _absorbed.forEach((t) => park(t, false));
+    _absorbed = [];
+    if (_stageMode) { _stageMode = false; setStageAnchor(false); }
+    _slingStaged = false;
+    _slingHeld = false;
+    _slingUntil = 0;
+    _hudBusy = false;
+    window.clearTimeout(_hudBusyGuard);
+    if (_toasts.length) relayout();
+  }
+}
+
 /* ---------------- listeners — registered ONLY by overlay.ts ------------- */
 export async function initToastListener(): Promise<void> {
   await listen<string>("toast-notification", (e) => {
@@ -1977,4 +2097,6 @@ export async function initToastListener(): Promise<void> {
     hideGuideHud(e.payload === true));
   await listen<boolean>("theme-changed", (e) => applyTheme(!!e.payload));
   await listen<boolean>("sound-changed", (e) => { _soundOn = !!e.payload; });
+  // PROBLEM 174 — `=== true`, not `!!`: absent must read as OFF.
+  await listen<boolean>("flight-changed", (e) => applyFlight(e.payload === true));
 }

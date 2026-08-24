@@ -34,6 +34,9 @@ const config: AppConfig = {
   active_profile: "Founders",
   rollover_ms: 50,
   guide_hud_delay_ms: 300,
+  // PROBLEM 174 — off, matching the shipped default, so the harness shows the
+  // switch in the state a new user actually meets.
+  hud_toast_flight: false,
   opacity_floor_pct: 30,
   browser_path: null,
   fullscreen_allowlist: [],

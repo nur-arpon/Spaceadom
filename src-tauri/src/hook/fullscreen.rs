@@ -82,6 +82,40 @@ pub fn start_fullscreen_watcher(flag: Arc<AtomicBool>, allowlist: Vec<String>) {
         });
 }
 
+/// Programs that go full-screen but are NOT games, and must never make the app
+/// stand down.
+///
+/// PROBLEM 172. The structural test below — `WS_POPUP` + `WS_EX_TOPMOST` +
+/// covers the whole monitor — is a decent description of an exclusive
+/// full-screen game and also, unavoidably, of a full-screen video, a
+/// presentation and a screen share. When it matches, `hook::FULLSCREEN_ACTIVE`
+/// goes true and the hook's very first line passes EVERYTHING through: no
+/// shortcuts, no Guide HUD, nothing. Standing down for a game is deliberate
+/// (Space is jump; a held Space plus a letter must not fire a shortcut
+/// mid-match). Standing down for a YouTube video is just the app not working.
+///
+/// The owner's call, 2026-08-24: *"stand down for games only, not video."*
+/// There is no cheap, honest way to ask Windows "is this a game?", so this
+/// does the reliable thing instead and names the things that are not.
+///
+/// It is a UNION with the user's `fullscreen_allowlist`, not a replacement:
+/// their list stays theirs, and this needs no config migration to reach
+/// someone who upgrades. Only the file stem is compared, lowercased.
+#[cfg(windows)]
+const NOT_A_GAME: &[&str] = &[
+    // Browsers — full-screen video and F11 both land here.
+    "brave.exe", "chrome.exe", "msedge.exe", "firefox.exe", "opera.exe",
+    "opera_gx.exe", "vivaldi.exe", "arc.exe", "zen.exe", "librewolf.exe",
+    // Media players.
+    "vlc.exe", "mpv.exe", "mpc-hc.exe", "mpc-hc64.exe", "mpc-be64.exe",
+    "potplayer.exe", "potplayermini64.exe", "wmplayer.exe", "video.ui.exe",
+    "spotify.exe", "netflix.exe", "iTunes.exe",
+    // Presenting and screen sharing — full-screen, and precisely when you most
+    // want a shortcut to still work.
+    "powerpnt.exe", "zoom.exe", "ms-teams.exe", "teams.exe", "slack.exe",
+    "discord.exe", "claude.exe",
+];
+
 /// Returns true if the foreground window appears to be an exclusive full-screen 3D app.
 #[cfg(windows)]
 unsafe fn check_fullscreen(allowlist: &[String]) -> bool {
@@ -164,5 +198,12 @@ unsafe fn is_allowlisted(hwnd: HWND, allowlist: &[String]) -> bool {
         .map(|f| f.to_string_lossy().to_lowercase())
         .unwrap_or_default();
 
+    // PROBLEM 172 — built-in non-games UNION the user's list. Union, not
+    // replace: a user who curated `fullscreen_allowlist` keeps every entry,
+    // and someone upgrading gets the browsers and players without a config
+    // migration having to run correctly first.
+    if NOT_A_GAME.iter().any(|a| *a == exe.as_str()) {
+        return true;
+    }
     allowlist.iter().any(|a| a.to_lowercase() == exe.as_str())
 }

@@ -3,6 +3,7 @@ import {
   initToastListener,
   applyTheme,
   applySound,
+  applyFlight,
   markOverlayWindow,
 } from "./components/toast";
 
@@ -41,10 +42,23 @@ window.addEventListener("DOMContentLoaded", () => {
   // in the light palette every launch and only correct itself the next time
   // the user touched the toggle — a split-theme app, which the design rules
   // out explicitly ("ONE setting drives everything").
-  invoke<{ dark_mode?: boolean; sound_enabled?: boolean; motion?: string }>("get_config")
+  invoke<{
+    dark_mode?: boolean;
+    sound_enabled?: boolean;
+    motion?: string;
+    hud_toast_flight?: boolean;
+  }>("get_config")
     .then((cfg) => {
       applyTheme(!!cfg?.dark_mode);
       applySound(!!cfg?.sound_enabled);
+      // PROBLEM 174 — seed the guide-to-toast motion from the saved config for
+      // the same reason the theme is seeded here: "flight-changed" only fires
+      // on a CHANGE, so an overlay that has just been created (first launch,
+      // or after a display-change rebuild) would otherwise run with the
+      // module's own default until the user next touched the switch.
+      // `=== true`: the key is absent from every config written before 1.0.73
+      // and absent must mean OFF.
+      applyFlight(cfg?.hud_toast_flight === true);
       // Same "Visual effects" resolution as the dashboard (PROBLEM 47). The
       // overlay is a SEPARATE document, so it must set the class on its own
       // <html> — the dashboard's copy is invisible to it. Without this the

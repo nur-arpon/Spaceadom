@@ -253,7 +253,7 @@ fn shell_launch(file: &str, params: Option<&str>, app_handle: Option<tauri::AppH
     use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
     use windows::Win32::System::Threading::{WaitForSingleObject, INFINITE};
     use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
-    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY, SW_SHOWNORMAL};
 
     unsafe {
         // ShellExecuteEx wants COM (.lnk resolution goes through the shell).
@@ -287,6 +287,18 @@ fn shell_launch(file: &str, params: Option<&str>, app_handle: Option<tauri::AppH
             nShow: SW_SHOWNORMAL.0,
             ..Default::default()
         };
+
+        // PROBLEM 170, half 1 — hand our foreground privilege to whatever the
+        // shell is about to start, so its first window may come up in front on
+        // its own. MUST be immediately before the shell call: the grant is
+        // consumed by the next process the caller creates and times out
+        // quickly. Without it Windows treats the new process as a background
+        // launch and denies it foreground, which is why apps "do not come up".
+        // Failure is not worth reporting loudly — half 2 (raise_after_launch)
+        // covers the same ground from the other side.
+        if let Err(e) = AllowSetForegroundWindow(ASFW_ANY) {
+            log::debug!("cascade: AllowSetForegroundWindow refused ({e}) — the watcher will raise it instead");
+        }
 
         if let Err(e) = ShellExecuteExW(&mut sei) {
             log::warn!("cascade: ShellExecute failed for {file}: {e}");
@@ -347,6 +359,181 @@ fn shell_launch(file: &str, params: Option<&str>, app_handle: Option<tauri::AppH
 #[cfg(not(windows))]
 fn shell_launch(_file: &str, _params: Option<&str>, _app_handle: Option<tauri::AppHandle>) -> bool {
     false
+}
+
+/// PROBLEM 170 — pull a JUST-LAUNCHED app's window to the front.
+///
+/// THE BUG. `force_foreground` was called from four places and every one of
+/// them was inside a *focus an existing window* path. **Nothing whatsoever ran
+/// after a launch.** So the CORE_AIM contract "If closed: launch the app" was
+/// half-implemented: the process started, and whether its window ended up in
+/// front was left entirely to Windows. Windows' answer is usually "no":
+///
+///   * Spaceadom is NOT the foreground process when a shortcut fires — our
+///     hook swallowed the keystroke, so the OS never credited us with the
+///     input that would grant foreground rights.
+///   * A process launched by a background process inherits that refusal. Its
+///     window opens BEHIND, or its taskbar button just flashes.
+///   * Many apps restore their last session's window state, so one that was
+///     closed while minimised comes back minimised.
+///
+/// The owner: *"when apps launched, they do not come up, they sometimes launch
+/// minimized in the taskbar"* — and, asked directly, confirmed it happens
+/// **only** when the app has to be launched, never when it is already running.
+/// That is this gap exactly, and nothing else.
+///
+/// THE FIX IS TWO HALVES, and neither is sufficient alone.
+///
+/// 1. `AllowSetForegroundWindow(ASFW_ANY)` immediately before the shell call
+///    (see `shell_launch` / `run_browser`). This is the documented way to hand
+///    OUR foreground privilege to the process we are about to start, so its
+///    first window is allowed to come up in front on its own. It only applies
+///    to a process the shell creates for us, and it expires quickly — which is
+///    why half 2 exists.
+/// 2. This watcher. Cold-start latency is wildly variable (measured on this
+///    machine: Brave ~500ms, VLC ~1s, Electron apps several seconds), so a
+///    single delayed attempt would miss exactly the slow apps that fail today.
+///
+/// WHY IT STANDS DOWN, AND ON WHAT. Owner's choice when offered the
+/// alternatives: *"keep trying ~8s, but stand down if you touch anything."*
+/// Focus theft seconds after a keypress is worse than an app opening behind,
+/// so this aborts on either signal:
+///
+///   * **You typed.** `hook::last_keyboard_event_tick()` moving past the
+///     baseline means a real key went down. The baseline is taken after
+///     `SETTLE_MS`, not immediately, because RELEASING the Space of the very
+///     combo that started the launch is itself a keyboard event and would
+///     otherwise abort every single launch instantly.
+///   * **You switched windows.** The foreground window becoming a third window
+///     — neither the one you launched from nor the target — means you moved on
+///     deliberately.
+///
+/// Mouse MOVEMENT deliberately does not abort: drifting the pointer while an
+/// app loads is not a decision.
+///
+/// It never minimises. The focus/minimise toggle belongs to the cascade's
+/// other paths; this one only ever raises, so a race with an app that puts
+/// itself in front cannot flip it into hiding the window it just opened.
+#[cfg(windows)]
+fn raise_after_launch(exe_stem: String) {
+    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, ShowWindow, SW_RESTORE};
+
+    if exe_stem.is_empty() {
+        return;
+    }
+
+    const SETTLE_MS: u64 = 500; // covers the Space release of the firing combo
+    const POLL_MS: u64 = 120;
+    const GIVE_UP_MS: u64 = 8_000;
+
+    // Kept for the spawn-failure message below: the closure takes ownership.
+    let label = exe_stem.clone();
+    let spawned = std::thread::Builder::new()
+        .name("st-launch-raise".into())
+        .spawn(move || {
+            let started_fg = unsafe { GetForegroundWindow() };
+            std::thread::sleep(std::time::Duration::from_millis(SETTLE_MS));
+            // Baseline AFTER the settle: everything up to here (including the
+            // Space-up of the combo) is our own doing, not the user moving on.
+            let kb_baseline = crate::hook::last_keyboard_event_tick();
+
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_millis(GIVE_UP_MS - SETTLE_MS);
+
+            while std::time::Instant::now() < deadline {
+                if crate::hook::last_keyboard_event_tick() > kb_baseline {
+                    log::info!(
+                        "raise_after_launch: '{exe_stem}' — you started typing, standing down. \
+                         The window will open wherever the app puts it."
+                    );
+                    return;
+                }
+
+                if let Some(hwnd) = find_window_by_exe_stem(&exe_stem) {
+                    unsafe {
+                        if IsIconic(hwnd).as_bool() {
+                            log::info!(
+                                "raise_after_launch: '{exe_stem}' opened MINIMIZED — restoring it"
+                            );
+                            let _ = ShowWindow(hwnd, SW_RESTORE);
+                        }
+                        if GetForegroundWindow() != hwnd {
+                            log::info!("raise_after_launch: raising '{exe_stem}' {hwnd:?}");
+                            force_foreground(hwnd);
+                        } else {
+                            log::debug!(
+                                "raise_after_launch: '{exe_stem}' came up in front by itself"
+                            );
+                        }
+                    }
+                    return;
+                }
+
+                // A THIRD window took over — not the one we launched from, and
+                // not the target (we would have returned above). You moved on.
+                let fg = unsafe { GetForegroundWindow() };
+                if !fg.0.is_null() && fg != started_fg {
+                    log::info!(
+                        "raise_after_launch: '{exe_stem}' — you switched to another window, \
+                         standing down rather than stealing focus back."
+                    );
+                    return;
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
+            }
+            log::warn!(
+                "raise_after_launch: no window for '{exe_stem}' within {GIVE_UP_MS}ms. \
+                 Either it is slower than that, or it has no top-level window of its own \
+                 (installers and launcher stubs behave this way)."
+            );
+        });
+
+    if let Err(e) = spawned {
+        // PROBLEM 124's rule: a spawn failure degrades the feature, never the app.
+        log::warn!(
+            "raise_after_launch: could not spawn the watcher ({e}) — '{label}' was still \
+             launched, it just will not be pulled to the front."
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn raise_after_launch(_exe_stem: String) {}
+
+/// Find a top-level window belonging to a process with this exe stem.
+///
+/// FIND ONLY — deliberately not `try_focus_or_minimize`, which would MINIMISE
+/// the window if it happened to be foreground already. Calling that from the
+/// post-launch watcher would mean an app that opened correctly in front got
+/// hidden again a moment later: a worse bug than the one being fixed. It also
+/// does not touch the cascade's HWND cache, which is the cascade's own
+/// bookkeeping and not this thread's business.
+#[cfg(windows)]
+fn find_window_by_exe_stem(exe_stem: &str) -> Option<HWND> {
+    let found: Arc<Mutex<Option<HWND>>> = Arc::new(Mutex::new(None));
+    unsafe {
+        let payload = Box::into_raw(Box::new((exe_stem.to_lowercase(), Arc::clone(&found))));
+        let _ = EnumWindows(
+            Some(enum_callback),
+            windows::Win32::Foundation::LPARAM(payload as isize),
+        );
+        // EnumWindows is synchronous, so the callback cannot outlive this
+        // scope and the payload is safe to reclaim here (same reasoning as
+        // try_focus_or_minimize, where forgetting it was a per-press leak).
+        drop(Box::from_raw(payload));
+    }
+    let hwnd = found.lock().unwrap_or_else(|p| p.into_inner()).take();
+    hwnd
+}
+
+/// The exe stem a launch target will show up as in the window list.
+/// `C:\Apps\Brave\brave.exe` → `brave`; `Discord.lnk` → `discord`.
+fn launch_stem(target: &str) -> String {
+    std::path::Path::new(target)
+        .file_stem()
+        .map(|f| f.to_string_lossy().to_lowercase())
+        .unwrap_or_default()
 }
 
 /// Four-step foreground ladder — the minimum set that reliably beats
@@ -1300,7 +1487,33 @@ fn is_shell_target(target: &str) -> bool {
     target.len() > 6 && target[..6].eq_ignore_ascii_case("shell:")
 }
 
+/// Launch a target, then pull its window to the front (PROBLEM 170).
+///
+/// `launch_app_inner` is the original function unchanged; this wrapper exists
+/// so the post-launch raise happens on EVERY successful launch route rather
+/// than being remembered at each of the five `return shell_launch(...)` sites
+/// inside it. A follow-up step that has to be repeated per return statement is
+/// a step that gets missed the next time a route is added — the same reasoning
+/// as PROBLEM 158.
+///
+/// The stem is derived from the ORIGINAL binding, not from whatever path
+/// resolution produced: `Discord.lnk` and `…\app-1.0.9\Discord.exe` both stem
+/// to `discord`, which is what the window's process is actually called.
 fn launch_app(exe_name: &str, app_handle: Option<tauri::AppHandle>) -> bool {
+    let launched = launch_app_inner(exe_name, app_handle);
+    if launched {
+        // Store/UWP activations are excluded: their windows belong to
+        // ApplicationFrameHost.exe, not to any process named after the app, so
+        // an exe-stem search can never find them. The shell foregrounds those
+        // itself, and AllowSetForegroundWindow already covers the handoff.
+        if !is_shell_target(exe_name) {
+            raise_after_launch(launch_stem(exe_name));
+        }
+    }
+    launched
+}
+
+fn launch_app_inner(exe_name: &str, app_handle: Option<tauri::AppHandle>) -> bool {
     // Case 0: Store/UWP app — hand the shell: path straight to ShellExecute,
     // which activates the package by AppUserModelID.
     if is_shell_target(exe_name) {
@@ -1412,7 +1625,9 @@ pub fn run_browser(url: &str, app_handle: Option<tauri::AppHandle>) -> bool {
             use windows::core::HSTRING;
             use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
             use windows::Win32::UI::Shell::ShellExecuteW;
-            use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+            use windows::Win32::UI::WindowsAndMessaging::{
+                AllowSetForegroundWindow, ASFW_ANY, SW_SHOWNORMAL,
+            };
 
             let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             let file = HSTRING::from(u.as_str());
@@ -1420,6 +1635,10 @@ pub fn run_browser(url: &str, app_handle: Option<tauri::AppHandle>) -> bool {
             // Explicit working directory — never let a mis-parse resolve the
             // URL against the process cwd (that is the Documents bug).
             let dir = HSTRING::from(std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into()));
+            // PROBLEM 170 — see shell_launch. Immediately before the shell
+            // call, so the browser we are about to start is allowed to bring
+            // its own window forward instead of opening behind.
+            let _ = AllowSetForegroundWindow(ASFW_ANY);
             let inst = ShellExecuteW(
                 None,
                 windows::core::PCWSTR(verb.as_ptr()),
@@ -1440,6 +1659,15 @@ pub fn run_browser(url: &str, app_handle: Option<tauri::AppHandle>) -> bool {
                 if let Some(app) = &app_handle {
                     use tauri::Emitter;
                     let _ = app.emit("app-launched", &url);
+                }
+                // PROBLEM 170, half 2. The default browser is whatever the
+                // user chose, so ask the registry rather than guessing —
+                // `browser_stem` is the same lookup `url_focus_or_minimize`
+                // uses to FIND browser windows, so the two agree by
+                // construction. If it cannot be determined the raise is
+                // skipped and the launch still stands.
+                if let Some(stem) = browser_stem() {
+                    raise_after_launch(stem);
                 }
                 true
             }

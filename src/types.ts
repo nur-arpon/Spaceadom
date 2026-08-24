@@ -68,6 +68,18 @@ export interface AppConfig {
    * the override matters (PROBLEM 47).
    */
   motion?: "auto" | "full" | "reduced";
+  /**
+   * PROBLEM 174 — "Guide-to-toast motion". OFF by default.
+   *
+   * On: a shortcut's message pill is slung out of the Space ring on a 940ms
+   * arc. Off: the ring collapses on its own and the message appears
+   * bottom-centre — exactly 1.0.27's behaviour.
+   *
+   * Read it as `=== true`, NEVER `!== false`: it is absent from every config
+   * written before 1.0.73, and those users are precisely the ones who asked
+   * for the motion to stop.
+   */
+  hud_toast_flight?: boolean;
   /** Spaceadom logon task enabled (run at startup). ON by default. */
   run_at_startup?: boolean;
   /**

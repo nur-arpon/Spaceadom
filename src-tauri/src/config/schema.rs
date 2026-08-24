@@ -169,6 +169,35 @@ pub struct AppConfig {
     /// effects-off machines a way to see the app as designed (PROBLEM 47).
     #[serde(default = "default_motion")]
     pub motion: String,
+
+    /// PROBLEM 174 — "Guide-to-toast motion". OFF by default.
+    ///
+    /// When a shortcut fires while the Space ring is up, the message pill can
+    /// either be slung out of the ring on a 940ms arc (on) or simply appear
+    /// bottom-centre while the ring collapses on its own (off). Off is exactly
+    /// 1.0.27's behaviour.
+    ///
+    /// WHY IT IS A SETTING, AND WHY OFF. The owner, 2026-08-24, relaying his
+    /// testers: *"some people gave me feedback that they found it disturbing,
+    /// too much time consuming and doesn't add much to the functionality… just
+    /// have an on off switch for this specific space hud to toast, off by
+    /// default."* This is also the third time the flight has been switched off
+    /// and back on (off for 1.0.33, back for 1.0.51), so making it the user's
+    /// choice retires the argument.
+    ///
+    /// It is not only taste. The flight brought a state machine with it —
+    /// `_stageMode`, `_slingStaged`, `_slingHeld`, `_hudBusy` — and the owner's
+    /// 2026-08-24 log caught `hudBusy=true` latched across three minutes and
+    /// many keypresses, which blocks every `overlay_fit` and therefore every
+    /// toast and every HUD placement. The latch is fixed separately (PROBLEM
+    /// 175); with this off, none of that machinery runs at all.
+    ///
+    /// `#[serde(default)]` = false, so an existing config upgrades into the
+    /// quiet behaviour without a migration. Deliberate: the default the owner
+    /// asked for is the one everybody should land on, whichever build they
+    /// came from.
+    #[serde(default)]
+    pub hud_toast_flight: bool,
 }
 
 /// PROBLEM 105 — the profile every OTHER profile silently falls back to.
@@ -300,6 +329,7 @@ impl Default for AppConfig {
             sound_enabled: false,
             run_at_startup: true,
             motion: default_motion(),
+            hud_toast_flight: false,
         }
     }
 }
@@ -380,6 +410,13 @@ mod first_install_tests {
         assert!(!d.hide_keyboard, "the keyboard must be visible at first install");
         assert_eq!(d.theme, "earthy", "first install opens in Earthy");
         assert!(!d.dark_mode, "Earthy is the light theme");
+        // PROBLEM 174 — the owner's testers found the ring→toast flight
+        // "disturbing, too much time consuming". Off is where everyone lands,
+        // and both paths must agree on that.
+        assert!(
+            !d.hud_toast_flight,
+            "the guide-to-toast flight must be OFF at first install"
+        );
     }
 
     #[test]
@@ -393,11 +430,19 @@ mod first_install_tests {
         obj.remove("fun_mode");
         obj.remove("show_me_around");
         obj.remove("theme");
+        obj.remove("hud_toast_flight");
         let c: AppConfig = serde_json::from_value(v).expect("a config without the new fields must still parse");
         assert!(!c.fun_mode, "a missing fun_mode must read as OFF");
         assert!(!c.show_me_around, "a missing show_me_around must read as OFF");
         // theme's serde default is deliberately EMPTY so migration can tell
         // "never set" from "set to earthy" — see config/mod.rs.
         assert_eq!(c.theme, "", "theme's absence must stay distinguishable");
+        // The UPGRADE path matters more than the fresh-install one here: every
+        // existing user has a config without this key, and they are exactly the
+        // people who asked for the motion to stop.
+        assert!(
+            !c.hud_toast_flight,
+            "a config predating this field must read as OFF, not ON"
+        );
     }
 }

@@ -139,6 +139,9 @@ function render(): void {
   const fun = appConfig.fun_mode === true;
   const hideBoard = appConfig.hide_keyboard === true;
   const showAround = appConfig.show_me_around === true;
+  // PROBLEM 174 — the ring-to-toast flight. `=== true`, same rule as the two
+  // above: absent means OFF, and every config written before 1.0.73 lacks it.
+  const flight = appConfig.hud_toast_flight === true;
   document.body.classList.toggle("show-around", showAround);
 
   panelEl.innerHTML = `
@@ -154,6 +157,7 @@ function render(): void {
       ${toggleRow("motion",  "Visual effects", effects,  6)}
       ${toggleRow("hideboard", "Hide the keyboard", hideBoard, 7)}
       ${toggleRow("software", "Software overlay", software, 8)}
+      ${toggleRow("flight",   "Guide-to-toast motion", flight, 9)}
     </div>
 
     <div class="divider" style="margin:14px 0 10px;"></div>
@@ -374,6 +378,20 @@ function render(): void {
     render();
   });
 
+  // PROBLEM 174 — the flight lives in the OVERLAY page, which cannot see this
+  // config object. persistConfig() saves, and save_config re-emits
+  // "flight-changed" from Rust so the overlay learns about it; that global
+  // emit is the only arrangement that has ever delivered here (the same rule
+  // the theme follows). Nothing to apply locally: the dashboard's own toasts
+  // never fly, because they are not in the overlay window.
+  wireToggle("flight", async () => {
+    if (!appConfig) return;
+    appConfig.hud_toast_flight = !appConfig.hud_toast_flight;
+    if (appConfig.hud_toast_flight) sfx.toggleOn("flight"); else sfx.toggleOff("flight");
+    await persistConfig();
+    render();
+  });
+
   renderConflicts();
 
   // PROBLEM 109 — the way back from deleting a preset. Additive: it restores
@@ -504,6 +522,8 @@ function renderConflicts(): void {
       box.appendChild(hint);
     }
 
+    void drawHookHealth(box, draw);
+
     const again = document.createElement("button");
     again.className = "btn btn-sm";
     again.style.cssText = "width:100%; justify-content:center; margin-top:8px;";
@@ -519,6 +539,88 @@ function renderConflicts(): void {
   };
 
   draw();
+}
+
+/**
+ * PROBLEM 173 — the eviction report, and the one control that fixes the cause.
+ *
+ * Windows enforces a HARD deadline on low-level keyboard hooks
+ * (`LowLevelHooksTimeout`, 300 ms by default). Overrun it and Windows silently
+ * unhooks you: no error, no event, the hook just stops firing. Our callback is
+ * microseconds of work, but the deadline is measured across the whole CHAIN —
+ * so another slow hook ahead of us in the queue evicts US.
+ *
+ * The owner's 2026-08-24 log has that happening 17 times in one day, with
+ * spacedesk and PowerToys both resident. Every one of those is a stretch of
+ * several seconds where holding Space does nothing whatsoever, which is what
+ * he described as "space hud doesn't appear all the time".
+ *
+ * Two things are shown, and only when there is something to say:
+ *
+ *   * The COUNT, so an intermittent fault stops being invisible. A user who
+ *     can see "shortcuts stopped 17 times" has a bug report; a user who cannot
+ *     has a flaky app.
+ *   * The BUTTON, which raises the timeout in the user's own HKCU hive. Never
+ *     automatic, and it states the sign-out requirement up front — a setting
+ *     that appears to do nothing for an hour is worse than no setting.
+ *
+ * Hidden entirely when the count is 0 and the timeout has not been raised:
+ * there is no point offering a registry change to someone whose hook has never
+ * been evicted.
+ */
+async function drawHookHealth(box: HTMLElement, redraw: () => void): Promise<void> {
+  let h: { timeout_ms: number | null; raised: boolean; evictions: number; rivals: string[] };
+  try {
+    h = await invoke("get_hook_health");
+  } catch {
+    return; // an older backend, or the command is unavailable — say nothing
+  }
+  if (!h || (h.evictions === 0 && !h.raised)) return;
+
+  const wrap = document.createElement("div");
+  wrap.className = "set-note sma-note";
+  wrap.style.marginTop = "10px";
+
+  const said = h.rivals.length
+    ? ` Most likely ${h.rivals.join(" and ")}, which also hook the keyboard.`
+    : "";
+  wrap.textContent = h.evictions > 0
+    ? `Windows dropped Spaceadom's keyboard shortcuts ${h.evictions} ` +
+      `time${h.evictions === 1 ? "" : "s"} since it started. Each one is a few seconds ` +
+      `where nothing happens when you hold Space.${said}`
+    : "Windows is giving keyboard shortcuts extra time before dropping them.";
+  box.appendChild(wrap);
+
+  const btn = document.createElement("button");
+  btn.className = "btn btn-sm";
+  btn.style.cssText = "width:100%; justify-content:center; margin-top:8px;";
+  btn.textContent = h.raised
+    ? "Undo the extra time for shortcuts"
+    : "Give shortcuts more time (recommended)";
+  btn.addEventListener("click", async () => {
+    sfx.tick();
+    btn.disabled = true;
+    try {
+      const msg = await invoke<string>("set_hook_timeout", { raise: !h.raised });
+      sfx.confirm();
+      showToast(msg);
+      redraw();
+    } catch (e) {
+      console.error("set_hook_timeout failed:", e);
+      showToast("⚠️ Could not change that Windows setting");
+      btn.disabled = false;
+    }
+  });
+  box.appendChild(btn);
+
+  const fine = document.createElement("div");
+  fine.className = "set-note sma-note";
+  fine.style.marginTop = "6px";
+  fine.textContent = h.raised
+    ? "This changes a Windows setting for your account only. Sign out and back in to apply."
+    : "Changes one Windows setting for your account only — no admin needed — so Windows waits " +
+      "5 seconds instead of 0.3 before giving up on a shortcut. Sign out and back in to apply.";
+  box.appendChild(fine);
 }
 
 // ---------------------------------------------------------------------------
@@ -547,6 +649,8 @@ const DESC: Record<string, string> = {
     "All the movement — keys popping, panels gliding. Turn off if the app ever feels heavy on your machine.",
   software:
     "A backup way of drawing the pop-ups. Turn on only if the guide or toasts stop appearing while sounds still play. Applies at the next launch.",
+  flight:
+    "When a shortcut fires while the Space ring is open, the little message flies out of the ring instead of simply appearing. It looks good and it takes about a second. Off is quicker and quieter.",
   theme:
     "Three looks for the whole app, pop-ups included: Earthy daylight, a Warcry of iron and war-banners, or a Starry night sky.",
   // Not in the spec — this setting is new, so the copy is written to match its

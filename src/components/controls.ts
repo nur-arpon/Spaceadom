@@ -23,11 +23,13 @@
  *                    board, where the knob arcs up and away like the layout
  *   rng  sonar ring  sound ticks and the software overlay — both are
  *                    "something went out and came back"
- *   wrp  warp smear  visual effects
+ *   wrp  warp smear  visual effects, and the guide-to-toast flight — the
+ *                    switch that governs a smear is best shown as one
  */
 const TOGGLE_CHAR: Record<string, string> = {
   around: "thr", engine: "thr", fun: "fun", sound: "rng",
   startup: "orb", motion: "wrp", hideboard: "orb", software: "rng",
+  flight: "wrp",
 };
 
 /**

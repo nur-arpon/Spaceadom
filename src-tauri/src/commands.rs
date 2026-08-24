@@ -82,6 +82,10 @@ pub fn save_config(
         use tauri::Emitter;
         let _ = app.emit("theme-changed", new_config.dark_mode);
         let _ = app.emit("sound-changed", new_config.sound_enabled);
+        // PROBLEM 174 — the guide-to-toast flight lives entirely in the OVERLAY
+        // page, so the switch in the dashboard's Settings panel can only reach
+        // it through here. Same global-emit rule as the two above.
+        let _ = app.emit("flight-changed", new_config.hud_toast_flight);
     }
 
     // Persist to disk
@@ -453,6 +457,141 @@ pub fn get_hook_status(state: State<'_, ConfigState>) -> HookStatus {
         bypass_active: BYPASS_MODE.load(Ordering::Relaxed),
         fullscreen_suppressed: FULLSCREEN_ACTIVE.load(Ordering::Relaxed),
         active_profile: state.0.read().unwrap_or_else(|p| p.into_inner()).active_profile.clone(),
+    }
+}
+
+/// What Windows' hook-eviction timeout is set to, and how often we have been
+/// evicted this session.
+#[derive(serde::Serialize)]
+pub struct HookHealth {
+    /// Current `LowLevelHooksTimeout` in ms. `None` = the value is absent, which
+    /// means Windows uses its 300 ms default.
+    pub timeout_ms: Option<u32>,
+    /// True once the value is at least `RECOMMENDED_HOOK_TIMEOUT_MS`.
+    pub raised: bool,
+    /// Watchdog reinstalls since the app started — each one is a stretch during
+    /// which shortcuts did not work.
+    pub evictions: u32,
+    /// Other keyboard-hook programs detected, for naming a likely culprit.
+    pub rivals: Vec<String>,
+}
+
+/// 5 seconds. Windows' default is 300 ms, and it is a HARD deadline: if a
+/// low-level hook callback has not returned within it, Windows silently
+/// unhooks you — no error, no event, the hook simply stops firing.
+///
+/// Our callback is microseconds of work. It overruns anyway when another
+/// low-level hook sits ahead of us in the chain and is slow, because the
+/// timeout is measured across the chain. With PowerToys and spacedesk both
+/// installed on this machine (see the conflicts detector), that is routine
+/// rather than exceptional.
+///
+/// 5000 is generous but not reckless: the value bounds how long a WEDGED hook
+/// can stall input system-wide, and 5 s is the figure AutoHotkey's own
+/// documentation has recommended for this exact problem for years.
+pub const RECOMMENDED_HOOK_TIMEOUT_MS: u32 = 5000;
+
+/// Read the eviction timeout and the session's eviction count.
+#[tauri::command]
+pub fn get_hook_health() -> HookHealth {
+    use std::sync::atomic::Ordering;
+    let timeout_ms = read_hook_timeout();
+    HookHealth {
+        timeout_ms,
+        raised: timeout_ms.is_some_and(|v| v >= RECOMMENDED_HOOK_TIMEOUT_MS),
+        evictions: crate::hook::HOOK_EVICTIONS_TOTAL.load(Ordering::Relaxed),
+        rivals: crate::hook::conflicts::detect()
+            .into_iter()
+            .map(|c| c.product)
+            .collect(),
+    }
+}
+
+#[cfg(windows)]
+fn read_hook_timeout() -> Option<u32> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    let key = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey("Control Panel\\Desktop")
+        .ok()?;
+    // The value is conventionally a DWORD but has historically also been
+    // written as a string by other tools; accept either rather than reporting
+    // "not set" for a value that is plainly there.
+    key.get_value::<u32, _>("LowLevelHooksTimeout")
+        .ok()
+        .or_else(|| {
+            key.get_value::<String, _>("LowLevelHooksTimeout")
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+        })
+}
+
+#[cfg(not(windows))]
+fn read_hook_timeout() -> Option<u32> {
+    None
+}
+
+/// Raise `LowLevelHooksTimeout` so Windows stops evicting our keyboard hook.
+///
+/// PROBLEM 173. This is the only change that addresses the CAUSE rather than
+/// the symptom: the watchdog can only notice an eviction and re-hook, and the
+/// user is deaf until it does.
+///
+/// FOUR PROPERTIES, ALL DELIBERATE:
+///
+/// 1. **HKCU only** — `HKEY_CURRENT_USER\Control Panel\Desktop`, this user's
+///    own hive. No elevation, no UAC, and it cannot affect anyone else who
+///    signs in to this PC. Same rule the autostart entry follows.
+/// 2. **Never automatic.** It is a Windows setting, not ours. It is offered in
+///    Settings, with what it does spelled out, and only ever written when the
+///    user presses the button. A background app quietly editing Control Panel
+///    keys is exactly the behaviour that gets an app removed from the Store.
+/// 3. **Reversible.** `restore` puts back whatever was there, deleting the
+///    value when there was none, so "undo" means the machine's original state
+///    and not our idea of a default.
+/// 4. **Honest about the sign-out.** Windows reads this at logon. Nothing
+///    changes until the user signs out and back in, and saying so is the whole
+///    difference between a setting that works and one they think is broken.
+#[tauri::command]
+pub fn set_hook_timeout(raise: bool) -> Result<String, String> {
+    #[cfg(windows)]
+    {
+        use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
+        use winreg::RegKey;
+        let key = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey_with_flags("Control Panel\\Desktop", KEY_SET_VALUE)
+            .map_err(|e| format!("Could not open your Control Panel settings: {e}"))?;
+
+        if raise {
+            key.set_value("LowLevelHooksTimeout", &RECOMMENDED_HOOK_TIMEOUT_MS)
+                .map_err(|e| format!("Could not save the setting: {e}"))?;
+            log::info!(
+                "hook timeout: raised LowLevelHooksTimeout to {RECOMMENDED_HOOK_TIMEOUT_MS}ms in \
+                 HKCU at the user's request — takes effect at next sign-in"
+            );
+            Ok(format!(
+                "Done — Windows will now give keyboard shortcuts {}s instead of 0.3s before \
+                 giving up on them. Sign out and back in for it to take effect.",
+                RECOMMENDED_HOOK_TIMEOUT_MS / 1000
+            ))
+        } else {
+            match key.delete_value("LowLevelHooksTimeout") {
+                Ok(()) => {
+                    log::info!("hook timeout: removed LowLevelHooksTimeout — back to Windows' 300ms default");
+                    Ok("Put back the way Windows had it. Sign out and back in to apply.".into())
+                }
+                // Already absent is the state being asked for, not a failure.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    Ok("It was already at the Windows default — nothing to undo.".into())
+                }
+                Err(e) => Err(format!("Could not undo the setting: {e}")),
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = raise;
+        Err("Only applies on Windows".into())
     }
 }
 
@@ -938,8 +1077,8 @@ pub fn overlay_fit(app: tauri::AppHandle, width: f64, height: f64) -> Option<Ove
         return None;
     }
     let win = app.get_webview_window("overlay")?;
-    let Ok(Some(mon)) = win.primary_monitor() else {
-        log::warn!("overlay_fit: primary_monitor() returned nothing — window NOT positioned");
+    let Some(mon) = overlay_monitor(&win) else {
+        log::warn!("overlay_fit: no monitor could be resolved — window NOT positioned");
         return None;
     };
     let sf = mon.scale_factor();
@@ -958,8 +1097,10 @@ pub fn overlay_fit(app: tauri::AppHandle, width: f64, height: f64) -> Option<Ove
         win.outer_size().map(|s| s.to_logical::<f64>(sf)).map(|s| (s.width.round(), s.height.round())),
         win.outer_position().map(|p| p.to_logical::<f64>(sf)).map(|p| (p.x.round(), p.y.round())),
     );
-    // Toasts must sit above everything, same rule as the HUD.
-    let _ = win.set_always_on_top(true);
+    // Toasts must sit above everything, same rule as the HUD. Direct Win32 —
+    // `set_always_on_top(true)` on an already-topmost window is a tao no-op
+    // (PROBLEM 168).
+    raise_overlay_topmost(&win);
     let _ = win.show();
     Some(OverlayRect { x, y, w, h })
 }
@@ -1006,8 +1147,8 @@ pub fn overlay_fit_handover(
         return None;
     }
     let win = app.get_webview_window("overlay")?;
-    let Ok(Some(mon)) = win.primary_monitor() else {
-        log::warn!("overlay_fit_handover: primary_monitor() returned nothing - not positioned");
+    let Some(mon) = overlay_monitor(&win) else {
+        log::warn!("overlay_fit_handover: no monitor could be resolved - not positioned");
         return None;
     };
     let sf = mon.scale_factor();
@@ -1032,7 +1173,7 @@ pub fn overlay_fit_handover(
         win.outer_size().map(|s| s.to_logical::<f64>(sf)).map(|s| (s.width.round(), s.height.round())),
         win.outer_position().map(|p| p.to_logical::<f64>(sf)).map(|p| (p.x.round(), p.y.round())),
     );
-    let _ = win.set_always_on_top(true);
+    raise_overlay_topmost(&win);
     let _ = win.show();
     Some(OverlayRect { x, y, w, h })
 }
@@ -1045,7 +1186,7 @@ pub fn overlay_fit_hud(app: tauri::AppHandle, width: f64, height: f64) -> Option
         return None;
     }
     let win = app.get_webview_window("overlay")?;
-    if let Ok(Some(mon)) = win.primary_monitor() {
+    if let Some(mon) = overlay_monitor(&win) {
         let sf = mon.scale_factor();
         let ms = mon.size().to_logical::<f64>(sf);
         let mp = mon.position().to_logical::<f64>(sf);
@@ -1080,6 +1221,11 @@ pub fn overlay_fit_hud(app: tauri::AppHandle, width: f64, height: f64) -> Option
             got_ps.map(|p| (p.x.round(), p.y.round())),
             win.is_visible(),
         );
+
+        // Last chance to get back over anything that entered the topmost band
+        // since show_guide_hud ran (PROBLEM 168). Cheap, and this is the final
+        // placement before the ring is revealed.
+        raise_overlay_topmost(&win);
 
         // PROBLEM 80 — the compositing self-test rides on every HUD show.
         compositing_selftest(app.clone());
@@ -1135,6 +1281,80 @@ unsafe fn sample_pixels(probes: &[(i32, i32)]) -> Vec<u32> {
     let v = probes.iter().map(|&(x, y)| GetPixel(hdc, x, y).0).collect();
     ReleaseDC(None, hdc);
     v
+}
+
+/// Is another window sitting ON TOP of the overlay at the probe points?
+///
+/// PROBLEM 171 — **the self-test cannot tell "I painted nothing" from "someone
+/// is covering me", and until now it did not try.** It reads screen pixels
+/// with `GetPixel` on the desktop DC, which returns whatever is visible at
+/// that coordinate — our overlay if we are on top, and the window above us if
+/// we are not. Both cases produce "the pixels did not change", and both scored
+/// a strike. Three strikes silently flip the machine to software rendering and
+/// restart the app.
+///
+/// The owner's log for 2026-08-24 is the proof: strikes reached 2/3 twice, and
+/// one of them (22:11:32.841) lands on the exact HUD show he described as
+/// *"space hud sound appeared but showed nothing, it appeared behind Claude"* —
+/// with a PiP'd, permanently-topmost window over it (PROBLEM 167/168). The
+/// overlay was composing perfectly; it was underneath. A remedy applied to a
+/// misdiagnosis is worse than no remedy.
+///
+/// WHY NOT `WindowFromPoint`. It is the obvious call and it is WRONG here: the
+/// overlay is click-through (`WS_EX_TRANSPARENT`, from
+/// `set_ignore_cursor_events(true)`), and `WindowFromPoint` deliberately skips
+/// transparent windows. It would never return our overlay, so every show would
+/// look occluded and the test would abstain forever — silently disabling
+/// detection, which is precisely the PROBLEM 122 failure this file already
+/// records once.
+///
+/// So walk the z-order from the top instead. If we meet the overlay before any
+/// visible window that covers a probe point, nothing is above us there.
+#[cfg(windows)]
+unsafe fn overlay_is_occluded(win: &tauri::WebviewWindow, probes: &[(i32, i32)]) -> bool {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetTopWindow, GetWindow, GetWindowRect, IsIconic, IsWindowVisible, GW_HWNDNEXT,
+    };
+
+    let Ok(ours) = win.hwnd() else { return false };
+    let ours = HWND(ours.0 as *mut _);
+
+    let mut h = GetTopWindow(HWND(std::ptr::null_mut())).unwrap_or_default();
+    let mut guard = 0;
+    while !h.0.is_null() && guard < 4000 {
+        guard += 1;
+        if h == ours {
+            return false; // we are above everything that could cover the probes
+        }
+        if IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool() {
+            // A CLOAKED window still has a rect and still reports visible —
+            // suspended UWP apps and virtual-desktop residents live here. They
+            // paint nothing, so treating them as cover would abstain constantly.
+            let mut cloaked = 0u32;
+            let _ = DwmGetWindowAttribute(
+                h,
+                DWMWA_CLOAKED,
+                &mut cloaked as *mut _ as *mut _,
+                std::mem::size_of::<u32>() as u32,
+            );
+            if cloaked == 0 {
+                let mut r = RECT::default();
+                if GetWindowRect(h, &mut r).is_ok()
+                    && probes.iter().any(|&(x, y)| {
+                        x >= r.left && x < r.right && y >= r.top && y < r.bottom
+                    })
+                {
+                    return true;
+                }
+            }
+        }
+        h = GetWindow(h, GW_HWNDNEXT).unwrap_or_default();
+    }
+    // Never found ourselves in the z-order (or the walk ran away). Do NOT
+    // abstain on an inconclusive answer — that would disable the test.
+    false
 }
 
 /// Called from the HUD show path with the overlay positioned but NOT yet
@@ -1216,6 +1436,21 @@ fn compositing_selftest(app: tauri::AppHandle) {
                 done();
                 return;
             }
+            // PROBLEM 171 — abstain if something is covering us. Checked AFTER
+            // the 450ms wait, not before: a window can be raised over the HUD
+            // during the sample, and it is the state at the moment of judgement
+            // that decides whether the pixels mean anything.
+            if unsafe { overlay_is_occluded(&win, &probes) } {
+                log::info!(
+                    "compositing: another window is covering the overlay at the probe points — \
+                     NO VERDICT from this show. Unchanged pixels here would mean 'someone is on \
+                     top of us', not 'we painted nothing', and scoring it would eventually flip \
+                     this machine to software rendering for a fault it does not have."
+                );
+                done();
+                return;
+            }
+
             let after = unsafe { sample_pixels(&probes) };
 
             // PROBLEM 93 — the ABSOLUTE half of the test. If the pixels where
@@ -1382,6 +1617,132 @@ pub fn overlay_shape(app: tauri::AppHandle, rects: Vec<ShapeRect>, dpr: f64) {
     }
     let Some(win) = app.get_webview_window("overlay") else { return };
     set_overlay_region(&win, &rects, dpr);
+}
+
+/// Which monitor the HUD and toasts should appear on.
+///
+/// **The one under the mouse cursor**, falling back to primary, falling back to
+/// whatever monitor exists at all.
+///
+/// PROBLEM 169. Every overlay placement used `primary_monitor()`, and the HUD
+/// was documented as primary-monitor-only "by explicit user decision". The
+/// owner plugs a second display in and out through the day, and on 2026-08-24
+/// reported the HUD failures were "worse with two displays". They would be:
+/// with the dashboard and his work on the external screen, the ring was drawn
+/// perfectly — on the laptop panel he was not looking at. Indistinguishable,
+/// from where he sat, from "it did not appear".
+///
+/// He reversed the decision the same day, choosing the CURSOR's screen over
+/// the foreground window's. That matches what PiP already does
+/// (`MonitorFromPoint(GetCursorPos())`, kept deliberately in the same
+/// conversation), so both features now answer "which screen?" the same way and
+/// a user only has to learn the rule once.
+///
+/// THE FALLBACK CHAIN IS NOT DECORATION. `primary_monitor()` returning `None`
+/// is exactly what happens for a moment during a display change — a hotplug,
+/// a lid close, a resolution switch — and this owner's machine does that
+/// several times a day. `place_overlay_centred` used to silently do nothing in
+/// that case while `show()` ran anyway, so the HUD painted into whatever box
+/// the last toast had left behind: clipped, or a 300px pill somewhere near the
+/// bottom of the screen. A placement that cannot find a monitor must say so
+/// and still land somewhere sane.
+pub(crate) fn overlay_monitor(win: &tauri::WebviewWindow) -> Option<tauri::Monitor> {
+    if let Ok(pos) = win.cursor_position() {
+        if let Ok(Some(mon)) = win.monitor_from_point(pos.x, pos.y) {
+            return Some(mon);
+        }
+    }
+    if let Ok(Some(mon)) = win.primary_monitor() {
+        log::debug!("overlay_monitor: no monitor under the cursor — using the primary display");
+        return Some(mon);
+    }
+    let first = win.available_monitors().ok().and_then(|m| m.into_iter().next());
+    if first.is_some() {
+        log::warn!(
+            "overlay_monitor: neither the cursor's monitor nor the primary could be resolved \
+             (a display change is probably in flight) — falling back to the first available"
+        );
+    } else {
+        log::error!(
+            "overlay_monitor: NO monitor could be resolved at all — the overlay will not be \
+             positioned this time. Expect the HUD/toast to be clipped or mis-placed until the \
+             display settles."
+        );
+    }
+    first
+}
+
+/// Re-raise the overlay to the top of the always-on-top band. **Never replace
+/// this with `win.set_always_on_top(true)`.**
+///
+/// PROBLEM 168. Three call sites used to do exactly that, each with a comment
+/// stating the intent — `guide_hud`'s *"Re-assert topmost on EVERY show: other
+/// always-on-top windows appearing since the last show can end up above us in
+/// the topmost band, and the user requires the HUD over everything"*, and
+/// `overlay_fit`/`overlay_fit_handover`'s *"Toasts must sit above everything,
+/// same rule as the HUD"*. **Not one of them did anything.**
+///
+/// tao caches the window's flags and diffs them before touching the OS
+/// (`tao-0.35.3/src/platform_impl/windows/window_state.rs`):
+///
+/// ```text
+/// fn apply_diff(mut self, window: HWND, mut new: WindowFlags) {
+///     let mut diff = self ^ new;
+///     if diff == WindowFlags::empty() { return; }          // <-- line 321
+///     ...
+///     if diff.contains(WindowFlags::ALWAYS_ON_TOP) {       // <-- line 339
+///         SetWindowPos(window, HWND_TOPMOST, ...);
+/// ```
+///
+/// The overlay is created `always_on_top(true)` and never turned off, so the
+/// flag is ALREADY set, the diff is empty, and `apply_diff` returns at line 321
+/// without reaching the `SetWindowPos` at line 339. Setting a flag to the value
+/// it already holds is a no-op — but "re-assert topmost" reads as covered in
+/// review, which is exactly why it survived so long.
+///
+/// The cost was not cosmetic. `SetWindowPos(HWND_TOPMOST)` on a window that is
+/// already topmost is NOT a no-op at the OS level: it moves the window to the
+/// top of the topmost band. Without it, anything that entered that band after
+/// us stayed above us permanently — a media player pinned on top, an installer,
+/// or (much more commonly on this machine) a window PiP marked topmost and then
+/// failed to release, PROBLEM 167. The owner's report is the exact signature:
+/// *"space hud sound appeared but showed nothing, it appeared behind Claude"* —
+/// the page ran and played its sound, and the window was simply underneath.
+///
+/// So this goes straight to Win32 and skips tao's cache entirely.
+/// SWP_NOACTIVATE matters: the overlay is NoActivate/click-through and must
+/// never take focus. Not SWP_ASYNCWINDOWPOS (which tao uses) — the caller
+/// shows the window immediately afterwards and wants the z-order already
+/// applied, not posted.
+pub(crate) fn raise_overlay_topmost(win: &tauri::WebviewWindow) {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        };
+        let Ok(hwnd) = win.hwnd() else {
+            log::warn!("raise_overlay_topmost: no HWND — the overlay may sit behind other windows");
+            return;
+        };
+        let raw = windows::Win32::Foundation::HWND(hwnd.0 as *mut _);
+        unsafe {
+            if let Err(e) = SetWindowPos(
+                raw,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            ) {
+                log::warn!("raise_overlay_topmost: SetWindowPos failed ({e}) — the HUD/toast may be covered");
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = win.set_always_on_top(true);
+    }
 }
 
 /// Apply (or clear, with an empty list) a per-pill rounded-rect union region.

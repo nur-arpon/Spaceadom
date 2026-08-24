@@ -1,0 +1,10 @@
+# The Store installer is ~210 MB (WebView2 embedded). It is produced by
+# `npm run store` and belongs on disk, never in git — the repo-wide *.exe rule
+# already covers it, and this file says WHY for anyone who wonders where the
+# binary went.
+*.exe
+
+# PRIVACY.md here is a COPY, refreshed from the repo root by the build. Editing
+# this one is a mistake: it will be overwritten on the next `npm run store`.
+# The source of truth is ../PRIVACY.md.
+PRIVACY.md

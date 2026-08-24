@@ -9,10 +9,11 @@
 ///     machine. Transparent Tauri windows are not trustworthy here — this is
 ///     the same compositor minefield as the 2026-07-10 "white box" bug.
 /// v3 (this file): the v11 AutoHotkey architecture, which is proven on this
-///     machine — an OPAQUE dark tool window, sized to content, positioned
-///     bottom-centre of the primary monitor, shown NoActivate on demand and
-///     hidden on release. The web content only draws the inside of the panel;
-///     the WINDOW is the panel.
+///     machine — an OPAQUE dark tool window, sized to content, shown
+///     NoActivate on demand and hidden on release. The web content only draws
+///     the inside of the panel; the WINDOW is the panel.
+///     (Placement moved from "bottom-centre of the primary monitor" to
+///     "centred on the monitor under the cursor" — PROBLEM 169.)
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter, Manager};
@@ -50,24 +51,36 @@ pub struct GuideHudPayload {
     pub specials: Vec<(String, String)>,
 }
 
-/// Size and place the overlay window CENTRED on the primary monitor.
-/// (Primary monitor only — the user's explicit decision, 2026-08-10.)
+/// Size and place the overlay window CENTRED on the monitor under the cursor.
 ///
 /// V13 placed this bottom-centre because the HUD was a bottom-anchored
 /// rectangular panel. The V14 HUD is a radial bloom centred on screen, and
 /// the frontend re-sizes it via `overlay_fit_hud` milliseconds after show.
 /// Without centring HERE too, the window appears bottom-anchored for one
 /// frame and then visibly jumps to the middle.
+///
+/// PROBLEM 169 — this was primary-monitor-only, by the owner's explicit
+/// decision of 2026-08-10, and he reversed it on 2026-08-24 after reporting
+/// the HUD failures were "worse with two displays". See `overlay_monitor` for
+/// why, and for why the silent do-nothing below was a bug in its own right:
+/// `primary_monitor()` returns None during a display change, and this function
+/// used to return having positioned nothing while the caller went on to
+/// `show()` anyway — so the ring painted into whatever box the last toast had
+/// left behind.
 fn place_overlay_centred(win: &tauri::WebviewWindow, w: f64, h: f64) {
-    if let Ok(Some(mon)) = win.primary_monitor() {
-        let sf = mon.scale_factor();
-        let ms = mon.size().to_logical::<f64>(sf);
-        let mp = mon.position().to_logical::<f64>(sf);
-        let x = mp.x + (ms.width - w) / 2.0;
-        let y = mp.y + (ms.height - h) / 2.0;
-        let _ = win.set_size(tauri::LogicalSize::new(w, h));
-        let _ = win.set_position(tauri::LogicalPosition::new(x, y));
-    }
+    let Some(mon) = crate::commands::overlay_monitor(win) else {
+        log::warn!(
+            "guide_hud: no monitor resolved — showing the HUD at its previous size and              position rather than not at all. It may look clipped until the display settles."
+        );
+        return;
+    };
+    let sf = mon.scale_factor();
+    let ms = mon.size().to_logical::<f64>(sf);
+    let mp = mon.position().to_logical::<f64>(sf);
+    let x = mp.x + (ms.width - w) / 2.0;
+    let y = mp.y + (ms.height - h) / 2.0;
+    let _ = win.set_size(tauri::LogicalSize::new(w, h));
+    let _ = win.set_position(tauri::LogicalPosition::new(x, y));
 }
 
 /// Show the Guide HUD — content via event, visibility via the window itself.
@@ -84,6 +97,15 @@ pub fn show_guide_hud(
         specials,
     };
 
+    // Mark the HUD live BEFORE the window work and the emit, not after.
+    // `overlay_fit_hud` refuses to place the window unless `is_visible()` is
+    // already true, and that call is made by the page as soon as it has laid
+    // the ring out — so publishing the flag last leaves a window in which the
+    // frontend's fit is rejected and the ring paints into an unsized box.
+    // Nothing reads a false-positive badly: hide_guide_hud_pending clears it
+    // unconditionally.
+    HUD_VISIBLE.store(true, Ordering::Relaxed);
+
     // Show the WINDOW first, then send the content. A hidden WebView2 window
     // throttles rendering; content emitted before show() painted nothing and
     // the panel came up as an empty dark box (2026-08-10).
@@ -96,7 +118,14 @@ pub fn show_guide_hud(
             // Re-assert topmost on EVERY show: other always-on-top windows
             // appearing since the last show can end up above us in the
             // topmost band, and the user requires the HUD over everything.
-            let _ = win.set_always_on_top(true);
+            //
+            // PROBLEM 168 — this line USED to be `win.set_always_on_top(true)`,
+            // which cannot do what the comment above says: tao diffs the flag
+            // against its cache and returns without calling SetWindowPos when
+            // it has not changed, and it never changes because the overlay is
+            // created always-on-top. Three years of "re-assert topmost" that
+            // asserted nothing. Go straight to Win32.
+            crate::commands::raise_overlay_topmost(&win);
             // PROBLEM 93 — capture what the DESKTOP looks like at the probe
             // points BEFORE the overlay covers them. The self-test used to be
             // purely differential ("did these pixels change in 450ms"), which
@@ -120,7 +149,6 @@ pub fn show_guide_hud(
     if let Err(e) = handle.emit("guide-hud-show", payload) {
         log::warn!("guide_hud: emit failed: {e}");
     }
-    HUD_VISIBLE.store(true, Ordering::Relaxed);
 }
 
 /// Hide the Guide HUD — hides the window, then tells the page to clean up.

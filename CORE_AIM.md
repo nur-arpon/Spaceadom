@@ -41,3 +41,60 @@ The **undeniable, non-negotiable** goal is to provide a "layman-friendly" visual
 
 ## 3. The Prime Directive for AI
 Any AI modifying this codebase **must** read this file. You are forbidden from "simplifying" or removing any of the features listed above. If a feature is broken, **fix it natively**; do not delete it. Parity with the original `install-v11.ps1` AutoHotkey logic is the absolute baseline.
+
+---
+
+## 4. Audit record
+
+A contract nobody re-checks is a wish list. Each row says when the aim was last
+verified, **how**, and what was found — because "it worked once" and "it works
+now" are different claims, and this file is read as making the second one.
+
+### 2026-08-24 — full audit against 1.0.72, at the owner's request
+
+*"recheck if each and every single aim is fully functional, because all of this
+is ai and so im worried if ai halucinated and skipped or made some unstable
+stuff to the core aim."* Fair question, and two of the aims were not fully
+functional. Method: every contract traced to the code that implements it, then
+cross-checked against `%APPDATA%\Spaceadom\debug.log`.
+
+| Aim | Verdict | Where it lives |
+| --- | --- | --- |
+| Tapping Space inserts a space | ✅ intact | `hook/mod.rs` `inject_space()`, cookie-tagged |
+| Holding Space never leaks repeats | ✅ intact | Space-down always returns `LRESULT(1)` |
+| Rollover protection | ✅ intact | `in_rollover` + one ordered `SendInput` batch |
+| Dashboard reachable from the tray | ✅ intact | `tray.rs` |
+| Key → app/URL mapping across profiles | ✅ intact | `key-detail-panel.ts`, `config/` |
+| Smart Cascade — **launch** | ❌ **BROKEN** → fixed | PROBLEM 170 |
+| Smart Cascade — focus / minimise cycling | ✅ intact | 4-step `force_foreground` ladder |
+| Smart Cascade — cyclic reliability | ✅ intact | HWND cache with `IsWindow` validation |
+| Boss Key (Win+M / Win+Shift+M + COM mute) | ✅ intact | `boss_key.rs` |
+| Guide HUD on hold, hides on release | ⚠️ intact but **unreliable** → fixed | PROBLEMS 168, 169, 173, 175 |
+| Toast on every action | ⚠️ intact but **blockable** → fixed | PROBLEM 175 |
+| Bypass on `Space + .` | ✅ intact | incl. the escape hatch to turn it back off |
+
+**The two real failures, and why they had gone unnoticed:**
+
+1. **"If closed: Launch the app" was half-implemented.** The process started;
+   nothing ever brought its window to the front. `force_foreground` existed and
+   was called from four places, all of them focus-an-existing-window paths. It
+   read as covered because the function was plainly there. PROBLEM 170.
+2. **The Guide HUD's reliability, not its existence.** Four independent causes,
+   each capable of the same symptom — a latched frontend flag, a topmost
+   re-assert that was a tao no-op, primary-monitor-only placement, and Windows
+   evicting the hook 17 times in one day. PROBLEMS 168/169/173/175.
+
+**Nothing had been removed or simplified away.** Every aim was still present in
+the code. What had happened is subtler and worth recording: features were
+*surrounded* by later machinery — the HUD→toast flight, the compositing
+self-test, the PiP topmost flag — and that machinery could block them while
+every component still reported itself healthy. The failure mode of this codebase
+is not deletion. It is a working feature made unreachable by something added
+beside it.
+
+**Verified how:** `cargo test --lib` (23 pass), a clean `cargo check`, the
+1.0.73 installer verified on the real machine by version stamp and
+bundle-freshness chain, and the owner's live `debug.log` re-read afterwards.
+Behaviour that needs hands — a real cold launch landing in front, the HUD over a
+second display — is listed as owner-verified in `PROJECT_STATUS.md`, not claimed
+here.

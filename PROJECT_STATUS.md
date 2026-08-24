@@ -1,6 +1,154 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## 2026-08-24 — Claude Opus 5 — 1.0.73: the CORE_AIM audit, and the four reasons the Space guide kept vanishing
+
+**The ask.** *"revisit the file named Core-aim, recheck if each and every single
+aim is fully functional, because all of this is ai and so im worried if ai
+halucinated and skipped or made some unstable stuff to the core aim. as far as i
+remember v1.0.27 was extremely stable, smooth animations and lag free."* Plus
+three specific reports: PiP misbehaving, launched apps not coming up, and a
+request for an on/off switch on the HUD→toast motion. Then, mid-session: *"i
+also noticed space hud doesnt appear all the time or not on top of everything"*
+and *"btw , you checked the debug files and json files log files before deciding
+all these changes right ?"*
+
+**That last question was the right one to ask, and the answer was no.** I had
+diagnosed everything from source. Reading `%APPDATA%\Spaceadom\debug.log`
+afterwards **confirmed three of my calls with measurements, corrected one, and
+surfaced two causes I had missed entirely.** The corrected one matters: I had
+claimed the PiP 5-tap restore was unreachable and that this was why frames get
+orphaned. The log shows him reaching it repeatedly (`pip: restoring hwnd 0x40f9e
+to original frame`). The orphan risk is real — there was no restore-on-exit —
+but it was not what he hit that evening. Written down here rather than quietly
+dropped, per the rule in CLAUDE.md.
+
+### The audit result
+
+Ten of twelve CORE_AIM contracts were intact. Two were not:
+
+- **"If closed: Launch the app"** — half-implemented. `force_foreground` existed
+  and was called from four places, every one of them a *focus an existing
+  window* path. Nothing at all ran after a launch (PROBLEM 170). He confirmed
+  the shape when asked: *"Only when it has to launch it."*
+- **The Guide HUD's reliability** — four independent causes, each capable of the
+  same symptom (PROBLEMS 168, 169, 173, 175).
+
+**Nothing had been removed or simplified away**, which was his actual worry.
+What had happened is worth recording as a class: features were *surrounded* by
+later machinery — the HUD→toast flight, the compositing self-test, PiP's topmost
+flag — and that machinery could block them while every component still reported
+itself healthy. **The failure mode of this codebase is not deletion. It is a
+working feature made unreachable by something added beside it.**
+
+### What the log proved that reading code could not
+
+```
+22:08:31.493 overlay-js: sling: text="PiP: Top-Left"  hudActive=false hudBusy=true chips=8
+22:11:34.665 overlay-js: sling: text="Frame Restored" hudActive=false hudBusy=true chips=8
+```
+
+`_hudBusy` latched true across three minutes and many keypresses (PROBLEM 175).
+`_hudBusy` blocks every `overlay_fit`, and `overlay_fit` is what shows the
+overlay window — so no toast and no HUD placement for the rest of the session.
+He independently confirmed the signature: *"Yes — restart fixes it until it
+happens again."*
+
+```
+22:11:32.306 guide_hud: overlay window shown
+22:11:32.326 overlay_fit_hud: ... GOT size Ok((908,572)) pos Ok((399,247)); visible Ok(true)
+```
+
+Right size, right position, visible — and nothing on his screen. That is *the
+window is underneath something*, and it led to the tao no-op (PROBLEM 168): the
+three "re-assert topmost" calls could not re-assert anything, because tao
+returns early when the flag has not changed.
+
+```
+22:03:02 WATCHDOG — user active 0ms ago but NEITHER hook saw anything (kb 9000ms / mouse 9000ms)
+```
+
+**17 times on 2026-08-24 alone**, with spacedesk and PowerToys both resident.
+Up to ~11 seconds of total deafness each time, invisible to him (PROBLEM 173).
+This is the single largest contributor to "doesn't appear *all the time*" and I
+would not have found it without reading the log.
+
+```
+22:08:57.910 compositing: overlay pixels did not change across 450ms while visible (strike 2/3)
+```
+
+Reached 2-of-3 twice in one evening. Three strikes silently switches the machine
+to software rendering. The test cannot distinguish "painted nothing" from
+"covered by another window", and one of those strikes lands on the exact HUD
+show he described as appearing behind Claude (PROBLEM 171).
+
+### Decisions taken by the owner this session
+
+| Question | His answer |
+| --- | --- |
+| What does the new switch turn off? | Everything — full 1.0.27 |
+| Switch label | "Guide-to-toast motion" |
+| PiP: still strip the title bar? | **Stop stripping entirely — corner-snap only** |
+| PiP: which monitor? | The cursor's — **keep as is** |
+| PiP orphans | Rescue them + restore all on exit |
+| Guide HUD display | Follow the mouse cursor's screen (reverses his 2026-08-10 primary-only decision) |
+| Launch focus | Keep trying ~8s, stand down the moment he touches anything |
+| Full-screen stand-down | Games only, not video |
+| Hook eviction | Detect faster **and** offer to raise the Windows timeout |
+| Compositing self-test | Only score a strike when genuinely on top |
+| Sweep scope | Overlay + engine this round |
+
+### Also found, and reported rather than fixed
+
+His config had shrunk from 23 KB to 12 KB and the app was warning about it at
+every startup. Diffed against the backup at his request: **all three real
+profiles are fully intact** (Founders 26 bindings a–z, Gamers 20, Professionals
+17). The only loss is two bindings in his personal "me" profile — `Space+C →
+Claude` and `Space+D → Discord` — almost certainly the "clear this profile" he
+tested. The 11 KB is cached icon data. Offered to restore the two; not done
+without his word.
+
+Also: `overlay_compositing` was `"software"` on 20 Aug and is `"auto"` now, so
+the self-test has flipped him before. PROBLEM 171 should stop that recurring.
+
+### One thing to know about this repo's tooling
+
+`$APPDATA/Spaceadom/config.json` read from the agent shell shows **47,754 bytes
+dated 18 Aug**, while the app's own log records writing **12,383 bytes at
+22:12 today** to that exact path. `debug.log` at the same path reads live and
+current, and `%LOCALAPPDATA%\SpaceadomBackups\` reads current too. So this is
+not a blanket redirect — it is a shadowed copy of that one file, almost
+certainly written into the container's overlay by an earlier agent session.
+**Do not trust a `config.json` read from the agent shell.** The newest file in
+`SpaceadomBackups` is the reliable proxy; its size matched the app's last save
+exactly. This is PROBLEM 143's family, narrower and sneakier.
+
+### Verified
+
+- `cargo check` clean, 0 warnings. `cargo test --lib`: **23 pass** (4 new, all PiP).
+- 1.0.73 built, installed on the real machine through `explorer.exe` and verified
+  by version stamp (1.0.73) plus the bundle-freshness chain.
+- **The faster watchdog is confirmed working on his machine.** Nine seconds after
+  1.0.73 started: `WATCHDOG — user active 1875ms ago ... (kb 4000ms / mouse
+  4000ms)`. Every previous entry in the file reads `9000ms / 9000ms`. Detection
+  went from ~9s to ~4s, measured, not predicted.
+
+### NOT verified — needs his hands
+
+None of these can be exercised from an agent shell, and none is claimed as
+working:
+
+- A real cold launch landing in front (PROBLEM 170). `raise_after_launch:` log
+  lines were added at every decision so the next log answers it without guesswork.
+- PiP on a real foreground window: the corner glide, the rescue of an
+  already-orphaned window, restore-on-exit.
+- The HUD climbing above a topmost window (PROBLEM 168).
+- The HUD appearing on the external display (PROBLEM 169).
+- Whether the `_hudBusy` latch recurs (PROBLEM 175) — needs a day of use.
+- `set_hook_timeout` — writes fine, but only takes effect after a sign-out.
+
+---
+
 ## Update: 2026-08-20 | night, the storm sequence (Claude Fable 5) - four wrong turns on one component, and what ended it
 
 Full technical record: PROBLEM 157 sub-sections 5d-5g in `V14_FIXES_AND_CODE.md`.
@@ -56,6 +204,34 @@ hypothesis about why it looks wrong.
 `design/storm-clouds.md` is now the authority for this component, and
 `starry-sky.ts` must stay diff-able against it - which is why 1.0.70's halving
 is a container transform rather than eighteen edited numbers.
+
+## Update: 2026-08-22 | (Claude Fable 5) - the publish folder
+
+`to-publish-in-microsoft-store/` now exists, and it is a BUILD OUTPUT, not a
+folder I filled in. `npm run store` produces the compliant installer, renames it
+so it can never be confused with the 5.6 MB friend build, and drops it there
+beside the paperwork - PROBLEM 166.
+
+That decision is the third application of the same lesson in three days.
+`all-versions/` drifted five versions behind while its own header promised
+otherwise; `share-spaceadom/` was handing out a stale build; and the two
+installers shared a filename. A publish folder is the worst place for that,
+because the Store pins a submission to a URL whose bytes must never change - so
+uploading the wrong file is not a mistake you quietly fix, it is a new version
+and a new review.
+
+Two files are paste-ready for Partner Center: `LISTING.md` (description,
+features, certification notes, age-rating answers) and `SUBMIT-CHECKLIST.md`
+(the steps in order). The checklist leads with the signing detail most people
+get wrong: Policy 10.2.9 says "the binary AND ALL OF ITS PE FILES", so signing
+only the installer leaves an unsigned spaceadom.exe inside it and is a
+rejection. Sign the exe, rebuild the installer, then sign the installer.
+
+The 210 MB binary and the copied PRIVACY.md are gitignored - the first because
+it is a build artifact, the second because it is a COPY and editing it instead
+of the root file is a mistake that survives until the next build silently
+overwrites it. The folder's own .gitignore says both, so the reason is where
+someone would look for it.
 
 ## Update: 2026-08-22 | (Claude Fable 5) - the release-readiness pass: five real defects, the doc fossils, and the Store build
 

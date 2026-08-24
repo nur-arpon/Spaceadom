@@ -603,6 +603,8 @@ pub fn run() {
             commands::pick_file,
             commands::check_app_path,
             commands::get_hook_status,
+            commands::get_hook_health,
+            commands::set_hook_timeout,
             commands::reset_config,
             commands::clear_active_profile,
             commands::restore_preset_profiles,
@@ -970,7 +972,28 @@ pub fn run() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .map(|app| app.run(|_, _| {}));
+        .map(|app| {
+            app.run(|_, event| {
+                // PROBLEM 167 — hand back every window PiP is still holding.
+                //
+                // PiP pins its window above everything and shrinks it to a
+                // quarter screen, and the ONLY control that released it was the
+                // 5th tap of the same shortcut. Quit Spaceadom before that tap
+                // and the window stayed pinned and small with nothing left that
+                // could undo it — the owner's "loses its title bar and won't
+                // come back", and (because a stranded topmost window sits over
+                // the overlay) also why the Guide HUD started appearing behind
+                // ordinary apps.
+                //
+                // Both Exit and ExitRequested, deliberately: ExitRequested is
+                // the one that fires for a tray Quit and a WM_CLOSE, Exit is
+                // the last word before the process goes. `restore_all` clears
+                // its own map, so running twice restores nothing twice.
+                if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
+                    engine::actions::pip::restore_all();
+                }
+            })
+        });
 
     // PROBLEM 89 — this used to be `.expect(...)`. A panic here is a SILENT
     // death for the user: no window, no tray icon, nothing on screen, and the
