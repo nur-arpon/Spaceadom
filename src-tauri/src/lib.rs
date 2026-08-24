@@ -479,6 +479,13 @@ pub fn run() {
     // ----------------------------------------------------------------
     let shared_config = config::load_or_init();
 
+    // PROBLEM 180 — publish which optional special keys are bound BEFORE the
+    // hook thread starts. `config::save` republishes on every change, but the
+    // atomic starts at 0: without this call every bit is clear from launch
+    // until the user happens to save something, and Space+Enter / Tab / arrows
+    // / F1-F12 are eaten in the meantime.
+    hook::publish_bound_specials(&shared_config.read().unwrap_or_else(|p| p.into_inner()));
+
     // ----------------------------------------------------------------
     // 4b. PROBLEM 80 — overlay compositing mode. MUST run before the Tauri
     // builder: WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS is read once, when the

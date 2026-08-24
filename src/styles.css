@@ -342,7 +342,24 @@ body.nocturne #halo {
   border: 1.5px solid var(--st-border);
   background: rgba(var(--srf-rgb), .82);
   box-shadow: var(--shadow-key);
-  transition: all 200ms var(--ease-out);
+  /* An EXPLICIT property list, and the omissions are load-bearing.
+     This was `transition: all 200ms var(--ease-out)`. `all` also covers the
+     standalone `translate` and `rotate` properties, which `key-wake.ts` writes
+     every frame to make the board react to a fast cursor sweep — under `all`
+     the browser would ease each of those writes over 200ms and reintroduce
+     precisely the lag the wake exists to remove (the owner: "when the cursor
+     is moved in a very fast way over the keyboard it should show some motion
+     and a reaction to it").
+     `transform` KEEPS its 200ms ease: that is the deliberate-hover lift, which
+     he likes and which must stay soft. The two channels compose because
+     `translate`/`rotate` are separate properties from `transform`, so neither
+     can clobber the other. Do not collapse this back to `all`. */
+  transition:
+    transform 200ms var(--ease-out),
+    box-shadow 200ms var(--ease-out),
+    border-color 200ms var(--ease-out),
+    background-color 200ms var(--ease-out),
+    color 200ms var(--ease-out);
   cursor: pointer;
 }
 /* EVERY key hovers, presses and ripples — not just the bindable letters.

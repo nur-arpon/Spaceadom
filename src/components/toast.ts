@@ -931,8 +931,21 @@ function buildHud(payload: GuideHudPayload, entranceDelay = 0): Promise<Rect | n
   // that cannot be animated, so callers must be able to wait for it and keep
   // content invisible until it has landed.
   return invoke<Rect | null>("overlay_fit_hud", { width: w, height: h })
-    .then((r) => { if (r) _rect = r; return r ?? null; })
-    .catch(() => null);
+    .then((r) => {
+      if (r) { _rect = r; return r; }
+      // Rust refused the fit (its side logs why). Without this line the PAGE's
+      // record of the clipped-HUD failure was empty too — both halves of the
+      // 2026-08-24 stall were silent, and silence on both sides of an IPC call
+      // is how it cost a full diagnostic round.
+      invoke("overlay_log", {
+        msg: `buildHud: overlay_fit_hud returned null for ${w}x${h} — the ring will be clipped to the window's previous size`,
+      }).catch(() => {});
+      return null;
+    })
+    .catch((e) => {
+      invoke("overlay_log", { msg: `buildHud: overlay_fit_hud REJECTED: ${e}` }).catch(() => {});
+      return null;
+    });
 }
 
 interface FlightGeo { x: number; y: number; w: number; h: number; s?: number }

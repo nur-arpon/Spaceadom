@@ -196,6 +196,24 @@ export function initKeyboardMatrix(
       c.style.animation = "";
       c.style.animationDelay = "";
     });
+    // PROBLEM 179 — re-measure the cursor wake now the keys are at REST.
+    //
+    // The wake caches key centres from getBoundingClientRect(), which returns
+    // the TRANSFORMED box. Bootstrap wires it in the same synchronous task that
+    // renders this board, and at that instant every cell is holding the 0%
+    // keyframe of `st-key-in` — `translateY(16px) scale(.85)`, applied
+    // throughout the stagger delay because the animation is `backwards`. So
+    // every centre was cached exactly 16 board-px LOW: the wake rendered above
+    // the cursor, and the row ABOVE reacted 2.1x as strongly as the row below.
+    //
+    // It could not self-heal: a transform triggers no ResizeObserver, and this
+    // cleanup mutates only inline STYLE, which a {childList, subtree}
+    // MutationObserver cannot see. Nothing re-measured until a resize or a
+    // profile switch.
+    //
+    // Imported lazily so this module stays free of a hard dependency on the
+    // wake, which is optional and dashboard-only.
+    void import("../key-wake").then((m) => m.measureKeyWake()).catch(() => {});
   }, 1700);
 }
 

@@ -85,6 +85,28 @@ static DROPPED_EVENTS: AtomicU32 = AtomicU32::new(0);
 /// Report and reset the hook's suppression counters. Called from the ENGINE
 /// thread (never the hook thread). Silent when everything is zero, so a
 /// healthy log stays clean.
+/// PROBLEM 183 — WHY THIS MUST ALSO BE CALLED ON A TIMER.
+///
+/// For its whole life this had exactly ONE caller: the engine's `SpaceUp` arm.
+/// A `SpaceUp` only reaches the engine if the hook received Space-down AND
+/// Space-up AND the channel send succeeded — so **every line it has ever
+/// printed was written at an instant when the hook was demonstrably working.**
+///
+/// That makes it blind to the only episode anyone cares about. When the owner
+/// reports *"it works only if I minimise the app"*, there is no successful
+/// Space release during the failure, so there is no drain and no line at all.
+/// The next line you read is a 60-second summary published from the far side of
+/// the outage, by which time the counters describe the recovery.
+///
+/// I built an argument on those zeros — "0 of them while the Spaceadom window
+/// had focus, twelve samples running" — and it was worthless: the samples could
+/// not have contained the failure. `KB_EVENTS_OWN_FG` has in fact read non-zero
+/// 35 times historically (`2026-08-16 20:30:05.439 … 341 of them`), which alone
+/// disproves the reading I gave it.
+///
+/// Called from a tokio interval on the ENGINE thread as well now, so a minute
+/// with no successful Space still produces a line. Never call it from the hook
+/// CALLBACK — it logs, and PROBLEM 58 is what that costs.
 pub fn drain_hook_diagnostics() {
     let fs = SUPPRESS_FULLSCREEN.swap(0, Ordering::Relaxed);
     let by = SUPPRESS_BYPASS.swap(0, Ordering::Relaxed);
@@ -93,6 +115,7 @@ pub fn drain_hook_diagnostics() {
     let un = UNMAPPED_KEYS.swap(0, Ordering::Relaxed);
     let dr = DROPPED_EVENTS.swap(0, Ordering::Relaxed);
     let rh = HOOK_REINSTALLS.swap(0, Ordering::Relaxed);
+    let os = PASSED_TO_OS.swap(0, Ordering::Relaxed);
     // PROBLEM 104 — reported at most once a minute. This function drains on
     // every Space RELEASE, so logging unconditionally wrote a line every few
     // seconds while typing: the same log-noise problem the watchdog had, in a
@@ -105,21 +128,36 @@ pub fn drain_hook_diagnostics() {
         if now.saturating_sub(last) >= 60_000 {
             let seen = KB_EVENTS_SEEN.swap(0, Ordering::Relaxed);
             let own = KB_EVENTS_OWN_FG.swap(0, Ordering::Relaxed);
-            if seen > 0 {
-                LAST_SEEN_REPORT.store(now, Ordering::Relaxed);
+            // ALWAYS advance the window, even when there is nothing to print.
+            // This used to advance only inside `if seen > 0`, so a drain that
+            // found the counters empty swapped them to zero, printed nothing,
+            // and left LAST_SEEN_REPORT where it was — quietly discarding an
+            // accumulated `own` count that had never been reported. A counter
+            // that can be zeroed without ever being read is not a measurement.
+            LAST_SEEN_REPORT.store(now, Ordering::Relaxed);
+            // PROBLEM 183, the other half — a DEAF minute must produce a line.
+            // `seen == 0` while the user was recently active is precisely the
+            // outage signature, and printing only on `seen > 0` meant the one
+            // instrument built for it stayed silent through every outage. The
+            // idle guard keeps quiet nights out of the log: nobody touching
+            // the machine is not evidence about the hook.
+            let idle_ms = millis_since_last_input();
+            let elapsed_s = now.saturating_sub(last) / 1000;
+            if seen > 0 || idle_ms < 60_000 {
                 log::info!(
-                    "hook: saw {seen} key event(s) in the last minute, {own} of them while the Spaceadom window itself had focus"
+                    "hook: saw {seen} key event(s) in the last {elapsed_s}s, {own} of them \
+                     while the Spaceadom window itself had focus (user input {idle_ms}ms ago)"
                 );
             }
         }
     }
-    if fs == 0 && by == 0 && ro == 0 && st == 0 && un == 0 && dr == 0 && rh == 0 {
+    if fs == 0 && by == 0 && ro == 0 && st == 0 && un == 0 && dr == 0 && rh == 0 && os == 0 {
         return;
     }
     log::info!(
         "hook diagnostics — fullscreen-suppressed:{fs} bypass-suppressed:{by} \
          typed-not-command(rollover):{ro} stuck-modifier-resets:{st} unmapped-keys:{un} \
-         dropped-events:{dr} watchdog-reinstalls:{rh}"
+         dropped-events:{dr} watchdog-reinstalls:{rh} passed-to-os(ctrl/alt/win held):{os}"
     );
     if ro > 0 {
         // The advice here used to say "set a SLOWER typing speed (a slower
@@ -265,6 +303,10 @@ pub fn last_keyboard_event_tick() -> u64 {
 
 /// PROBLEM 78 — tick of the watchdog's last reinstall, for its 60s cooldown.
 static WATCHDOG_LAST_REINSTALL: AtomicU64 = AtomicU64::new(0);
+/// PROBLEM 182 — tick of the last hook-THREAD rebuild, rate-limited separately
+/// from re-hooking because the supervisor that performs it gives up for good
+/// after 5 rebuilds in 10 minutes.
+static LAST_ESCALATION: AtomicU64 = AtomicU64::new(0);
 /// Same for the MOUSE hook. Kept separate: the two hooks are evicted
 /// independently, and our keyboard callback is the heavy one — a dead
 /// keyboard hook with a live mouse hook is the realistic failure.
@@ -307,6 +349,91 @@ pub fn request_hook_rebuild() {
 pub static HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 /// Count of watchdog reinstalls, drained into the log by the engine thread.
 pub static HOOK_REINSTALLS: AtomicU32 = AtomicU32::new(0);
+/// PROBLEM 180 — which of the OPTIONAL special keys the user has actually
+/// bound. Bits 0..11 = F1..F12, 12 = Enter, 13 = Tab, 14 = Left, 15 = Right.
+///
+/// THE BUG THIS FIXES HAS SHIPPED IN EVERY BUILD SINCE 1.0.27, and nobody
+/// noticed because its symptom is *nothing happening*.
+///
+/// The combo match swallowed all sixteen of these unconditionally:
+///
+///     VK_RETURN => Some(KeyCombo::Special("enter".into())),
+///     VK_TAB    => Some(KeyCombo::Special("tab".into())),
+///     v if (VK_F1..=VK_F12).contains(&v) => …
+///
+/// directly under a comment claiming the opposite — *"only dispatch if the
+/// user has bound them in special_keys config"*. The config check does exist,
+/// but it lives downstream in `engine::handle_special`, which runs AFTER the
+/// keystroke has already been destroyed by `return LRESULT(1)`. Its own
+/// comment, `// key passes through — not configured`, describes something that
+/// cannot happen: by then there is no key left to pass through.
+///
+/// `special_keys` is `{}` in the owner's config and **nothing in the UI can
+/// write it**, so for every user of every build: hold Space and Enter, Tab,
+/// the Left/Right arrows and all twelve F-keys are eaten and do nothing.
+/// Space+Tab cannot alt-tab, Space+Enter cannot confirm a dialog.
+///
+/// A bitmask rather than a config read because this is consulted on the hook
+/// path, where PROBLEM 58's rule is absolute: atomics only, no allocation, no
+/// lock, no logging. One relaxed load and a shift.
+pub static BOUND_SPECIALS: AtomicU32 = AtomicU32::new(0);
+
+/// Is this optional special key bound? Hook-path safe: one relaxed load.
+#[inline]
+fn special_bound(bit: u16) -> bool {
+    BOUND_SPECIALS.load(Ordering::Relaxed) & (1u32 << bit) != 0
+}
+
+/// Bit index for a `special_keys` config name, or `None` if that key is a
+/// FIXED shortcut rather than an optional one (esc = Boss Key, up/down =
+/// scroll) and therefore always dispatched.
+fn special_bit(name: &str) -> Option<u32> {
+    match name {
+        "enter" => Some(12),
+        "tab" => Some(13),
+        "left" => Some(14),
+        "right" => Some(15),
+        _ => name
+            .strip_prefix('f')
+            .and_then(|n| n.parse::<u32>().ok())
+            .filter(|n| (1..=12).contains(n))
+            .map(|n| n - 1),
+    }
+}
+
+/// Publish which optional special keys are bound, so the hook can stop eating
+/// the ones that are not.
+///
+/// MUST be called from BOTH the startup config load and every save. The atomic
+/// starts at 0, so without the startup call every bit is clear from launch
+/// until the user happens to save something — which is the same dead-keys bug
+/// with a smaller window.
+pub fn publish_bound_specials(cfg: &crate::config::AppConfig) {
+    let mut mask = 0u32;
+    for (name, bind) in &cfg.special_keys {
+        if !bind.is_mapped() {
+            continue;
+        }
+        if let Some(bit) = special_bit(name) {
+            mask |= 1 << bit;
+        }
+    }
+    let prev = BOUND_SPECIALS.swap(mask, Ordering::Relaxed);
+    if prev != mask {
+        log::info!(
+            "hook: optional special keys bound = {mask:#06x} (bits 0-11 F1-F12, 12 Enter, \
+             13 Tab, 14 Left, 15 Right). Unbound ones now pass through to Windows instead \
+             of being swallowed (PROBLEM 180)."
+        );
+    }
+}
+
+/// PROBLEM 176 — keys handed straight back to Windows because a REAL modifier
+/// (Ctrl/Alt/Win) was held alongside Space. Drained into the diagnostics line
+/// so "my system shortcut did nothing" and "Spaceadom ate my key" stay
+/// distinguishable in a log, which is the only place the difference is visible.
+pub static PASSED_TO_OS: AtomicU32 = AtomicU32::new(0);
+
 /// The same count, but for the whole session and **never drained**.
 ///
 /// PROBLEM 173 — `HOOK_REINSTALLS` above is `swap(0)`-ed on every Space
@@ -551,6 +678,58 @@ fn hook_thread_main(tx: Sender<HookEvent>) {
 /// an invalid HHOOK for the watchdog to retry. Updates HOOK_INSTALLED so the
 /// dashboard reports the truth.
 #[cfg(windows)]
+/// PROBLEM 181 — the REFERENCE keyboard hook, and the reason it exists.
+///
+/// The watchdog's only eviction test is `both_dead`: BOTH the keyboard and the
+/// mouse hook silent past a threshold while the user is active. That cannot see
+/// the failure that actually happens on this machine — the KEYBOARD hook alone
+/// being evicted — because the mouse hook keeps firing and holds `both_dead`
+/// false. Measured in the owner's log for 2026-08-24/25: **24 of 46 alarms had
+/// mouse silence under 5s while keyboard silence ran to 5–29 SECONDS**, e.g.
+///
+///     23:31:07.802  kb 20000ms / mouse 3906ms   Foreground: Discord.exe
+///     23:35:17.905  kb 19000ms / mouse 3515ms   Foreground: spaceadom.exe
+///
+/// Twenty seconds of a dead app, and the watchdog only noticed when the mouse
+/// happened to go quiet too.
+///
+/// The obvious detector — "keyboard silent while mouse is alive" — is exactly
+/// the branch PROBLEM 101 DELETED, and deleting it was right: it cannot tell an
+/// evicted hook from a person who is reading rather than typing. Both look
+/// identical from inside this process. The removal left no detector at all.
+///
+/// THE DISCRIMINATOR. Install a SECOND `WH_KEYBOARD_LL` that does nothing but
+/// stamp a timestamp and call the next hook. Windows evicts the hook whose
+/// callback overran `LowLevelHooksTimeout`, not every hook in the chain — and
+/// this one cannot overrun, because it does one relaxed store. So:
+///
+///     reference firing + primary silent  =  the primary was evicted. Certain.
+///     both silent                        =  nobody is typing. Ambiguous, ignore.
+///
+/// That turns an unanswerable question into an arithmetic one.
+///
+/// It lives on the SAME thread as the primary deliberately. If the thread's
+/// message pump is what wedged, both stop together and this correctly reports
+/// nothing — that case is already handled by `ESCALATE_RESTART` rebuilding the
+/// whole thread, and a reference on another thread would have muddied the two
+/// failure modes back together.
+static LAST_REF_KB_EVENT: AtomicU64 = AtomicU64::new(0);
+
+/// Reference hook. Do NOT add anything to this function. Its entire value is
+/// that it cannot be evicted for being slow, and every line added erodes that.
+#[cfg(windows)]
+unsafe extern "system" fn ref_kb_hook_proc(
+    n_code: i32,
+    w_param: windows::Win32::Foundation::WPARAM,
+    l_param: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::UI::WindowsAndMessaging::CallNextHookEx;
+    if n_code >= 0 {
+        LAST_REF_KB_EVENT.store(tick_count(), Ordering::Relaxed);
+    }
+    CallNextHookEx(None, n_code, w_param, l_param)
+}
+
 unsafe fn install_hooks() -> (
     windows::Win32::UI::WindowsAndMessaging::HHOOK,
     windows::Win32::UI::WindowsAndMessaging::HHOOK,
@@ -560,16 +739,45 @@ unsafe fn install_hooks() -> (
         .unwrap_or_default();
     let ms = SetWindowsHookExW(WINDOWS_HOOK_ID(WH_MOUSE_LL), Some(ms_hook_proc), None, 0)
         .unwrap_or_default();
+    // PROBLEM 181 — the liveness reference. Kept in its own static rather than
+    // returned, because every caller of install_hooks() treats its two return
+    // values as "the hooks to unhook", and this one must be replaced on the
+    // same schedule without any of them having to remember it.
+    let old_ref = REF_KB_HOOK.swap(0, Ordering::SeqCst);
+    if old_ref != 0 {
+        use windows::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx;
+        let _ = UnhookWindowsHookEx(windows::Win32::UI::WindowsAndMessaging::HHOOK(
+            old_ref as *mut _,
+        ));
+    }
+    let rf = SetWindowsHookExW(WINDOWS_HOOK_ID(WH_KEYBOARD_LL), Some(ref_kb_hook_proc), None, 0)
+        .unwrap_or_default();
+    REF_KB_HOOK.store(rf.0 as isize as u64, Ordering::SeqCst);
+
     HOOK_INSTALLED.store(!kb.is_invalid(), Ordering::Relaxed);
+    // PROBLEM 184 — a reinstall means we may have missed key-ups while unhooked,
+    // so take the OS's word for the modifier state rather than our own stale
+    // bookkeeping. This runs on the hook THREAD, not in the callback.
+    resync_modifiers();
     let now = tick_count();
     LAST_KB_EVENT.store(now, Ordering::Relaxed);
     LAST_MS_EVENT.store(now, Ordering::Relaxed);
+    LAST_REF_KB_EVENT.store(now, Ordering::Relaxed);
     (kb, ms)
 }
+
+/// Handle of the reference hook, so it can be replaced/removed alongside the
+/// primary. Stored as a raw `u64` because `HHOOK` is not `Send`/`Sync`.
+static REF_KB_HOOK: AtomicU64 = AtomicU64::new(0);
 
 /// Milliseconds since the OS last saw ANY user input (keyboard or mouse).
 /// GetLastInputInfo reports in 32-bit GetTickCount space — compare there,
 /// never against GetTickCount64.
+#[cfg(not(windows))]
+fn millis_since_last_input() -> u64 {
+    u64::MAX
+}
+
 #[cfg(windows)]
 fn millis_since_last_input() -> u64 {
     use windows::Win32::System::SystemInformation::GetTickCount;
@@ -687,6 +895,11 @@ unsafe fn watchdog_check(
         FG_IS_SELF.store(is_self, Ordering::Relaxed);
     }
 
+    // PROBLEM 184 — heal a modifier bit latched by a lost key-up (an eviction
+    // that straddled a held Ctrl/Alt/Win). Free here; forbidden in the
+    // callback, which is the whole reason the mask exists.
+    resync_modifiers();
+
     let user_input_ms = millis_since_last_input();
     if user_input_ms >= 2_000 {
         // PROBLEM 101 — THE ROOT CAUSE OF 260 FALSE ALARMS.
@@ -759,13 +972,20 @@ unsafe fn watchdog_check(
     // and a repeating cause (UIPI edge, another hook ahead of us swallowing
     // events) turns the watchdog into an ERROR-spam loop. One reinstall per
     // minute is fast enough for real evictions and bounds the noise.
-    let last = WATCHDOG_LAST_REINSTALL.load(Ordering::Relaxed);
-    if last != 0 && now.saturating_sub(last) < 60_000 {
-        return;
-    }
-
+    // MEASURE FIRST, THROTTLE SECOND. PROBLEM 182.
+    //
+    // This early return used to sit ABOVE the silence computation, so after any
+    // repair the app was UNREPAIRABLE for a full minute and the log had nothing
+    // to say about it. The cooldown's own length is visible in the owner's
+    // measurements: six alarms on 2026-08-24/25 report silences of 58000,
+    // 58016, 60000, 60015 and 60016 ms. A 58–60 second eviction is not
+    // plausible — that is the throttle showing up in its own instrument.
+    //
+    // On a machine that evicts this hook 15–40 times a day, a fixed 60s hold is
+    // a bigger source of deafness than the fault it throttles.
     let kb_silence = now.saturating_sub(LAST_KB_EVENT.load(Ordering::Relaxed));
     let ms_silence = now.saturating_sub(LAST_MS_EVENT.load(Ordering::Relaxed));
+    let ref_silence = now.saturating_sub(LAST_REF_KB_EVENT.load(Ordering::Relaxed));
 
     // PROBLEM 101 — the `kb_dead` branch is DELETED. It read:
     //     kb_dead = kb_silence > 120_000 && ms_silence < 8_000
@@ -784,13 +1004,79 @@ unsafe fn watchdog_check(
     // eviction — a reinstall cannot cure that, which is why the log line below
     // no longer claims it can.
     let both_dead = kb_silence > BLIND_MS && ms_silence > BLIND_MS;
-    if !both_dead {
+
+    // PROBLEM 181 — the case `both_dead` structurally cannot see: the KEYBOARD
+    // hook alone evicted. The reference hook is firing, so keys ARE moving and
+    // hooks in this chain CAN still be called; our primary is simply no longer
+    // among them. That is not ambiguous the way the deleted `kb_dead` branch
+    // was, and it is the failure the owner actually lives with — 24 of 46
+    // alarms on 2026-08-24/25 had the mouse alive within 5s while the keyboard
+    // had been silent for 5–29s.
+    let kb_only_dead = kb_silence > BLIND_MS && ref_silence < BLIND_MS;
+
+    if !both_dead && !kb_only_dead {
         // Events are arriving: whatever was wrong has cleared. Reset the
         // streak so escalation only ever fires for CONTINUOUS blindness.
         BLIND_REINSTALLS.store(0, Ordering::Relaxed);
         return;
     }
-    WATCHDOG_LAST_REINSTALL.store(now, Ordering::Relaxed);
+
+    // PROBLEM 182 — the cooldown, now ADAPTIVE and applied after measuring.
+    //
+    // A fixed 60s hold assumes the previous reinstall did something. Often it
+    // did not: ten alarms on 2026-08-24/25 read exactly `kb 4000ms / mouse
+    // 4000ms` — identical clocks, which is the signature of `install_hooks()`
+    // stamping both and then NEITHER hook firing. `reinstall ok: true` only
+    // means `SetWindowsHookExW` returned a handle (PROBLEM 132's lesson,
+    // still reproducing).
+    //
+    // So: if the last repair demonstrably produced NO events, do not wait —
+    // retrying immediately is the whole point, and `BLIND_REINSTALLS` bounds it
+    // by escalating to a full thread rebuild on the second failure. Reserve the
+    // 60s hold for the case where events DID resume and then stopped again,
+    // which is the repeating-cause scenario the cooldown was written for.
+    let last = WATCHDOG_LAST_REINSTALL.load(Ordering::Relaxed);
+    if last != 0 && now.saturating_sub(last) < 60_000 {
+        let previous_worked = LAST_KB_EVENT.load(Ordering::Relaxed) > last
+            || LAST_MS_EVENT.load(Ordering::Relaxed) > last;
+        if previous_worked {
+            log::debug!(
+                "hook: WATCHDOG would re-hook (kb {kb_silence}ms / mouse {ms_silence}ms / ref \
+                 {ref_silence}ms) but the last repair DID deliver events — holding off for the \
+                 rest of the 60s cooldown."
+            );
+            return;
+        }
+        // A FLOOR, NOT ZERO. Retrying with no delay at all would spin, and —
+        // far worse — it would burn the supervisor's restart budget. `lib.rs`'s
+        // hook-thread supervisor keeps `restarts.retain(|t| … < 600)` and gives
+        // up permanently above 5, logging *"Space+key is DEAD until the app is
+        // restarted."* Escalation currently needs 2 blind reinstalls, which at
+        // the old 60s cooldown took ~2 minutes and never reached that cap. Take
+        // the cooldown to zero and the same path escalates every few seconds,
+        // trips the cap inside a minute, and converts INTERMITTENT deafness
+        // into PERMANENT deafness. That is the fix being worse than the bug.
+        //
+        // 5s is fast enough that a real eviction costs seconds instead of a
+        // minute, and slow enough that the escalation rate stays inside budget
+        // — together with the separate escalation floor below.
+        const BLIND_RETRY_MS: u64 = 5_000;
+        if now.saturating_sub(last) < BLIND_RETRY_MS {
+            return;
+        }
+        log::warn!(
+            "hook: the previous re-hook delivered NOTHING (kb {kb_silence}ms / mouse \
+             {ms_silence}ms / ref {ref_silence}ms) — retrying after {BLIND_RETRY_MS}ms instead \
+             of sitting out the rest of the 60s cooldown deaf (PROBLEM 182)."
+        );
+    }
+    // NOTE: WATCHDOG_LAST_REINSTALL is stamped AFTER install_hooks() below,
+    // not here. Stamping before was a logic bug found on re-review: the
+    // `previous_worked` test above compares LAST_KB_EVENT against this stamp,
+    // and install_hooks() itself stores LAST_KB_EVENT a few ms LATER than a
+    // stamp taken here — so the reinstall's own bookkeeping satisfied
+    // "an event arrived after the repair" and the blind-retry path could
+    // never fire. The whole adaptive cooldown was dead on arrival.
 
     // Unhook FIRST (dead handles unhook harmlessly), log after — the old
     // hooks are gone by the time the disk write happens.
@@ -801,8 +1087,32 @@ unsafe fn watchdog_check(
     SPACE_INTERCEPTED.store(false, Ordering::Relaxed);
     SPACE_ABORTED.store(false, Ordering::Relaxed);
 
+    // PROBLEM 177, second half — and it must not leave the HUD stuck either.
+    //
+    // The three flags above were reset because an eviction mid-hold loses the
+    // Space-UP: the hook is gone when the key comes back up, so `SpaceUp` is
+    // never delivered and the engine's `cancel_hud(false)` never runs. Every
+    // piece of KEY state was repaired here; the HUD, which is the only part of
+    // that state the USER can see, was not. So the ring stayed on screen with
+    // nothing left in the system able to take it down — the owner's *"I'm not
+    // holding the space but the space hud is still stuck"*.
+    //
+    // This machine evicts the hook 17 times a day (PROBLEM 173), so a hold
+    // that straddles an eviction is routine here, not exotic.
+    if crate::guide_hud::is_visible() {
+        log::warn!(
+            "hook: the HUD was up when the hook was evicted — the Space-UP for that hold is \
+             gone for good, so hiding it here. Without this it stays on screen forever."
+        );
+    }
+    crate::guide_hud::hide_guide_hud();
+
     let fg = foreground_desc();
     let (nkb, nms) = install_hooks();
+    // Stamped with a FRESH tick, strictly >= the clock stamps install_hooks()
+    // just wrote — so `LAST_KB_EVENT > WATCHDOG_LAST_REINSTALL` is true only
+    // when a GENUINE event arrived after the repair completed (PROBLEM 182).
+    WATCHDOG_LAST_REINSTALL.store(tick_count(), Ordering::Relaxed);
     *kb = nkb;
     *ms = nms;
     HOOK_REINSTALLS.fetch_add(1, Ordering::Relaxed);
@@ -814,12 +1124,29 @@ unsafe fn watchdog_check(
     // fact; the likelier cause is UIPI deafness (an elevated window has focus
     // while this app runs unelevated), which a reinstall cannot fix. Say what
     // was OBSERVED and leave the diagnosis open.
-    log::warn!(
-        "hook: WATCHDOG — user active {user_input_ms}ms ago but NEITHER hook saw anything \
-         (kb {kb_silence}ms / mouse {ms_silence}ms). Foreground: {fg}. Elevation was \
-         ALREADY ruled out above, so this is NOT UIPI. Re-hooking. reinstall ok: {}",
-        !nkb.is_invalid()
-    );
+    // PROBLEM 181 — say WHICH failure this is. "Neither hook saw anything" and
+    // "the keyboard hook alone was evicted while keys were demonstrably still
+    // being delivered to the chain" are different faults with different causes,
+    // and until the reference hook existed they were indistinguishable in this
+    // line.
+    if kb_only_dead && !both_dead {
+        log::warn!(
+            "hook: WATCHDOG — the KEYBOARD hook alone was evicted. The reference hook fired \
+             {ref_silence}ms ago, so keys ARE reaching the chain, but ours has been silent for \
+             {kb_silence}ms (mouse {ms_silence}ms, user active {user_input_ms}ms ago). \
+             Foreground: {fg}. This is the failure `both_dead` could never see — it needs BOTH \
+             hooks quiet, and the mouse hook keeps it false. Re-hooking. reinstall ok: {}",
+            !nkb.is_invalid()
+        );
+    } else {
+        log::warn!(
+            "hook: WATCHDOG — user active {user_input_ms}ms ago but NEITHER hook saw anything \
+             (kb {kb_silence}ms / mouse {ms_silence}ms / ref {ref_silence}ms). Foreground: {fg}. \
+             Elevation was ALREADY ruled out above, so this is NOT UIPI. Re-hooking. \
+             reinstall ok: {}",
+            !nkb.is_invalid()
+        );
+    }
 
     // PROBLEM 132 - ESCALATE. Re-hooking was the ONLY repair this watchdog
     // had, and on 2026-08-17 it ran for 20 unbroken minutes: one alarm a
@@ -838,7 +1165,31 @@ unsafe fn watchdog_check(
     // supervisor's own 5-restarts-per-10-minutes cap bounds this, so escalation
     // cannot become a spin loop.
     let streak = BLIND_REINSTALLS.fetch_add(1, Ordering::Relaxed) + 1;
-    if streak >= 2 {
+    // PROBLEM 182 — escalation is rate-limited SEPARATELY from re-hooking.
+    //
+    // Re-hooking is cheap and can now retry every 5s. Escalation is not: it
+    // kills the hook thread so the supervisor rebuilds it, and that supervisor
+    // gives up FOREVER after 5 rebuilds in 10 minutes. Letting the faster retry
+    // cadence drive escalation would spend that budget in under a minute and
+    // leave the app permanently deaf — measured against the seven rebuilds at
+    // 00:13:03 through 00:25:03 on 2026-08-25, which stayed inside the cap only
+    // because they were two minutes apart.
+    //
+    // 120s preserves exactly that spacing, so the budget behaves as it always
+    // has while the ordinary repair got twelve times faster.
+    const ESCALATE_EVERY_MS: u64 = 120_000;
+    let last_esc = LAST_ESCALATION.load(Ordering::Relaxed);
+    let escalation_allowed = last_esc == 0 || now.saturating_sub(last_esc) >= ESCALATE_EVERY_MS;
+    if streak >= 2 && !escalation_allowed {
+        log::warn!(
+            "hook: {streak} blind reinstalls, but the last hook-thread rebuild was only {}ms \
+             ago — holding off. The supervisor gives up permanently after 5 rebuilds in 10 \
+             minutes, and spending that budget turns intermittent deafness into permanent.",
+            now.saturating_sub(last_esc)
+        );
+    }
+    if streak >= 2 && escalation_allowed {
+        LAST_ESCALATION.store(now, Ordering::Relaxed);
         BLIND_REINSTALLS.store(0, Ordering::Relaxed);
         let own = BLIND_WHILE_OWN_FG.swap(0, Ordering::Relaxed);
         log::error!(
@@ -920,6 +1271,13 @@ unsafe extern "system" fn kb_hook_proc(
     // GetForegroundWindow/GetWindowThreadProcessId pair; no allocation, no
     // lock, no logging, so the callback still returns in microseconds.
     KB_EVENTS_SEEN.fetch_add(1, Ordering::Relaxed);
+
+    // PROBLEM 184 — maintain the Ctrl/Alt/Win mask from the events themselves.
+    // BEFORE every early return below (fullscreen, bypass, the cookie check),
+    // because a modifier released while bypassed must not stay latched. Two
+    // atomics at worst, no syscall.
+    track_modifier(vk, is_down);
+
     {
         // PROBLEM 134 - this used to call GetForegroundWindow +
         // GetWindowThreadProcessId HERE, on every keystroke. Both are Win32
@@ -1060,6 +1418,60 @@ unsafe extern "system" fn kb_hook_proc(
         let held_ms = now.saturating_sub(space_ts);
         let in_rollover = rollover > 0 && is_alpha_or_digit(vk) && held_ms < rollover;
 
+        // --- A REAL OS SHORTCUT THAT OVERLAPS A HELD SPACE MUST WIN ---
+        //
+        // PROBLEM 176. The owner: *"when holding the space if I press on the
+        // Print Screen button then Spotify comes up. For no reason. It doesn't
+        // let me take screenshot while holding the space bar."*
+        //
+        // The screenshot shortcut on Windows 11 is **Win+Shift+S**, and the
+        // chain is exact:
+        //   * Space is held, so MODIFIER_ACTIVE is set.
+        //   * The `S` of Win+Shift+S arrives here. Nothing below asks whether
+        //     Win is also down, so `is_alpha_vk(0x53)` matches and it becomes
+        //     KeyCombo::Alpha('s'), suppressed with LRESULT(1).
+        //   * His active profile is Professionals, where Space+S is Slack.
+        //     Slack does not launch, so `handle_alpha` falls back to the
+        //     FOUNDERS binding for that key — which is **Spotify**.
+        // Both halves of his report from one missing check: no screenshot,
+        // and a music player instead.
+        //
+        // The identical rule is already applied to the Space-DOWN path a few
+        // hundred lines above ("Ctrl+Space, Alt+Space and Win+Space are real
+        // OS/app shortcuts... Never swallow them"). It was simply never
+        // extended to the keys pressed WHILE Space is held, so the rule held
+        // for Win+Space and not for Space-then-Win+S. This fixes Ctrl+C,
+        // Alt+Tab, Win+L, Win+Shift+S and every other system chord that
+        // happens to be pressed while a thumb is resting on the spacebar.
+        //
+        // VK_RMENU IS EXEMPT, and must stay exempt: Space+RightAlt cycles
+        // profiles, and Right Alt IS Alt — so `other_modifier_down()` reports
+        // true for the very keypress that shortcut is made of. Guarding it
+        // without this exemption would silently delete profile cycling.
+        //
+        // Shift alone is deliberately NOT in `other_modifier_down` (Space+Shift
+        // is not an OS shortcut and capitalising is not a chord), which is why
+        // Win+Shift+S is caught by the Win, not the Shift.
+        //
+        // POSITION MATTERS, and getting it wrong made the first version of
+        // this gate useless. It sat BELOW the rollover branch. `ROLLOVER_MS`
+        // is 200 on this machine, and `is_alpha_or_digit(0x53)` is true — so
+        // a Win+Shift+S pressed within 200ms of Space going down was
+        // swallowed by `in_rollover` and retyped as a literal " s" before
+        // execution ever reached the gate. It has to run before ANY branch
+        // that can consume the key.
+        //
+        // Pass-through, not abort: the Space is still genuinely held, so
+        // releasing it still types a space exactly as a plain hold always has.
+        // Accepted knowingly — this returns before `SPACE_ABORTED` is set, so
+        // Space-held + Ctrl+C + release now performs the copy AND types a
+        // space, where previously the space was suppressed. The chord working
+        // is worth the space.
+        if vk != VK_RMENU && other_modifier_down() {
+            PASSED_TO_OS.fetch_add(1, Ordering::Relaxed);
+            return CallNextHookEx(None, n_code, w_param, l_param);
+        }
+
         if in_rollover {
             // Typing rollover — this is prose, not a command.
             //
@@ -1103,13 +1515,20 @@ unsafe extern "system" fn kb_hook_proc(
                 let ch = vk_to_char(v);
                 ch.map(KeyCombo::Alpha)
             }
-            // Special keys (F1–F12, Enter, Tab, Left, Right) —
-            // only dispatch if the user has bound them in special_keys config.
-            VK_RETURN => Some(KeyCombo::Special("enter".into())),
-            VK_TAB    => Some(KeyCombo::Special("tab".into())),
-            VK_LEFT   => Some(KeyCombo::Special("left".into())),
-            VK_RIGHT  => Some(KeyCombo::Special("right".into())),
-            v if (VK_F1..=VK_F12).contains(&v) => {
+            // Special keys (F1–F12, Enter, Tab, Left, Right) — dispatched ONLY
+            // if the user has actually bound them.
+            //
+            // PROBLEM 180: this comment has said "only dispatch if the user has
+            // bound them" since 1.0.27 while the arms below dispatched
+            // unconditionally, destroying the key with `return LRESULT(1)` and
+            // leaving `engine::handle_special` to discover there was no binding
+            // — far too late to pass anything through. `BOUND_SPECIALS` moves
+            // that decision to where it can still matter.
+            VK_RETURN if special_bound(12) => Some(KeyCombo::Special("enter".into())),
+            VK_TAB    if special_bound(13) => Some(KeyCombo::Special("tab".into())),
+            VK_LEFT   if special_bound(14) => Some(KeyCombo::Special("left".into())),
+            VK_RIGHT  if special_bound(15) => Some(KeyCombo::Special("right".into())),
+            v if (VK_F1..=VK_F12).contains(&v) && special_bound(v - VK_F1) => {
                 let n = v - VK_F1 + 1;
                 Some(KeyCombo::Special(format!("f{n}")))
             }
@@ -1243,22 +1662,92 @@ unsafe fn inject_space_then_key(_vk: u16) {}
 ///
 /// Shift is deliberately excluded: Shift+Space is a plain space in most apps,
 /// and treating it as pass-through would break the modifier while capitalising.
-fn other_modifier_down() -> bool {
-    #[cfg(windows)]
+/// Ctrl / Alt / Win currently held, tracked from the hook's OWN event stream.
+/// Bit 0 = Ctrl, 1 = Alt, 2 = Win.
+///
+/// PROBLEM 184 — this replaces four-to-six `GetAsyncKeyState` calls that ran
+/// **inside the keyboard callback**.
+///
+/// `GetAsyncKeyState` is a win32k syscall. This file already argues the case
+/// against exactly this, at length, about a different pair of calls (PROBLEM
+/// 134): *"Window queries are not on that list… They enter win32k and contend
+/// on USER32 state that the foreground application's UI thread also touches —
+/// so the cost is paid exactly when that thread is busiest."* That fix removed
+/// `GetForegroundWindow` and left these behind.
+///
+/// It matters here more than it looks, for three reasons measured on this
+/// machine:
+///   * `LowLevelHooksTimeout` is **NOT SET** in HKCU, so Windows' 300 ms
+///     default applies, and that deadline is WALL-CLOCK — a callback merely
+///     waiting for a CPU slice misses it exactly like a slow one.
+///   * The keyboard hook is evicted 15–40 times a day here while the MOUSE
+///     hook, on the same thread and the same pump, survives. The one
+///     structural difference between them is that `ms_hook_proc` makes no
+///     win32k calls at all.
+///   * PROBLEM 176 had just put this call on the path of EVERY combo key, not
+///     only Space-down — i.e. it added syscalls to the hot path of a hook that
+///     is already being evicted for overrunning.
+///
+/// A low-level keyboard hook SEES every Ctrl/Alt/Win transition, so the state
+/// can be maintained from the events themselves and read back as one relaxed
+/// load. No syscall, no contention, exact at the instant of the keystroke
+/// rather than sampled near it.
+///
+/// SELF-HEALING: a missed key-up — from an eviction that straddles a held
+/// modifier — would latch a bit and quietly pass every combo through. The
+/// watchdog re-syncs the mask from `GetAsyncKeyState` on its timer, which is
+/// OFF the callback path and where such a call is free.
+static MODS_DOWN: AtomicU32 = AtomicU32::new(0);
+
+const MOD_CTRL: u32 = 1;
+const MOD_ALT: u32 = 2;
+const MOD_WIN: u32 = 4;
+
+/// Update `MODS_DOWN` from one hook event. Pure atomics; safe on the callback.
+#[inline]
+fn track_modifier(vk: u16, is_down: bool) {
+    // LL hooks report the SPECIFIC side (VK_LCONTROL / VK_RCONTROL …); the
+    // generic codes are accepted too because injected input may use them.
+    let bit = match vk {
+        0x11 | 0xA2 | 0xA3 => MOD_CTRL, // VK_CONTROL / VK_LCONTROL / VK_RCONTROL
+        0x12 | 0xA4 | 0xA5 => MOD_ALT,  // VK_MENU / VK_LMENU / VK_RMENU
+        0x5B | 0x5C => MOD_WIN,         // VK_LWIN / VK_RWIN
+        _ => return,
+    };
+    if is_down {
+        MODS_DOWN.fetch_or(bit, Ordering::Relaxed);
+    } else {
+        MODS_DOWN.fetch_and(!bit, Ordering::Relaxed);
+    }
+}
+
+/// Re-sync the modifier mask from the OS. Watchdog thread only — never the
+/// callback. Cheap there, and it heals a bit latched by a lost key-up.
+#[cfg(windows)]
+fn resync_modifiers() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
     unsafe {
-        use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-        const VK_CONTROL: i32 = 0x11;
-        const VK_MENU: i32 = 0x12; // Alt
-        const VK_LWIN: i32 = 0x5B;
-        const VK_RWIN: i32 = 0x5C;
-        [VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN]
-            .iter()
-            .any(|&k| (GetAsyncKeyState(k) as u16 & 0x8000) != 0)
+        let mut mask = 0u32;
+        if (GetAsyncKeyState(0x11) as u16 & 0x8000) != 0 { mask |= MOD_CTRL; }
+        if (GetAsyncKeyState(0x12) as u16 & 0x8000) != 0 { mask |= MOD_ALT; }
+        if (GetAsyncKeyState(0x5B) as u16 & 0x8000) != 0 { mask |= MOD_WIN; }
+        if (GetAsyncKeyState(0x5C) as u16 & 0x8000) != 0 { mask |= MOD_WIN; }
+        let prev = MODS_DOWN.swap(mask, Ordering::Relaxed);
+        if prev != mask {
+            log::debug!("hook: modifier mask re-synced {prev:#x} -> {mask:#x}");
+        }
     }
-    #[cfg(not(windows))]
-    {
-        false
-    }
+}
+
+#[cfg(not(windows))]
+fn resync_modifiers() {}
+
+/// Is a REAL modifier (Ctrl/Alt/Win) physically held? One relaxed load.
+///
+/// Shift is deliberately excluded: Space+Shift is not an OS chord and
+/// capitalising is not a command. Win+Shift+S is caught by the Win.
+fn other_modifier_down() -> bool {
+    MODS_DOWN.load(Ordering::Relaxed) != 0
 }
 
 /// PROBLEM 99 — the monotonic clock, for callers outside this module (the

@@ -18,6 +18,7 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import { sfx } from "../sfx";
+import { registerDismissable } from "../dismissable";
 
 export interface ConflictLike {
   process: string;
@@ -32,11 +33,15 @@ interface CloseOutcome {
 }
 
 let _host: HTMLElement | null = null;
+/** Cancels this prompt's outside-press registration. */
+let _undismiss: (() => void) | null = null;
 
 function close(): void {
   if (!_host) return;
   const el = _host;
   _host = null;
+  _undismiss?.();
+  _undismiss = null;
   el.classList.add("is-leaving");
   el.addEventListener("transitionend", () => el.remove(), { once: true });
   window.setTimeout(() => el.remove(), 400);   // hidden documents never fire it
@@ -50,9 +55,15 @@ export function openConflictPrompt(c: ConflictLike, onChanged?: () => void): voi
   host.className = "conflict-prompt";
   host.setAttribute("role", "dialog");
   host.setAttribute("aria-label", `Close ${c.product}`);
-  // It sits over the stage, which closes popovers on any click — and closing
-  // the settings panel out from under this prompt would strand it.
-  host.addEventListener("click", (e) => e.stopPropagation());
+  // Outside press closes it, clicks inside do not. Registered HERE, on the
+  // line that creates the surface, because the owner reported this prompt as
+  // the second thing in this app to pop up and refuse to go away when pressed
+  // around — see `dismissable.ts` for why that rule now lives in one place
+  // instead of in a list of element ids in main.ts.
+  //
+  // This element used to only `stopPropagation()`, which is the half of the
+  // contract that is obvious from inside this file. registerDismissable does
+  // that half for us and adds the half that was missing.
 
   const title = document.createElement("div");
   title.className = "conflict-prompt-title";
@@ -129,17 +140,13 @@ export function openConflictPrompt(c: ConflictLike, onChanged?: () => void): voi
   host.append(title, body, row);
   document.body.appendChild(host);
   _host = host;
+  // Outside press AND Escape, both from one call. The bespoke Escape listener
+  // this replaces was correct but private to this file — which is precisely
+  // how the outside-press half came to be missing. `dismissable` closes the
+  // most recently opened surface first, so a prompt raised over the settings
+  // panel still peels off before the panel does.
+  _undismiss = registerDismissable(host, close);
   sfx.arm();
-
-  // Escape always backs out of a dialog. Capture phase, because sky mode and
-  // the special cards also listen for Escape and the topmost thing wins.
-  const esc = (e: KeyboardEvent) => {
-    if (e.key !== "Escape" || !_host) return;
-    e.stopPropagation();
-    close();
-    document.removeEventListener("keydown", esc, true);
-  };
-  document.addEventListener("keydown", esc, true);
 
   // A forced reflow, NOT requestAnimationFrame. rAF does not fire in a window
   // that is not compositing — and if the class never lands, the prompt stays

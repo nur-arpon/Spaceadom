@@ -275,6 +275,43 @@ You will have 30 seconds to undo.`,
 // Inline "＋ New profile"
 // ---------------------------------------------------------------------------
 
+/**
+ * PROBLEM 178 — the name box had no way back.
+ *
+ * The owner, 2026-08-24: *"when I want to add a new profile, a box changes for
+ * me to write the name of a profile. But what happens if I don't write
+ * anything in it? The 'add new profile' thing doesn't come up again, it still
+ * asks me to write the name. So it shouldn't stay like that. If I had not
+ * pressed anything after some time, it should go back how it was before."*
+ *
+ * He is exactly right. `open()` sets `openBtn.hidden = true`, and the ONLY two
+ * routes back were Escape and a SUCCESSFUL create. Click elsewhere, or think
+ * better of it, and the "＋ New profile" button is gone — not just for that
+ * moment, but for the rest of the session, because the row's state outlives
+ * the popover being closed and reopened. A control that can only be undone by
+ * completing the very action you decided against is a trap.
+ *
+ * Three ways back now, and each one exists for a different way of changing
+ * your mind:
+ *   - **Escape** — you decided against it deliberately. (Already existed.)
+ *   - **Clicking elsewhere** — you moved on. Reverts only when the box is
+ *     EMPTY: a half-typed name is work, and silently discarding it because
+ *     focus moved would be its own bug.
+ *   - **Doing nothing** — his actual words, "if I had not pressed anything
+ *     after some time". An idle timer, re-armed on every keystroke.
+ *
+ * The row is also reset whenever the popover closes, so reopening it always
+ * shows the button rather than resuming an abandoned box.
+ */
+const NEW_PROFILE_IDLE_MS = 15_000;
+
+/** Reverts the "＋ New profile" row to its button. Safe to call any time. */
+let _resetNewProfileRow: () => void = () => {};
+
+export function resetNewProfileRow(): void {
+  _resetNewProfileRow();
+}
+
 function wireNewProfile(): void {
   const openBtn = document.getElementById("new-profile-btn") as HTMLButtonElement | null;
   const row = document.getElementById("new-profile-row") as HTMLElement | null;
@@ -282,24 +319,55 @@ function wireNewProfile(): void {
   const addBtn = document.getElementById("new-profile-add") as HTMLButtonElement | null;
   if (!openBtn || !row || !input || !addBtn) return;
 
+  let idle: number | undefined;
+
+  const close = () => {
+    window.clearTimeout(idle);
+    idle = undefined;
+    row.hidden = true;
+    openBtn.hidden = false;
+    input.value = "";
+    input.classList.remove("error");
+  };
+  // Only ever discards an EMPTY box. Typed text is the user's work.
+  const closeIfEmpty = () => { if (!input.value.trim()) close(); };
+
+  const armIdle = () => {
+    window.clearTimeout(idle);
+    idle = window.setTimeout(closeIfEmpty, NEW_PROFILE_IDLE_MS);
+  };
+
   const open = () => {
     row.hidden = false;
     openBtn.hidden = true;
     input.value = "";
+    input.classList.remove("error");
     input.focus();
+    armIdle();
   };
-  const close = () => {
-    row.hidden = true;
-    openBtn.hidden = false;
-    input.value = "";
-  };
+
+  _resetNewProfileRow = close;
 
   openBtn.addEventListener("click", open);
   addBtn.addEventListener("click", () => void create(input, close));
   input.addEventListener("keydown", (e) => {
     e.stopPropagation();
+    armIdle();                    // typing is "pressing something" — keep it open
     if (e.key === "Enter") void create(input, close);
     if (e.key === "Escape") close();
+  });
+
+  // Focus moving away = you moved on. Deferred by a tick, because clicking the
+  // Add button blurs the input FIRST — reverting synchronously here would tear
+  // the row down before Add's own click handler ever ran, and the profile
+  // would silently not be created. `relatedTarget` is null for a click on
+  // non-focusable chrome, so the containment test cannot be relied on alone.
+  input.addEventListener("blur", () => {
+    window.setTimeout(() => {
+      if (row.hidden) return;
+      if (row.contains(document.activeElement)) return;   // still inside the row
+      closeIfEmpty();
+    }, 0);
   });
 }
 

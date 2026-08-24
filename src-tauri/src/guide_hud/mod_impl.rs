@@ -14,12 +14,115 @@
 ///     the inside of the panel; the WINDOW is the panel.
 ///     (Placement moved from "bottom-centre of the primary monitor" to
 ///     "centred on the monitor under the cursor" — PROBLEM 169.)
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter, Manager};
 
 static HUD_VISIBLE: AtomicBool = AtomicBool::new(false);
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+
+/// PROBLEM 177 — which Space-hold we are currently in.
+///
+/// THE BUG THIS KILLS. Showing the HUD is DEFERRED by `guide_hud_delay_ms`
+/// (500ms on the owner's machine), so between the decision to show and the
+/// show itself there is half a second in which the hold can end. The engine
+/// guards that with a `tokio::watch` cancel channel — but the guard is
+///
+///     if !*cancel_rx.borrow() { ...read config...; show_guide_hud(...) }
+///
+/// and **the check is not atomic with the show**. Everything between them —
+/// locking the engine state, locking the config, cloning the profile name and
+/// building two Vecs of bindings — is time during which a cancel can arrive,
+/// complete, and be forgotten. The show then proceeds anyway, and because the
+/// cancel has ALREADY run, nothing is left that will ever hide it.
+///
+/// Caught live in the owner's log on 2026-08-24, 81ms apart:
+///
+///     23:41:07.793 guide_hud: hide with action pending - window stays up for the handover
+///     23:41:07.874 guide_hud: overlay window shown      <-- the loser, winning
+///
+/// After that line the HUD stayed on screen with no further fit and no hide,
+/// which is exactly what he reported: *"right now it is stuck. Like I'm not
+/// holding the space but the space hud is still stuck."*
+///
+/// THE FIX IS A GENERATION COUNTER, not a tighter check. `begin_hold()` stamps
+/// the hold that a deferred show belongs to; every cancel and every new hold
+/// moves the counter on. A show whose stamp is stale refuses, and it refuses
+/// INSIDE `show_guide_hud`, on the same line as the state it would have
+/// changed — so there is no gap left to lose a race in. A narrower check would
+/// only have made the window smaller; this removes it.
+static HOLD_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// Begin a Space-hold and return its stamp. Pass that stamp to
+/// `show_guide_hud`; it will refuse if the hold has ended in the meantime.
+pub fn begin_hold() -> u64 {
+    HOLD_EPOCH.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+/// End the current hold, invalidating any deferred show still in flight.
+pub fn end_hold() {
+    HOLD_EPOCH.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Which hold the currently-published `HUD_VISIBLE == true` belongs to.
+///
+/// Without this, a show that aborts late cannot tell ITS OWN published flag
+/// from one a newer show has since published — and an unconditional
+/// `HUD_VISIBLE.store(false)` on abort would clobber the newer show's flag,
+/// recreating the exact bug in a new disguise.
+static VISIBLE_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// A show completed and no hide has consumed it yet.
+///
+/// This is the ONLY thing the reconciliation path may test before deciding
+/// whether to touch Tauri, because every Tauri window getter blocks on the main
+/// event loop and that path runs on the hook thread and on every typed space.
+/// Set after `win.show()`; cleared by any hide, normal or reconciling.
+static SHOW_OUTSTANDING: AtomicBool = AtomicBool::new(false);
+
+/// Has this show been overtaken? If so, undo whatever it has already done.
+///
+/// Returns true when the caller must stop. Safe to call repeatedly.
+fn abort_if_stale(epoch: u64, win: Option<&tauri::WebviewWindow>, at: &str) -> bool {
+    let current = HOLD_EPOCH.load(Ordering::SeqCst);
+    if current == epoch {
+        return false;
+    }
+    log::warn!(
+        "guide_hud: hold #{epoch} was overtaken by #{current} ({at}) — standing down. \
+         Left unchecked this is what puts a window on screen that no later hide can \
+         reach, because every hide path is gated on HUD_VISIBLE (PROBLEM 177)."
+    );
+    // Only clear the flag if it is still OURS. A newer show may already have
+    // published its own, and stamping on that is how a fix becomes the bug.
+    if VISIBLE_EPOCH.load(Ordering::SeqCst) == epoch {
+        HUD_VISIBLE.store(false, Ordering::Relaxed);
+        // Hide the window ONLY if WE showed it and no hide has since taken
+        // responsibility — i.e. `SHOW_OUTSTANDING` is still set (it is set
+        // right after our `win.show()` and consumed by every hide path).
+        //
+        // NOT unconditional, and the difference is a real bug caught on
+        // re-review: at the "before show" checkpoint this invocation has shown
+        // nothing yet, but the window may legitimately be up from a PREVIOUS
+        // hold's action-pending handover with a toast in flight. Hiding it
+        // there would take the window down under a toast — PROBLEM 135's exact
+        // class, reintroduced by the code meant to prevent its cousin. The
+        // swap also means a cancel that already handled the window (its swap
+        // of HUD_VISIBLE succeeded and it chose hide-or-keep deliberately)
+        // is never second-guessed from here.
+        //
+        // NO `is_visible()` probe — that getter blocks on the main event loop
+        // and this can run on the hook thread. `hide()` on an already-hidden
+        // window is harmless.
+        if SHOW_OUTSTANDING.swap(false, Ordering::SeqCst) {
+            if let Some(w) = win {
+                let _ = w.hide();
+                log::info!("guide_hud: hid the window this stale show had put up");
+            }
+        }
+    }
+    true
+}
 
 /// Set when the overlay window cannot be made click-through at startup.
 /// A HUD that eats mouse clicks is worse than no HUD, so we never show it.
@@ -85,10 +188,25 @@ fn place_overlay_centred(win: &tauri::WebviewWindow, w: f64, h: f64) {
 
 /// Show the Guide HUD — content via event, visibility via the window itself.
 pub fn show_guide_hud(
+    epoch: u64,
     profile_name: &str,
     apps: Vec<(String, String)>,
     specials: Vec<(String, String)>,
 ) {
+    // PROBLEM 177 — the hold this show was scheduled for is over. Refuse.
+    //
+    // Checked HERE, not at the call site: the call site cannot be atomic with
+    // the state changes below, and every gap between a check and the work it
+    // guards is a race waiting to be lost. See HOLD_EPOCH.
+    let current = HOLD_EPOCH.load(Ordering::SeqCst);
+    if current != epoch {
+        log::info!(
+            "guide_hud: a deferred show for hold #{epoch} arrived after that hold had ended \
+             (now #{current}) — NOT showing. Unchecked, this is what strands the HUD on \
+             screen with nothing left able to hide it (PROBLEM 177)."
+        );
+        return;
+    }
     let Some(handle) = APP_HANDLE.get() else { return };
 
     let payload = GuideHudPayload {
@@ -102,8 +220,29 @@ pub fn show_guide_hud(
     // already true, and that call is made by the page as soon as it has laid
     // the ring out — so publishing the flag last leaves a window in which the
     // frontend's fit is rejected and the ring paints into an unsized box.
-    // Nothing reads a false-positive badly: hide_guide_hud_pending clears it
-    // unconditionally.
+    // The comment above ended "Nothing reads a false-positive badly:
+    // hide_guide_hud_pending clears it unconditionally." **That sentence is
+    // the 1.0.73 bug, in plain sight.** It reasoned about a false POSITIVE and
+    // never about a LOST UPDATE. A hide landing in the ~80ms of window work
+    // below consumes a flag belonging to a show that has not shown anything
+    // yet; the show then puts the window up regardless, and the terminal state
+    // is `window visible, HUD_VISIBLE == false` — from which nothing in Rust
+    // can recover, because every hide path is gated on that flag.
+    //
+    // Under 1.0.72's ordering (store LAST) the same race ended with the flag
+    // TRUE, which is self-correcting: the next release hid the window. So this
+    // change did not create a race, it **inverted a recoverable one into an
+    // unrecoverable one**. Measured on the owner's machine, 2026-08-24:
+    //
+    //     23:41:07.793 guide_hud: hide with action pending
+    //     23:41:07.874 guide_hud: overlay window shown     <- 81ms later
+    //     (then 3m36s with zero fits, zero hides, a HUD stuck on screen)
+    //
+    // VISIBLE_EPOCH records WHICH hold the published `true` belongs to, so a
+    // late-aborting show can tell its own flag from a newer show's and clear
+    // only its own. Stored first, and with SeqCst, so no reader can observe
+    // `HUD_VISIBLE == true` paired with a stale epoch.
+    VISIBLE_EPOCH.store(epoch, Ordering::SeqCst);
     HUD_VISIBLE.store(true, Ordering::Relaxed);
 
     // Show the WINDOW first, then send the content. A hidden WebView2 window
@@ -136,9 +275,29 @@ pub fn show_guide_hud(
             // behind them, the overlay painted nothing.
             #[cfg(windows)]
             crate::commands::capture_compositing_baseline(&win);
-            let _ = win.show();
-            log::info!("guide_hud: overlay window shown");
+
+            // THE LOAD-BEARING CHECK. Everything above — placing, re-regioning,
+            // re-raising, sampling the desktop — takes real time (81ms
+            // measured), and the check at the top of this function happened
+            // BEFORE all of it. Re-asking here is what actually stops a show
+            // that has been overtaken from putting a window on screen that
+            // nothing will ever take down.
+            if !abort_if_stale(epoch, Some(&win), "before show") {
+                let _ = win.show();
+                SHOW_OUTSTANDING.store(true, Ordering::SeqCst);
+                log::info!("guide_hud: overlay window shown (hold #{epoch})");
+            } else {
+                return;
+            }
         }
+    }
+
+    // And again before the content emit: the page treats `guide-hud-show` as
+    // proof the HUD is live and sets `_hudActive`, which gates its ONLY route
+    // back to `overlay_toasts_done`. Emitting for a hold that has ended is how
+    // the page ends up permanently believing a HUD is up that is not.
+    if abort_if_stale(epoch, handle.get_webview_window("overlay").as_ref(), "before emit") {
+        return;
     }
     // GLOBAL broadcast, on purpose. Targeted emits (emit_to) silently never
     // reached this page's listeners regardless of how they were registered —
@@ -175,6 +334,14 @@ pub fn hide_guide_hud() {
 /// the same terminal path every toast already uses. A plain release (no combo)
 /// hides immediately, exactly as before.
 pub fn hide_guide_hud_pending(action_pending: bool) {
+    // PROBLEM 177 — invalidate any deferred show still in flight, whether or
+    // not the HUD is currently up.
+    //
+    // This MUST sit OUTSIDE the HUD_VISIBLE guard below. The race being closed
+    // is exactly the one where the show has not happened yet — so HUD_VISIBLE
+    // is still false, the guard skips its whole body, and putting the
+    // invalidation inside it would do nothing in the only case that matters.
+    end_hold();
     if HUD_VISIBLE.swap(false, Ordering::Relaxed) {
         if let Some(handle) = APP_HANDLE.get() {
             if action_pending {
@@ -188,7 +355,59 @@ pub fn hide_guide_hud_pending(action_pending: bool) {
             }
             let _ = handle.emit("guide-hud-hide", action_pending);
         }
+        // Consumed by the normal path — nothing left to reconcile.
+        SHOW_OUTSTANDING.store(false, Ordering::SeqCst);
+        return;
     }
+
+    // RECONCILIATION — the swap said the HUD is down, but is the WINDOW?
+    //
+    // This is the recovery path for the state section 1 of the 2026-08-24
+    // post-mortem describes: `HUD_VISIBLE == false` while the overlay window
+    // is up and the page still believes `_hudActive`. The epoch checks in
+    // `show_guide_hud` should now prevent that state arising at all — this
+    // exists because "should" is not "does", and the failure mode is a HUD
+    // stuck on the owner's screen for minutes with nothing able to clear it.
+    //
+    // GATED ON AN ATOMIC, AND NOTHING ELSE, BEFORE TOUCHING TAURI AT ALL.
+    //
+    // The first version of this block opened with `win.is_visible()`. That is a
+    // **blocking** call: in tauri-runtime-wry it is `window_getter!` → a
+    // `rx.recv()` with NO timeout, parked until the main event loop next turns.
+    // And this function is reached from `cancel_hud` on every SpaceUp, every
+    // KeyCombo and both wheel directions — i.e. **on every ordinary space the
+    // owner types** — while holding the `EngineState` lock, and again from the
+    // watchdog ON THE HOOK THREAD. Parking the hook thread on the UI event loop
+    // is the precise mechanism this whole investigation is about; shipping it
+    // would have made the eviction worse in the name of fixing its symptom.
+    //
+    // `SHOW_OUTSTANDING` is not a mirror of window visibility — a mirror would
+    // go stale the moment `display_watch` destroys and rebuilds the overlay,
+    // which is routine on this machine. It records the DISAGREEMENT itself: a
+    // show that completed and that no hide has since consumed. On every normal
+    // keystroke it is false and this costs one relaxed load.
+    if !SHOW_OUTSTANDING.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    //
+    // Note this deliberately does NOT test `action_pending`: in the observed
+    // failure the swap returned false AND action_pending was true, so any
+    // condition mentioning it would have skipped the one case that mattered.
+    let Some(handle) = APP_HANDLE.get() else { return };
+    let Some(win) = handle.get_webview_window("overlay") else { return };
+    log::warn!(
+        "guide_hud: RECONCILING — the overlay window is visible but HUD_VISIBLE was already \
+         false, so Rust and the page disagree about who owns it. Forcing the hide the normal \
+         path could not reach (action_pending={action_pending})."
+    );
+    if !action_pending {
+        let _ = win.hide();
+    }
+    // The page's `_hudActive` is set by `guide-hud-show` and cleared ONLY by
+    // this event. Without it the page keeps refusing every window fit and
+    // never calls `overlay_toasts_done`, which is what made the stall outlast
+    // nine PiP actions and a launched app.
+    let _ = handle.emit("guide-hud-hide", action_pending);
 }
 
 /// Returns true if the HUD is currently displayed.

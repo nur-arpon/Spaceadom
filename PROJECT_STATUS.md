@@ -1,6 +1,105 @@
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
 
+## 2026-08-25 — Claude Opus 5 / Fable 5 — 1.0.74: the logic audit, and three of my own 1.0.73 fixes that were wrong
+
+**The ask.** After a night of reports (stuck HUD, PiP, Print Screen launching
+Spotify, shortcuts dead inside the app, the profile name box, cursor sweep,
+popovers that will not close), the owner asked for the LOGIC to be re-derived
+rather than more agents: *"make sure the solution you take is excellent logic…
+for the ultimate stability and functionality of my app."*
+
+**Method.** Two adversarial workflows (35 and 37 agents) established the facts
+from code + the live 24,607-line `debug.log`. Then every decision chain was
+re-derived by hand on Fable 5, which is where the three worst defects were
+found — all of them in MY OWN fixes from earlier the same night, none of them
+findable by testing, all of them by tracing interleavings and arithmetic.
+
+### The three I got wrong, and why it matters that they were caught
+
+1. **`abort_if_stale` hid a window it did not own.** At its "before show"
+   checkpoint the invocation has shown nothing — but the window may legitimately
+   be up from a PREVIOUS hold's action-pending toast handover. Hiding it there
+   takes the window down under a live toast: PROBLEM 135's exact class,
+   reintroduced by the code written to prevent its cousin. Now gated on
+   `SHOW_OUTSTANDING.swap(false)`.
+
+2. **The adaptive cooldown could never fire.** `previous_worked` compared
+   `LAST_KB_EVENT` against `WATCHDOG_LAST_REINSTALL`, but the stamp was stored
+   BEFORE `install_hooks()` — which stamps `LAST_KB_EVENT` a few ms later. The
+   reinstall's own bookkeeping satisfied "an event arrived after the repair".
+   The whole PROBLEM 182 fix was dead on arrival. Stamp moved to after
+   `install_hooks()` with a fresh tick.
+
+3. **The reconciliation would have made the eviction worse.** It opened with
+   `win.is_visible()` — in tauri-runtime-wry a `rx.recv()` with NO timeout,
+   parked until the main event loop turns — reached on EVERY typed space under
+   the engine lock, and from the hook thread. Parking the hook thread on the UI
+   event loop is the precise mechanism under investigation. Now one atomic;
+   Tauri is touched only in the genuine failure.
+
+Plus a fourth, from the same re-derivation: PROBLEM 183's timer drain still
+printed nothing during an outage because `if seen > 0` survived. A deaf minute
+is `seen == 0`. Now prints when `seen > 0` OR the user was active within 60s.
+
+### What the agents established (facts, not theories)
+
+- **The keyboard hook alone is evicted, in 11–189 second bursts, while the
+  mouse hook on the same thread and pump keeps firing.** 24 of 46 alarms on
+  2026-08-24/25 had mouse silence <5s against keyboard silence 5–29s. The
+  watchdog's only test (`both_dead`) requires BOTH silent, so it could never
+  see this. Captured live at 23:35:17 with the dashboard focused: 19s deaf →
+  re-hook → HUD and four combos working within 11s. That sequence IS the
+  owner's "it only works when I minimise the app".
+- **Focus-specificity is NOT proven** and is recorded as open: 51 of 444 alarms
+  name spaceadom.exe; most name claude.exe or brave.exe. Two in-app instruments
+  (`Foreground:` tally vs `BLIND_WHILE_OWN_FG`) disagree by ~5× and nobody has
+  reconciled them.
+- **`LowLevelHooksTimeout` is NOT SET** in HKCU, so Windows' 300ms wall-clock
+  default is in force and PROBLEM 173's mitigation has never actually been in
+  effect on this machine.
+- **My WebView2-child-pid theory was wrong.** `GetForegroundWindow()` returns
+  the top-level `Tauri Window` owned by spaceadom.exe; the WebView2 render
+  widgets are children. Measured on the live process.
+- **The zeros I argued from were worthless** — see PROBLEM 183. The counter has
+  read non-zero 35 times historically.
+
+### Shipped in 1.0.74
+
+PROBLEMS 176–184, each documented in `V14_FIXES_AND_CODE.md` in full shape.
+Headlines: the Win+Shift+S → Spotify chain closed (and its gate moved above the
+rollover branch, where the first version was inert); the deferred-HUD race
+closed with an epoch re-checked at the point of no return; 16 special keys that
+have been silently destroyed in every build since 1.0.27 now pass through unless
+bound; a reference keyboard hook that makes eviction provable instead of
+inferable; the watchdog's own throttles fixed (they were causing more deafness
+than the fault) with detect/repair/escalate budgeted independently; six win32k
+syscalls removed from the hook callback; and the cursor wake rewritten after
+review found five defects including a permanent 16px measurement error caused by
+measuring keys mid-intro-animation.
+
+### Verified
+
+`cargo check` clean, 0 warnings. `cargo test --lib`: 23 pass. `npm run build`
+clean. Installed and verified on the real machine by version stamp and the
+bundle-freshness chain.
+
+### NOT verified — needs the owner's hands
+
+Everything behavioural: the HUD no longer sticking after a PiP storm, Win+Shift+S
+screenshotting, PiP corner glide and restore-on-exit, the cursor wake's feel,
+Space+Tab passing through, the popover dismiss rule, and whether the reference
+hook's `kb_only_dead` alarm fires in the wild. The `ref {…}ms` field has never
+appeared in a log — 1.0.74 is its first run.
+
+### The one action worth more than any of this
+
+Settings → Conflicts → "Give shortcuts more time", then sign out and back in.
+`LowLevelHooksTimeout` is unset; that is the only change that addresses the
+CAUSE rather than the detection and repair of the symptom.
+
+---
+
 ## 2026-08-24 — Claude Opus 5 — 1.0.73: the CORE_AIM audit, and the four reasons the Space guide kept vanishing
 
 **The ask.** *"revisit the file named Core-aim, recheck if each and every single

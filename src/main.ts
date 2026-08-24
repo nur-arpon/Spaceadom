@@ -27,7 +27,12 @@ import {
   updatePanelConfig,
   getCurrentKey,
 } from "./components/key-detail-panel";
-import { initProfileEditor, refreshProfileList, syncPill } from "./components/profile-editor";
+import {
+  initProfileEditor,
+  refreshProfileList,
+  syncPill,
+  resetNewProfileRow,
+} from "./components/profile-editor";
 import {
   initSettingsPanel,
   openSettingsPanel,
@@ -39,6 +44,8 @@ import { showToast } from "./components/toast";
 import { syncStarrySky } from "./components/starry-sky";
 import { sfx, bindSfxConfig, wireSfxUnlock } from "./sfx";
 import { SPECIALS, toggleSpecialCard } from "./components/special-cards";
+import { dismissAll } from "./dismissable";
+import { wireKeyWake, applyKeyWakeMotion } from "./key-wake";
 
 import type { AppConfig, HookStatus, KeyBinding } from "./types";
 
@@ -218,6 +225,14 @@ async function bootstrap(): Promise<void> {
   renderSpecials();
   wireCursorGlow();
   wireKeyboardFit();
+  // PROBLEM 179 — the board reacts to a cursor SWEEP, not only to dwelling.
+  // AFTER wireKeyboardFit: the wake measures key rectangles once, and doing
+  // that before the board has been scaled to the window would cache every
+  // position wrong. See key-wake.ts.
+  {
+    const board = document.getElementById("keyboard-scale");
+    if (board) wireKeyWake(board);
+  }
 
   // ---- backend sync ----
   try {
@@ -412,6 +427,11 @@ export function applyMotion(pref: "auto" | "full" | "reduced" | undefined): bool
   // Marks that the setting has been resolved, so toast.ts's REDUCED() stops
   // falling back to the bare OS media query.
   document.documentElement.dataset.motionResolved = "1";
+  // PROBLEM 179 — the key wake consults `enabled()` only from inside its rAF
+  // loop, so a board caught mid-sweep when effects are switched OFF would keep
+  // its inline transforms until something happened to start the loop again.
+  // Tell it directly; it is a no-op when nothing is displaced.
+  applyKeyWakeMotion();
   return reduced;
 }
 
@@ -633,6 +653,10 @@ function closeAllPopovers(): void {
   const pill = document.getElementById("profile-pill");
   if (pop) pop.hidden = true;
   pill?.setAttribute("aria-expanded", "false");
+  // PROBLEM 178 — an abandoned "new profile" name box must not survive the
+  // popover being closed and reopened, or the ＋ button is still missing the
+  // next time you look for it.
+  resetNewProfileRow();
 
   const tray = document.getElementById("specials-tray");
   const trayBtn = document.getElementById("specials-btn");
@@ -643,6 +667,14 @@ function closeAllPopovers(): void {
   }
 
   closeSettingsPanel();
+
+  // Everything that registered itself with `dismissable` — the conflict
+  // prompt today, and whatever is added next without anyone having to edit
+  // this function. The owner reported the same "it won't close when I press
+  // elsewhere" bug twice, for two different surfaces, because this function
+  // was the only place that knew how to close anything and it names each one
+  // by id. New surfaces opt in from their own file now; see dismissable.ts.
+  dismissAll();
 }
 
 /**

@@ -243,6 +243,12 @@ pub fn load_or_init() -> SharedConfig {
 /// Persist the config to disk atomically (write-then-rename).
 pub fn save(config: &AppConfig) -> Result<(), String> {
     let path = config_path();
+    // PROBLEM 180 — republish which optional special keys are bound. This is
+    // the single funnel every mutation site goes through, which is why the
+    // publish belongs here and not at each caller. Paired with the call in
+    // lib.rs's startup load: the atomic starts at 0, so without that one every
+    // bit is clear from launch until the first save.
+    crate::hook::publish_bound_specials(config);
     save_to_disk(config, &path).map_err(|e| e.to_string())
 }
 

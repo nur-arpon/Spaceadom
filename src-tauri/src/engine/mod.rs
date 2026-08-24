@@ -106,6 +106,29 @@ pub fn start_engine(
     tauri::async_runtime::spawn(async move {
         log::info!("engine: actor started");
 
+        // PROBLEM 183 — drain the hook's diagnostics on a CLOCK, not only when
+        // a Space release succeeds.
+        //
+        // `drain_hook_diagnostics` had one caller: the SpaceUp arm below. A
+        // SpaceUp only arrives if the hook received both halves of a Space
+        // press, so every diagnostics line ever written was written at a moment
+        // the hook was provably alive — precisely the moments that are NOT the
+        // problem. During an outage there is no Space release, so there is no
+        // line, and the outage leaves no trace in the one instrument built to
+        // measure it.
+        //
+        // On the ENGINE thread, deliberately: this function logs, and logging
+        // on the hook thread delays the next callback (PROBLEM 58's territory).
+        // 30s so a minute-long outage cannot fall between two ticks.
+        tauri::async_runtime::spawn(async move {
+            let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(30));
+            tick.tick().await; // the first tick fires immediately; skip it
+            loop {
+                tick.tick().await;
+                crate::hook::drain_hook_diagnostics();
+            }
+        });
+
         loop {
             // Receive next event (blocking in an async-friendly way via spawn_blocking)
             let event = match tauri::async_runtime::spawn_blocking({
@@ -162,6 +185,14 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
                 if d == 0 { 300 } else { d }
             };
 
+            // PROBLEM 177 — stamp THIS hold. The `cancel_rx` check below is
+            // not atomic with the show it guards (there are two lock
+            // acquisitions and a pile of Vec building in between), so a cancel
+            // that lands in that gap is honoured and then forgotten, and the
+            // show proceeds with nothing left to undo it. The stamp is checked
+            // inside show_guide_hud itself, where it cannot be raced.
+            let epoch = guide_hud::begin_hold();
+
             let state_clone = Arc::clone(state_arc);
             tauri::async_runtime::spawn(async move {
                 tokio::select! {
@@ -213,7 +244,7 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
 
                                 (name, binds, specials)
                             };
-                            guide_hud::show_guide_hud(&profile_name, bindings, specials);
+                            guide_hud::show_guide_hud(epoch, &profile_name, bindings, specials);
                         }
                     }
                     _ = cancel_rx.changed() => {
@@ -299,7 +330,14 @@ fn handle_special(key_name: String, state_arc: &Arc<Mutex<EngineState>>) {
 
     let Some(bind) = binding else {
         log::debug!("engine: no special_key binding for Space+{key_name}");
-        return; // key passes through — not configured
+        // PROBLEM 180 — this used to say "key passes through — not configured",
+        // which was never true: the hook had already destroyed the keystroke
+        // with LRESULT(1) before this line could run, so there was nothing left
+        // to pass through. The hook consults BOUND_SPECIALS now and genuinely
+        // does pass unbound keys through, so reaching here means the binding
+        // was removed between the hook reading its mask and this dispatch — a
+        // harmless race.
+        return;
     };
 
     if !bind.is_mapped() {

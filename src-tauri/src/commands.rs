@@ -1183,9 +1183,35 @@ pub fn overlay_fit_hud(app: tauri::AppHandle, width: f64, height: f64) -> Option
     crate::crash_context::note_overlay_op(format!("overlay_fit_hud {width}x{height} (radial HUD, centred)"));
     use tauri::Manager;
     if !crate::guide_hud::is_visible() {
+        // SAY SO. This early return sits ABOVE the instrumentation block below,
+        // whose own comment reads "This function used to be completely silent…
+        // Diagnosing it cost a whole round trip… Never remove this." The guard
+        // quietly reintroduced that silence for the one case that matters: the
+        // page is laying out a ring while Rust believes the HUD is down, so the
+        // window keeps whatever size it had (680x600 first-frame) and a
+        // 1130x572 ring is clipped by 225px per side. That is exactly the
+        // owner's 2026-08-24 screenshot, and the log had nothing to say about
+        // it.
+        //
+        // INFO, not WARN: releasing Space inside the ~15ms between show and fit
+        // legitimately lands here (measured: show 23:40:47.978, fit
+        // 23:40:47.993). It is a diagnostic, not an alarm.
+        let sz = app
+            .get_webview_window("overlay")
+            .and_then(|w| w.outer_size().ok())
+            .map(|s| format!("{}x{}", s.width, s.height))
+            .unwrap_or_else(|| "unknown".into());
+        log::info!(
+            "overlay_fit_hud: REFUSED {width:.0}x{height:.0} — is_visible() is false while the \
+             page is laying out a ring. The window keeps its current size ({sz} physical) and \
+             the HUD will be CLIPPED if it is on screen."
+        );
         return None;
     }
-    let win = app.get_webview_window("overlay")?;
+    let Some(win) = app.get_webview_window("overlay") else {
+        log::warn!("overlay_fit_hud: no 'overlay' window — the HUD cannot be placed");
+        return None;
+    };
     if let Some(mon) = overlay_monitor(&win) {
         let sf = mon.scale_factor();
         let ms = mon.size().to_logical::<f64>(sf);
@@ -1799,13 +1825,24 @@ unsafe fn apply_region(hwnd_raw: isize, rects: &[ShapeRect], dpr: f64) {
 pub fn overlay_toasts_done(app: tauri::AppHandle) {
     use tauri::Manager;
     if crate::guide_hud::is_visible() {
+        log::debug!("overlay_toasts_done: refused — the HUD owns the window right now");
         return;
     }
     if let Some(win) = app.get_webview_window("overlay") {
+        // BOTH branches are logged, and the SUCCESS matters more than the
+        // refusal. This was a completely silent `win.hide()` — the exact class
+        // of silence PROBLEM 135 cost three diagnostic rounds to find, and the
+        // project's own window rules say every call that changes what the user
+        // can see must say so. This is the single terminal path that takes the
+        // overlay down, so "did the stack ever empty?" is answerable only from
+        // here.
+        log::info!("overlay_toasts_done: the toast stack is empty — hiding the overlay window");
         let _ = win.hide();
         // Clear the toast-shaped region so the next show (HUD or toast)
         // starts from a full rectangular window.
         set_overlay_region(&win, &[], 1.0);
+    } else {
+        log::warn!("overlay_toasts_done: no 'overlay' window to hide");
     }
 }
 

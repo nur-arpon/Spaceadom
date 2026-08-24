@@ -10172,3 +10172,364 @@ this code runs for most users anyway.
 **Generalise this.** *A flag set on entry and cleared on ONE exit path is a latch
 waiting for a second exit path to be added.* Clear it on every return, or give it
 a deadline — this one now has both.
+
+---
+
+## PROBLEM 176 — a held Space swallowed every OS chord: Win+Shift+S became "launch Spotify"
+
+**Symptom.** Owner, 2026-08-24: *"when holding the space if I press on the Print
+Screen button then Spotify comes up. For no reason. It doesn't let me take
+screenshot while holding the space bar."*
+
+**Root cause.** Not Print Screen at all — `VK_SNAPSHOT` (0x2C) matches no combo
+arm and always passed through. The owner's screenshot key is the **Win+Shift+S**
+snip chord (`PrintScreenKeyForSnippingEnabled = 1`, verified live). The combo
+gate in `hook/mod.rs` asked only `MODIFIER_ACTIVE && is_down`; the rule
+*"Ctrl+Space / Alt+Space / Win+Space are real OS shortcuts, never swallow them"*
+existed only on the Space-DOWN path, so it protected Space-pressed-last and
+nothing else. The `S` of Win+Shift+S became `KeyCombo::Alpha('s')`, suppressed
+with `LRESULT(1)`. Then the engine chain, proven in the log:
+
+```
+23:41:20.192 engine: combo Space+s received
+23:41:20.210 cascade: could not resolve "slack.exe" ...            (Professionals: s = Slack)
+23:41:20.210 cascade: ... falling back to the FOUNDERS binding     (Founders: s = Spotify)
+23:41:20.211 Event: Space+? | Target: Spotify.exe | Action: Restore (Enum)
+```
+
+Both halves of the report from one missing check. Dates to 1.0.27 (`e1f8103`),
+not a recent regression.
+
+**Fix.** `hook/mod.rs` — in the combo block, before ANY branch that can consume
+the key:
+
+```rust
+if vk != VK_RMENU && other_modifier_down() {
+    PASSED_TO_OS.fetch_add(1, Ordering::Relaxed);
+    return CallNextHookEx(None, n_code, w_param, l_param);
+}
+```
+
+Three details that are each load-bearing:
+- **Placement ABOVE the rollover branch.** The first version sat below it;
+  with `ROLLOVER_MS = 200` on this machine, any chord within 200ms of
+  Space-down was eaten by `in_rollover` and retyped as a literal `" s"` before
+  the gate ever ran.
+- **`VK_RMENU` exempt** — Space+RightAlt cycles profiles and Right Alt IS Alt;
+  guarding it would silently delete profile cycling.
+- **Shift stays out of `other_modifier_down`** — Win+Shift+S is caught by the
+  Win. Space+Shift is not an OS chord.
+
+Accepted knowingly: the pass-through returns before `SPACE_ABORTED` is set, so
+Space-held + Ctrl+C now performs the copy AND types a space on release. The
+chord working is worth the space. `passed-to-os(...)` was added to the drained
+diagnostics so "Spaceadom ate my key" and "my chord did nothing" stay
+distinguishable.
+
+**Generalise.** *A rule enforced on one entry path is not a rule.* The invariant
+was "OS chords always win"; it was implemented as "OS chords win when Space
+comes last".
+
+---
+
+## PROBLEM 177 — the deferred HUD show raced its own cancel; the loser could win
+
+**Symptom.** *"At the present moment it is stuck. Like I'm not holding the space
+but the space hud is still stuck."* Screenshot: the ring on screen, Space up.
+
+**Root cause.** The show is deferred by `guide_hud_delay_ms` (500ms here). The
+engine's guard — `if !*cancel_rx.borrow() { …locks, Vec-building… show }` — is
+not atomic with the show. A cancel landing in that gap is honoured, then forgotten,
+and the show proceeds with nothing left to undo it. Caught live, 81ms apart:
+
+```
+23:41:07.793 guide_hud: hide with action pending - window stays up for the handover
+23:41:07.874 guide_hud: overlay window shown        <- the loser, winning
+```
+
+Compounded by 1.0.73 moving `HUD_VISIBLE.store(true)` to the START of
+`show_guide_hud` (its comment reasoned about a false positive, never a lost
+update): the hide consumed a flag belonging to a show that had shown nothing,
+terminal state `window visible, HUD_VISIBLE == false`, from which no Rust hide
+path could recover — every one is gated on that flag. Result measured: 3m36s
+with zero fits, zero hides, nine PiP actions and a launch all invisible.
+
+**Fix.** `guide_hud/mod_impl.rs` + `engine/mod.rs`, four pieces:
+
+1. `HOLD_EPOCH` — `begin_hold()` stamps each Space-hold; every cancel
+   (`end_hold`, OUTSIDE the `HUD_VISIBLE` guard — the race being closed is
+   exactly the case where the flag is still false) and every new hold advances
+   it.
+2. The stamp is re-checked **inside** `show_guide_hud`, three times: on entry,
+   immediately before `win.show()`, and before the `guide-hud-show` emit — the
+   entry check alone leaves ~80ms of window work after it, which is the
+   original race in a smaller coat.
+3. `VISIBLE_EPOCH` records WHICH hold published the flag, so a late-aborting
+   show clears only its OWN flag — an unconditional `store(false)` would let
+   stale show A clobber newer show B's flag and recreate the bug.
+4. A reconciliation branch in `hide_guide_hud_pending`: swap returned false but
+   `SHOW_OUTSTANDING` says a show completed unconsumed → force the hide and the
+   `guide-hud-hide` emit (the page's `_hudActive` is cleared ONLY by that
+   event).
+
+Two hazards found on re-review and fixed before shipping:
+- The reconciliation originally opened with `win.is_visible()` — a **blocking**
+  getter (`rx.recv()`, no timeout) reached on every typed space under the
+  engine lock and from the hook thread. It now gates on one atomic
+  (`SHOW_OUTSTANDING`) and touches Tauri only in the real failure.
+- `abort_if_stale`'s hide is gated on `SHOW_OUTSTANDING.swap(false)`: at the
+  "before show" checkpoint this invocation has shown nothing, and the window
+  may be legitimately up from a previous hold's action-pending toast handover —
+  hiding it unconditionally would take the window down under a toast (PROBLEM
+  135's class, reintroduced by the fix's first draft).
+
+Second half: the watchdog now calls `hide_guide_hud()` on eviction — a mid-hold
+eviction loses the Space-UP forever, and every piece of key state was repaired
+on reinstall except the one the user can see.
+
+**Generalise.** *Every gap between a check and the work it guards is a race;
+re-check at the point of no return, and give the state an owner (epoch) so late
+losers can tell their own writes from newer ones.*
+
+---
+
+## PROBLEM 178 — the new-profile name box had no way back
+
+**Symptom.** *"What happens if I don't write anything in it? The add-new-profile
+thing doesn't come up again… if I had not pressed anything after some time, it
+should go back how it was before."*
+
+**Root cause.** `profile-editor.ts` `wireNewProfile`: `open()` set
+`openBtn.hidden = true` and the only routes back were Escape or a SUCCESSFUL
+create. The state also outlived the popover closing, so the ＋ button stayed
+missing for the session.
+
+**Fix.** Three exits, one per way of changing your mind: Escape (unchanged);
+focus leaving the row (deferred one tick — clicking Add blurs the input FIRST,
+and a synchronous revert would tear the row down before Add's click handler ran,
+silently not creating the profile); and a 15s idle timer re-armed per keystroke.
+Blur and idle revert ONLY when the box is empty — typed text is the user's work.
+`resetNewProfileRow()` is called from `closeProfilePopover` so reopening always
+shows the button.
+
+**Generalise.** *A control that can only be undone by completing the action you
+decided against is a trap. Every transient state needs an abandon path.*
+
+---
+
+## PROBLEM 179 — the keyboard could not react to a fast cursor sweep, and the first fix measured in the wrong coordinate space
+
+**Symptom.** *"When the cursor is moved in a very fast way over the keyboard it
+should show some motion and a reaction to it."*
+
+**Root cause.** `.key { transition: all 200ms }` + `:hover { translateY(-4px) }`.
+A sweep hovers each key ~20–40ms; a 200ms ease covers under a third of its
+travel and reverses. The animation was correct and never got to happen.
+
+**Fix.** `src/key-wake.ts` — a velocity-driven wake on the STANDALONE CSS
+`translate`/`rotate` properties, which compose with `transform` instead of
+fighting it, so the deliberate-hover lift keeps its 200ms softness untouched.
+`styles.css` switched `.key` from `transition: all` to an explicit property
+list OMITTING translate/rotate (with `all`, the browser would ease every wake
+write over 200ms and reintroduce the lag). Instant attack, ~300ms spring
+release, strength scaled by speed, smoothstep falloff, loop parks when settled.
+
+Reviewed adversarially before shipping; five real defects fixed:
+1. **Coordinate-space mismatch** — measured viewport px, wrote board-local px
+   under `#keyboard-scale`'s `transform: scale()`. Now ONE space (board-local
+   design px), pointer mapped per frame, `_scale = rect.width / offsetWidth`.
+2. **16px baked-in offset** — bootstrap measures during the intro cascade,
+   whose `backwards` fill holds every key at `translateY(16px)`; centres cached
+   16px low, wake rendered above the cursor, row above reacting 2.1× the row
+   below. No observer could see the cleanup (transform ≠ ResizeObserver;
+   inline-style ≠ childList MutationObserver). Fixed by re-measuring from the
+   cascade cleanup timeout in `keyboard-matrix.ts`.
+3. **Frame-rate dependence** — lerp factors were per-frame; now normalised to a
+   60Hz reference from the rAF timestamp.
+4. **Tilt strobe** — `Math.sign()` of a quantity that is zero on the line of
+   travel flipped per sub-pixel jitter on the keys under the cursor;
+   `rotate` has no transition, so they snapped 2×TILT per frame. Now a clamped
+   continuous `cross/22`, latched with the direction.
+5. Runs while the board is blurred behind the key editor or hidden in sky mode;
+   `enabled()` now checks both, and `applyMotion` tears the wake down when
+   Visual effects turns off mid-session.
+
+Re-measure strips inline translate/rotate first (rects would otherwise include
+the live displacement), and `measureKeyWake` is re-entrant across rebuilds.
+
+**Generalise.** *Any effect that reads geometry and writes transforms must name
+its coordinate space once and stay in it — and never measure an element that is
+mid-animation.*
+
+---
+
+## PROBLEM 180 — sixteen special keys were destroyed unconditionally, in every build since 1.0.27
+
+**Symptom.** None reported — that is the point. Space+Enter, Tab, Left, Right
+and F1–F12 did nothing for any user ever, silently.
+
+**Root cause.** The combo arms dispatched `KeyCombo::Special(...)`
+unconditionally and destroyed the key with `LRESULT(1)`, directly under a
+comment claiming *"only dispatch if the user has bound them in special_keys
+config"*. The config check lived downstream in `engine::handle_special`, AFTER
+the keystroke was gone; its `// key passes through — not configured` comment
+described something that cannot happen. `special_keys` is `{}` in the owner's
+config and no UI can write it, so all 16 were dead everywhere.
+
+**Fix.** `BOUND_SPECIALS: AtomicU32` (bits 0–11 = F1–F12, 12 Enter, 13 Tab,
+14 Left, 15 Right), consulted in the match arms (`VK_TAB if special_bound(13)`
+…). One relaxed load + shift — PROBLEM 58 respected. Published from BOTH the
+startup config load in `lib.rs` AND `config::save` (the single mutation
+funnel); the atomic starts at 0, so the startup publish is what stops the same
+bug reappearing with a smaller window. Both false comments fixed in the same
+commit. No `BOUND_LETTERS`: Founders maps all 26, the mask would be a constant.
+
+Honest scope note: this makes the keys stop VANISHING (Tab alt-tabs again while
+Space is held); it does not make Space+F1 launch anything — `special_keys` has
+no UI, which is separate work.
+
+**Generalise.** *A comment describing a check is not the check. Enforce a
+precondition where the irreversible action happens, not downstream of it.*
+
+---
+
+## PROBLEM 181 — the keyboard hook alone was evicted in 11–189s bursts, and the watchdog structurally could not see it
+
+**Symptom.** *"All these used to work inside the Spaceadom app itself. Right now
+it works only if we minimize that app."* Measured — the report captured live:
+
+```
+23:35:17.905 WATCHDOG — (kb 19000ms / mouse 3515ms). Foreground: spaceadom.exe <- OWN WINDOW
+23:35:29.017 guide_hud: overlay window shown
+23:35:31.468 engine: combo Space+b received      (and three more within seconds)
+```
+
+19 seconds deaf at the focused dashboard; re-hook; everything works 11s later.
+24 of 46 alarms on 2026-08-24/25 had mouse silence <5s with keyboard silence
+5–29s. Worst episode: 23 consecutive minutes (2026-08-20 02:55–03:18) through
+six full thread rebuilds. NOTE: focus-specificity is NOT proven — only 51/444
+alarms name spaceadom.exe; the eviction is machine-wide (spacedesk + PowerToys
+resident, `LowLevelHooksTimeout` unset → 300ms wall-clock default).
+
+**Root cause of the blindness.** The only detector was
+`both_dead = kb_silence > BLIND_MS && ms_silence > BLIND_MS` — and the mouse
+hook keeps firing, holding it false. The keyboard-only branch was deleted by
+PROBLEM 101, correctly (it could not tell "evicted" from "not typing"), but the
+deletion left NO detector for the failure that actually happens.
+
+**Fix.** A REFERENCE `WH_KEYBOARD_LL` (`ref_kb_hook_proc`) that does exactly one
+relaxed store and `CallNextHookEx` — it cannot overrun the timeout, so it cannot
+be evicted for being slow. Discriminator:
+
+```rust
+let kb_only_dead = kb_silence > BLIND_MS && ref_silence < BLIND_MS;
+```
+
+Reference firing + primary silent = eviction, CERTAIN — the ambiguity PROBLEM
+101 died on is gone. Same thread as the primary deliberately: a wedged pump
+stops both, which is `ESCALATE_RESTART`'s case, and a cross-thread reference
+would blur the two failure modes. The WARN now names which failure it is.
+`install_hooks` swaps the reference alongside the primaries.
+
+**Generalise.** *When a signal is ambiguous, do not tune thresholds — add a
+reference that isolates one cause. A do-nothing probe that cannot fail the way
+the subject fails turns an unanswerable question into arithmetic.*
+
+---
+
+## PROBLEM 182 — the watchdog's own throttles were a bigger source of deafness than the eviction
+
+**Symptom.** Six alarms reporting 58,000–60,016ms of silence — not a plausible
+eviction duration; the 60s cooldown's own length showing up in its instrument.
+Ten alarms reading exactly `kb 4000ms / mouse 4000ms` — identical clocks, the
+signature of `install_hooks()` stamping both and NEITHER hook then firing
+(`reinstall ok: true` only means SetWindowsHookExW returned a handle — PROBLEM
+132, still reproducing).
+
+**Root cause.** (a) The cooldown early-return sat ABOVE the silence
+computation: after any repair, unrepairable and unmeasured for 60s. (b) The
+cooldown assumed the previous repair worked; often it demonstrably had not.
+
+**Fix, with two guard rails that the first drafts each violated:**
+- Measure first, throttle second. If the previous repair delivered events, hold
+  the full 60s; if it delivered NOTHING, retry after **5s — a floor, not
+  zero**. Zero would spin and, worse, burn the supervisor's budget.
+- `previous_worked = LAST_KB_EVENT > WATCHDOG_LAST_REINSTALL` — and the stamp
+  is therefore stored AFTER `install_hooks()` with a fresh tick. Stored before
+  (the first draft), install_hooks' own clock-stamp lands a few ms later and
+  satisfies the comparison by itself: the adaptive path could never fire. Found
+  by re-deriving the arithmetic, not by testing.
+- Escalation (thread rebuild) is rate-limited SEPARATELY at 120s
+  (`LAST_ESCALATION`): the supervisor in lib.rs gives up FOREVER above 5
+  rebuilds in 10 minutes ("Space+key is DEAD until the app is restarted"), and
+  the historical 2-minute cadence is precisely what kept 7 consecutive rebuilds
+  inside that cap. Letting the 5s retry drive escalation would have converted
+  intermittent deafness into permanent deafness — the fix worse than the bug.
+
+**Generalise.** *A retry policy has three rates — detect, repair, escalate —
+and they must be budgeted independently. And a "did it work?" comparison must
+be stamped after the work, or the work satisfies it.*
+
+---
+
+## PROBLEM 183 — the diagnostics instrument could only report while the hook was alive
+
+**Symptom.** I argued from *"saw N key events, 0 while the Spaceadom window had
+focus"* (12 samples) that the hook was deaf when the app was focused. The
+argument was worthless.
+
+**Root cause.** `drain_hook_diagnostics()` had exactly ONE caller: the engine's
+`SpaceUp` arm. A SpaceUp only arrives if the hook received BOTH halves of a
+Space press — so every line ever printed was written at an instant the hook
+demonstrably worked. The failure episodes produced no line at all; the counter
+has read non-zero 35 times historically (`2026-08-16 … 341 of them`), disproving
+my reading outright. Bonus defects: the seen-block swapped counters to zero
+without printing when `seen == 0` AND without advancing `LAST_SEEN_REPORT`
+(silently discarding an accumulated own-focus count), and "in the last minute"
+was a floor, not a window (two consecutive lines 8.5 hours apart both claimed
+it).
+
+**Fix.** A 30s `tokio::interval` on the ENGINE thread also drains (never the
+hook callback — PROBLEM 58); `LAST_SEEN_REPORT` always advances when the window
+elapses; the line prints when `seen > 0` **or the user was active within 60s**
+(`millis_since_last_input`, non-windows stub added), so a deaf-while-active
+minute finally leaves a trace while idle nights stay quiet; and the wording
+reports the true elapsed window.
+
+**Generalise.** *An instrument whose trigger requires the system to be healthy
+cannot observe the system being sick. Check what has to be true for a
+measurement to be RECORDED before believing its absence — or its zeros.*
+
+---
+
+## PROBLEM 184 — six win32k syscalls per keystroke inside the hook callback, added by the fix for PROBLEM 176
+
+**Symptom.** None yet — caught in review before it shipped, by the codebase's
+own precedent.
+
+**Root cause.** `other_modifier_down()` ran up to six `GetAsyncKeyState` calls,
+and PROBLEM 176 put it on the path of EVERY combo key. `GetAsyncKeyState`
+enters win32k and contends on USER32 state the foreground app's UI thread also
+touches — PROBLEM 134's argument verbatim, which removed `GetForegroundWindow`
+from this same callback and left these behind. With `LowLevelHooksTimeout`
+unset, the 300ms deadline is WALL-CLOCK: a callback merely waiting on a
+contended lock misses it like a slow one. The mouse hook survives every
+eviction on this machine; `ms_hook_proc` makes no win32k calls at all. That
+contrast is the whole argument.
+
+**Fix.** `MODS_DOWN: AtomicU32` maintained from the hook's OWN event stream —
+it sees every Ctrl/Alt/Win transition (`track_modifier`, called before every
+early return so a release during bypass cannot latch; the injected-cookie check
+runs earlier still, so our own synthetic Alt tap never pollutes the mask).
+`other_modifier_down()` is now one relaxed load. Self-healing for a key-up lost
+to an eviction: `resync_modifiers()` (the GetAsyncKeyState sweep) runs from the
+watchdog timer and from `install_hooks` — off the callback, where it is free.
+The PROBLEM 100-family hazard ("bookkeeping lied about key state and broke
+every shortcut") does not apply: that failure was specific to Space, which we
+SUPPRESS; Ctrl/Alt/Win are never suppressed, so the OS and our ledger see the
+same events — and the resync bounds any drift at ~1s regardless.
+
+**Generalise.** *When a file documents why a class of call was removed from a
+hot path, grep for the survivors of that class before adding another. The
+comparison instrument was free: the hook that never fails is the one that makes
+no syscalls.*
