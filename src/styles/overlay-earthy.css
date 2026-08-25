@@ -1,18 +1,81 @@
 /* ==========================================================================
    Goes at: src/styles/overlay-earthy.css
    Linked from overlay.html (see RUST_AND_HTML_CHANGES.md §4).
-   ONE theme setting drives everything: body.nocturne = dark.
+   ONE theme setting drives everything: body.nocturne = dark,
+   body[data-theme] = which of the three looks (PROBLEM 185).
    ========================================================================== */
 
+/* ---------------------------------------------------------------------------
+   PROBLEM 185 REGRESSION FIX — kill the full-bleed background boxes.
+
+   themes.css defines two DASHBOARD-ONLY decorative layers:
+     body.nocturne[data-theme="warcry"]::before  (themes.css ~line 77, ember glow)
+     body.nocturne[data-theme="starry"]::before  (themes.css ~line 116, star field)
+   Both are `position: fixed; inset: 0` — full-viewport paints meant to sit
+   behind the dashboard's #stage. They were written when only the dashboard's
+   <body> ever carried `data-theme`; the overlay's <body> had no such
+   attribute, so these selectors could never match there.
+
+   v1.0.75 added applyThemeName() (toast.ts) so the overlay could tell warcry
+   from starry (both set dark_mode=true, so a boolean alone can't) — and the
+   moment the overlay's <body> started carrying the SAME `data-theme`
+   attribute, these two dashboard-only rules started matching it too. The
+   overlay window is TRANSPARENT and click-through; a `position:fixed;
+   inset:0` background painted into it composites as an opaque/tinted
+   rectangle floating on the desktop behind the HUD/toasts — exactly the
+   regression the owner reported ("this unnecessary color around it is
+   ugly").
+
+   Fix: neutralise those two rules for the overlay body ONLY, so the
+   dashboard's own decoration is untouched. `.st-overlay` is a marker class
+   overlay.ts adds to its own <body> (there was no existing id/class to
+   scope on — see overlay.ts, right after markOverlayWindow()). Adding that
+   class makes this selector MORE specific than themes.css's original
+   (0,0,3,2) > (0,0,2,2), so it wins on specificity alone — independent of
+   import/link order, and safe even if these files get reordered later.
+
+   DO NOT DELETE THIS without also confirming themes.css no longer paints a
+   fixed/inset-0 layer off `data-theme`. If a THIRD dark theme is ever added
+   with its own `::before` decoration, mirror it here too. */
+body.st-overlay.nocturne[data-theme="warcry"]::before,
+body.st-overlay.nocturne[data-theme="starry"]::before {
+  content: none;
+}
+
+/* ---------------------------------------------------------------------------
+   EARTHY — light theme, clay/terracotta + sage (the dashboard's own
+   "second accent"; design-system.css :root, comment: "second accent —
+   success/active"). Every value below is transcribed from design-system.css
+   :root, not re-approximated — see the token-for-token mapping in each pair.
+   Pill text uses the theme's own --st-text (not a softened custom grey) to
+   match the rule applied to nocturne/warcry/starry below: pill text = that
+   theme's --st-text, always. Still the LIGHT theme: pill stays a light
+   card tone, not darkened, so it reads on a light desktop. --------------- */
 :root {
-  --st-pill-bg: #fffaf0;  --st-pill-brd: #e3d3b4;  --st-pill-text: #3a332b;
-  --st-chipA-bg: #f6dfc9; --st-chipA-brd: #dfaa7c; --st-chipA-text: #7c3f16; --st-kbdA: #c67139;
-  --st-chipB-bg: #e9ecdd; --st-chipB-brd: #b9c2a2; --st-chipB-text: #47523a; --st-kbdB: #7a8a5e;
-  --st-space-bg: #c67139; --st-space-brd: #a85a28; --st-ring: #e8b48b;
-  --st-glow-rgb: 198, 113, 57;
-  --st-shadow: 0 10px 28px rgba(90, 60, 30, 0.22);
+  --st-pill-bg:    #fdf6e9; /* = --st-card */
+  --st-pill-brd:   #d8c9ab; /* = --st-border */
+  --st-pill-text:  #201e1d; /* = --st-text */
+  --st-chipA-bg:   #f6e2cf; /* = --st-accent-tint */
+  --st-chipA-brd:  #e0ac80; /* = --st-accent-brd */
+  --st-chipA-text: #8a4a22; /* = --st-accent-deep ("body-size text in accent") */
+  --st-kbdA:       #c67139; /* = --st-accent (terracotta) */
+  --st-chipB-bg:   #e9ecdd; /* = --st-sage-tint */
+  --st-chipB-brd:  #c3cbae; /* = --st-sage-brd */
+  --st-chipB-text: #3f4a2e; /* = --st-sage-deep */
+  --st-kbdB:       #7a8a5e; /* = --st-sage (second accent, NOT a neutral grey) */
+  --st-space-bg:   #c67139; /* = --st-accent — SPACE is the loudest element */
+  --st-space-brd:  #a85a28; /* = --st-accent-600 */
+  --st-ring:       #e0ac80; /* = --st-accent-brd */
+  --st-glow-rgb:   198, 113, 57; /* = --st-glow-rgb (accent as r,g,b) */
+  --st-shadow: 0 10px 28px rgba(90, 60, 30, 0.22); /* warm-brown, never pure black on cream */
   --st-track: rgba(32, 30, 29, 0.14);
 }
+
+/* Generic dark fallback — used only if dark_mode is ever true with no
+   recognised theme name (should not happen in practice: applyThemeName()
+   always normalises to earthy/warcry/starry). Left as the plain nocturne
+   blue so an unrecognised name fails toward "looks like starry", not toward
+   an undefined half-themed state. */
 body.nocturne {
   --st-pill-bg: rgba(20,28,44,.95); --st-pill-brd: #2e3a4e; --st-pill-text: #e8e4dc;
   --st-chipA-bg: #1e2a4a; --st-chipA-brd: #3c4f80; --st-chipA-text: #b7c8ec; --st-kbdA: #6b8cd6;
@@ -21,6 +84,90 @@ body.nocturne {
   --st-glow-rgb: 107, 140, 214;
   --st-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
   --st-track: rgba(255, 255, 255, 0.12);
+}
+
+/* ---------------------------------------------------------------------------
+   STARRY NIGHT — themes.css is explicit that starry KEEPS THE ENTIRE
+   nocturne palette unchanged and re-tints only the sky behind #stage
+   (owner, 2026-08-19: "let assigned keys and other colors stay the same as
+   nocturne, not gold"). So this block exists to make that explicit for the
+   overlay too, token-for-token from design-system.css's `body.nocturne`
+   block — it must NOT be left to fall through to the generic dark block
+   above by coincidence, because that fallthrough is exactly the class of
+   bug PROBLEM 185 was: two different themes silently sharing one palette
+   until someone changes the shared block for one and breaks the other
+   without knowing it also served starry.
+
+   Second voice: in starry, and ONLY in starry, a cool slate IS the theme's
+   own family (a real night sky is cool blues + moonlight) — so --st-sage
+   here is used as-is, unlike warcry where the equivalent cold-iron tone was
+   rejected. See the warcry block below for why that distinction matters. */
+body.nocturne[data-theme="starry"] {
+  --st-pill-bg:    rgba(19,26,41,.95); /* = --st-surface (--srf-rgb 19,26,41) */
+  --st-pill-brd:   #2e3a4e; /* = --st-border */
+  --st-pill-text:  #e8e4dc; /* = --st-text */
+  --st-chipA-bg:   #1e2a4a; /* = --st-accent-tint */
+  --st-chipA-brd:  #3c4f80; /* = --st-accent-brd */
+  --st-chipA-text: #b7c8ec; /* = --st-accent-800 */
+  --st-kbdA:       #6b8cd6; /* = --st-accent */
+  --st-chipB-bg:   #1a2334; /* = --st-sage-tint */
+  --st-chipB-brd:  #2e3a4e; /* = --st-sage-brd */
+  --st-chipB-text: #b3bdcc; /* = --st-sage-deep */
+  --st-kbdB:       #7f93b8; /* = --st-sage — cool slate, family here only */
+  --st-space-bg:   #6b8cd6; /* = --st-accent — SPACE is the loudest element */
+  --st-space-brd:  #5573b8; /* = --st-accent-600 */
+  --st-ring:       #3c4f80; /* = --st-accent-brd */
+  --st-glow-rgb:   107, 140, 214; /* = --st-glow-rgb */
+  --st-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+  --st-track: rgba(255, 255, 255, 0.12);
+}
+
+/* ---------------------------------------------------------------------------
+   WARCRY — dried blood and cold iron.
+   PROBLEM 185 first gave this theme its own block (it used to fall through
+   to the blue nocturne block above and wear starry's colours by mistake —
+   owner: "it's still using the ones from starry night").
+
+   REVISED after the owner's second pass: "for the warcry theme the apps
+   list is too much greyish compared to the red special keys... Make sure
+   you understand the principles of contrast and beauty." The first pass put
+   cold iron (--st-sage #7b8792, a desaturated blue-grey in THIS palette) on
+   chip B (the app list) opposite blazing crimson on chip A (the specials).
+   A saturated colour beside a desaturated neutral doesn't read as two
+   materials in one world — it reads as "a coloured thing next to a dead
+   thing", because grey has no hue to belong to warcry with.
+
+   Fixed by staying inside warcry's own WARM family and separating the two
+   chip groups by VALUE and SATURATION instead of by hue:
+     chip A (specials)  = BLAZING crimson  — --st-accent-tint/-brd/-800/accent
+     chip B (app list)  = SMOULDERING ember/bronze — a deeper, darker warm
+                           ground (--st-card, "scorched wood"), a warm border
+                           (--st-border, not the loud accent border), warm
+                           worn-leather text (--st-text-soft), and a live-
+                           ember kbd highlight (--st-accent-deep) — a coal
+                           glowing inside ash, not a grey box next to a red
+                           one. Both groups are unmistakably warcry.
+   Cold iron (--st-sage) is dropped entirely here — the owner's rule is that
+   it may survive only as a thin border/detail, never as the app list's
+   field colour, and warm ember/bronze already does the job without it. */
+body.nocturne[data-theme="warcry"] {
+  --st-pill-bg:    rgba(31,16,13,.96); /* = --st-surface */
+  --st-pill-brd:   #6e2118; /* = --st-accent-brd */
+  --st-pill-text:  #f0ded0; /* = --st-text */
+  --st-chipA-bg:   #3d130f; /* = --st-accent-tint */
+  --st-chipA-brd:  #6e2118; /* = --st-accent-brd */
+  --st-chipA-text: #f3ad98; /* = --st-accent-800 (ash-pink) */
+  --st-kbdA:       #b83024; /* = --st-accent (blood crimson) */
+  --st-chipB-bg:   #2b1713; /* = --st-card (scorched wood) */
+  --st-chipB-brd:  #4a231b; /* = --st-border (warm, not the loud accent-brd) */
+  --st-chipB-text: #c8a892; /* = --st-text-soft (worn leather) */
+  --st-kbdB:       #e86a54; /* = --st-accent-deep (live ember) */
+  --st-space-bg:   #b83024; /* = --st-accent — SPACE is the loudest element */
+  --st-space-brd:  #9c2820; /* = --st-accent-600 */
+  --st-ring:       #6e2118; /* = --st-accent-brd */
+  --st-glow-rgb:   184, 48, 36; /* = --st-glow-rgb */
+  --st-shadow: 0 10px 28px rgba(0, 0, 0, 0.62);
+  --st-track: rgba(240, 222, 208, 0.14);
 }
 
 /* ---------------- Toast — island pill ---------------- */

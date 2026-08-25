@@ -7,6 +7,7 @@
 /// • Never touches Tauri/WebView2 on the critical path.
 
 pub mod fullscreen;
+pub mod exclusions;
 pub mod conflicts;
 pub mod conflict_close;
 
@@ -50,6 +51,14 @@ pub static MODIFIER_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static BYPASS_MODE: AtomicBool = AtomicBool::new(false);
 /// `true` when a fullscreen game is active — hook passes everything through.
 pub static FULLSCREEN_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// `true` when the foreground app is on the user's App-exceptions list — hook
+/// passes everything through, so Space is stock in there (Photoshop's
+/// hold-Space panning, a game's Space key, anything).
+///
+/// Written ONLY by the `st-exclusion-watcher` poller in hook/exclusions.rs.
+/// The hook callback may do lock-free atomics only, and asking Windows which
+/// window is in front is a win32k call (PROBLEM 58/134/184).
+pub static EXCLUDED_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // Suppression counters — LOCK-FREE ATOMICS ONLY (PROBLEM 58).
@@ -116,6 +125,11 @@ pub fn drain_hook_diagnostics() {
     let dr = DROPPED_EVENTS.swap(0, Ordering::Relaxed);
     let rh = HOOK_REINSTALLS.swap(0, Ordering::Relaxed);
     let os = PASSED_TO_OS.swap(0, Ordering::Relaxed);
+    let ex = SUPPRESS_EXCLUDED.swap(0, Ordering::Relaxed);
+    // MUST-FIX 2 — drained alongside `os` (passed-to-os): both counters are
+    // "a modifier was held", but this one is the Space-UP side that DROPPED
+    // the pending space injection rather than passing a keystroke through.
+    let dm = SPACE_DROPPED_MODIFIER.swap(0, Ordering::Relaxed);
     // PROBLEM 104 — reported at most once a minute. This function drains on
     // every Space RELEASE, so logging unconditionally wrote a line every few
     // seconds while typing: the same log-noise problem the watchdog had, in a
@@ -125,7 +139,22 @@ pub fn drain_hook_diagnostics() {
         static LAST_SEEN_REPORT: AtomicU64 = AtomicU64::new(0);
         let now = tick_count();
         let last = LAST_SEEN_REPORT.load(Ordering::Relaxed);
-        if now.saturating_sub(last) >= 60_000 {
+        // MUST-FIX 1 — `LAST_SEEN_REPORT` starts at 0 and `tick_count()` is
+        // `GetTickCount64`: MACHINE UPTIME, not an elapsed window. On the
+        // very first drain of a process `now - 0` equals however long the
+        // box has been on, so the `>= 60_000` gate below was satisfied
+        // instantly and the FIRST line printed every single launch lied
+        // about what it measured. Measured live:
+        //     08:09:20.439  hook: saw 70 key event(s) in the last 38539s ...
+        // — on a machine that had booted 38538s earlier. Seed the clock (and
+        // zero the two counters, so pre-launch accumulation can't leak into
+        // the first real window) and print NOTHING here, so the first line
+        // that ever prints measures a window it actually covered.
+        if last == 0 {
+            LAST_SEEN_REPORT.store(now, Ordering::Relaxed);
+            KB_EVENTS_SEEN.store(0, Ordering::Relaxed);
+            KB_EVENTS_OWN_FG.store(0, Ordering::Relaxed);
+        } else if now.saturating_sub(last) >= 60_000 {
             let seen = KB_EVENTS_SEEN.swap(0, Ordering::Relaxed);
             let own = KB_EVENTS_OWN_FG.swap(0, Ordering::Relaxed);
             // ALWAYS advance the window, even when there is nothing to print.
@@ -135,29 +164,49 @@ pub fn drain_hook_diagnostics() {
             // accumulated `own` count that had never been reported. A counter
             // that can be zeroed without ever being read is not a measurement.
             LAST_SEEN_REPORT.store(now, Ordering::Relaxed);
-            // PROBLEM 183, the other half — a DEAF minute must produce a line.
-            // `seen == 0` while the user was recently active is precisely the
-            // outage signature, and printing only on `seen > 0` meant the one
-            // instrument built for it stayed silent through every outage. The
-            // idle guard keeps quiet nights out of the log: nobody touching
-            // the machine is not evidence about the hook.
-            let idle_ms = millis_since_last_input();
             let elapsed_s = now.saturating_sub(last) / 1000;
-            if seen > 0 || idle_ms < 60_000 {
+            // SHOULD-FIX 3 — `millis_since_last_input()` (GetLastInputInfo)
+            // counts MOUSE movement too, so `seen == 0 && idle_ms < 60_000`
+            // is ALSO the signature of someone reading a page with their
+            // hands off the keyboard — the exact ambiguity PROBLEM 101
+            // deleted a whole detector over, and this line was reinstating
+            // it at INFO. Use the REFERENCE hook instead (PROBLEM 181): a
+            // second do-nothing WH_KEYBOARD_LL that cannot be evicted for
+            // being slow, so `ref_silence` answers "did any key reach this
+            // thread's hook chain" definitively, not "was the mouse
+            // touched". Computed the same way `watchdog_check` computes it.
+            let ref_silence = now.saturating_sub(LAST_REF_KB_EVENT.load(Ordering::Relaxed));
+            if seen > 0 {
                 log::info!(
                     "hook: saw {seen} key event(s) in the last {elapsed_s}s, {own} of them \
-                     while the Spaceadom window itself had focus (user input {idle_ms}ms ago)"
+                     while the Spaceadom window itself had focus"
+                );
+            } else if ref_silence < 60_000 {
+                // Reference hook fired inside this window, primary saw
+                // NOTHING: keys reached the chain and this hook missed them.
+                // Genuinely deaf — name it, so it can't be misread as "nobody
+                // typed" a year from now.
+                log::warn!(
+                    "hook: DEAF for the last {elapsed_s}s — the reference hook fired \
+                     {ref_silence}ms ago (keys ARE reaching the chain) but the primary hook \
+                     saw 0 of them. This is NOT 'nobody typed'."
                 );
             }
+            // else: the reference hook was ALSO silent this window, so
+            // nobody typed. Idle time is not evidence about the hook
+            // (PROBLEM 101) — stay quiet rather than reinstate the ambiguity.
         }
     }
-    if fs == 0 && by == 0 && ro == 0 && st == 0 && un == 0 && dr == 0 && rh == 0 && os == 0 {
+    if fs == 0 && by == 0 && ro == 0 && st == 0 && un == 0 && dr == 0 && rh == 0 && os == 0
+        && dm == 0 && ex == 0
+    {
         return;
     }
     log::info!(
         "hook diagnostics — fullscreen-suppressed:{fs} bypass-suppressed:{by} \
          typed-not-command(rollover):{ro} stuck-modifier-resets:{st} unmapped-keys:{un} \
-         dropped-events:{dr} watchdog-reinstalls:{rh} passed-to-os(ctrl/alt/win held):{os}"
+         dropped-events:{dr} watchdog-reinstalls:{rh} passed-to-os(ctrl/alt/win held):{os} \
+         space-dropped(modifier still held on release):{dm} excluded-app:{ex}"
     );
     if ro > 0 {
         // The advice here used to say "set a SLOWER typing speed (a slower
@@ -433,6 +482,25 @@ pub fn publish_bound_specials(cfg: &crate::config::AppConfig) {
 /// so "my system shortcut did nothing" and "Spaceadom ate my key" stay
 /// distinguishable in a log, which is the only place the difference is visible.
 pub static PASSED_TO_OS: AtomicU32 = AtomicU32::new(0);
+
+/// Key-DOWN events handed straight back to Windows because the foreground app
+/// is on the user's App-exceptions list. Counted DOWN events only, mirroring
+/// `SUPPRESS_BYPASS`, so the number reads as keystrokes, not edges.
+pub static SUPPRESS_EXCLUDED: AtomicU32 = AtomicU32::new(0);
+
+/// MUST-FIX 2 — Space-UP dropped injecting a synthetic space because a REAL
+/// modifier (Ctrl/Alt/Win) was STILL physically held at release. PROBLEM 176
+/// added a pass-through on the combo path (see the big comment at the
+/// Space-held branch below) that lets a key escape to the OS WITHOUT setting
+/// `SPACE_ABORTED` — deliberately, so a plain hold still types a space on
+/// release. But that leaves `!SPACE_ABORTED` alone unable to tell "nothing
+/// happened, inject a space" apart from "a chord fired while Space was held,
+/// and the modifier may STILL be down right now" — and injecting a bare
+/// VK_SPACE into a live Alt/Win/Ctrl composes Alt+Space (window menu),
+/// Win+Space (layout switch) or Ctrl+Space (IME/IntelliSense), not a space.
+/// Drained alongside `passed-to-os`: without this counter, "my space went
+/// missing" and "Spaceadom ate my key" read identically in a log.
+pub static SPACE_DROPPED_MODIFIER: AtomicU32 = AtomicU32::new(0);
 
 /// The same count, but for the whole session and **never drained**.
 ///
@@ -1309,6 +1377,20 @@ unsafe extern "system" fn kb_hook_proc(
         return CallNextHookEx(None, n_code, w_param, l_param);
     }
 
+    // --- App exceptions: pass everything through immediately ---
+    //
+    // Structured identically to the fullscreen gate above, and placed straight
+    // after it on purpose. Note what is NOT here: the Space + . bypass escape
+    // hatch that the bypass branch below keeps. Full stock behaviour means
+    // full stock behaviour — inside an excluded app the hook decides nothing
+    // at all, so a Space + . in Photoshop is a full stop, not a toggle.
+    if EXCLUDED_ACTIVE.load(Ordering::Relaxed) {
+        if is_down {
+            SUPPRESS_EXCLUDED.fetch_add(1, Ordering::Relaxed);
+        }
+        return CallNextHookEx(None, n_code, w_param, l_param);
+    }
+
     // --- Bypass Mode: pass everything through immediately (except Space + .) ---
     if BYPASS_MODE.load(Ordering::Relaxed) {
         if is_down {
@@ -1366,9 +1448,24 @@ unsafe extern "system" fn kb_hook_proc(
         let modifier_fired = MODIFIER_ACTIVE.load(Ordering::Relaxed);
         MODIFIER_ACTIVE.store(false, Ordering::Relaxed);
 
-        // If no modifier action was taken, pass a real Space through
+        // If no modifier action was taken, pass a real Space through.
+        // MUST-FIX 2 — but NOT into a physically-held modifier. This is an
+        // ASYMMETRY fix, not a new rule: the Space-DOWN gate above already
+        // declines to intercept when Ctrl/Alt/Win arrives FIRST ("Ctrl+Space,
+        // Alt+Space and Win+Space are real OS/app shortcuts... never swallow
+        // them"). The up-path never learned the same rule, so hold Space →
+        // press Alt → Tab → release Space injected a bare VK_SPACE while Alt
+        // was STILL physically down, and the OS composed it as Alt+Space
+        // (opens the window menu) instead of a space. `other_modifier_down()`
+        // is a single relaxed atomic load (PROBLEM 184) — safe on the
+        // callback. Do NOT reintroduce `GetAsyncKeyState` here; see the
+        // FAILSAFE comment further down for why it lies about suppressed keys.
         if !SPACE_ABORTED.load(Ordering::Relaxed) {
-            inject_space();
+            if !other_modifier_down() {
+                inject_space();
+            } else {
+                SPACE_DROPPED_MODIFIER.fetch_add(1, Ordering::Relaxed);
+            }
         }
 
         send_event(HookEvent::SpaceUp { modifier_fired });
@@ -1573,6 +1670,13 @@ unsafe extern "system" fn ms_hook_proc(
     // MODIFIER_ACTIVE early-return or the watchdog only sees mouse life
     // while Space is held.
     LAST_MS_EVENT.store(tick_count(), Ordering::Relaxed);
+    // --- App exceptions: same gate as kb_hook_proc, before anything is eaten.
+    // MODIFIER_ACTIVE can still be TRUE from a Space held just before the
+    // switch, and without this the wheel would stay swallowed for the first
+    // scroll inside an excluded app.
+    if EXCLUDED_ACTIVE.load(Ordering::Relaxed) {
+        return CallNextHookEx(None, n_code, w_param, l_param);
+    }
     if !MODIFIER_ACTIVE.load(Ordering::Relaxed) {
         return CallNextHookEx(None, n_code, w_param, l_param);
     }

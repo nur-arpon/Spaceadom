@@ -81,6 +81,13 @@ pub fn save_config(
     {
         use tauri::Emitter;
         let _ = app.emit("theme-changed", new_config.dark_mode);
+        // PROBLEM 185 — the overlay needs the theme's NAME, not just "is it
+        // dark". `dark_mode` is true for BOTH warcry and starry (they share a
+        // nocturne base and each re-tints on top), so a boolean cannot tell
+        // them apart and the overlay wore starry's palette in warcry — the
+        // owner's report: "for the warcry theme the guide hud and toasts
+        // colour was not matched, it's still using the ones from starry night".
+        let _ = app.emit("theme-name-changed", new_config.theme.clone());
         let _ = app.emit("sound-changed", new_config.sound_enabled);
         // PROBLEM 174 — the guide-to-toast flight lives entirely in the OVERLAY
         // page, so the switch in the dashboard's Settings panel can only reach
@@ -489,7 +496,14 @@ pub struct HookHealth {
 /// 5000 is generous but not reckless: the value bounds how long a WEDGED hook
 /// can stall input system-wide, and 5 s is the figure AutoHotkey's own
 /// documentation has recommended for this exact problem for years.
-pub const RECOMMENDED_HOOK_TIMEOUT_MS: u32 = 5000;
+// 1000, not the internet's folk-standard 5000 — the owner's call, 2026-08-25,
+// and the reasoning is his: this limit is MACHINE-WIDE, so if ANY hooked app
+// (Spaceadom, PowerToys, spacedesk) genuinely hangs, the keyboard stalls for
+// the full limit before Windows evicts it. A possible 5-second system-wide
+// freeze is too high a price for surviving stalls that 1s already covers.
+// If HOOK_EVICTIONS_TOTAL shows 1s still is not enough on this machine, step
+// to 2s — from the counter's data, never from folklore.
+pub const RECOMMENDED_HOOK_TIMEOUT_MS: u32 = 1000;
 
 /// Read the eviction timeout and the session's eviction count.
 #[tauri::command]

@@ -12,6 +12,91 @@ Companion docs: `PROJECT_STATUS.md` (chronological log), `WHAT_HAPPENED.md`
 
 ---
 
+## FEATURE 185 — App exceptions: Spaceadom stands down inside chosen apps
+
+**Symptom.** Hold-Space canvas panning does nothing in Photoshop / Figma /
+Blender while Spaceadom runs. Measured 2026-08-25: the target app never receives
+a Space keydown.
+
+**Root cause.** By design. `kb_hook_proc` suppresses Space-down globally so it
+can decide tap-vs-hold; there was no way to say "not in this app".
+
+**Exact files.**
+
+`src-tauri/src/config/schema.rs`
+```rust
+    /// Apps Spaceadom stands down inside — the owner’s "exception list".
+    /// Stored as LOWERCASE EXE STEMS ("photoshop").
+    /// `#[serde(default)]` is load-bearing: every config written before 1.0.79
+    /// lacks the field, and without it they all fail to deserialise.
+    #[serde(default)]
+    pub excluded_apps: Vec<String>,
+```
+
+`src-tauri/src/hook/mod.rs` — the atomic, the counter and the gate:
+```rust
+pub static EXCLUDED_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub static SUPPRESS_EXCLUDED: AtomicU32 = AtomicU32::new(0);
+
+    // --- App exceptions: pass everything through immediately ---
+    // Note what is NOT here: the Space + . bypass escape hatch that the bypass
+    // branch below keeps. Full stock behaviour means full stock behaviour.
+    if EXCLUDED_ACTIVE.load(Ordering::Relaxed) {
+        if is_down {
+            SUPPRESS_EXCLUDED.fetch_add(1, Ordering::Relaxed);
+        }
+        return CallNextHookEx(None, n_code, w_param, l_param);
+    }
+```
+The same two-line gate is in `ms_hook_proc`, placed AFTER the `LAST_MS_EVENT`
+liveness stamp and BEFORE the `MODIFIER_ACTIVE` early-return — `MODIFIER_ACTIVE`
+can still be true from a Space held just before the app switch, and without it
+the first scroll inside an excluded app would still be swallowed.
+
+`src-tauri/src/hook/exclusions.rs` (new) — the poller. Pure, tested core:
+```rust
+pub fn normalize_stem(raw: &str) -> String {
+    let trimmed = raw.trim().trim_matches('"');
+    // Split on BOTH separators by hand rather than using `Path::file_name`:
+    // on a non-Windows build `Path` does not treat `\` as a separator.
+    let name = trimmed.rsplit(|c| c == '\\' || c == '/').next().unwrap_or(trimmed);
+    let lower = name.to_lowercase();
+    lower.strip_suffix(".exe").unwrap_or(&lower).to_string()
+}
+
+pub fn is_excluded(foreground: &str, list: &[String]) -> bool {
+    let fg = normalize_stem(foreground);
+    if fg.is_empty() { return false; }   // "could not read it", NOT "matches"
+    list.iter().any(|e| normalize_stem(e) == fg)
+}
+```
+
+Published from BOTH ends (PROBLEM 180): `config/mod.rs::save` and `lib.rs`
+startup both call `hook::exclusions::publish_excluded_apps(cfg)`, and
+`lib.rs` setup step 8b calls `hook::exclusions::start_exclusion_watcher()`.
+
+**Generalise this.** *A per-app verdict belongs in a poller, never in the hook.*
+Any question of the form "which window is in front" is a win32k call, and a
+win32k call in a `WH_KEYBOARD_LL` callback is how the hook gets evicted
+(PROBLEM 58/134/184). The pattern is now used twice — fullscreen and exclusions —
+and both fail toward "the app keeps working" when the probe panics.
+
+**Frontend.** `src/components/app-grid.ts` (new leaf, PROBLEM 148) holds the
+tiles, the icon `onerror` fallback and PROBLEM 97’s truncation notice.
+`key-detail-panel.ts` and `settings-panel.ts` both call `drawAppGrid()`. It was
+extracted rather than copied on purpose: two copies of a list that has already
+needed two separate fixes is how the next fix reaches only one of them.
+`exeStem()` there mirrors `normalize_stem` exactly, so both sides of the config
+agree without a translation step.
+
+**How it was verified.** `npx tsc --noEmit` and `npm run build` clean;
+`cargo check --lib --all-targets` 0 errors 0 warnings; `cargo test --lib`
+25 passed including `hook::exclusions::tests::stem_normalisation_accepts_every_form`
+and `matching_is_case_and_form_insensitive`. Behaviour in Photoshop is NOT yet
+hand-verified on the real machine.
+
+---
+
 ## PROBLEM 30 — inherited Store-app (AUMID) code had never compiled
 
 **Symptom.** First `cargo check` after carrying `smart_cascade.rs` over from
@@ -10533,3 +10618,371 @@ same events — and the resync bounds any drift at ~1s regardless.
 hot path, grep for the survivors of that class before adding another. The
 comparison instrument was free: the hook that never fails is the one that makes
 no syscalls.*
+
+---
+
+## PROBLEM 185 — the Warcry theme's HUD and toasts wore Starry Night colours instead
+
+**Symptom.** The Guide ring and toast messages displayed the wrong palette: cold
+blues and a starry theme, not the blood crimson and cold iron the owner had set
+as Warcry.
+
+**Root cause.** The theme system relied on a boolean: `body.nocturne` on the
+dashboard meant "dark mode" — but both Warcry and Starry Night use a `nocturne`
+base, differing only in a secondary tint on top. The dashboard's CSS could tell
+them apart with `body.nocturne[data-theme="warcry"]` and `body.nocturne[data-theme="starry"]`
+selector chains, but the overlay — a separate window — never had `data-theme`
+set on its body. Every overlay rule with a nocturne qualifier therefore
+matched for both themes. Toasts and HUD wore Starry Night's palette inside
+Warcry's session.
+
+**Fix.** Four changes, each one load-bearing:
+
+1. **`commands.rs` now emits the theme value as a STRING.** Instead of a boolean
+   change-flag, `theme-name-changed` carries the full enum value ("Earthy",
+   "Warcry", or "Starry Night"). The single event is sufficient because themes
+   are not changed from Rust — only from the dashboard, which re-emits via
+   `save_config`.
+
+2. **`overlay.ts` seeds `document.body.dataset.theme` at startup** from
+   `get_config().theme`, translating the enum value into the same string the
+   CSS expects. This is mandatory because the event only fires on CHANGE — a
+   freshly opened overlay window sees no event and would wear the previous
+   session's palette without it.
+
+3. **`toast.ts` gained `applyThemeName(value: string)`** that sets the dataset
+   and runs on every theme-name-changed event. No longer does the toast miss
+   changes because it was looking for a boolean.
+
+4. **`overlay-earthy.css` gained a complete `body.nocturne[data-theme="warcry"]`
+   block** transcribed from `themes.css`: crimson `#b83024` for the ring accent,
+   cold iron `#7b8792` for outlines, surfaces `#1f100d` and `#2b1713` for the
+   deeper layering. Without this block the selector chain never matched.
+
+**Generalise.** *A boolean that distinguishes two cases by the absence of a
+third case cannot scale to three. Store the actual value, not a signal, and
+broadcast it to all windows that need to observe it.*
+
+---
+
+## PROBLEM 186 — "Give Shortcuts More Time" was unexplained and the owner did not understand what it did
+
+**Symptom.** The owner asked: *"even I do not understand what that means… what
+would happen if more time is not given? and why keep it as an option rather
+than the default?"*
+
+**Root cause.** The setting existed but carried no documentation. The note field
+was unused.
+
+**Fix.** `settings-panel.ts` now displays two notes:
+
+1. **The mechanism:** "Windows gives keyboard-watching apps 0.3 seconds per
+   keypress and cuts them off entirely if they overrun."
+
+2. **Why it is not the default:** "This is a Windows setting affecting every
+   keyboard app on the PC. It needs a sign-out to take effect. The trade-off
+   is that a genuinely hung keyboard app could hold keys for 5 seconds instead
+   of 0.3 seconds — so disable it if you trust your apps."
+
+The button label now names the numbers in both directions:
+- On: "Raise Windows' limit from 0.3 to 5 seconds"
+- Off: "Put back Windows' 0.3 second limit"
+
+These words translate the setting from abstract ("more time") to concrete (how much
+time), from "option" to trade-off (what you are choosing between), and explain
+the Windows plumbing instead of leaving it to guesswork.
+
+**Generalise.** *Name a setting by its numbers and its real constraint, not by
+the quantity of change. "Raise from 0.3 to 5 seconds" is immediate and
+testable; "give more time" is abstract and invites confusion.*
+
+---
+
+## PROBLEM 187 — elapsed-time window computed against zero-initialized timestamp measures UPTIME, not elapsed
+
+**Symptom.** A log line reported: `hook: saw 1 key event(s) in the last 38539s, 0 of them while the Spaceadom window itself had focus`. 38,539 seconds is 10.7 hours — the app reported it had been running for more than 10 hours when it had been running for a few minutes and the owner was actively using it. The same line then appeared again at 07:10:58.
+
+**Root cause.** `drain_hook_diagnostics()` computed elapsed time as `now - LAST_SEEN_REPORT`, where `LAST_SEEN_REPORT` was an `AtomicU32` initialized to 0. The first call to drain arrived when `tick_count()` (machine uptime in milliseconds) was actually 38,539,000 ms. Subtracting zero from that gave 10.7 hours regardless of how long the diagnostic window actually was. The counter was then zeroed, so the next drain 8.5 hours later started from zero again — producing the duplicate.
+
+**Fix.** Lines 128–189 in `src-tauri/src/hook/mod.rs`, in `drain_hook_diagnostics()`:
+
+```rust
+if last == 0 {
+    LAST_SEEN_REPORT.store(now, Ordering::Relaxed);
+    KB_EVENTS_SEEN.store(0, Ordering::Relaxed);
+    KB_EVENTS_OWN_FG.store(0, Ordering::Relaxed);
+} else if now.saturating_sub(last) >= 60_000 {
+    // ... drain the counters and print
+}
+```
+
+On the first call, seed the reference point to the current tick and zero the counters. Only on subsequent calls — when `last != 0` — compute the elapsed window and decide whether to print. This moves the zero timestamp from the log output into the clock.
+
+**Generalise.** *An elapsed-time window computed against a zero-initialized timestamp measures UPTIME, not elapsed. Seed the reference on first use. Print nothing on that first call — print only when the window has matured enough to mean something.*
+
+---
+
+## PROBLEM 188 — Space released while another modifier is held silently dropped instead of typing a space
+
+**Symptom.** Holding Alt and pressing Space intended to type a space (Alt is not a bound modifier). Instead, nothing happened. No error, no space typed, nothing in the log. The window menu did not open because Space was suppressed and Alt+nothing-else does nothing.
+
+**Root cause.** The Space-UP handler at lines 1422–1440 in `src-tauri/src/hook/mod.rs` checked whether another modifier was physically down and, if so, dropped Space entirely:
+
+```rust
+if !other_modifier_down() {
+    inject_space();
+}
+```
+
+This is correct for SPACE-DOWN — Alt is a pass-through modifier and Space should not launch a command when Alt is held. But the release path inherited the same gate. When a modifier is held at release time, Space-UP should type a space anyway, because nothing was launched and the key must complete its normal purpose.
+
+**Fix.** Lines 1422–1440 now store the modifier state AT PRESS time and honour it at release time. When Space is pressed with another modifier held, the combo is aborted immediately (`SPACE_ABORTED` set). At release, if no combo was aborted, Space types a space — UNLESS another modifier is STILL held, in which case a new counter `SPACE_DROPPED_MODIFIER` records the event for diagnostics:
+
+```rust
+if !SPACE_ABORTED.load(Ordering::Relaxed) {
+    if !other_modifier_down() {
+        inject_space();
+    } else {
+        SPACE_DROPPED_MODIFIER.fetch_add(1, Ordering::Relaxed);
+    }
+}
+```
+
+The counter is drained and included in the diagnostic log alongside the other event counts.
+
+**Generalise.** *When a gate is added on the DOWN edge of a key, audit the UP edge. Asymmetry between press and release — a check that applies to one but not the other — is its own bug class and will surface only when the user presses while in state X and releases while in state Y. Do not assume the DOWN logic is complete for UP.*
+
+---
+
+## PROBLEM 189 — diagnostic log misreported when the keyboard hook last received input
+
+**Symptom.** Log lines printed: `hook: DEAF for the last 9s — the reference hook fired 3100ms ago (keys ARE reaching the chain) but the primary hook saw 0 of them. This is NOT 'nobody typed'.` At the same time, logs printed `hook: saw 0 key event(s) in the last 0s`. Contradictory: the first line says keys are reaching the chain; the second says the app has been silent for zero seconds (which is obviously false on any long-running session).
+
+**Root cause.** `drain_hook_diagnostics()` used an `idle_ms < 60_000` discriminator based on mouse movement to decide whether "nobody typed" or "the hook is deaf". This was a guess with no evidence. The reference hook existed by then and fires whenever a key reaches the OS, regardless of whether the primary hook saw it — perfect evidence. But the log was not using it. The "0s" came from the same measurement that produced PROBLEM 187's 38,539s: zero-initialized timestamp, no seeding.
+
+**Fix.** Lines 157–187 in `src-tauri/src/hook/mod.rs`, in `drain_hook_diagnostics()`, replace the mouse-based discriminator with the reference-hook clock:
+
+```rust
+let ref_silence = now.saturating_sub(LAST_REF_KB_EVENT.load(Ordering::Relaxed));
+if seen > 0 {
+    log::info!("hook: saw {seen} key event(s) in the last {elapsed_s}s, {own} of them \
+                 while the Spaceadom window itself had focus");
+} else if ref_silence < 60_000 {
+    log::warn!("hook: DEAF for the last {elapsed_s}s — the reference hook fired \
+                 {ref_silence}ms ago (keys ARE reaching the chain) but the primary hook \
+                 saw 0 of them. This is NOT 'nobody typed'.");
+}
+// else: reference also silent → nobody typed, stay quiet.
+```
+
+The reference hook's silence is now the evidence. If it fired in the last 60 seconds, keys reached the OS — the primary hook failure is REAL, not user silence. Only when both are silent (nobody typed AND we saw nothing) do we stay quiet. The elapsed window now uses the seeded clock from PROBLEM 187, so it reports actual elapsed time, not uptime.
+
+**Generalise.** *An instrument whose trigger requires the system to be healthy cannot observe the system being sick. Before trusting a measurement's absence, check what has to be true for that measurement to be RECORDED. In a deaf-detection log, a line printed only when events arrive cannot report that nobody arrived.*
+
+---
+
+## PROBLEM 190 — frontend diagnostic log printed duplicate warn lines about overlay fit failures
+
+**Symptom.** The log contained multiple identical lines: `overlay-log warn: overlay window size is not a number: (null).` At 1650ms and again at 1751ms, the warning fired twice in 101ms with the exact same arguments — but each fit operation runs once, and they were not about the same overlay function.
+
+**Root cause.** `src/components/toast.ts`, in `buildHud()` around lines 933–955, contained a null-check branch that warned when the overlay's window did not report its fitted size, FOLLOWED by a `.catch()` that warned again when the IPC call itself was rejected (a different failure: the Rust command was not available or failed). Both branches warned with similar wording. When the overlay was first building, it called fit once and got both errors in sequence — the size query failed (warn 1), then the IPC fell back to a retry that also failed (warn 2).
+
+The null warn was redundant: if the IPC succeeded, we have the size; if it failed, the `.catch()` already explains why. Printing both turned one failure into confusing duplicate output.
+
+**Fix.** Lines 933–955 in `src/components/toast.ts`, in `buildHud()`: delete the null-branch warn call that prints "overlay window size is not a number". Keep the `.catch()` branch:
+
+```typescript
+.catch((err) => {
+    log.warn(`IPC fit failure; falling back: ${err}`);
+    // ... fallback logic
+});
+```
+
+The Rust log already prints with more detail (`overlay_fit_hud` INFO level) when fit succeeds or fails, so the front-end's one job is to handle genuine IPC rejection — a Rust command missing or Rust failing. Deleting the null-branch warn removes the duplicate without losing information.
+
+**Generalise.** *When a diagnostic is generated by two separate code paths both observing the same failure, keep the one closest to the root cause. The `.catch()` on the async call sees the failure at the boundary; a null-check inside the success path cannot — it only ever fires on a path that went wrong somewhere earlier.*
+
+
+## PROBLEM 191 — hold-Space apps (Photoshop, Figma, Blender) lost their Space gestures; the exception list
+
+**Symptom.** The owner reported: *"In the settings give an option of Exclude list or Exception list where people can add their apps they want to exclude. The app will automatically pause while in there — it won't work inside the apps of the exception list. When people press that, the similar option of choosing apps when pressing letters comes up, and they will be able to choose as many apps as exceptions as they want."* The specific use case: Photoshop, Figma and Blender use hold-Space mouse gestures to pan the canvas. Spaceadom suppresses every Space keydown system-wide, so those gestures are dead in those apps.
+
+**Root cause.** The low-level keyboard hook callback (`kb_hook_proc`, `ms_hook_proc`) intercepts every Space-down and suppresses it globally, preventing the target application from ever receiving the keydown event. Verified 2026-08-25: a Space-down keystroke inside Photoshop produces ZERO keydown events at the application level while Spaceadom is running. There is no way for Photoshop to know Space was pressed, so the hold-Space pan gesture never starts. This is by design — the hook must suppress Space to use it as a modifier — but the design is too absolute: it has no exception path.
+
+**Fix.** Implemented three-layer solution:
+
+1. **Background poller thread** (`src-tauri/src/hook/exclusions.rs`, ~230 lines), modelled line-for-line on the existing `fullscreen.rs` watcher:
+   - Polls the foreground window once every 500 ms.
+   - Normalizes the window's executable stem (lowercase, with or without `.exe`, handles both `/` and `\` path separators).
+   - Checks it against `EXCLUDED_LIST: Mutex<Vec<String>>`, locked only by the poller itself.
+   - Sets `EXCLUDED_ACTIVE: AtomicBool` to the result.
+   - Uses `Builder::new().name("st-exclusion-watcher")` and `catch_unwind` returning `String::new()` (→ NOT excluded) on panic, matching fullscreen.rs's fail-OPEN design. A broken poller must never disable the app.
+   - Logs only on state change: `exclusions: photoshop is foreground — Spaceadom standing down` / `exclusions: left photoshop — Spaceadom resumed`.
+
+2. **Hook-side gate** (`src-tauri/src/hook/mod.rs`), placed immediately after the `FULLSCREEN_ACTIVE` check and **before** the bypass branch:
+   ```rust
+   pub static EXCLUDED_ACTIVE: AtomicBool = AtomicBool::new(false);
+   pub static SUPPRESS_EXCLUDED: AtomicU32 = AtomicU32::new(0);
+
+   if EXCLUDED_ACTIVE.load(Ordering::Relaxed) {
+       if is_down { SUPPRESS_EXCLUDED.fetch_add(1, Ordering::Relaxed); }
+       return CallNextHookEx(None, n_code, w_param, l_param);
+   }
+   ```
+   In both `kb_hook_proc` and `ms_hook_proc`, deliberately after `LAST_MS_EVENT` liveness stamp and **before** `MODIFIER_ACTIVE` early-return — `MODIFIER_ACTIVE` can still be true from a Space held just before the app switch, so without the gate's position, the first wheel event inside an excluded app would still be swallowed.
+
+3. **Config and startup** (`src-tauri/src/config/schema.rs`, `src-tauri/src/config/mod.rs`, `src-tauri/src/lib.rs`):
+   - Added `#[serde(default)] pub excluded_apps: Vec<String>` to the schema with `Vec::new()` default.
+   - `publish_excluded_apps` called from both `config::save` and the startup load. Commented with PROBLEM 180 — an atomic that starts empty and is only fed on save means the feature is dead from launch until the first save.
+   - `start_exclusion_watcher()` added as setup step 8b beside the fullscreen watcher.
+
+4. **Frontend UI** (`src/components/settings-panel.ts`, `src/components/app-grid.ts`, `src/components/key-detail-panel.ts`):
+   - New "App exceptions" section directly above Conflicts, using the same `.set-title .set-row-label .descBox` pattern as other settings.
+   - Clicking the setting opens the app-selection grid (identical markup to key-detail-panel's editor grid), allowing users to select multiple excluded apps.
+   - `drawAppGrid` carries the tile markup, icon `onerror` letter-disc fallback, and PROBLEM 97's `RENDER_CAP` truncation notice.
+   - Diagnostic counter added: `drain_hook_diagnostics` drains `let ex = SUPPRESS_EXCLUDED.swap(0, …)`, includes `&& ex == 0` in the all-zero guard, and appends `excluded-app:{ex}` to the diagnostics line.
+
+**Generalise.** *A system-wide input intercept that suppresses a key cannot safely be made absolute — there must be a surrender path. The check that decides "is this app excluded?" must live off the hot path (the hook callback) where it can do zero allocation, logging, or locking; the verdict is delivered as one atomic boolean updated from a background thread. The background thread's failure mode must be fail-OPEN: a broken probe returns "not excluded" so the app never gets silently disabled. Applying this pattern to other global-suppress features is straightforward — the existing fullscreen watcher demonstrates the architecture.*
+
+---
+
+## PROBLEM 192 — the App exceptions review pass: rows too wide, conflicts had no faces, the picker had no way out but one
+
+**Symptom.** The owner reviewed 1.0.79's App exceptions feature (PROBLEM 191) and gave three notes: (1) *"Instead of the apps accepted... saying their full name and making it row by row — just show their icon, and maybe their name can be beneath the icon in very small font… the apps excepted can be side by side."* (2) *"In the conflicts, it would be good if you could show the app icon when something conflicts — show the app icon of the conflicting app as well."* (3) *"Instead of having to press on Done adding — if someone presses another place it shouldn't stay and wait for pressing Done adding. And after a few seconds it should automatically close."*
+
+**Root cause.** All three are UI-only — nothing in the hook path, config schema, or backend was implicated. (1)/(2) were as-designed layout choices from the first pass that read as heavier than the app-grid picker they sit beside. (3) is the SAME class of bug as PROBLEM 178 (the new-profile name box): a transient UI surface with only one way to close, `_excPickerOpen` toggled solely by its own "Done adding" button — click anywhere else, or walk away, and it just sits there.
+
+**Fix — all in `src/components/settings-panel.ts`, `src/components/app-grid.ts`, `src/styles.css`. No Rust touched; `cargo test --lib` (25/25) is the proof.**
+
+1. **Exception tiles.** `renderAppExceptions()`'s per-app markup changed from one `.exc-row` (icon | full name | ✕, three-column grid, full row width) to a `.exc-grid` of `.exc-tile`s (flex-wrap, ~58px each, icon on top at 30px, name beneath at 10.5px with `text-overflow:ellipsis`, `title=` the full name):
+   ```ts
+   const tile = document.createElement("div");
+   tile.className = "exc-tile";
+   tile.title = label;                       // full name discoverable on hover
+   const disc = document.createElement("span");
+   disc.className = "exc-tile-disc";
+   paintAppDisc(disc, hit?.icon, label, i);   // shared with app-grid.ts, not duplicated
+   const name = document.createElement("span");
+   name.className = "exc-tile-name";
+   name.textContent = label;
+   const remove = document.createElement("button");
+   remove.className = "exc-tile-x";           // corner badge, not a full-width column
+   remove.setAttribute("aria-label", `Remove ${label} from exceptions`);
+   ```
+   CSS: `.exc-tile-x { position:absolute; top:-6px; right:-6px; opacity:0; }` with
+   `.exc-tile:hover .exc-tile-x, .exc-tile:focus-within .exc-tile-x, .exc-tile-x:focus-visible { opacity:1; }` —
+   `:focus-within` is load-bearing: the badge is invisible at rest, and without
+   it a keyboard user tabbing to the (still-focusable) button would land on a
+   control they cannot see.
+
+2. **Conflict-row icons.** `Conflict.process` (Rust, `hook/conflicts.rs`) is
+   already a bare exe filename (`"autohotkey64.exe"`), never a path — so the
+   cheap route the investigation flagged just works: `exeStem()` in
+   `app-grid.ts` only splits on a path separator when one is present, so
+   calling it on a bare filename returns the same stem it would from a full
+   path. Added one small export:
+   ```ts
+   export function findAppByStem(stem: string): AppInfo | null {
+     if (!_apps) return null;
+     for (const a of _apps) if (exeStem(a.path) === stem) return a;
+     return null;
+   }
+   ```
+   and in `renderConflicts()`:
+   ```ts
+   const known = findAppByStem(exeStem(c.process));
+   paintAppDisc(disc, known?.icon_base64, known?.name ?? c.product, i);
+   ```
+   No new Rust command — the existing Start-Menu scan (`list_start_menu_apps`,
+   already warmed by the exceptions section rendered just above it) is reused.
+   Degrades to the letter disc exactly like every other app icon in this app
+   when the running process isn't a Start-Menu shortcut Spaceadom has scanned
+   (a bare service exe, for instance). `renderConflicts()` also redraws once
+   if the scan was still running on first paint:
+   ```ts
+   void loadApps().then(() => { if (panelEl && !panelEl.hidden) draw(); });
+   ```
+   CSS: `.conflict-row` gained a leading `auto` grid column for the 22px
+   `.conflict-row-disc`; `.conflict-row-why`/`.conflict-row-cta` moved from
+   `grid-column: 1 / -1` to `2 / -1` so the wrapped text still starts under
+   the name, not under the icon.
+
+3. **The picker closes itself.** Reused the SAME two mechanisms PROBLEM 178
+   already established for exactly this trap, deliberately not inventing a
+   third:
+   - **`registerDismissable()`** (`src/dismissable.ts`) on the picker's wrap
+     element — outside-press + Escape, for free.
+   - **A 12s idle timer**, re-armed on pointer movement inside the picker,
+     scroll, keystroke, and picking an app:
+     ```ts
+     const EXC_PICKER_IDLE_MS = 12_000;
+     function armExcIdle(): void {
+       window.clearTimeout(_excIdleTimer);
+       _excIdleTimer = window.setTimeout(closeExcPicker, EXC_PICKER_IDLE_MS);
+     }
+     // wired to: search input, wrap pointermove, scroll container scroll,
+     // and drawAppGrid's onPick (armExcIdle() before addException()).
+     ```
+     12s, not profile-editor's 15s or something shorter: scanning a grid of
+     app icons to find the right one is slower than typing a name, and a
+     picker that vanishes mid-scan is a worse bug than the one being fixed.
+   - **"Done adding" stays** — now one way out among several, not the only
+     one, so nobody who already relies on it is stranded.
+
+   **The propagation gotcha, found and fixed while implementing (a) — worth
+   recording as its own class of bug.** `main.ts` wires
+   `panelEl.addEventListener("click", e => e.stopPropagation())` at bootstrap
+   (PROBLEM 98 — required so the settings panel itself survives clicks inside
+   it). `registerDismissable`'s "outside press" detection is a
+   **document-level** click listener. A press that lands OUTSIDE the whole
+   settings panel never passes through `panelEl` at all, so it reaches
+   `document` fine. But a press that lands INSIDE the panel and outside the
+   picker — another settings row, a slider, blank space in the box — bubbles
+   up and dies at `panelEl`'s own stopPropagation listener; it never reaches
+   `document`, so `registerDismissable` alone cannot see it and the picker
+   would stay open. Fixed by adding a **second** listener, scoped to the panel
+   itself rather than document:
+   ```ts
+   function wireExcPanelOutsideClick(): void {
+     if (_excPanelClickWired || !panelEl) return;
+     _excPanelClickWired = true;
+     panelEl.addEventListener("click", (e) => {
+       if (!_excPickerOpen || !_excPickerWrap) return;
+       if (e.timeStamp <= _excArmedAt) return;                 // the click that opened it
+       if (_excPickerWrap.contains(e.target as Node)) return;  // handled inside the picker
+       closeExcPicker();
+     });
+   }
+   ```
+   This works because `e.stopPropagation()` only stops an event from reaching
+   ANCESTOR elements — it does not stop other listeners registered on the
+   SAME element from running. `main.ts`'s stopPropagation listener and this
+   new one both live on `panelEl`, so both still fire for every click inside
+   the panel; only the trip past `panelEl` to `document` is cut. Wired once
+   (guarded by `_excPanelClickWired`), a no-op whenever the picker is closed.
+
+**Verified.** `npx tsc --noEmit` exits 0. `npm run build` exits 0, 0
+warnings. `cargo test --lib`: 25 passed, 0 failed (proves the Rust side is
+genuinely untouched, not just states it). Confirmed the changes reached the
+actual bundle, not just the source: `grep -o "exc-tile\|conflict-row-disc"
+dist2/assets/toast-*.css` found both; `grep -o "12e3" dist2/assets/main-*.js`
+found the idle constant (`12_000` minifies to `12e3`); `grep -o "from
+exceptions" dist2/assets/main-*.js` found the new aria-label text. **Not yet
+verified:** installer build, install to the real machine, hand-test of the
+tiles, the conflict icons, and the picker's auto-close on the owner's actual
+1707×1067 panel.
+
+**Generalise.** *Any transient UI surface that opens on request needs multiple
+ways to close, not just one. Outside-press, Escape key, and an idle timeout
+(re-armed on user activity) form a complete close pattern. This pattern has
+recurred three times in this project (PROBLEM 178 for the new-profile name box,
+PROBLEM 192 for the picker, with the same mechanisms reused deliberately
+rather than hand-rolled twice). The pattern belongs in a shared helper
+(`dismissable.ts`, with idle logic nearby) so future transient surfaces get it
+automatically. A secondary lesson worth keeping: when a dismissal mechanism
+listens at `document` level but lives inside a container with a
+stopPropagation boundary, add a second boundary-scoped listener for the inner
+surface — a single global listener cannot see presses that die at a boundary
+before reaching the global context.*
+
+---

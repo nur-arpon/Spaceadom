@@ -537,8 +537,11 @@ body.nocturne #key-detail-panel { box-shadow: 0 24px 60px rgba(0, 0, 0, .55); }
   color: var(--st-text-dim);
 }
 
-#ed-grid-scroll { max-height: 212px; overflow-y: auto; margin: 0 -4px; padding: 0 4px 4px; }
-#ed-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+/* The id form is the key editor's markup; the class form is the App-exceptions
+   picker in Settings, which renders the SAME grid from components/app-grid.ts.
+   One rule for both, so the two pickers cannot drift visually either. */
+#ed-grid-scroll, .ed-grid-scroll { max-height: 212px; overflow-y: auto; margin: 0 -4px; padding: 0 4px 4px; }
+#ed-grid, .ed-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
 
 .ed-tile {
   display: flex;
@@ -719,7 +722,7 @@ body.theme-xfade .toggle-track {
 .conflict-row:hover { background: var(--st-accent-tint); }
 .conflict-row:focus-visible { outline: 2px solid var(--st-accent-brd); outline-offset: 2px; }
 .conflict-row-cta {
-  grid-column: 1 / -1;
+  grid-column: 2 / -1;
   font-size: 10.5px;
   font-weight: 700;
   color: var(--st-accent-deep);
@@ -858,9 +861,85 @@ body.nocturne #conflict-banner {
 .conflict-close:hover { opacity: 1; background: rgba(0, 0, 0, .07); }
 
 /* Settings › Conflicts rows */
+/* App exceptions — a wrapping grid of compact tiles: icon prominent, name in
+   very small type beneath it, side by side rather than one row per app (the
+   owner: full-name rows cost "so much space… isn't worth it"). Same card
+   vocabulary as the app-grid tiles (.ed-tile) and .conflict-row below, so the
+   whole panel reads as one family. */
+.exc-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+.exc-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 58px;
+  padding: 7px 4px 5px;
+  border-radius: 12px;
+  border: 1px solid var(--st-border);
+  background: var(--st-card);
+}
+.exc-tile-disc {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-full);
+  background: var(--st-accent-tint);
+  font-size: 12px;
+  font-weight: 800;
+  color: #fff;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.exc-tile-disc img { width: 30px; height: 30px; border-radius: var(--radius-full); object-fit: contain; }
+.exc-tile-name {
+  font-size: 10.5px;
+  font-weight: 600;
+  max-width: 100%;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The remove badge: tucked into the corner, quiet until it's needed. Always
+   on for keyboard focus (:focus-within covers the button itself receiving
+   focus) so it stays reachable without a mouse even though it's invisible
+   at rest. */
+.exc-tile-x {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--st-border);
+  background: var(--st-card);
+  color: var(--st-text-dim);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 140ms var(--ease-out), background-color 160ms var(--ease-out), color 160ms var(--ease-out);
+}
+.exc-tile:hover .exc-tile-x,
+.exc-tile:focus-within .exc-tile-x,
+.exc-tile-x:focus-visible {
+  opacity: 1;
+}
+.exc-tile-x:hover { background: var(--st-danger-tint, var(--st-accent-tint)); color: var(--st-text); }
+.exc-tile-x:focus-visible { outline: 2px solid var(--st-accent-brd); outline-offset: 2px; }
+
 .conflict-row {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
   gap: 2px 8px;
   padding: 8px 10px;
   margin-bottom: 6px;
@@ -868,6 +947,25 @@ body.nocturne #conflict-banner {
   border: 1px solid var(--st-border);
   background: var(--st-card);
 }
+/* The conflicting program's icon (PROBLEM: "show the app icon of the
+   conflicting app as well") — spans both text rows so it sits centred
+   beside the name+detail block rather than only the top line. */
+.conflict-row-disc {
+  grid-row: 1 / 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-full);
+  background: var(--st-accent-tint);
+  font-size: 10px;
+  font-weight: 800;
+  color: #fff;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.conflict-row-disc img { width: 22px; height: 22px; border-radius: var(--radius-full); object-fit: contain; }
 .conflict-row-name { font-size: 12.5px; font-weight: 700; }
 .conflict-row-proc {
   font-family: ui-monospace, Menlo, Consolas, monospace;
@@ -876,7 +974,7 @@ body.nocturne #conflict-banner {
   text-align: right;
 }
 .conflict-row-why {
-  grid-column: 1 / -1;
+  grid-column: 2 / -1;
   font-size: 11px;
   color: var(--st-text-dim);
   line-height: 1.4;

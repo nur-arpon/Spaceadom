@@ -249,6 +249,10 @@ pub fn save(config: &AppConfig) -> Result<(), String> {
     // lib.rs's startup load: the atomic starts at 0, so without that one every
     // bit is clear from launch until the first save.
     crate::hook::publish_bound_specials(config);
+    // PROBLEM 180 again, for the App-exceptions list — published from BOTH
+    // here and the startup load in lib.rs. Published from save alone, the
+    // feature would be dead from launch until the user happened to save.
+    crate::hook::exclusions::publish_excluded_apps(config);
     save_to_disk(config, &path).map_err(|e| e.to_string())
 }
 

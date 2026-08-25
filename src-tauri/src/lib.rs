@@ -485,6 +485,10 @@ pub fn run() {
     // until the user happens to save something, and Space+Enter / Tab / arrows
     // / F1-F12 are eaten in the meantime.
     hook::publish_bound_specials(&shared_config.read().unwrap_or_else(|p| p.into_inner()));
+    // PROBLEM 180 — the App-exceptions list has to be published HERE as well
+    // as in config::save, or an excluded app is not excluded until the first
+    // save of the session.
+    hook::exclusions::publish_excluded_apps(&shared_config.read().unwrap_or_else(|p| p.into_inner()));
 
     // ----------------------------------------------------------------
     // 4b. PROBLEM 80 — overlay compositing mode. MUST run before the Tauri
@@ -664,6 +668,12 @@ pub fn run() {
                     flag_clone,
                     cfg.fullscreen_allowlist.clone(),
                 );
+
+                // 8b. Start the App-exceptions watcher. Same shape as the
+                // fullscreen watcher above: a named 500ms poller that writes
+                // one atomic the hook reads, because the hook callback may not
+                // ask Windows which window is in front.
+                hook::exclusions::start_exclusion_watcher();
 
                 // PROBLEM 88 — the 500ms "copier" thread that used to live
                 // here is GONE. It was the only writer to

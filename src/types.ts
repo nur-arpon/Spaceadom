@@ -45,6 +45,10 @@ export interface AppConfig {
   browser_path: string | null;
   /** Process names never treated as exclusive-fullscreen for hook suppression. */
   fullscreen_allowlist: string[];
+  /** Apps Spaceadom stands down inside — the "App exceptions" list.
+   *  LOWERCASE EXE STEMS ("photoshop"), matching hook/exclusions.rs.
+   *  Optional: every config written before 1.0.79 lacks it. */
+  excluded_apps?: string[];
   /** All user-defined shortcut profiles. */
   profiles: Profile[];
   /** Nocturne (dark) mode. ONE setting drives dashboard AND overlay. */

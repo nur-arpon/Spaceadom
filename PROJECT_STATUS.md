@@ -1,5 +1,178 @@
+## 2026-08-25 — Claude Sonnet 5 — 1.0.80: app-exceptions UI review pass (tiles, conflict icons, self-closing picker)
+
+**The work.** The owner reviewed 1.0.79's "App exceptions" feature and asked
+for three UI changes. All three are frontend-only — nothing on the hook path,
+no new Rust command, `cargo test --lib` untouched (25/25 still pass, proving
+this).
+
+1. **Exception tiles, not rows.** *"Just show their icon, and maybe their
+   name can be beneath the icon in very small font… the apps excepted can be
+   side by side."* `renderAppExceptions()` in `src/components/settings-panel.ts`
+   now builds a `.exc-grid` of `.exc-tile`s (flex-wrap, ~58px each) instead of
+   one `.exc-row` per app: icon on top (30px, `title=` the full name for
+   hover-discovery on truncated ones), name beneath at 10.5px. The ✕ remove
+   control moved to a corner badge (`.exc-tile-x`), opacity 0 until
+   `:hover`/`:focus-within`/`:focus-visible` — the `:focus-within` rule is what
+   keeps it reachable by keyboard even though it's invisible at rest.
+
+2. **Conflict-row icons.** *"Show the app icon of the conflicting app as
+   well."* Took the cheap path the investigation flagged: `Conflict.process`
+   (Rust) is already a bare exe filename like `"autohotkey64.exe"` —
+   `exeStem()` strips a path separator only when one exists, so it works
+   unchanged on a bare filename. Added `findAppByStem()` to
+   `src/components/app-grid.ts` (linear scan of the already-cached Start-Menu
+   list) and looked it up in `renderConflicts()`. No new Rust command. Falls
+   back to the letter disc exactly like every other app icon in this app if
+   the process isn't a Start-Menu app Spaceadom has scanned.
+
+3. **The picker closes itself.** *"If someone presses another place it
+   shouldn't stay and wait for pressing Done adding. And after a few seconds
+   it should automatically close."* Same trap as PROBLEM 178 (profile-editor's
+   new-profile box), so it gets the SAME two mechanisms rather than a third:
+   `registerDismissable()` (`src/dismissable.ts`) for outside-press + Escape,
+   and a 12s idle timer re-armed on pointer movement, scroll, keystroke, and
+   picking an app. "Done adding" stays as one more way out.
+   **The propagation gotcha:** `main.ts` stops `click` propagation at
+   `#settings-panel` itself (PROBLEM 98), so `registerDismissable`'s
+   document-level listener can only ever see a press that lands OUTSIDE the
+   whole panel — a click that lands inside the panel but outside the picker
+   (another settings row, blank space in the box) dies at `panelEl` before
+   reaching `document`. Added a second listener, `wireExcPanelOutsideClick()`,
+   scoped to `panelEl` itself (same element, so it isn't blocked by the
+   existing stopPropagation listener — only propagation to ANCESTORS is
+   stopped, sibling listeners on the same node still all fire), wired once,
+   no-op while the picker is closed.
+
+**Files changed:** `src/components/settings-panel.ts` (exception tiles,
+conflict-row icon, picker self-close), `src/components/app-grid.ts`
+(`paintAppDisc`/`paintLetterDisc`/`findAppByStem`, shared instead of
+duplicated), `src/styles.css` (`.exc-grid`/`.exc-tile*` replacing `.exc-row*`,
+`.conflict-row-disc`, `.conflict-row-why`/`-cta` regridded from `1 / -1` to
+`2 / -1` now that column 1 is the icon).
+
+**Verified:** `npx tsc --noEmit` exits 0. `npm run build` exits 0, 0 warnings.
+`cargo test --lib`: 25 tests pass, 0 failed (Rust untouched — this run proves
+it, not just states it). Confirmed in the built bundle, not just the source:
+`grep -o "exc-tile\|conflict-row-disc" dist2/assets/toast-*.css` found both;
+`grep -o "12e3" dist2/assets/main-*.js` found the idle-timeout constant
+(minified from `12_000`); `grep -o "from exceptions" dist2/assets/main-*.js`
+found the new aria-label string. Not yet: installer build, install to the
+running machine, hand-test of the tiles/icons/auto-close on the real
+1707×1067 panel.
+
+## 2026-08-25 — Claude Haiku 4.5 — 1.0.79: app exceptions for hold-Space apps (Photoshop, Figma, Blender)
+
+**The work.** One feature completed end-to-end: app exceptions, allowing users to exclude applications from Spaceadom's Space interception. While an excluded app is foreground, the app stands down completely — Space behaves stock, and hold-Space gestures work. Photoshop, Figma and Blender use hold-Space-to-pan, which requires the Space keydown at the application level. The hook suppresses every Space-down system-wide, so those gestures were impossible inside those apps. Excluded apps solve that.
+
+**Implementation.** Five-file change:
+
+1. **`src-tauri/src/hook/exclusions.rs` (NEW, ~230 lines).** Background poller thread, modelled line-for-line on the existing `fullscreen.rs` watcher. Polls foreground window every 500ms. Normalizes exe stem (lowercase, handles `\` and `/`). Checks against `EXCLUDED_LIST: Mutex<Vec<String>>`, sets `EXCLUDED_ACTIVE: AtomicBool`. Uses `Builder::new().name("st-exclusion-watcher")`, `catch_unwind` returning `String::new()` (→ not excluded) on panic — fail-OPEN design, a broken poller must never disable the app. Logs only on state change.
+
+2. **`src-tauri/src/hook/mod.rs`.** Added `pub static EXCLUDED_ACTIVE: AtomicBool = AtomicBool::new(false)` and `pub static SUPPRESS_EXCLUDED: AtomicU32 = AtomicU32::new(0)`. Placed gate immediately after `FULLSCREEN_ACTIVE` check and before bypass branch in both `kb_hook_proc` and `ms_hook_proc`: if excluded, pass through and count suppressed events. `drain_hook_diagnostics` drains the counter and appends `excluded-app:{count}` to diagnostics line.
+
+3. **`src-tauri/src/config/schema.rs`.** Added `#[serde(default)] pub excluded_apps: Vec<String>` with `Vec::new()` default.
+
+4. **`src-tauri/src/config/mod.rs` and `src-tauri/src/lib.rs`.** `publish_excluded_apps` called from both `config::save` and startup load (commented with PROBLEM 180 — atomic that starts empty and is only fed on save means feature is dead until first save). `start_exclusion_watcher()` added as setup step 8b.
+
+5. **`src/components/settings-panel.ts`, `src/components/app-grid.ts`, `src/components/key-detail-panel.ts`.** New "App exceptions" section in settings (same `.set-title .set-row-label .descBox` pattern). Opens app-selection grid identical to key-detail-panel's editor grid. `drawAppGrid` carries tile markup, icon `onerror` fallback, PROBLEM 97's `RENDER_CAP` truncation notice.
+
+**Verified:** `npx tsc --noEmit` exits 0. `npm run build` exits 0. `cargo test --lib` from src-tauri: 23 tests pass, 0 failed. `V14_FIXES_AND_CODE.md` and `all-versions/WHAT-CHANGED.md` updated with PROBLEM 191 and 1.0.79 rows. Not yet: installer build, install to the running machine, live test of the exclusion poller and HUD/toast suppression.
+
+---
 # Spaceadom (formerly SpaceToggle OS / V14) — Project Status & Log
 **IF YOU ARE AN AI AND YOU ARE READING THIS , YOU ARE SUPPOSED TO STORE ALL THE PROBLEMS YOU FACED AND HOW YOU SOLVED THOSE OVER HERE SO THAT SOMEONE ELSE CAN LEARN FROM THE DEVELEPMENT REPORT. IN NO WAY CAN YOU DELETE THESE , WRITE WITH DATE AND TIME AND WHO YOU ARE.**
+
+## 2026-08-25 — Claude Opus 5 — 1.0.79: App exceptions (per-app passthrough)
+
+**The feature, in the owner’s words.** *"In the settings give an option of
+Exclude list or Exception list where people can add their apps they want to
+exclude. The app will automatically pause while in there — it won’t work inside
+the apps of the exception list. When people press that, the similar option of
+choosing apps when pressing letters comes up, and they will be able to choose as
+many apps as exceptions as they want."*
+
+**The condition it fixes.** Photoshop, Figma and Blender pan the canvas on
+HOLD-SPACE + drag. Spaceadom suppresses every Space-down system-wide, so
+verified 2026-08-25 the target app never receives a Space keydown while
+Spaceadom runs, and the gesture is dead. It is not a bug in either app — it is
+what a global spacebar modifier costs, and the only honest fix is a per-app
+passthrough.
+
+**What shipped.**
+- `excluded_apps: Vec<String>` in the config, `#[serde(default)]`, stored as
+  lowercase exe STEMS (`photoshop`), empty by default.
+- `src-tauri/src/hook/exclusions.rs` — a named 500 ms poller
+  (`st-exclusion-watcher`) modelled line-for-line on `hook/fullscreen.rs`:
+  `catch_unwind` around the probe, non-panicking spawn (PROBLEM 124). It reads
+  the foreground exe and writes ONE atomic, `hook::EXCLUDED_ACTIVE`, because the
+  hook callback may not make win32k calls (PROBLEM 58/134/184).
+- The gate sits in `kb_hook_proc` immediately after the fullscreen gate and in
+  `ms_hook_proc` before the wheel is touched. Counted as `excluded-app:{n}` in
+  the diagnostics line.
+- Settings grows an "App exceptions" section directly above Conflicts, using
+  the SAME app grid the key editor uses — extracted to
+  `src/components/app-grid.ts` and shared, not forked.
+
+**Two decisions worth keeping.**
+1. **The probe fails toward NOT excluded.** fullscreen.rs already documents why
+   ("a broken probe must never be able to disable every shortcut"); a probe that
+   panicked and latched `true` here would stand Spaceadom down *everywhere*,
+   silently, until restart.
+2. **No Space + . escape hatch inside an excluded app.** Bypass mode keeps one;
+   this deliberately does not. Full stock behaviour means full stock behaviour —
+   in Photoshop the hook decides nothing at all.
+
+**Also.** The list is published from BOTH `lib.rs` startup and `config::save`
+(PROBLEM 180 — an atomic fed only on save is dead from launch until the first
+save). Self-exclusion is refused with a toast: excluding the app that draws the
+settings panel would be a trap.
+
+**Verified.** `npx tsc --noEmit` clean, `npm run build` clean,
+`cargo check --lib --all-targets` 0 errors 0 warnings, `cargo test --lib`
+25 passed (2 new, on the stem normalisation and matching). NOT yet hand-tested
+in Photoshop on the real machine — the installer has not been run.
+
+---
+
+## 2026-08-25 — Claude Sonnet 5 — 1.0.78: recommended hook timeout lowered 5s -> 1s, owner decision
+
+**The change.** `RECOMMENDED_HOOK_TIMEOUT_MS` in `src-tauri/src/commands.rs`
+lowered from 5000 to 1000, plus the three matching UI strings in
+`src/components/settings-panel.ts` (a fourth stale "5 seconds instead of 0.3"
+string was found and fixed during this pass in the same file, line 659 — it
+had been missed when the other three were updated).
+
+**The owner's reasoning, in his words (recorded verbatim for the record).**
+The LowLevelHooksTimeout limit is machine-wide — if ANY hooked app
+(Spaceadom, PowerToys, spacedesk) genuinely hangs, the keyboard freezes for
+the full limit before Windows evicts it. A possible 5-second system-wide
+freeze is too high a price; 1 second already covers the scheduling stalls
+that cause the daily evictions. If the app's eviction counter shows 1s is
+still not enough, step to 2s from measured data.
+
+## 2026-08-25 — Claude Haiku 4.5 — 1.0.77: diagnostics, Space+modifier, overlay fit
+
+**The work.** Four fixes applied and verified before documentation: all four tested and passing 0 errors / 0 warnings on npm run build and cargo test --lib.
+
+1. **PROBLEM 187 — Elapsed-time window computed against zero-initialized timestamp measures UPTIME, not elapsed.** A diagnostic log line reported "running for 38,539 seconds" when the app had been up for a few minutes — it was subtracting 0 from machine uptime in ms. On first drain, seed LAST_SEEN_REPORT to now; only on subsequent drains compute and print the elapsed window. This moved the zero reference point from the log output into the clock. Lines 128–189 in `src-tauri/src/hook/mod.rs`.
+
+2. **PROBLEM 188 — Space released while another modifier is held silently dropped instead of typing a space.** Alt+Space intended to type a space; instead nothing happened because the Space-UP handler inherited a modifier check from Space-DOWN (correct for preventing commands when Alt is held, wrong for completing the keystroke when no command was launched). The gate now lives only on press; release types a space UNLESS another modifier is still held at release time, in which case a diagnostic counter records the edge case. A new counter SPACE_DROPPED_MODIFIER is drained with the other event counts. Lines 1422–1440 in `src-tauri/src/hook/mod.rs`.
+
+3. **PROBLEM 189 — Diagnostic log misreported when the keyboard hook last received input.** "DEAF for 9 seconds" contradicted "saw 0 events in 0 seconds" because the log used mouse silence to guess whether keyboard silence was a hook fault or user silence, and the elapsed-time computation had zero-initialization issues. Replaced mouse-based discriminator with reference-hook evidence: if the reference hook fired in the last 60s, keys reached the OS and the primary hook failure is real. Combined with PROBLEM 187's seeded clock. Lines 157–187 in `src-tauri/src/hook/mod.rs`.
+
+4. **PROBLEM 190 — Frontend diagnostic log printed duplicate warn lines about overlay fit failures.** Both a null-check branch and the following `.catch()` printed the same failure, turning one problem into confusing duplicate noise. The Rust-side log (overlay_fit_hud INFO) already covers fit results in detail. Deleted the redundant null-branch warn; kept the `.catch()` for genuine IPC rejection. Lines 933–955 in `src/components/toast.ts`.
+
+**Verified:** `npx tsc --noEmit` exits 0. `npm run build` exits 0 with clean output. `cargo test --lib` from src-tauri: 23 tests pass, 0 failed. All changes matched against the build/test commands. Not yet: installer build, install to the running machine, live-log re-verification. That remains for final delivery.
+
+## 2026-08-25 — Claude Haiku 4.5 — 1.0.75: Warcry theme colours and keyboard-limit explanation
+
+**The work.** Two documentation and settings fixes, both observed to be incomplete:
+
+1. **PROBLEM 185 — The Warcry theme's HUD and toasts wore Starry Night colours instead.** The overlay window never had `data-theme` set, so it could not distinguish Warcry from Starry Night — both use the same `nocturne` CSS base, differing only in a secondary tint. Fixed by broadcasting the theme's enum value (not a boolean) via `theme-name-changed` event from Rust, having `overlay.ts` seed `document.body.dataset.theme` at startup from `get_config().theme`, having `toast.ts` listen to apply the change, and adding a complete warcry block to `overlay-earthy.css`.
+
+2. **PROBLEM 186 — "Give Shortcuts More Time" was unexplained.** The owner asked what the setting meant and why it was an option rather than the default. Fixed by adding two notes to the button in `settings-panel.ts`: one explaining Windows' 0.3-second timeout per keystroke and why it cuts off the hook if overrun, and one stating plainly why this is not the default (it is a Windows setting affecting every keyboard app on the PC, needs a sign-out, and the trade-off is that a hung app could hold keys for 5 seconds instead). The button label now names the numbers in both directions.
+
+**Method.** Read the uncommitted code from PROBLEMS 185 and 186 brief above; wrote both V14_FIXES_AND_CODE.md and WHAT-CHANGED.md entries matching the house style; added a dated PROJECT_STATUS.md entry at the top of the log. Files are documentation only; no code changes made here.
 
 ## 2026-08-25 — Claude Opus 5 / Fable 5 — 1.0.74: the logic audit, and three of my own 1.0.73 fixes that were wrong
 

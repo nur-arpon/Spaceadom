@@ -21,6 +21,12 @@ import { sfx } from "../sfx";
 import { openConflictPrompt } from "./conflict-prompt";
 import { toggleSwitchHtml, sliderShell } from "./controls";
 import { showToast } from "./toast";
+// The SAME grid the key editor uses - the owner asked for exactly that
+// picker here. Shared leaf module, never a fork (see app-grid.ts).
+import {
+  drawAppGrid, cachedApps, loadApps, exeStem, findAppByStem, paintAppDisc,
+} from "./app-grid";
+import { registerDismissable } from "../dismissable";
 
 let panelEl: HTMLElement | null = null;
 let _paused = false;
@@ -166,6 +172,12 @@ function render(): void {
     ${sliderRow("huddelay", "Guide HUD delay", appConfig.guide_hud_delay_ms, 100, 1000, 50, "ms")}
     ${sliderRow("opacity",  "Opacity floor",   appConfig.opacity_floor_pct, 10, 90, 5, "%")}
 
+
+    <div class="divider" style="margin:14px 0 10px;"></div>
+    <button type="button" class="set-title set-row-label" data-desc="appexceptions"
+            aria-expanded="false" style="font-size:13px; margin-bottom:8px;">App exceptions</button>
+    ${descBox("appexceptions")}
+    <div id="set-app-exceptions"></div>
 
     <div class="divider" style="margin:14px 0 10px;"></div>
     <button type="button" class="set-title set-row-label" data-desc="conflicts"
@@ -392,6 +404,7 @@ function render(): void {
     render();
   });
 
+  renderAppExceptions();
   renderConflicts();
 
   // PROBLEM 109 — the way back from deleting a preset. Additive: it restores
@@ -460,6 +473,276 @@ function render(): void {
  * close something the user wanted, and it is malware behaviour besides. The
  * user is told exactly what to turn off and decides for themselves.
  */
+/** The picker’s open state and its search text live at module scope, because
+ *  render() replaces the panel’s whole innerHTML and would otherwise slam the
+ *  grid shut every time anything else re-rendered. Same reasoning as the
+ *  open-descriptions snapshot at the top of render(). */
+let _excPickerOpen = false;
+let _excQuery = "";
+
+/**
+ * PROBLEM 178's picker had to be closed by hand, and the owner reported the
+ * same trap a second time, this time for "Add an app": *"Instead of having
+ * to press on Done adding — if someone presses another place it shouldn't
+ * stay and wait for pressing Done adding. And after a few seconds it should
+ * automatically close."* Two ways back now, mirroring profile-editor.ts's
+ * new-profile box exactly rather than inventing a third mechanism:
+ *   - an outside press (registerDismissable, `dismissable.ts`)
+ *   - 12s of no interaction with the picker (re-armed on real use)
+ * "Done adding" stays — it is now one way out among several, not the only
+ * one, so nobody who already relies on it is stranded.
+ */
+const EXC_PICKER_IDLE_MS = 12_000;
+let _excIdleTimer: number | undefined;
+/** Unregisters the picker's dismissable entry. Set while open, cleared on close. */
+let _excUnregisterDismiss: (() => void) | null = null;
+/**
+ * The picker's own container element, and when it was armed. Needed because
+ * registerDismissable's document-level "outside press" listener CANNOT see a
+ * click that lands inside the settings panel but outside the picker — see
+ * `wireExcPanelOutsideClick` below for why, and what covers that gap instead.
+ */
+let _excPickerWrap: HTMLElement | null = null;
+let _excArmedAt = 0;
+let _excPanelClickWired = false;
+
+function armExcIdle(): void {
+  window.clearTimeout(_excIdleTimer);
+  _excIdleTimer = window.setTimeout(closeExcPicker, EXC_PICKER_IDLE_MS);
+}
+
+function openExcPicker(): void {
+  _excPickerOpen = true;
+  _excQuery = "";
+  renderAppExceptions();
+}
+
+function closeExcPicker(): void {
+  if (!_excPickerOpen) return;
+  _excPickerOpen = false;
+  _excQuery = "";
+  window.clearTimeout(_excIdleTimer);
+  _excIdleTimer = undefined;
+  _excUnregisterDismiss?.();
+  _excUnregisterDismiss = null;
+  _excPickerWrap = null;
+  renderAppExceptions();
+}
+
+/**
+ * `main.ts` registers `panelEl.addEventListener("click", e =>
+ * e.stopPropagation())` at bootstrap (PROBLEM 98 — required so the settings
+ * panel survives clicks inside itself). That means a click that lands INSIDE
+ * the panel but OUTSIDE the picker (another settings row, a slider, blank
+ * space in the box) never reaches `document`, so registerDismissable's
+ * document-level listener never fires for it — it only ever sees presses
+ * that land outside the whole panel, which never pass through panelEl at
+ * all. This second listener, scoped to the panel itself rather than
+ * document, closes the gap in between. Wired once; a no-op while the picker
+ * is closed.
+ */
+function wireExcPanelOutsideClick(): void {
+  if (_excPanelClickWired || !panelEl) return;
+  _excPanelClickWired = true;
+  panelEl.addEventListener("click", (e) => {
+    if (!_excPickerOpen || !_excPickerWrap) return;
+    if (e.timeStamp <= _excArmedAt) return;                 // the click that opened it
+    if (_excPickerWrap.contains(e.target as Node)) return;  // handled inside the picker
+    closeExcPicker();
+  });
+}
+
+/** The stems currently excluded, always lowercase. */
+function excludedList(): string[] {
+  return (appConfig?.excluded_apps ?? []).map((s) => s.toLowerCase());
+}
+
+async function setExcluded(list: string[]): Promise<void> {
+  if (!appConfig) return;
+  appConfig.excluded_apps = Array.from(new Set(list.map((s) => s.toLowerCase())));
+  await persistConfig();
+  renderAppExceptions();
+}
+
+/**
+ * "App exceptions" — the apps Spaceadom stands down inside.
+ *
+ * A WRAPPING GRID of compact tiles (icon + name beneath, side by side), the
+ * same visual vocabulary as the app-grid picker below it, rather than one
+ * full-width row per app — the owner: *"the apps excepted can be side by
+ * side"; a full name on every row "isn't worth it" for the space it costs.
+ *
+ * Built with createElement, not innerHTML: app names come off this machine and
+ * the tile text is the user’s data. It also renders into its OWN container, so
+ * adding or removing an entry never triggers the panel-wide render() that
+ * would close the picker mid-use.
+ */
+function renderAppExceptions(): void {
+  const box = panelEl?.querySelector<HTMLElement>("#set-app-exceptions");
+  if (!box) return;
+
+  // Warm the scan now so pressing "Add an app" is not a blank grid.
+  void loadApps();
+
+  const draw = () => {
+    box.innerHTML = "";
+    const list = excludedList();
+    const known = cachedApps() ?? [];
+    // Stem -> the detected app, so a tile can show the real icon and the real
+    // display name instead of the bare stem we store.
+    const byStem = new Map<string, { name: string; icon: string | null }>();
+    known.forEach((a) => {
+      const stem = exeStem(a.path);
+      if (stem && !byStem.has(stem)) {
+        byStem.set(stem, { name: a.name, icon: a.icon_base64 ?? null });
+      }
+    });
+
+    if (list.length === 0) {
+      const none = document.createElement("div");
+      none.className = "set-note";
+      none.style.marginTop = "0";
+      none.textContent = "No exceptions yet — Spaceadom works everywhere.";
+      box.appendChild(none);
+    } else {
+      const grid = document.createElement("div");
+      grid.className = "exc-grid";
+
+      list.forEach((stem, i) => {
+        const hit = byStem.get(stem);
+        const label = hit?.name ?? stem;
+
+        const tile = document.createElement("div");
+        tile.className = "exc-tile";
+        tile.title = label;   // full name discoverable on hover for truncated ones
+
+        const disc = document.createElement("span");
+        disc.className = "exc-tile-disc";
+        paintAppDisc(disc, hit?.icon, label, i);
+
+        const name = document.createElement("span");
+        name.className = "exc-tile-name";
+        name.textContent = label;   // textContent — user data
+
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "exc-tile-x";
+        remove.setAttribute("aria-label", `Remove ${label} from exceptions`);
+        remove.textContent = "✕";
+        remove.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          sfx.tick();
+          await setExcluded(excludedList().filter((s) => s !== stem));
+        });
+
+        tile.append(disc, name, remove);
+        grid.appendChild(tile);
+      });
+
+      box.appendChild(grid);
+    }
+
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "btn btn-sm";
+    add.style.cssText = "width:100%; justify-content:center; margin-top:8px;";
+    add.textContent = _excPickerOpen ? "Done adding" : "Add an app";
+    add.addEventListener("click", (e) => {
+      e.stopPropagation();
+      sfx.tick();
+      if (_excPickerOpen) closeExcPicker(); else openExcPicker();
+    });
+    box.appendChild(add);
+
+    if (!_excPickerOpen) return;
+
+    const wrap = document.createElement("div");
+    wrap.className = "exc-picker";
+
+    const search = document.createElement("input");
+    search.className = "input";
+    search.style.marginTop = "8px";
+    search.placeholder = "Search apps…";
+    search.autocomplete = "off";
+    search.spellcheck = false;
+    search.value = _excQuery;
+    wrap.appendChild(search);
+
+    const label = document.createElement("div");
+    label.className = "ed-section";
+    label.textContent = "Apps on this device";
+    wrap.appendChild(label);
+
+    const scroll = document.createElement("div");
+    scroll.className = "ed-grid-scroll";
+    const grid = document.createElement("div");
+    grid.className = "ed-grid";
+    const empty = document.createElement("div");
+    empty.className = "ed-empty";
+    empty.hidden = true;
+    scroll.append(grid, empty);
+    wrap.appendChild(scroll);
+    box.appendChild(wrap);
+
+    const paint = () => {
+      const current = new Set(excludedList());
+      drawAppGrid(
+        grid,
+        empty,
+        {
+          query: _excQuery,
+          isCurrent: (app) => current.has(exeStem(app.path)),
+          onPick: (app) => { armExcIdle(); void addException(app.path, app.name); },
+        },
+        // A scan that lands after the picker was closed must not repaint a
+        // grid that is no longer on screen.
+        () => _excPickerOpen && !!panelEl && !panelEl.hidden,
+      );
+    };
+
+    search.addEventListener("input", () => { _excQuery = search.value; armExcIdle(); paint(); });
+    // The panel reacts to stray keys; keep typing inside the box. Still counts
+    // as real use of the picker, so it re-arms the idle timer too.
+    search.addEventListener("keydown", (e) => { e.stopPropagation(); armExcIdle(); });
+    wrap.addEventListener("pointermove", armExcIdle);
+    scroll.addEventListener("scroll", armExcIdle, { passive: true });
+    paint();
+
+    // Outside-press + Escape (dismissable.ts), and the idle countdown — both
+    // (re-)armed fresh on every draw, since the wrap element is rebuilt each
+    // time.
+    _excUnregisterDismiss = registerDismissable(wrap, closeExcPicker);
+    _excPickerWrap = wrap;
+    _excArmedAt = performance.now();
+    wireExcPanelOutsideClick();
+    armExcIdle();
+  };
+
+  draw();
+}
+
+/** Add one app to the exception list, from whatever path the grid gave us. */
+async function addException(path: string, label: string): Promise<void> {
+  const stem = exeStem(path);
+  if (!stem) return;
+  // Excluding the app that DRAWS this panel would be a trap: Spaceadom would
+  // stand down whenever its own dashboard had focus, and the setting that
+  // caused it would look like it had simply done nothing.
+  if (stem === "spaceadom") {
+    showToast("Spaceadom cannot exclude itself");
+    sfx.toggleOff("engine");
+    return;
+  }
+  const list = excludedList();
+  if (list.includes(stem)) {
+    showToast(`${label} is already an exception`);
+    return;
+  }
+  sfx.confirm();
+  await setExcluded([...list, stem]);
+  showToast(`Spaceadom will pause inside ${label}`);
+}
+
 function renderConflicts(): void {
   const box = panelEl?.querySelector<HTMLElement>("#set-conflicts");
   if (!box) return;
@@ -474,9 +757,21 @@ function renderConflicts(): void {
       ok.textContent = "Nothing else is remapping your keyboard.";
       box.appendChild(ok);
     } else {
-      knownConflicts.forEach((c) => {
+      knownConflicts.forEach((c, i) => {
         const row = document.createElement("div");
         row.className = "conflict-row";
+
+        // The conflicting program's icon, when we already know it. The cheap
+        // path: `c.process` is a bare exe filename ("autohotkey64.exe"), and
+        // exeStem() strips a path separator only when one is present, so it
+        // works unchanged on a bare filename too — no new Rust command, just
+        // a stem lookup against the SAME Start-Menu scan the exceptions grid
+        // already warms. Degrades to the letter disc exactly like every
+        // other app icon in this app if the scan hasn't found a match.
+        const disc = document.createElement("span");
+        disc.className = "conflict-row-disc";
+        const known = findAppByStem(exeStem(c.process));
+        paintAppDisc(disc, known?.icon_base64, known?.name ?? c.product, i);
 
         const name = document.createElement("span");
         name.className = "conflict-row-name";
@@ -509,7 +804,7 @@ function renderConflicts(): void {
         const hint = document.createElement("span");
         hint.className = "conflict-row-cta";
         hint.textContent = "Press to close it →";
-        row.append(name, proc, why, hint);
+        row.append(disc, name, proc, why, hint);
         box.appendChild(row);
       });
 
@@ -539,6 +834,12 @@ function renderConflicts(): void {
   };
 
   draw();
+
+  // The exceptions section (rendered just before this one) already warms the
+  // Start-Menu scan; if it's still running when conflicts first draw, redraw
+  // once it lands so a row that opened on a letter fallback picks up the
+  // real icon instead of staying stuck on it for the rest of the session.
+  void loadApps().then(() => { if (panelEl && !panelEl.hidden) draw(); });
 }
 
 /**
@@ -581,22 +882,59 @@ async function drawHookHealth(box: HTMLElement, redraw: () => void): Promise<voi
   wrap.className = "set-note sma-note";
   wrap.style.marginTop = "10px";
 
+  // PROBLEM 186 — this used to say "Give shortcuts more time (recommended)"
+  // and nothing else. The owner, 2026-08-25: *"the explanation is not good
+  // enough — even I don't understand what that means… what would happen if
+  // more time is not given, and what is happening by giving more time? And why
+  // keep it as an option rather than the default?"*
+  //
+  // He is right on all three counts, and the third is the important one: a
+  // control whose only justification is the word "(recommended)" is asking for
+  // trust it has not earned. So the copy now answers, in order: what goes
+  // wrong, what the button changes, and why the app will not just do it.
   const said = h.rivals.length
-    ? ` Most likely ${h.rivals.join(" and ")}, which also hook the keyboard.`
+    ? ` The likely cause is ${h.rivals.join(" and ")}, which watch the keyboard too.`
     : "";
+  const why =
+    "Windows gives every app that watches the keyboard 0.3 seconds to handle each " +
+    "keypress. If Spaceadom is still busy when that runs out — a slow moment, or " +
+    "another keyboard app ahead of it in the queue — Windows stops sending it keys " +
+    "altogether. Spaceadom notices and reconnects within a second, but until it does, " +
+    "holding Space does nothing at all.";
   wrap.textContent = h.evictions > 0
-    ? `Windows dropped Spaceadom's keyboard shortcuts ${h.evictions} ` +
-      `time${h.evictions === 1 ? "" : "s"} since it started. Each one is a few seconds ` +
-      `where nothing happens when you hold Space.${said}`
-    : "Windows is giving keyboard shortcuts extra time before dropping them.";
+    ? `Windows has cut Spaceadom off ${h.evictions} time${h.evictions === 1 ? "" : "s"} ` +
+      `since it started.${said}\n\n${why}`
+    : `Windows is currently allowing 1 second instead of the usual 0.3, so a busy ` +
+      `moment is no longer enough for it to cut Spaceadom off.\n\n${why}`;
+  wrap.style.whiteSpace = "pre-line";
   box.appendChild(wrap);
+
+  // WHY IT IS A BUTTON AND NOT THE DEFAULT. Stated plainly, because the honest
+  // answer is also the reassuring one — and because a user who is not told the
+  // trade-off cannot consent to it.
+  const caveat = document.createElement("div");
+  caveat.className = "set-note sma-note";
+  caveat.style.cssText = "margin-top:8px; opacity:.82;";
+  caveat.textContent = h.raised
+    ? "This is a Windows setting, not a Spaceadom one — it applies to every app on " +
+      "this PC that watches the keyboard. Undoing it takes effect after you sign out " +
+      "and back in."
+    : "Spaceadom will not change this for you. It is a Windows setting that applies to " +
+      "every app on this PC that watches the keyboard, and it needs a sign-out to take " +
+      "effect — so it is your call, not the app's. The trade-off: a keyboard app that " +
+      "genuinely hangs could hold your keys for up to 1 second before Windows steps " +
+      "in, instead of 0.3.";
+  box.appendChild(caveat);
 
   const btn = document.createElement("button");
   btn.className = "btn btn-sm";
   btn.style.cssText = "width:100%; justify-content:center; margin-top:8px;";
+  // The label says what it CHANGES, with the numbers in it. "Give shortcuts
+  // more time (recommended)" told the owner nothing — he could not tell what
+  // it did, what it cost, or why he should trust "(recommended)".
   btn.textContent = h.raised
-    ? "Undo the extra time for shortcuts"
-    : "Give shortcuts more time (recommended)";
+    ? "Put back Windows' 0.3 second limit"
+    : "Raise Windows' limit from 0.3 to 1 second";
   btn.addEventListener("click", async () => {
     sfx.tick();
     btn.disabled = true;
@@ -619,7 +957,7 @@ async function drawHookHealth(box: HTMLElement, redraw: () => void): Promise<voi
   fine.textContent = h.raised
     ? "This changes a Windows setting for your account only. Sign out and back in to apply."
     : "Changes one Windows setting for your account only — no admin needed — so Windows waits " +
-      "5 seconds instead of 0.3 before giving up on a shortcut. Sign out and back in to apply.";
+      "1 second instead of 0.3 before giving up on a shortcut. Sign out and back in to apply.";
   box.appendChild(fine);
 }
 
@@ -666,6 +1004,8 @@ const DESC: Record<string, string> = {
   // NOT gated behind "Show me around" like the other teaching prose: a
   // conflict is a live fault on this machine, and the owner wants its
   // explanation there whenever it is (2026-08-20).
+  appexceptions:
+    "Spaceadom pauses itself while any of these apps is in front. Space works exactly as it normally would there — Photoshop’s hold-Space panning, a game’s Space key, anything. Shortcuts come back the moment you switch away.",
   conflicts:
     "Only one program can own the spacebar. Press one below to close it.",
   reset:

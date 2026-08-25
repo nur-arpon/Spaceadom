@@ -933,16 +933,26 @@ function buildHud(payload: GuideHudPayload, entranceDelay = 0): Promise<Rect | n
   return invoke<Rect | null>("overlay_fit_hud", { width: w, height: h })
     .then((r) => {
       if (r) { _rect = r; return r; }
-      // Rust refused the fit (its side logs why). Without this line the PAGE's
-      // record of the clipped-HUD failure was empty too — both halves of the
-      // 2026-08-24 stall were silent, and silence on both sides of an IPC call
-      // is how it cost a full diagnostic round.
-      invoke("overlay_log", {
-        msg: `buildHud: overlay_fit_hud returned null for ${w}x${h} — the ring will be clipped to the window's previous size`,
-      }).catch(() => {});
+      // SHOULD-FIX 4 — the overlay_log call that used to live here is
+      // DELETED, deliberately. `overlay_fit_hud`'s null return means Rust
+      // already refused the fit and logged WHY, at INFO, with MORE detail
+      // than this branch had (commands.rs documents it as a legitimate
+      // non-fault: Space released inside the ~15ms between show and fit).
+      // `overlay_log` is `log::warn!`, so this republished that same benign
+      // event into the alarm channel, 9ms later, with less information —
+      // proven duplicated live:
+      //   07:10:58.828 [INFO] overlay_fit_hud: REFUSED 1144x572 ...
+      //   07:10:58.837 [WARN] overlay-js: buildHud: overlay_fit_hud
+      //                 returned null ...
+      // Rust's copy survives a dead/frozen frontend and is strictly better;
+      // this one only added noise to WARN.
       return null;
     })
     .catch((e) => {
+      // KEPT: a rejected invoke is a real IPC failure (the command didn't
+      // even complete), which Rust has no way to observe on its own — unlike
+      // the null branch above, there is no Rust-side log this duplicates.
+      // Has never fired in practice, but if it ever does, WARN is correct.
       invoke("overlay_log", { msg: `buildHud: overlay_fit_hud REJECTED: ${e}` }).catch(() => {});
       return null;
     });
@@ -2062,6 +2072,27 @@ export function applyTheme(dark: boolean): void {
   document.body.classList.toggle("nocturne", dark);
 }
 
+/**
+ * PROBLEM 185 — which of the three looks the overlay is wearing.
+ *
+ * `applyTheme` above takes a BOOLEAN, and that is the whole bug: `dark_mode` is
+ * true for warcry AND for starry, because both sit on the same nocturne base
+ * and each re-tints on top of it. So the overlay could not tell them apart and
+ * wore starry's night-sky palette in warcry — the owner, 2026-08-25: *"for the
+ * warcry theme the guide hud and toasts colour was not matched, it's still
+ * using the ones from starry night."*
+ *
+ * The dashboard has always keyed its warcry rules off `data-theme` on <body>
+ * (`themes.css`: `body.nocturne[data-theme="warcry"]`). The overlay is a
+ * SEPARATE window that never had the attribute set, so every warcry rule
+ * missed it. Setting the same attribute here means the overlay and the
+ * dashboard select on one identical mechanism instead of two that can drift.
+ */
+export function applyThemeName(theme: string): void {
+  const t = theme === "warcry" || theme === "starry" ? theme : "earthy";
+  document.body.dataset.theme = t;
+}
+
 /** Sound ticks on/off. Exported so overlay.ts can seed it at startup. */
 export function applySound(on: boolean): void {
   _soundOn = on;
@@ -2109,6 +2140,8 @@ export async function initToastListener(): Promise<void> {
   await listen<boolean>("guide-hud-hide", (e) =>
     hideGuideHud(e.payload === true));
   await listen<boolean>("theme-changed", (e) => applyTheme(!!e.payload));
+  // PROBLEM 185 — the theme NAME, which is what tells warcry from starry.
+  await listen<string>("theme-name-changed", (e) => applyThemeName(String(e.payload ?? "earthy")));
   await listen<boolean>("sound-changed", (e) => { _soundOn = !!e.payload; });
   // PROBLEM 174 — `=== true`, not `!!`: absent must read as OFF.
   await listen<boolean>("flight-changed", (e) => applyFlight(e.payload === true));

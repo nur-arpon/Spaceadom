@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   initToastListener,
   applyTheme,
+  applyThemeName,
   applySound,
   applyFlight,
   markOverlayWindow,
@@ -11,6 +12,18 @@ import {
 // via overlay_fit / overlay_toasts_done — the dashboard shares this module for
 // its own toasts and must never touch those commands (PROBLEM 45).
 markOverlayWindow();
+
+// PROBLEM 185 regression fix — a marker to scope CSS to THIS body only.
+// overlay.html's <body> had no id/class of its own (it holds only
+// #toast-container), so nothing distinguished it from the dashboard's body
+// for CSS purposes. applyThemeName() (toast.ts) now sets the same
+// `data-theme` attribute the dashboard uses, and themes.css has full-bleed
+// `body.nocturne[data-theme="warcry"/"starry"]::before` decoration keyed off
+// exactly that attribute — see the reset in styles/overlay-earthy.css, which
+// needs this class to target the overlay body without touching the
+// dashboard's. Set before DOMContentLoaded so it is present for the very
+// first paint.
+document.body.classList.add("st-overlay");
 
 // Surface overlay JS failures in the Rust log — the webview console is
 // invisible in production, so without this an exception here just looks
@@ -44,12 +57,18 @@ window.addEventListener("DOMContentLoaded", () => {
   // out explicitly ("ONE setting drives everything").
   invoke<{
     dark_mode?: boolean;
+    theme?: string;
     sound_enabled?: boolean;
     motion?: string;
     hud_toast_flight?: boolean;
   }>("get_config")
     .then((cfg) => {
       applyTheme(!!cfg?.dark_mode);
+      // PROBLEM 185 — seeded here for the same reason as the theme bool:
+      // "theme-name-changed" only fires on a CHANGE, so a freshly created
+      // overlay (first launch, or after a display-change rebuild) would
+      // otherwise wear the wrong palette until the user next switched theme.
+      applyThemeName(cfg?.theme ?? "earthy");
       applySound(!!cfg?.sound_enabled);
       // PROBLEM 174 — seed the guide-to-toast motion from the saved config for
       // the same reason the theme is seeded here: "flight-changed" only fires

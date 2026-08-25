@@ -16,7 +16,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { showToast } from "./toast";
 import { getKeyCell, animateKeyPop, cleanLabel } from "./keyboard-matrix";
-import type { AppConfig, AppInfo, KeyBinding, ConflictResult } from "../types.ts";
+// The app grid is SHARED with the App-exceptions setting (2026-08-25). Do not
+// re-inline it here: two copies drift and only one gets the next fix.
+import { loadApps, drawAppGrid } from "./app-grid";
+import type { AppConfig, KeyBinding, ConflictResult } from "../types.ts";
 
 let _panel: HTMLElement | null = null;
 let _backdrop: HTMLElement | null = null;
@@ -25,16 +28,7 @@ let _currentKey: string | null = null;
 let _onSave: ((key: string, binding: KeyBinding) => void) | null = null;
 let _onClosed: (() => void) | null = null;
 
-/** Detected apps, fetched once and reused for every key. */
-let _apps: AppInfo[] | null = null;
-let _appsPromise: Promise<AppInfo[]> | null = null;
 let _query = "";
-
-/** Fallback disc colours, matching the mockup's earthy set. */
-const DISC_COLORS = [
-  "#c67139", "#b08a3e", "#a8552f", "#8a6c4a",
-  "#c2884e", "#6e3a15", "#7a8a5e", "#5f7052",
-];
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -134,16 +128,6 @@ export function updatePanelConfig(config: AppConfig): void {
 // ---------------------------------------------------------------------------
 // Detected apps
 // ---------------------------------------------------------------------------
-
-function loadApps(): Promise<AppInfo[]> {
-  if (_apps) return Promise.resolve(_apps);
-  if (!_appsPromise) {
-    _appsPromise = invoke<AppInfo[]>("list_start_menu_apps")
-      .then((list) => { _apps = list; return list; })
-      .catch(() => { _apps = []; return []; });
-  }
-  return _appsPromise;
-}
 
 // ---------------------------------------------------------------------------
 // Render
@@ -252,96 +236,27 @@ function renderGrid(): void {
   const empty = _panel?.querySelector<HTMLElement>("#ed-empty");
   if (!grid || !empty) return;
 
-  const draw = (apps: AppInfo[]) => {
-    const q = _query.trim().toLowerCase();
-    const filtered = q ? apps.filter((a) => a.name.toLowerCase().includes(q)) : apps;
-
-    // PROBLEM 97 — this was `slice(0, 60)` with the comment "the grid scrolls;
-    // 60 is plenty". It is not plenty, and the truncation was SILENT: this
-    // machine has 210 Start Menu shortcuts plus Store apps, so scrolling the
-    // unfiltered grid showed only the first 60 alphabetically while searching
-    // appeared to reveal apps that "weren't there" — because a query narrows
-    // the set below the cap. The user reported exactly that.
-    //
-    // The cap now exists only as a rendering-cost backstop for an implausibly
-    // large machine, and when it bites it SAYS SO. A list that quietly stops
-    // is indistinguishable from a scanner that missed something.
-    const RENDER_CAP = 500;
-    const shown = filtered.slice(0, RENDER_CAP);
-    const truncated = filtered.length - shown.length;
-
-    grid.innerHTML = "";
-    if (shown.length === 0) {
-      empty.hidden = false;
-      empty.textContent = apps.length === 0
-        ? "No apps detected on this device"
-        : `No apps match “${_query}”`;
-      return;
-    }
-    empty.hidden = true;
-
-    const currentApp = _currentKey ? getBinding(_currentKey)?.app ?? null : null;
-
-    shown.forEach((app, i) => {
-      const tile = document.createElement("div");
-      tile.className = "ed-tile" + (currentApp === app.path ? " current" : "");
-      tile.style.animationDelay = `${100 + Math.min(i, 20) * 22}ms`;
-      tile.title = app.path;
-
-      const disc = document.createElement("span");
-      disc.className = "ed-tile-disc";
-      const letterFallback = () => {
-        disc.innerHTML = "";
-        disc.style.background = DISC_COLORS[i % DISC_COLORS.length];
-        disc.textContent = (app.name[0] || "?").toUpperCase();
-      };
-      if (app.icon_base64) {
-        const img = document.createElement("img");
-        // If the payload is ever malformed, show the letter disc rather than
-        // the browser's broken-image glyph — a torn-paper icon on every tile
-        // is what a CSP block looked like before `img-src data:` was added.
-        img.onerror = letterFallback;
-        img.src = `data:image/png;base64,${app.icon_base64}`;
-        img.alt = "";
-        disc.appendChild(img);
-      } else {
-        letterFallback();
-      }
-
-      const name = document.createElement("span");
-      name.className = "ed-tile-name";
-      name.textContent = app.name;         // textContent — user data
-
-      tile.append(disc, name);
-      tile.addEventListener("click", () =>
+  // The tiles, the icon fallback, the RENDER_CAP notice and the "no apps
+  // match" copy all live in components/app-grid.ts now — shared verbatim with
+  // the App-exceptions setting.
+  const key = _currentKey;
+  drawAppGrid(
+    grid,
+    empty,
+    {
+      query: _query,
+      isCurrent: (app) => (key ? getBinding(key)?.app ?? null : null) === app.path,
+      onPick: (app) =>
         commit({
           app: app.path,
           web_url: null,
           label: app.name,
           icon_override: app.icon_base64 ?? null,
         }),
-      );
-      grid.appendChild(tile);
-    });
-
-    // PROBLEM 97 — never let the list stop without saying why.
-    if (truncated > 0) {
-      const note = document.createElement("div");
-      note.className = "ed-grid-note";
-      note.style.cssText =
-        "grid-column:1/-1; padding:8px 4px 2px; font-size:11px; opacity:.6; text-align:center;";
-      note.textContent =
-        `+${truncated} more app${truncated === 1 ? "" : "s"} — type in the search box to narrow the list`;
-      grid.appendChild(note);
-    }
-  };
-
-  if (_apps) draw(_apps);
-  else {
-    empty.hidden = false;
-    empty.textContent = "Scanning this device…";
-    void loadApps().then((list) => { if (_currentKey) draw(list); });
-  }
+    },
+    // Abandon a late scan result if the editor moved to another key or closed.
+    () => _currentKey === key && key !== null,
+  );
 }
 
 // ---------------------------------------------------------------------------

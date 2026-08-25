@@ -91,6 +91,20 @@ pub struct AppConfig {
     /// Process names that are never treated as exclusive-fullscreen for hook suppression.
     pub fullscreen_allowlist: Vec<String>,
 
+    /// Apps Spaceadom stands down inside — the owner's "exception list".
+    ///
+    /// Stored as LOWERCASE EXE STEMS ("photoshop", never
+    /// "C:\...\Photoshop.exe"), the same normalisation the conflicts and
+    /// fullscreen-allowlist code use. While one of these is the foreground
+    /// window the hook passes EVERYTHING through, so hold-Space canvas panning
+    /// in Photoshop/Figma/Blender works exactly as it does with Spaceadom
+    /// closed.
+    ///
+    /// `#[serde(default)]` is load-bearing: every config written before
+    /// 1.0.79 lacks the field, and without it they all fail to deserialise.
+    #[serde(default)]
+    pub excluded_apps: Vec<String>,
+
     /// All user-defined shortcut profiles.
     pub profiles: Vec<Profile>,
 
@@ -319,6 +333,8 @@ impl Default for AppConfig {
                 "vlc.exe".into(),
                 "mpv.exe".into(),
             ],
+            // Empty by default. Nobody gets an app excluded without asking.
+            excluded_apps: Vec::new(),
             profiles: Vec::new(),
             special_keys: HashMap::new(),
             dark_mode: false,
