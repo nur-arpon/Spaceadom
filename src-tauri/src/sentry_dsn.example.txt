@@ -1,0 +1,16 @@
+Paste your real Sentry DSN below, on its own line, nothing else in this file.
+Get it from: sentry.io -> your project -> Settings -> Client Keys (DSN).
+
+Then save it as `sentry_dsn.txt` (no `.example`) in this same folder —
+`src-tauri/src/sentry_dsn.txt` — which is gitignored on purpose (PROBLEM 196):
+a leaked DSN is not a secret in the security sense (it can only SUBMIT
+events, never read or manage the account), but a public one is an open
+invitation to spam fake crashes and burn through the free tier's 5,000
+events/month.
+
+`sentry_dsn.txt` is read at COMPILE time via `include_str!`, so:
+  - if it does not exist, the build fails loudly. That is deliberate — a
+    build that silently shipped with telemetry quietly OFF because the file
+    was missing would be far worse than a build that refuses to compile.
+  - editing it requires a rebuild (`npm run tauri build`) to take effect,
+    same as any other compiled-in constant.

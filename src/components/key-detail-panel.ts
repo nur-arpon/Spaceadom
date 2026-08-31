@@ -18,8 +18,27 @@ import { showToast } from "./toast";
 import { getKeyCell, animateKeyPop, cleanLabel } from "./keyboard-matrix";
 // The app grid is SHARED with the App-exceptions setting (2026-08-25). Do not
 // re-inline it here: two copies drift and only one gets the next fix.
-import { loadApps, drawAppGrid } from "./app-grid";
-import type { AppConfig, KeyBinding, ConflictResult } from "../types.ts";
+import { loadApps, cachedApps, drawAppGrid, paintAppDisc } from "./app-grid";
+// "Open this in a specific browser profile" (2026-08-26). Also a leaf module.
+import {
+  warmBrowsers,
+  warmDefaultBrowser,
+  findBrowserByExe,
+  knownBrowsers,
+  loadBrowsers,
+  renderProfileChip,
+  renderProfilePage,
+  loadDefaultBrowser,
+  cachedDefaultBrowser,
+  labelOf,
+} from "./browser-profile-picker";
+import type {
+  AppConfig,
+  KeyBinding,
+  ConflictResult,
+  DetectedBrowser,
+  DefaultBrowserInfo,
+} from "../types.ts";
 
 let _panel: HTMLElement | null = null;
 let _backdrop: HTMLElement | null = null;
@@ -29,6 +48,37 @@ let _onSave: ((key: string, binding: KeyBinding) => void) | null = null;
 let _onClosed: (() => void) | null = null;
 
 let _query = "";
+
+/**
+ * Page 2 — the browser-profile page — while it is up. It is a child of the
+ * panel, absolutely positioned over page 1, so page 1 STAYS IN THE DOM and the
+ * panel's height never changes. That is the whole reason it is drawn this way:
+ * the panel must not resize, because the keyboard behind it is scaled to fit
+ * and any change to the panel's box would make the board re-layout.
+ */
+let _page: HTMLElement | null = null;
+/** Cleared by `closeProfilePage`; the exit tween needs a handle on its timer. */
+let _pageTimer = 0;
+
+/**
+ * The EXACT value the assigned-value pill loaded back into `#ed-path` for
+ * editing, or null when the field's contents are the user's own.
+ *
+ * It exists to answer one question that nothing else can: "is the text in this
+ * field something already saved, or something new?" Before the pill there was
+ * no way for the field to hold an already-committed value, so every non-empty
+ * field meant "the user typed this" and re-assigning on Done was always right
+ * (PROBLEM 199). Clicking the pill body breaks that assumption.
+ *
+ * WHY THIS MATTERS AND IS NOT DEFENSIVE PADDING: `assignFromPath`'s URL branch
+ * deliberately omits the three browser-profile fields so that re-pointing a key
+ * CLEARS the pin, and `commit()` normalises them to null. So re-committing an
+ * unchanged URL would silently wipe a browser-profile pin — which is verbatim
+ * the failure `assignFromPath`'s own comment records: *"the same omission
+ * silently wiped a pin the user had just set on a url they were only editing."*
+ * Clicking a pill to look at a URL and pressing Done is exactly "only editing".
+ */
+let _pathSeed: string | null = null;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -48,8 +98,56 @@ export function initKeyDetailPanel(
 
   _backdrop?.addEventListener("click", () => closePanel());
 
-  // Warm the app list in the background so the first open is not a blank grid.
+  // PROBLEM 205 — the three warm-ups that USED to run here have moved to
+  // `warmPickerData()`, fired on the FIRST openPanel(). Read this before
+  // moving them back:
+  //
+  // `initKeyDetailPanel` is on the critical path to first paint. main.ts
+  // calls it during bootstrap(), and bootstrap()'s LAST act is
+  // `dashboard_ready`, which is the only thing that shows the window
+  // (PROBLEM 74). Every command these warm-ups fire — `list_start_menu_apps`,
+  // `list_browser_profiles`, `get_default_browser` — is a NON-async
+  // `#[tauri::command]`, so each one runs on the MAIN THREAD and every other
+  // IPC call from both webviews queues behind it. Measured on the owner's
+  // machine: ~12s + ~2.5s of main-thread block, inside a 15.8s startup during
+  // which he saw no window at all, only a tray icon.
+  //
+  // Nothing is lost by deferring them: every consumer already treats "not
+  // landed yet" as its own state rather than as an answer. `drawAppGrid`
+  // renders "Scanning this device…", `wireProfileChip` re-checks after
+  // `loadBrowsers()` resolves, `knownBrowsers()` falls back to last session's
+  // list from localStorage, and the default-browser disc repaints when
+  // `loadDefaultBrowser()` lands.
+  //
+  // This does NOT make the scan cheap — it relocates it. Until
+  // `list_start_menu_apps` is safe to make `async` (it calls in-process COM;
+  // see its doc comment), the first editor open pays the cost. That is a
+  // deliberate trade: a wait the user asked for, with a visible "Scanning…"
+  // note, beats the same wait before any window exists.
+}
+
+/**
+ * Start every picker scan the editor needs, once, on first open.
+ *
+ * Called from `openPanel`, NOT from `initKeyDetailPanel` — see the note there.
+ * Fire-and-forget by design: nothing awaits these, and each of the three
+ * loaders is idempotent and caches for the session, so a second call is free.
+ */
+let _pickerWarmed = false;
+function warmPickerData(): void {
+  if (_pickerWarmed) return;
+  _pickerWarmed = true;
+  // The app grid. ~12s on the owner's machine; `drawAppGrid` shows its
+  // "Scanning this device…" state until this lands.
   void loadApps();
+  // The browser scan (~2.5s: it walks AppData). Starting it as the panel opens
+  // means the profile picker is usually populated by the time the user reaches
+  // it, and `knownBrowsers()` covers the gap from last session's cached list.
+  warmBrowsers();
+  // …and the OS default browser, for 4b's leading disc. Cheap and cached on the
+  // Rust side (one registry read plus the shared icon cache), so the disc
+  // paints its real icon rather than swapping a placeholder for an icon later.
+  warmDefaultBrowser();
 }
 
 export function openPanel(key: string, config: AppConfig, origin?: HTMLElement): void {
@@ -58,6 +156,9 @@ export function openPanel(key: string, config: AppConfig, origin?: HTMLElement):
   _query = "";
 
   if (!_panel) return;
+
+  // PROBLEM 205 — first open pays for the picker scans, not bootstrap.
+  warmPickerData();
 
   // --fx/--fy = vector from the stage centre to the key that was pressed.
   // The bloom animation starts there and lands centred; closing reverses it.
@@ -94,6 +195,11 @@ export function openPanel(key: string, config: AppConfig, origin?: HTMLElement):
 
 export function closePanel(): void {
   if (!_panel || _panel.hidden) return;
+
+  // Page 2 goes with the panel, and INSTANTLY: the panel is already collapsing
+  // back into the key, so sliding the page out on top of that would be two
+  // exits fighting over the same 280ms.
+  closeProfilePage(true);
 
   _panel.classList.remove("open");
   _panel.classList.add("closing");        // collapses back into the key
@@ -136,6 +242,15 @@ export function updatePanelConfig(config: AppConfig): void {
 function renderPanel(key: string): void {
   if (!_panel || !_config) return;
 
+  // `_panel.innerHTML = …` below would orphan page 2's node while leaving
+  // `_page` pointing at it. Tear it down first, on the same path everything
+  // else does.
+  closeProfilePage(true);
+  // The seed describes the CONTENTS of a field that is about to be replaced, so
+  // it cannot outlive it. Left standing it would compare a fresh paste against
+  // the previous key's URL — and a match would silently skip a real bind.
+  _pathSeed = null;
+
   const binding = getBinding(key);
   const bound = !!(binding && (binding.app || binding.web_url));
   const boundLabel = bound
@@ -153,6 +268,18 @@ function renderPanel(key: string): void {
         <span class="ed-sub" id="ed-sub"></span>
       </span>
       <button class="ed-close" id="ed-close" aria-label="Close">✕</button>
+    </div>
+
+    <!-- "Open this in a specific browser profile" (2026-08-26). Hidden unless
+         this binding is a URL or a detected browser; see wireProfileChip.
+         Label wording is the owner's choice ("Browser profile", not "Opens
+         in"). Width check, since this label is the row's fixed part
+         (flex-shrink: 0): ~110px at 10px/700/.1em uppercase + 8px gap + the
+         chip's 260px max still totals ~378px of the panel's 416px usable row
+         width (460 - 2x20 padding - 2x2 margin), so no CSS change needed. -->
+    <div class="ed-bp-row" id="ed-bp-row" hidden>
+      <span class="ed-bp-label">Browser profile</span>
+      <span id="ed-bp-chip"></span>
     </div>
 
     <input class="input" id="ed-search" placeholder="Search apps…" autocomplete="off" spellcheck="false" />
@@ -178,8 +305,58 @@ function renderPanel(key: string): void {
       <button class="btn ed-browse" id="ed-browse">Browse files…</button>
     </div>
 
+    <!-- 4b — "a leading disc in the paste row" (owner's decision, 2026-08-26:
+         *"implement 4b now, and 4a later"*). The disc is the SECOND way into
+         the profile page, for a URL that has not been committed yet. It sits
+         inside the field's own box, so the row's height is unchanged and
+         nothing is added below it.
+
+         THE AGREED FALLBACK, recorded here so whoever picks it up later knows
+         it was considered rather than forgotten: if this disc proves
+         undiscoverable, build 4a instead — Assign/Enter/Done commits the URL
+         and the panel then turns AUTOMATICALLY to a page headed "Open
+         <url> in…" listing every browser with its profiles, plus "My default
+         browser" as the leading, pre-selected row. 4a adds no control at all;
+         it costs a forced page turn on every URL commit, which is exactly why
+         it is the fallback and not the default. renderProfilePage already takes
+         the multi-browser shape 4a needs — only the trigger differs.
+         (No backticks anywhere in this block: it is inside a template literal,
+         and one would terminate the string. See the NOTE above.) -->
+    <!-- THE ASSIGNED-VALUE PILL (2026-08-27). The owner: *"when we have assigned
+         an app to a key and we press that same key again, from the dashboard we
+         can see that OK this is the app I assigned it to. But it's not the same
+         case in case of the links... That pill should show that, or the URL
+         assigned, in the URL or file path pasting place, along with crossing
+         option for if someone wants to edit."*
+
+         An APP binding is already visible on reopen — its grid tile draws
+         .current. A URL binding was visible NOWHERE: this field is built
+         fresh every render and nothing ever assigned .value, so a bound key
+         looked unbound. #ed-val is the missing half, and it deliberately
+         REPLACES the input rather than pre-filling it — a pre-filled field
+         invites a stray keystroke into a saved value and gives the crossing
+         option nowhere to live.
+
+         The pill is a .bp-chip — literally the browser-profile chip's own
+         classes, which is the visual precedent the owner named ("the way they
+         make a pill shape for the browser that is being used with the profile
+         — that's similar"). Radius 999, disc + text + trailing ✕, the same
+         accent tokens, one family by construction rather than by resemblance.
+
+         GEOMETRY, so the 4b rebuild is not disturbed: the pill sits INSIDE
+         .ed-path-wrap, is 32px tall and align-self: center in a row whose
+         36px comes from #ed-assign — which stays put, disabled, exactly as it
+         is over an empty field today. That is not furniture: keeping it means
+         there is ZERO layout shift when the pill is clicked and the input takes
+         its place, and it is what holds the row at 36px without a new
+         min-height rule invented to defend a measurement.
+         (No backticks in this block — it is inside a template literal.) -->
     <div class="ed-row-tight">
-      <input class="input" id="ed-path" placeholder="…or paste a file path / URL" autocomplete="off" spellcheck="false" />
+      <span class="ed-path-wrap">
+        <button class="ed-path-disc" id="ed-path-disc" hidden></button>
+        <input class="input" id="ed-path" placeholder="…or paste a file path / URL" autocomplete="off" spellcheck="false" />
+        <span class="ed-val-host" id="ed-val" hidden></span>
+      </span>
       <button class="btn btn-primary" id="ed-assign" disabled>Assign</button>
     </div>
 
@@ -205,7 +382,6 @@ function renderPanel(key: string): void {
 
   // --- wiring ---
   _panel.querySelector("#ed-close")!.addEventListener("click", () => closePanel());
-  _panel.querySelector("#ed-done")!.addEventListener("click", () => closePanel());
   _panel.querySelector("#ed-browse")!.addEventListener("click", handleBrowse);
   _panel.querySelector("#ed-remove")?.addEventListener("click", handleRemove);
 
@@ -217,18 +393,907 @@ function renderPanel(key: string): void {
   });
 
   const path = _panel.querySelector<HTMLInputElement>("#ed-path")!;
-  const assign = _panel.querySelector<HTMLButtonElement>("#ed-assign")!;
-  const syncAssign = () => { assign.disabled = path.value.trim().length === 0; };
-  path.addEventListener("input", syncAssign);
+  const disc = _panel.querySelector<HTMLButtonElement>("#ed-path-disc")!;
+  wirePathDisc(key, path, disc);
+  // `syncAssign` used to be a closure over `path`/`assign`/`disc`. It is now
+  // `syncPathRow`, which finds them itself, because the pill has to run the
+  // same sync from OUTSIDE this render — the field going from "hidden behind a
+  // pill" to "holding the pill's value" is exactly the transition Assign and
+  // the 4b disc both key off, and a second, hand-rolled copy of that rule in
+  // the pill's click handler is how the two would drift.
+  path.addEventListener("input", syncPathRow);
   path.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && path.value.trim()) assignFromPath(path.value.trim());
+    if (e.key === "Enter") submitPathField(path.value.trim());
   });
-  assign.addEventListener("click", () => {
-    if (path.value.trim()) assignFromPath(path.value.trim());
+  _panel.querySelector<HTMLButtonElement>("#ed-assign")!
+    .addEventListener("click", () => submitPathField(path.value.trim()));
+  syncPathRow();
+
+  // PROBLEM 199 — pasting a URL/path then clicking "Done" silently discarded
+  // it. The owner: *"pressing done instead of assigning after pasting a URL
+  // doesn't assign the website to the key, fix it."*
+  //
+  // `assignFromPath` only ever fired on Enter in the paste field, or on the
+  // separate small "Assign" button — never from "Done". So the flow SILENTLY
+  // REQUIRED two deliberate actions (assign, then close) when everything
+  // about the panel's layout — one text field, one big primary "Done" button
+  // right there — reads as one. A pasted value sitting in the field when
+  // "Done" is pressed is unambiguous intent; there is no reading of "I typed
+  // a URL and clicked the button that closes this panel" other than "save
+  // it, then close."
+  //
+  // Wired here rather than left where `#ed-done` used to be attached (before
+  // `path`/`assignFromPath` existed in scope) so there is exactly ONE
+  // listener on it, not two silently stacking.
+  //
+  // MUST await, not fire-and-forget: `assignFromPath`'s FILE-PATH branch
+  // `await`s `check_app_path` before it ever calls `commit()`, and
+  // `closePanel()` sets the module-level `_currentKey` to `null`
+  // SYNCHRONOUSLY. Calling `assignFromPath(pending)` without awaiting it and
+  // then immediately closing would null `_currentKey` while that check is
+  // still in flight — so by the time `commit()` finally ran, `_currentKey`
+  // would already be gone and the bind would silently no-op, reproducing the
+  // exact bug this fix exists for, just for a pasted file path instead of a
+  // URL. Only the URL branch happens to have no `await` before its own
+  // `commit()` call, which is why the bug as REPORTED only showed up on URLs.
+  //
+  // THE PILL'S INTERACTION WITH THIS, traced rather than assumed, because the
+  // pill can now put an ALREADY-SAVED value into the field this reads:
+  //   · unbound key, nothing typed      -> pending "" -> falsy -> just closes
+  //   · unbound key, something pasted   -> pending = the paste, seed null -> assigns (199 intact)
+  //   · bound key, PILL SHOWING         -> the input is hidden and its value is
+  //     "" (renderPanel builds it fresh and never assigns .value; the pill is a
+  //     separate element) -> pending "" -> NO commit, binding untouched
+  //   · bound key, pill clicked, value UNCHANGED -> pending === _pathSeed ->
+  //     skipped. Without this it would re-commit and, via assignFromPath's
+  //     deliberate omission of the three browser fields, wipe the pin.
+  //   · bound key, pill clicked and EDITED -> pending !== _pathSeed -> assigns
+  //   · bound key, pill clicked then field emptied -> pending "" -> nothing.
+  //     Emptying the field is not "clear the binding"; the pill's ✕ is.
+  _panel.querySelector("#ed-done")!.addEventListener("click", () => {
+    void (async () => {
+      const pending = path.value.trim();
+      if (pending && !isUnchangedPillValue(pending)) await assignFromPath(pending);
+      else if (pending) console.info("key-editor: Done with an unedited pill value — nothing committed");
+      closePanel();
+    })();
   });
-  syncAssign();
+
+  wireProfileChip(key, binding);
+  renderPathValue(key, binding);
 
   renderGrid();
+}
+
+/**
+ * Show the browser-profile chip, but only where it means something.
+ *
+ * TWO CASES, and nothing else:
+ *   1. a URL binding — ANY url can optionally be pinned to a browser+profile;
+ *   2. an app binding whose path is EXACTLY one of the detected browsers'
+ *      exes ("just open Brave's Studies profile", no url).
+ *
+ * Case 2 is matched by exact path, never by name: "Chrome" is a name several
+ * things answer to, `…\Google\Chrome\Application\chrome.exe` is one program.
+ *
+ * NOTHING HERE IS ON THE BIND PATH. The panel has already committed the
+ * binding through its normal instant-bind flow by the time this runs (PROBLEM
+ * 199's `#ed-done` fix is untouched), so this can only ever ADD a control to an
+ * already-saved key. If the browser scan has not landed yet the chip simply
+ * appears a moment later — it never delays anything and never blocks a bind.
+ */
+function wireProfileChip(key: string, binding: KeyBinding | undefined): void {
+  const row = _panel?.querySelector<HTMLElement>("#ed-bp-row");
+  const host = _panel?.querySelector<HTMLElement>("#ed-bp-chip");
+  if (!row || !host || !binding) return;
+
+  const isUrl = !!binding.web_url;
+  const boundApp = binding.app ?? null;
+
+  const show = (): void => {
+    row.hidden = false;
+    renderProfileChip(
+      host,
+      {
+        // `browser_exe` is null on an APP binding by design — the exe already
+        // IS `binding.app`, and storing it twice is how the two get to
+        // disagree. The chip still has to NAME the browser, so the effective
+        // exe is resolved HERE, at paint time, from whichever field holds it.
+        // Measured before this line existed: an app binding pinned to
+        // "ARPON'S STUDIES" drew a chip with an empty browser name and the raw
+        // folder name "Default" as the profile, because the lookup was handed
+        // null and could not find the browser to read the display name from.
+        browserExe: binding.browser_exe ?? boundApp,
+        profileDir: binding.browser_profile_dir ?? null,
+        profileName: binding.browser_profile_name ?? null,
+        // Only a URL binding STORES a browser. An app binding's exe is
+        // `binding.app`, which is not a pin and must not be drawn as one.
+        exePinned: !!binding.browser_exe,
+      },
+      {
+        // The chip body no longer opens a popover. `.bp-pop` hung off a chip
+        // inside a 460px panel and overflowed it by ~19px, which is what gave
+        // the editor a horizontal scrollbar. It opens page 2 instead, which is
+        // the panel's own width by construction.
+        onOpen: (browser) => openProfilePage(key, browser),
+        // Three nulls, through the SAME commit path every other change uses.
+        // No confirm dialog: it is one press to redo, and the toast carries an
+        // Undo. NEVER `""` — null is the only value that means "the OS default
+        // browser opens this", which is the owner's hard requirement.
+        onClear: () => clearPin(key),
+      },
+    );
+  };
+
+  if (isUrl) { show(); return; }
+  if (!boundApp) return;
+
+  // An app binding: only a detected browser gets the chip. On a true first run
+  // nothing is known yet, in which case `findBrowserByExe` returns null meaning
+  // "not yet known" — so ask again when the scan lands rather than deciding
+  // "no" too early. From the second run onward last session's list answers this
+  // in the same frame.
+  if (findBrowserByExe(boundApp)) { show(); return; }
+  void loadBrowsers().then(() => {
+    // The editor may have moved to another key, or closed, while we waited.
+    if (_currentKey !== key || !row.isConnected) return;
+    if (findBrowserByExe(boundApp)) show();
+  });
+}
+
+/**
+ * Write a picked profile into the binding, through the SAME commit() every
+ * other change goes through, so the save/toast flow is reused rather than
+ * duplicated. Everything else about the binding is carried across verbatim —
+ * this edits one property, it does not re-bind.
+ *
+ * `browserExe` is what the PAGE reports (whose tile was pressed). Whether it is
+ * STORED depends on the binding: for a URL it must be, because a URL has no
+ * other record of which browser to use; for an app binding the exe already IS
+ * `binding.app`, so `browser_exe` stays null and Rust reads the profile off
+ * `app`. Two sources of truth for one path is the bug to avoid.
+ */
+function commitProfile(
+  key: string,
+  browserExe: string | null,
+  profileDir: string | null,
+  profileName: string | null,
+  opts: { keepOpen: boolean },
+): void {
+  // Read the binding LIVE rather than trusting a snapshot: with `keepOpen` the
+  // editor stays up, so a second pick in the same visit would otherwise
+  // re-commit state captured before the first one.
+  const live = getBinding(key);
+  if (!live) {
+    console.error(`bp: commit skipped — no binding for key=${key}`);
+    return;
+  }
+  const isUrl = !!live.web_url;
+  // `profileName` is the account label, derived from a signed-in email
+  // address — so it is NOT logged. `dir` says which tile was pressed just as
+  // precisely and identifies nobody. (Owner's rule 2026-08-31: emails never
+  // reach logs or telemetry.) `named` keeps the line able to distinguish
+  // "a pin was written" from "a pin was cleared", which is what it was for.
+  console.info(
+    `bp: commit reached — key=${key} isUrl=${isUrl} exe=${browserExe ?? "(default)"} ` +
+    `dir=${profileDir ?? "(none)"} named=${profileName ? "yes" : "no"}`,
+  );
+  void commit(
+    {
+      app: live.app ?? null,
+      web_url: live.web_url ?? null,
+      label: live.label ?? null,
+      icon_override: live.icon_override ?? null,
+      browser_exe: isUrl ? browserExe : null,
+      browser_profile_dir: profileDir,
+      browser_profile_name: profileName,
+    },
+    {
+      // The conflict check is about Space+<key> colliding with an OS shortcut.
+      // That verdict cannot change by picking a profile, and the user already
+      // answered it when this key was bound — re-prompting would be pure noise.
+      skipConflict: true,
+      // THE WHOLE POINT of the chip path: it edits ONE property of a binding
+      // that already exists. Closing the editor on it — which is what every
+      // other commit() caller wants and what this one used to inherit — made
+      // choosing a profile look exactly like a failed re-bind: the editor
+      // vanished and the toast read "Space+Y → Youtube", saying nothing about
+      // the browser. The owner's verdict was "so bad, it's non-functional".
+      keepOpen: opts.keepOpen,
+      // With `keepOpen` the panel is NOT re-rendered, so nothing else would
+      // repaint the chip — measured: pressing the ✕ wrote three nulls and saved
+      // them correctly while the chip went on reading "Brave · ARPON'S
+      // STUDIES", which is a save that worked being indistinguishable from one
+      // that did not. Re-wiring the row is enough; the 6s Undo lives on the row
+      // itself, not inside the chip host, so it survives.
+      onSaved: opts.keepOpen ? () => refreshProfileRow(key) : undefined,
+      // …so the confirmation has to name what actually changed, or a save that
+      // worked is indistinguishable from one that did not.
+      toast: profileDir
+        ? `🌐 Space+${key.toUpperCase()} opens in ${profileName ?? profileDir}`
+        : `🌐 Space+${key.toUpperCase()} opens in your default browser`,
+    },
+  );
+}
+
+/** Repaint the chip row from the LIVE binding, without touching page 1. */
+function refreshProfileRow(key: string): void {
+  if (_currentKey !== key) return;
+  // A pending Undo belongs to the pin that WAS there. Once a new value has been
+  // written it would put back something the user has since replaced, so it goes
+  // with the state it described. `clearPin` re-offers a fresh one immediately
+  // afterwards.
+  _panel?.querySelector("#ed-bp-row .ed-bp-undo")?.remove();
+  wireProfileChip(key, getBinding(key));
+}
+
+/** The chip's ✕ — three nulls, no confirm, and an Undo for 6 seconds. */
+function clearPin(key: string): void {
+  const live = getBinding(key);
+  if (!live) return;
+  const undo = {
+    browser_exe: live.browser_exe ?? null,
+    browser_profile_dir: live.browser_profile_dir ?? null,
+    browser_profile_name: live.browser_profile_name ?? null,
+  };
+  commitProfile(key, null, null, null, { keepOpen: true });
+  offerPinUndo(key, undo);
+}
+
+/**
+ * The 6-second Undo after clearing a pin.
+ *
+ * DEVIATION FROM THE HANDOFF, stated so nobody has to re-derive it: the handoff
+ * asks for "a toast carrying an Undo for 6s". It cannot live in the toast as
+ * things stand. `#toast-container` is `pointer-events: none` (toast.ts's
+ * `toastLayer`, set via CSSOM), and toast.ts is the overlay's verbatim drop-in
+ * — the same component renders into the transparent CLICK-THROUGH overlay
+ * window, where a button is unreachable by definition. Making it clickable
+ * would mean changing the shared toast component and the overlay's stylesheet,
+ * neither of which this feature owns.
+ *
+ * So the Undo sits where the ✕ that caused it was, for the same 6 seconds. The
+ * user's eyes are already there, and the panel is still open (`keepOpen`), so
+ * it is if anything closer to hand than a toast at the bottom of the window.
+ */
+function offerPinUndo(
+  key: string,
+  prev: { browser_exe: string | null; browser_profile_dir: string | null; browser_profile_name: string | null },
+): void {
+  const row = _panel?.querySelector<HTMLElement>("#ed-bp-row");
+  if (!row || (!prev.browser_exe && !prev.browser_profile_dir)) return;
+  row.querySelector(".ed-bp-undo")?.remove();
+
+  const undo = document.createElement("button");
+  undo.type = "button";
+  undo.className = "ed-bp-undo";
+  undo.textContent = "Undo";
+  undo.title = `Put the ${prev.browser_profile_name ?? prev.browser_profile_dir ?? "browser"} pin back`;
+  const timer = window.setTimeout(() => undo.remove(), 6000);
+  undo.addEventListener("click", () => {
+    window.clearTimeout(timer);
+    undo.remove();
+    if (_currentKey !== key) return;
+    console.info(`bp: pin undo — restoring dir=${prev.browser_profile_dir ?? "(none)"}`);
+    commitProfile(key, prev.browser_exe, prev.browser_profile_dir, prev.browser_profile_name, {
+      keepOpen: true,
+    });
+  });
+  row.appendChild(undo);
+}
+
+// ---------------------------------------------------------------------------
+// Page 2 — the browser-profile page
+// ---------------------------------------------------------------------------
+
+/**
+ * Open page 2 over page 1.
+ *
+ * `browser` null means "list every detected browser" — the shape a URL binding
+ * needs before it has chosen one, and the shape 4a would reuse verbatim.
+ *
+ * `fromBind` says this page was reached by pressing a tile in the app grid,
+ * which is one continuous bind gesture: picking a profile there finishes it and
+ * closes the editor, exactly as the design draws it. Reached from the CHIP it
+ * is a one-property edit of a key that is already bound, so picking returns to
+ * page 1 with the editor still open — that is the defect the `keepOpen` option
+ * exists to fix, and it must not come back through this door.
+ */
+function openProfilePage(
+  key: string,
+  browser: DetectedBrowser | null,
+  fromBind = false,
+): void {
+  if (!_panel || _panel.hidden) return;
+  closeProfilePage(true);
+
+  const binding = getBinding(key);
+  const list = browser ? [browser] : (knownBrowsers() ?? []);
+  const combo = `Space + ${key.toUpperCase()}`;
+  const boundLabel =
+    browser?.browser_name ??
+    binding?.label ??
+    (binding?.web_url ? binding.web_url : "this key");
+
+  const page = document.createElement("div");
+  page.className = "bp-page";
+  // Anything the panel could scroll must be pinned to the panel's VISIBLE box,
+  // and an absolutely-positioned child of a scrolled container scrolls with it.
+  // Reset the scroll and freeze it for as long as the page is up.
+  _panel.scrollTop = 0;
+  _panel.classList.add("bp-paged");
+  _panel.appendChild(page);
+  _page = page;
+
+  const selection = {
+    browserExe: binding?.browser_exe ?? binding?.app ?? null,
+    profileDir: binding?.browser_profile_dir ?? null,
+  };
+  const pinned = !!(binding?.browser_exe || binding?.browser_profile_dir);
+
+  renderProfilePage(page, {
+    title: browser ? `Which ${browser.browser_name} profile?` : `Open ${boundLabel} in…`,
+    subtitle: browser
+      ? `${combo} is already bound to ${browser.browser_name}`
+      : `${combo} opens this link`,
+    hint: browser
+      ? `Skip this and ${combo} opens ${browser.browser_name} the way it always has.`
+      : `Skip this and ${combo} opens in your default browser.`,
+    browsers: list,
+    selection,
+    // Only offer "back to normal" when there is something to undo. A row that
+    // re-selects the state you are already in is furniture.
+    resetLabel: pinned
+      ? (browser && !binding?.web_url
+          ? `◍  No specific profile — open ${browser.browser_name} normally`
+          : "🌐  Open in my default browser")
+      : null,
+    onPick: (browserExe, dir, name) => {
+      commitProfile(key, browserExe, dir, name, { keepOpen: !fromBind });
+      if (fromBind) return;              // commit() closed the whole editor
+      closeProfilePage();
+      if (_currentKey === key) renderPanel(key);
+    },
+    onReset: () => {
+      commitProfile(key, null, null, null, { keepOpen: !fromBind });
+      if (fromBind) return;
+      closeProfilePage();
+      if (_currentKey === key) renderPanel(key);
+    },
+    onBack: () => {
+      // ← returns to the app grid with the binding intact. Nothing is committed
+      // or reverted here; whatever was saved on the way in stays saved.
+      console.info("bp: page back — binding untouched");
+      closeProfilePage();
+    },
+    onClose: () => closePanel(),
+    onDone: () => closePanel(),
+  });
+
+  console.info(
+    `bp: page opened — key=${key} browser=${browser?.browser_name ?? "(all)"} ` +
+    `profiles=${list.reduce((n, b) => n + b.profiles.length, 0)} fromBind=${fromBind}`,
+  );
+}
+
+/** Slide page 2 out. `instant` skips the tween — used when the panel itself is
+ *  closing, so two exits are not fighting over the same 280ms. */
+function closeProfilePage(instant = false): void {
+  const page = _page;
+  _page = null;
+  window.clearTimeout(_pageTimer);
+  _panel?.classList.remove("bp-paged");
+  if (!page) return;
+  if (instant) { page.remove(); return; }
+  page.classList.add("bp-page-out");
+  // 195ms = ~65% of the 300ms entrance, the app's standing exit ratio.
+  _pageTimer = window.setTimeout(() => page.remove(), 195);
+}
+
+// ---------------------------------------------------------------------------
+// 4b — the leading disc in the paste row
+// ---------------------------------------------------------------------------
+
+/**
+ * IS THIS TEXT A WEBSITE OR A THING ON DISK? One rule, one place (1.0.88).
+ *
+ * THE BUG THIS EXISTS FOR, in the owner's words: *"When I pasted the complete
+ * URL of YouTube — with the https and all — it did launch and gave me the
+ * option to choose my browser, the circular thing beside it. But when I just
+ * typed youtube.com, no option to choose the browser came. Nor for
+ * discord.com."*
+ *
+ * Every URL test in this file used to be `/^https?:\/\//i`. `youtube.com`
+ * fails that, so it fell into the FILE-PATH branch: `check_app_path`, then an
+ * app binding, which the engine later rescued by Start Menu heuristics
+ * (`cascade: resolved youtube.com via Start Menu` in his log). It "worked",
+ * and cost him the browser-profile chip, the 4b disc and the correct binding
+ * kind — because all three key off this one test.
+ *
+ * TWO OUTCOMES, NOT THREE. A third "ambiguous" verdict would push the tiebreak
+ * back out to each call site, which is exactly the drift this consolidation
+ * removes: the disc, Assign, Enter, Done and `assignFromPath` must all reach
+ * the same answer for the same text or the panel contradicts itself.
+ *
+ * THE RULES, in order. The PATH VETOES run first and always win:
+ *   1. `https?://` — url. Unchanged from before; this branch is byte-identical
+ *      in effect for every binding that already exists.
+ *   2. A backslash ANYWHERE, a `X:` drive letter, a `\\` UNC prefix, a leading
+ *      `%ENVVAR%`, a leading `./` or `../`, a leading `/`, or any other scheme
+ *      (`file:`, `mailto:`, `steam:`) — path. A backslash is never legal in a
+ *      hostname, so it is a free and total discriminator.
+ *   3. An `.exe` / `.lnk` / `.bat` / `.cmd` suffix — path. This list is short
+ *      ON PURPOSE and does not need to grow: a file pasted WITH a directory
+ *      component is already caught by rule 2, so this only has to cover a bare
+ *      filename typed alone — and .exe/.lnk are the only things Browse files…
+ *      will even offer, with .bat/.cmd for the scripts people bind by hand.
+ *   4. Hostname SHAPE, no TLD list: labels of [a-z0-9-] joined by dots, at
+ *      least two of them, last one 2+ letters. A TLD table would be wrong the
+ *      week it was written and is not needed once rule 2 exists.
+ *      `youtube.com`, `discord.com`, `notebooklm.google.com`, `x.com` → url.
+ *      `notepad` → path, because a single label is a program name — that is a
+ *      REAL existing flow (bind `notepad` and let the Start Menu resolve it)
+ *      and it must not be turned into `https://notepad`.
+ *   5. Anything else — path. The field's other job is still file paths.
+ *
+ * THE `.com` TRADE-OFF, ACCEPTED DELIBERATELY. `.com` is both the commonest
+ * TLD and a DOS-era executable extension, and they collide EXACTLY here.
+ * `C:\Tools\a.com` classifies as a path (rule 2, the backslash). A bare
+ * `a.com` typed with no path at all classifies as a URL. That is the wrong
+ * answer for someone who pastes the bare name of a .com executable and expects
+ * it resolved off the Start Menu — and it is the right answer approximately
+ * every other time the string `something.com` is typed into this field. The
+ * owner asked for precisely this. Anyone tempted to "fix" it: the cure is a
+ * file-exists check, not a TLD list (see the note on `check_app_path` below).
+ *
+ * SYNCHRONOUS, so the "does this file exist?" leg of the veto is NOT here.
+ * This runs on every keystroke (`syncPathRow`), and an IPC round trip per
+ * keypress to answer a question that only matters at commit time would be a
+ * cost paid constantly for a case that is vanishingly rare. The commit path's
+ * `check_app_path` still guards the file branch; nothing about that changed.
+ */
+type PathInputKind = "url" | "path";
+
+/** `.exe` and friends. NOT `.com` — see the trade-off note above. */
+const EXECUTABLE_SUFFIX = /\.(?:exe|lnk|bat|cmd)$/i;
+/** One hostname label: alphanumeric, inner hyphens allowed. */
+const HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
+
+function classifyPathInput(raw: string): PathInputKind {
+  const value = raw.trim();
+  if (!value) return "path";
+
+  // 1 — an explicit web scheme settles it.
+  if (/^https?:\/\//i.test(value)) return "url";
+
+  // 2 — the path vetoes. Any one of these and the hostname test never runs.
+  if (value.includes("\\")) return "path";              // C:\… , \\server\… , anything Windows
+  if (/^[a-z]:/i.test(value)) return "path";            // C:  C:/  D:\
+  if (value.startsWith("%")) return "path";             // %LOCALAPPDATA%\…
+  if (/^\.{1,2}[\\/]/.test(value)) return "path";       // ./run   ../bin
+  if (value.startsWith("/")) return "path";             // a separator before the first dot
+  // Any OTHER scheme is somebody else's business, not a website. The character
+  // class deliberately excludes `.` so a host with a port (`youtube.com:8080`)
+  // cannot be mistaken for a scheme.
+  if (/^[a-z][a-z0-9+-]*:/i.test(value)) return "path";
+
+  // 3 — a bare executable filename.
+  if (EXECUTABLE_SUFFIX.test(value)) return "path";
+
+  // 4 — hostname shape. Take the authority only: `youtube.com/watch?v=x` is a
+  // url, and the `/` after the first dot is its path, not a file separator.
+  const authority = value.split(/[/?#]/)[0] ?? "";
+  const host = authority.split(":")[0] ?? "";           // drop any :port
+  const labels = host.split(".");
+  if (labels.length < 2) return "path";                 // "notepad" stays an app lookup
+  if (!labels.every((l) => HOST_LABEL.test(l))) return "path";
+  if (!/^[a-z]{2,}$/i.test(labels[labels.length - 1]!)) return "path";
+  return "url";
+}
+
+/**
+ * What actually gets STORED in `web_url`, once classified as a url.
+ *
+ * ALWAYS SCHEMED. Verified against the consumers rather than assumed:
+ *   · `run_browser` (smart_cascade.rs) already prepends `https://` itself and
+ *     logs it — so the DEFAULT-browser leg would survive a bare host, but only
+ *     by being repaired downstream on every single press;
+ *   · `open_binding_url`'s `BrowserRoute::Specific` leg does NOT. It hands the
+ *     stored string to `build_launch_params` as a command-line argument to a
+ *     browser exe, with no scheme repair anywhere on that path — so a URL
+ *     pinned to a browser profile (which is the very feature this fix restores
+ *     access to) would be launched as a bare word;
+ *   · `url_match_keys` tolerates either, and
+ *   · `splitUrlForPill` needs `new URL()` to parse, which a bare host does not.
+ * One normalisation here beats three tolerances downstream.
+ */
+function normaliseUrl(value: string): string {
+  const v = value.trim();
+  return /^https?:\/\//i.test(v) ? v : `https://${v}`;
+}
+
+/**
+ * Show the disc only once the field holds a link, and reserve no room for it
+ * before then.
+ *
+ * A permanently-present disc would be a control that can do nothing on the
+ * common path (a file path, or an empty field), and this codebase's standing
+ * rule is that such a control is worse than its absence. A permanently-reserved
+ * 38px of padding would be the same problem wearing a different hat. So both
+ * arrive together, on a 90ms padding tween, at the moment a link is recognised
+ * — which reads as "I noticed this is a link", not as noise.
+ */
+function syncPathDisc(path: HTMLInputElement, disc: HTMLElement): void {
+  // CALL SITE 1 of 4 for the classifier. Before 1.0.88 this was
+  // `looksLikeUrl`, i.e. `^https?://`, which is why typing `youtube.com`
+  // raised no disc — the owner's report, half of it.
+  const on = classifyPathInput(path.value) === "url";
+  disc.hidden = !on;
+  path.parentElement?.classList.toggle("has-disc", on);
+}
+
+/**
+ * Assign + the 4b disc follow whatever `#ed-path` holds. ONE rule, called from
+ * the render wiring, from every keystroke, and from the pill's edit path.
+ */
+function syncPathRow(): void {
+  const path = _panel?.querySelector<HTMLInputElement>("#ed-path");
+  const assign = _panel?.querySelector<HTMLButtonElement>("#ed-assign");
+  const disc = _panel?.querySelector<HTMLElement>("#ed-path-disc");
+  if (!path || !assign || !disc) return;
+  assign.disabled = path.value.trim().length === 0;
+  syncPathDisc(path, disc);
+}
+
+/**
+ * True when the field is holding the pill's own value, untouched.
+ *
+ * CALL SITE 2 of 4 for the classifier, and the one that had to be re-traced
+ * for 1.0.88 rather than left alone. The seed is whatever the pill loaded back
+ * in, which for a URL binding is now ALWAYS the schemed, stored form
+ * (`https://youtube.com`) — because `assignFromPath` normalises before it
+ * commits. So a NEW way to "change nothing" appeared with normalisation:
+ * deleting the `https://` the user never typed in the first place. Byte
+ * equality would call that an edit, re-commit an identical `web_url`, and —
+ * through `assignFromPath`'s deliberate omission of the three browser-profile
+ * fields — silently wipe the pin. That is verbatim the failure `_pathSeed`
+ * exists to prevent, arriving through a door this release opened.
+ *
+ * So a url is compared in its NORMALISED form. Nothing else is loosened: the
+ * comparison is still exact apart from a scheme this code added itself, so
+ * `youtube.com` vs `youtu.be` is still a real edit, and a path is still
+ * compared byte for byte.
+ */
+function isUnchangedPillValue(value: string): boolean {
+  if (_pathSeed === null) return false;
+  if (value === _pathSeed) return true;
+  return (
+    classifyPathInput(value) === "url" &&
+    classifyPathInput(_pathSeed) === "url" &&
+    normaliseUrl(value) === normaliseUrl(_pathSeed)
+  );
+}
+
+/**
+ * Enter in the paste field, and the Assign button. Both used to be
+ * `if (value) assignFromPath(value)`.
+ *
+ * The only thing added is the unchanged-pill case, and it is not a no-op: it
+ * puts the pill back. Pressing Assign over a value you did not change is a
+ * request to finish, and finishing means "the field goes back to showing what
+ * is assigned" — which is the pill. Committing instead would be a save with
+ * nothing to save that also clears the browser-profile pin (see `_pathSeed`).
+ */
+function submitPathField(value: string): void {
+  if (!value) return;
+  if (isUnchangedPillValue(value)) { cancelPathEdit(); return; }
+  void assignFromPath(value);
+}
+
+/** Abandon an edit and restore the pill, committing nothing. */
+function cancelPathEdit(): void {
+  const key = _currentKey;
+  if (!key) return;
+  console.info("bp: path edit cancelled — value unchanged, nothing committed");
+  const path = _panel?.querySelector<HTMLInputElement>("#ed-path");
+  if (path) path.value = "";
+  _pathSeed = null;
+  renderPathValue(key, getBinding(key));
+  syncPathRow();
+}
+
+/**
+ * Split a URL so the SCANNABLE half leads: `youtube.com` then `/watch?v=…`.
+ *
+ * This is the same "one part holds, one part gives" split the browser-profile
+ * chip already makes (`.bp-chip-browser` never truncates, `.bp-chip-profile`
+ * ellipsizes) — browser·profile there, host·path here. A URL that will not
+ * parse is shown whole and given no tail, rather than guessed at.
+ */
+function splitUrlForPill(url: string): { head: string; tail: string } {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^www\./, "");
+    const rest = (u.pathname === "/" ? "" : u.pathname) + u.search + u.hash;
+    return { head: host || url, tail: rest };
+  } catch (_) {
+    return { head: url, tail: "" };
+  }
+}
+
+/**
+ * Decide what the paste row shows for this binding, and draw it.
+ *
+ * THE RULE, read out of the code rather than assumed. The app grid marks a tile
+ * `.current` when `getBinding(key).app === app.path` (see `renderGrid`'s
+ * `isCurrent`) over `cachedApps()`. So:
+ *
+ *   · a URL binding      -> pill. The grid can never show a URL.
+ *   · an app binding whose path IS in the detected list -> NO pill. The tile
+ *     is right there wearing `.current`; a pill would say the same thing twice.
+ *   · an app binding whose path is NOT in the list -> pill. This is the case
+ *     the owner did not ask about and it is the SAME defect one step worse: an
+ *     app bound by pasting a path (a portable exe, a game launcher, anything
+ *     off the Start Menu) has no tile to highlight AND an empty field, so it is
+ *     invisible twice over.
+ *   · nothing bound      -> no pill, and the row is byte-for-byte what it was.
+ *
+ * TWO deliberate calls, both stated so they are not read as oversights:
+ *
+ * 1. The membership test uses the UNFILTERED cached list, not what the grid is
+ *    rendering this instant. Typing in the search box narrows the grid, and a
+ *    pill that appeared and vanished as the query moved would be noise on every
+ *    keystroke. The question the pill answers is "does this key's assignment
+ *    appear anywhere in this panel", and with the search box cleared it does.
+ * 2. `cachedApps()` being null means NOT YET SCANNED, never "not in the list" —
+ *    the same distinction `wireProfileChip` makes for `findBrowserByExe`. Draw
+ *    nothing and ask again when the scan lands, so a first run adds a pill only
+ *    to the genuinely invisible bindings instead of flashing one onto every
+ *    app-bound key. The grid beside it is showing "Scanning this device…" for
+ *    the same interval, so the two agree about what is not yet known.
+ */
+function renderPathValue(key: string, binding: KeyBinding | undefined): void {
+  const host = _panel?.querySelector<HTMLElement>("#ed-val");
+  const input = _panel?.querySelector<HTMLInputElement>("#ed-path");
+  if (!host || !input) return;
+
+  const clear = (): void => {
+    host.hidden = true;
+    host.innerHTML = "";
+    input.hidden = false;
+  };
+
+  const url = binding?.web_url ?? null;
+  if (url) {
+    const { head, tail } = splitUrlForPill(url);
+    console.info(`bp: path pill — key=${key} kind=url host=${head} len=${url.length}`);
+    paintPathPill({
+      key, host, input, head, tail,
+      title: url,
+      value: url,
+      paintDisc: (d) => {
+        // A globe, NOT the default browser's icon. Which browser opens this
+        // link is answered by the Browser-profile chip at the top of the panel,
+        // for this same binding — a second, quieter answer painted 300px below
+        // it could only ever disagree with the first one. This disc says
+        // "this assignment is a link", which is the thing the row was missing.
+        d.classList.add("ed-val-disc-url");
+        d.textContent = "🌐";
+      },
+    });
+    return;
+  }
+
+  const app = binding?.app ?? null;
+  if (!app) { clear(); return; }
+
+  const apps = cachedApps();
+  if (!apps) {
+    clear();
+    void loadApps().then(() => {
+      // The editor may have moved to another key, or closed, while we waited.
+      if (_currentKey !== key || !host.isConnected) return;
+      renderPathValue(key, getBinding(key));
+    });
+    return;
+  }
+  if (apps.some((a) => a.path === app)) {
+    console.info(`bp: path pill suppressed — key=${key} app is on a .current grid tile`);
+    clear();
+    return;
+  }
+
+  const name = binding?.label || cleanLabel(app.split(/[\\/]/).pop() || app);
+  console.info(`bp: path pill — key=${key} kind=app name=${name} (no grid tile for this path)`);
+  paintPathPill({
+    key, host, input,
+    head: name,
+    tail: "",
+    title: app,
+    value: app,
+    paintDisc: (d) => paintAppDisc(d, binding?.icon_override, name, 0),
+  });
+}
+
+/**
+ * Draw the pill and wire its two DIFFERENT intentions.
+ *
+ * ✕ means "clear this". The body means "let me change this". Conflating them
+ * would make fixing one character of a long URL a retype, which is precisely
+ * the thing the owner asked for the crossing option to avoid becoming.
+ */
+function paintPathPill(o: {
+  key: string;
+  host: HTMLElement;
+  input: HTMLInputElement;
+  head: string;
+  tail: string;
+  title: string;
+  value: string;
+  paintDisc: (disc: HTMLElement) => void;
+}): void {
+  o.host.innerHTML = "";
+  o.host.hidden = false;
+  o.input.hidden = true;
+  // The field BEHIND the pill must be empty, or `#ed-done` would read a value
+  // nobody typed and re-assign it. Stated here rather than relied upon: this is
+  // the invariant the whole `pending` trace above rests on.
+  o.input.value = "";
+  _pathSeed = null;
+  syncPathRow();
+
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "bp-chip bp-chip-set ed-val-chip";
+  chip.title = o.title;                    // the FULL url / path, always
+  chip.setAttribute("aria-label", `Assigned: ${o.title}. Press to edit.`);
+
+  const disc = document.createElement("span");
+  disc.className = "ed-tile-disc bp-chip-disc";
+  o.paintDisc(disc);
+  chip.appendChild(disc);
+
+  // With a tail, the head HOLDS and the tail GIVES — the chip's own rule. With
+  // no tail the single run is the one that gives, because an app name has no
+  // assumable width and must be free to ellipsize (CLAUDE.md).
+  const head = document.createElement("span");
+  head.className = o.tail ? "bp-chip-browser" : "bp-chip-profile";
+  head.textContent = o.head;               // textContent — user data
+  chip.appendChild(head);
+
+  if (o.tail) {
+    const sep = document.createElement("span");
+    sep.className = "bp-chip-sep";
+    sep.textContent = "·";
+    const tail = document.createElement("span");
+    tail.className = "bp-chip-profile";
+    tail.textContent = o.tail;
+    chip.append(sep, tail);
+  }
+  o.host.appendChild(chip);
+
+  // Outside the <button>, for the reason `renderProfileChip` records: a button
+  // inside a button is invalid HTML and the inner one's clicks are unreliable.
+  const x = document.createElement("button");
+  x.type = "button";
+  x.className = "bp-chip-x";
+  x.textContent = "✕";
+  x.title = "Clear this assignment";
+  x.setAttribute("aria-label", "Clear this assignment");
+  x.addEventListener("click", (e) => {
+    e.stopPropagation();
+    console.info(`bp: path pill ✕ — clearing the binding for key=${o.key}`);
+    clearBindingFromPill(o.key);
+  });
+  o.host.appendChild(x);
+
+  chip.addEventListener("click", () => {
+    o.host.hidden = true;
+    o.host.innerHTML = "";
+    o.input.hidden = false;
+    o.input.value = o.value;
+    _pathSeed = o.value;
+    syncPathRow();                          // Assign lights up; a URL raises the 4b disc
+    o.input.focus();
+    o.input.select();                       // so a long URL can be replaced in one keystroke
+    console.info(
+      `bp: path pill opened for editing — key=${o.key} ${o.value.length} chars, ` +
+      `4b disc ${classifyPathInput(o.value) === "url" ? "shown" : "hidden"}`,
+    );
+  });
+}
+
+/**
+ * The pill's ✕ — the SAME commit "Remove binding" uses, so normalisation, the
+ * save and the toast are all reused rather than re-implemented.
+ *
+ * Two differences from `handleRemove`, both required by the owner's wording
+ * ("clears the assignment back to an empty, focused input, ready for a new
+ * value"): `keepOpen` stops `commit()` collapsing the editor, and `onSaved`
+ * re-renders page 1. The re-render is not decoration — clearing a binding also
+ * stales the "Bound to …" sub-title, the Remove button, the grid's `.current`
+ * tile and the browser-profile row, and with `keepOpen` nothing else repaints
+ * any of them. That is the same failure `commitProfile`'s `onSaved` exists for:
+ * *"a save that worked being indistinguishable from one that did not."*
+ *
+ * No confirm and no Undo, matching `handleRemove`, which this is: one press of
+ * work to redo, and the grid is right there.
+ */
+function clearBindingFromPill(key: string): void {
+  void commit(
+    { app: null, web_url: null, label: null, icon_override: null },
+    {
+      // A cleared key cannot collide with an OS shortcut — same reasoning as
+      // `handleRemove`, which also skips it.
+      skipConflict: true,
+      keepOpen: true,
+      onSaved: () => {
+        if (_currentKey !== key) return;
+        renderPanel(key);
+        _panel?.querySelector<HTMLInputElement>("#ed-path")?.focus();
+      },
+    },
+  );
+}
+
+/** Paint the disc and wire its press. */
+function wirePathDisc(key: string, path: HTMLInputElement, disc: HTMLButtonElement): void {
+  const paint = (info: DefaultBrowserInfo | null): void => {
+    disc.innerHTML = "";
+    if (info) {
+      // The REAL default browser's own icon, resolved by Rust from the same
+      // http/https handler `run_browser` launches through — so the disc cannot
+      // name a browser other than the one the key would actually open. Painted
+      // through `paintAppDisc`, the app's single icon path, so a malformed
+      // payload falls back the way every other missing icon does instead of
+      // showing the broken-image glyph.
+      disc.classList.remove("ed-path-disc-unset");
+      paintAppDisc(disc, info.icon_base64, info.name, 0);
+      disc.title = `Opens in ${info.name} — press to choose a different browser or profile`;
+    } else {
+      // Rust could not resolve a handler (or the lookup has not landed yet).
+      // The unset treatment — dashed ring and `◍` — never a guess: showing
+      // Brave's icon because Brave happens to be installed would be a lie on
+      // exactly the machine that matters, one whose default is Firefox.
+      disc.classList.add("ed-path-disc-unset");
+      disc.textContent = "◍";
+      disc.title = "Opens in your default browser — press to choose a browser or profile";
+    }
+  };
+
+  paint(cachedDefaultBrowser());
+  if (!cachedDefaultBrowser()) {
+    void loadDefaultBrowser().then((info) => {
+      if (disc.isConnected) paint(info);
+    });
+  }
+  disc.setAttribute("aria-label", "Choose which browser opens this link");
+
+  disc.addEventListener("click", () => {
+    const value = path.value.trim();
+    // CALL SITE 3 of 4. The disc only appears over a url (`syncPathDisc`), so
+    // this guard and that one have to agree by construction — they now read
+    // the same function rather than two copies of the same regex.
+    if (classifyPathInput(value) !== "url") return;
+    // Loaded back out of the pill and not edited: it is ALREADY committed, so
+    // there is nothing to save — and saving it would clear the very pin the
+    // page is about to set, then leave it cleared if the user backs out with ←.
+    if (isUnchangedPillValue(value)) {
+      console.info("bp: 4b disc pressed on an unedited pill value — opening the page, committing nothing");
+      openProfilePage(key, null);
+      return;
+    }
+    console.info(`bp: 4b disc pressed — committing ${value} then opening the page`);
+    // The URL has to be BOUND before there is anything for the page to pin to,
+    // so this commits first and turns the page from `onSaved` — the same
+    // ordering the app-grid branch uses, for the same reason: a conflict the
+    // user cancels must not leave a page open over a binding that was never
+    // written. `keepOpen` is what stops commit() collapsing the editor first.
+    void assignFromPath(value, {
+      keepOpen: true,
+      onSaved: () => openProfilePage(key, null),
+    });
+  });
 }
 
 function renderGrid(): void {
@@ -246,13 +1311,55 @@ function renderGrid(): void {
     {
       query: _query,
       isCurrent: (app) => (key ? getBinding(key)?.app ?? null : null) === app.path,
-      onPick: (app) =>
-        commit({
-          app: app.path,
-          web_url: null,
-          label: app.name,
-          icon_override: app.icon_base64 ?? null,
-        }),
+      onPick: (app) => {
+        // THE DEFECT THIS FEATURE EXISTS TO FIX. This used to be a bare
+        // `commit({...})`, and `commit()` ends in `closePanel()` — so pressing
+        // a browser tile bound the key and destroyed the panel in the same
+        // tick, and `wireProfileChip` never got a chance to show anything. The
+        // owner: *"pressing any browser to a letter just assigns it, i expected
+        // something to change in the app choosing dialogue after detecting it
+        // is a browser to let me choose a profile."*
+        //
+        // The bind still commits instantly. What changes is what happens after.
+        const b = findBrowserByExe(app.path);
+        // `findBrowserByExe` returning null means NOT YET KNOWN, not "no". On a
+        // true first run that resolves to "bind and close", which is the
+        // owner's decision — nobody waits up to 2.2s to be offered something
+        // optional. Reopening the key once the scan has landed shows the chip.
+        const multi = !!b && b.profiles.length > 1;
+        // A browser with exactly ONE profile never opens the page — there is no
+        // choice to make — but the profile IS still written, so the launch is
+        // explicit instead of relying on Chromium's last-used.
+        const only = b && b.profiles.length === 1 ? b.profiles[0] : null;
+        void commit(
+          {
+            app: app.path,
+            web_url: null,
+            label: app.name,
+            icon_override: app.icon_base64 ?? null,
+            // `browser_exe` stays null on an app binding: the exe already IS
+            // `app`, and two sources of truth for one path is how this breaks
+            // later. The other two are nulled for a non-browser app by
+            // commit()'s normalisation, which is what clears a pin that
+            // described the target being replaced.
+            browser_exe: null,
+            browser_profile_dir: only?.directory ?? null,
+            // The ACCOUNT LABEL, exactly as a hand-picked tile would store it
+            // — never `display_name` directly, or a one-profile browser would
+            // label its HUD chip differently from every other pin.
+            browser_profile_name: only ? labelOf(only) : null,
+          },
+          {
+            // Keep the editor up ONLY to turn the page. Everything else about
+            // this press is unchanged, including the conflict check: the
+            // Space+<key> verdict is about a NEW binding and is still worth
+            // asking. `onSaved` fires after the save actually lands, so a
+            // conflict the user CANCELS leaves the page unopened.
+            keepOpen: multi,
+            onSaved: multi && key ? () => openProfilePage(key, b, true) : undefined,
+          },
+        );
+      },
     },
     // Abandon a late scan result if the editor moved to another key or closed.
     () => _currentKey === key && key !== null,
@@ -275,16 +1382,36 @@ async function handleBrowse(): Promise<void> {
   await assignFromPath(path);
 }
 
-/** Shared by the paste row, Enter in that row, and Browse files…. */
-async function assignFromPath(raw: string): Promise<void> {
+/**
+ * Shared by the paste row, Enter in that row, Browse files… and the 4b disc.
+ *
+ * `opts` is forwarded verbatim to `commit`. Every existing caller passes
+ * nothing and therefore behaves exactly as before — only the 4b disc uses it,
+ * to keep the editor open so it can turn the page onto the URL it just bound.
+ */
+async function assignFromPath(raw: string, opts: CommitOptions = {}): Promise<void> {
   const value = raw.trim();
   if (!value || !_currentKey) return;
 
-  const isUrl = /^https?:\/\//i.test(value);
-  if (isUrl) {
-    let host = value;
-    try { host = new URL(value).hostname.replace(/^www\./, ""); } catch (_) { /* keep raw */ }
-    commit({ app: null, web_url: value, label: cleanLabel(host), icon_override: null });
+  // CALL SITE 4 of 4, and the one that decides what the binding IS. This was
+  // `/^https?:\/\//i` until 1.0.88; `youtube.com` failed it and became an APP
+  // binding that only worked because the engine's Start Menu cascade happened
+  // to rescue it.
+  if (classifyPathInput(value) === "url") {
+    // NORMALISE AT COMMIT TIME, not at classify time. The field, the pill and
+    // the disc all keep working with exactly what the user typed; only the
+    // value that reaches `web_url` is repaired, and it is repaired once. See
+    // `normaliseUrl` for which Rust consumer needs it and why.
+    const url = normaliseUrl(value);
+    let host = url;
+    try { host = new URL(url).hostname.replace(/^www\./, ""); } catch (_) { /* keep raw */ }
+    // No browser-profile fields here ON PURPOSE: this key is being pointed at
+    // a NEW url, so any pin from the old target must go. commit() normalises
+    // the three of them to null explicitly — see its header. Until 2026-08-26
+    // that clearing was an accident of the full-replace save rather than a
+    // decision, which is how the same omission silently wiped a pin the user
+    // had just set on a url they were only editing.
+    void commit({ app: null, web_url: url, label: cleanLabel(host), icon_override: null }, opts);
     return;
   }
 
@@ -307,46 +1434,156 @@ async function assignFromPath(raw: string): Promise<void> {
   } catch (_) { /* icon is a nicety */ }
 
   const name = value.split(/[\\/]/).pop() || value;
-  commit({
+  // Same rule as the URL branch: a new target clears the pin, via commit()'s
+  // normalisation rather than by leaving the fields off and hoping.
+  void commit({
     app: value,
     web_url: null,
     label: cleanLabel(name),
     icon_override: icon,
-  });
+  }, opts);
 }
 
 function handleRemove(): void {
-  commit({ app: null, web_url: null, label: null, icon_override: null }, true);
+  // The three browser-profile fields are nulled by commit()'s normalisation —
+  // clearing a key must not leave a pin behind in config.json.
+  void commit({ app: null, web_url: null, label: null, icon_override: null }, {
+    skipConflict: true,
+  });
+}
+
+interface CommitOptions {
+  /** Skip the Space+<key> conflict prompt. Remove and the profile chip do. */
+  skipConflict?: boolean;
+  /** Save WITHOUT collapsing the editor. Only the profile chip does. */
+  keepOpen?: boolean;
+  /** Override the confirmation text. Only the profile chip does. */
+  toast?: string;
+  /**
+   * Fired AFTER `_onSave` has actually run — never when `commit` bails out.
+   *
+   * It exists because "did this save?" was previously unanswerable from a call
+   * site: `commit` returns `Promise<void>` and its two early exits (no key /
+   * no handler, and a conflict the user has yet to answer) look identical to
+   * success from outside. The app-grid's browser branch has to know, or a
+   * cancelled conflict prompt would still turn the page onto a binding that was
+   * never written. Carried through `showConflict` too, so "Bind anyway" reaches
+   * it and "Cancel" does not.
+   */
+  onSaved?: () => void;
 }
 
 /**
  * Commit a binding: conflict-check first, then save, pop the key, close.
- * `skipConflict` is used by Remove — clearing a key can never conflict.
+ *
+ * An OPTIONS OBJECT, not the positional `skipConflict` boolean this used to
+ * take. There are now two independent switches, and `commit(b, true, false)`
+ * at a call site is a coin flip about which is which.
+ *
+ * `binding` REPLACES the stored one outright (main.ts does
+ * `profile.bindings[key] = binding`), it does not merge — so an omitted field
+ * is a DELETED field, and TypeScript cannot warn about it because
+ * `browser_exe?` and its two siblings are optional. That is how the
+ * browser-profile pin was being erased: `assignFromPath` calls
+ * `commit({ app, web_url, label, icon_override })`, and those four keys were
+ * the whole saved binding a moment later.
+ *
+ * `full` below closes that hole by NORMALISING to a complete KeyBinding here,
+ * once, instead of asking six call sites to remember three fields.
+ *
+ * NOTE THIS IS NOT A MERGE, DELIBERATELY. Re-pointing a key at a new target
+ * must CLEAR the pin — the pin described the target being replaced, and a
+ * merge would resurrect it so a newly-dropped URL silently kept opening in the
+ * old browser profile. That is exactly the bug `BINDING_RESET` exists to
+ * prevent in keyboard-matrix.ts, whose `updateBinding` DOES merge. The two
+ * save paths therefore have opposite semantics on purpose: matrix = merge +
+ * explicit reset, panel = replace + explicit normalise. What changed here is
+ * only that the panel's clearing is now stated instead of accidental.
  */
-async function commit(binding: KeyBinding, skipConflict = false): Promise<void> {
+async function commit(binding: KeyBinding, opts: CommitOptions = {}): Promise<void> {
   const key = _currentKey;
-  if (!key || !_onSave) return;
+  if (!key || !_onSave) {
+    // NEVER SILENT AGAIN. This early return is the same `_currentKey`-is-null
+    // trap that produced PROBLEM 199 (see the `#ed-done` comment above): it
+    // saved nothing, showed nothing and logged nothing, so a save path that
+    // had stopped working was indistinguishable from one that had nothing to
+    // do. A frontend-only failure leaves no trace in debug.log either, which
+    // is why this reports through all three channels.
+    const why = !key ? "no key is open (_currentKey is null)" : "no onSave handler";
+    const msg = `key-editor: commit ABORTED — ${why}; nothing was saved`;
+    console.error(msg, binding);
+    showToast("⚠️ Not saved — the key editor lost track of which key this was");
+    void invoke("frontend_log", { msg }).catch(() => {});
+    return;
+  }
 
-  if (!skipConflict) {
+  if (!opts.skipConflict) {
     try {
       const conflict = await invoke<ConflictResult>("show_conflict_check", {
         keyCombo: `Space+${key.toUpperCase()}`,
       });
       if (conflict.has_conflict) {
-        showConflict(conflict, binding);
+        showConflict(conflict, binding, opts);
         return;
       }
     } catch (_) { /* the check is advisory; never block a binding on it */ }
   }
 
-  _onSave(key, binding);
+  // The COMPLETE binding. Every optional field is stated, so a caller that
+  // leaves one off can no longer delete it by omission.
+  const full: KeyBinding = {
+    app: binding.app ?? null,
+    web_url: binding.web_url ?? null,
+    label: binding.label ?? null,
+    icon_override: binding.icon_override ?? null,
+    // Never `""` — the owner's hard requirement is that a URL with no specific
+    // browser opens in the OS default, and null is the only value that says so
+    // (types.ts spells this out; Rust re-checks it in
+    // `browser_profiles::should_use_specific_browser`).
+    browser_exe: binding.browser_exe ?? null,
+    browser_profile_dir: binding.browser_profile_dir ?? null,
+    browser_profile_name: binding.browser_profile_name ?? null,
+  };
 
-  const label = binding.label ?? key.toUpperCase();
-  showToast(
-    binding.app || binding.web_url
-      ? `✅ Space+${key.toUpperCase()} → ${label}`
-      : `🗑️ Cleared: Space+${key.toUpperCase()}`,
+  console.info(
+    `key-editor: onSave key=${key} app=${full.app ?? "null"} url=${full.web_url ?? "null"} ` +
+    `browser_exe=${full.browser_exe ?? "null"} profile_dir=${full.browser_profile_dir ?? "null"}`,
   );
+  _onSave(key, full);
+
+  // The point of no return has passed, so the paste row must not still be
+  // holding text that a later "Done" would re-assign over the top of what was
+  // just saved. That was harmless while every commit closed the panel; with
+  // `keepOpen` the field survives, and re-running `assignFromPath` would wipe
+  // the pin the user had just set.
+  const pathInput = _panel?.querySelector<HTMLInputElement>("#ed-path");
+  if (pathInput) {
+    pathInput.value = "";
+    const assignBtn = _panel?.querySelector<HTMLButtonElement>("#ed-assign");
+    if (assignBtn) assignBtn.disabled = true;
+  }
+  // The seed described the field's contents, and the field has just been
+  // emptied. A stale seed would then match the next paste only by coincidence,
+  // and a coincidence that skips a bind is the same silent-no-save class of bug
+  // as PROBLEM 199.
+  _pathSeed = null;
+
+  const label = full.label ?? key.toUpperCase();
+  showToast(
+    opts.toast ??
+      (full.app || full.web_url
+        ? `✅ Space+${key.toUpperCase()} → ${label}`
+        : `🗑️ Cleared: Space+${key.toUpperCase()}`),
+  );
+
+  // Whatever the caller wanted to do with a save that actually happened. Runs
+  // BEFORE the close below, so a caller can cancel that close by opening a page
+  // over the top of it (`keepOpen`) rather than racing it.
+  opts.onSaved?.();
+
+  // A one-property edit leaves the editor where it was: the user is still
+  // looking at this key, and the chip has already repainted itself.
+  if (opts.keepOpen) return;
 
   closePanel();
   // Pop the key after the editor has collapsed back into it.
@@ -356,7 +1593,11 @@ async function commit(binding: KeyBinding, skipConflict = false): Promise<void> 
   }, 220);
 }
 
-function showConflict(conflict: ConflictResult, binding: KeyBinding): void {
+function showConflict(
+  conflict: ConflictResult,
+  binding: KeyBinding,
+  opts: CommitOptions = {},
+): void {
   const box = _panel?.querySelector<HTMLElement>("#ed-conflict");
   if (!box) return;
   box.hidden = false;
@@ -371,7 +1612,9 @@ function showConflict(conflict: ConflictResult, binding: KeyBinding): void {
   `;
   box.querySelector("#ed-conflict-go")!.addEventListener("click", () => {
     box.hidden = true;
-    void commit(binding, true);
+    // Carry the original caller's options through — only the conflict answer
+    // changes here, not whether the editor should close afterwards.
+    void commit(binding, { ...opts, skipConflict: true });
   });
   box.querySelector("#ed-conflict-no")!.addEventListener("click", () => {
     box.hidden = true;

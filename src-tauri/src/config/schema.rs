@@ -212,6 +212,187 @@ pub struct AppConfig {
     /// came from.
     #[serde(default)]
     pub hud_toast_flight: bool,
+
+    /// PROBLEM 206 — pointer activation on the Guide HUD. **ON by default
+    /// since PROBLEM 209.**
+    ///
+    /// While Space is held and the ring is up, POINTING the cursor in a
+    /// binding's direction ARMS it (the chip lights up); releasing Space — or
+    /// left-clicking — launches that binding. Both gestures live in the
+    /// mouse hook plus the `st-hud-pointer` poller; this flag is mirrored
+    /// into `hook::POINTER_HUD_ACTIVATION` by
+    /// `publish_pointer_hud_activation`, which MUST be called from BOTH the
+    /// startup load (lib.rs) and `config::save` (PROBLEM 180's rule).
+    ///
+    /// **THE DEFAULT WAS FLIPPED ON 2026-08-27 BY THE OWNER'S EXPLICIT
+    /// DECISION, KNOWINGLY OVERRIDING THIS CODEBASE'S OWN CONVENTION.** The
+    /// convention — spelled out on `hud_toast_flight` directly above — is
+    /// that brand-new behaviour ships OFF so nobody is surprised by it. He
+    /// asked for this one ON anyway, in the same conversation that replaced
+    /// containment with directional sectors: he wants the feature met, not
+    /// found. It is his app and his call. **Do not "restore the convention"
+    /// here** — that is not a bug being fixed, it is a decision being
+    /// reversed, and it needs him, not a tidy-up.
+    ///
+    /// So: `default = "default_true"`, NOT a bare `#[serde(default)]` — a
+    /// bool's `Default` is `false`, so the bare attribute would read OFF for
+    /// every config already on disk and the flip would reach nobody who
+    /// already runs the app. Frontend readers use `!== false`, NEVER
+    /// `=== true`; same shape as `send_logs` below, and the OPPOSITE of
+    /// `hud_toast_flight` above. **Both conventions live in this one struct
+    /// on purpose** — see `hud_show_specials`, which is the other one — so
+    /// check what a field's default IS before copying a neighbour's read.
+    /// `first_install_tests` checks BOTH paths, because `Default` governs a
+    /// fresh install and the serde attr governs an old file, and nothing
+    /// forces them to agree except that test.
+    #[serde(default = "default_true")]
+    pub pointer_hud_activation: bool,
+
+    /// Show the SPECIAL keys on the Space HUD's inner ring? ON by default.
+    ///
+    /// Display only. The eight specials (Esc, the backtick PiP, the Boss Key
+    /// and friends) keep working exactly as they always have whether this is
+    /// on or off — the gate is in `engine/mod.rs`, where an empty `specials`
+    /// vec is sent in the `GuideHudPayload` instead of the eight entries, and
+    /// the overlay page simply renders what it is given. Nothing in the hook
+    /// or the engine's key HANDLING consults this.
+    ///
+    /// **NO HOOK ATOMIC, DELIBERATELY.** Every other setting the HUD path
+    /// touches has one because the hook callback needs it and may not read
+    /// config (PROBLEM 58/134/184). This one is read on the Space-HOLD path,
+    /// inside a config read that already happens, on the engine thread — an
+    /// atomic would be a second source of truth for no gain and one more
+    /// thing to forget to publish (PROBLEM 180's failure mode). Do not add
+    /// one.
+    ///
+    /// `default = "default_true"`, and the frontend reads `!== false`: this
+    /// is EXISTING behaviour becoming optional, not new behaviour arriving,
+    /// so a config that predates the field must keep showing the specials it
+    /// has always shown. **That is the opposite convention from
+    /// `hud_toast_flight` above** — and `pointer_hud_activation` directly
+    /// above is a third case again, a new behaviour the owner chose to ship
+    /// ON. Three fields, two conventions, one struct; the deciding question
+    /// is always "what did this config do YESTERDAY?", never "what does the
+    /// field next to it do?".
+    #[serde(default = "default_true")]
+    pub hud_show_specials: bool,
+
+    /// How many RINGS of app shortcuts the Space HUD lays out:
+    /// `"auto"` (default), `"one"` or `"two"`.
+    ///
+    /// **A STRING ENUM, not a bool, and modelled on `motion` above** — same
+    /// three-valued shape (`"auto" | "full" | "reduced"`), same
+    /// `#[serde(default = ...)]` returning a `String`, same "an unknown value
+    /// means auto" tolerance on the reading side. It is deliberately NOT
+    /// `theme`'s shape: `theme`'s serde default is the empty string so a
+    /// migration can tell "never set" from "set to earthy", and there is no
+    /// migration here — an absent key simply means auto.
+    ///
+    /// **THIS FIELD AND `hud_show_specials` ARE ONE SYSTEM.** The specials
+    /// occupy the HUD's INNER band, so they can only exist when the apps need
+    /// just the outer one:
+    ///
+    /// ```text
+    ///   rows   specials   result
+    ///   one    on         specials inner ring + apps outer ring
+    ///   one    off        one app band, no inner ring
+    ///   two    on/off     two app bands, specials NOT rendered
+    ///   auto   on         specials shown IF the apps fit one ring
+    ///   auto   off        band count by arithmetic, no inner ring
+    /// ```
+    ///
+    /// Rust decides the DETERMINISTIC half of that table (see
+    /// `engine::specials_for_hud`): with `"two"` the specials vec is sent
+    /// empty, exactly as it is when `hud_show_specials` is off. `"auto"` is
+    /// the page's call and only the page's — the band count depends on
+    /// MEASURED label widths, which exist nowhere but in the overlay
+    /// document — so Rust keeps sending the specials and the page drops them
+    /// if it ends up needing two bands.
+    ///
+    /// **NO HOOK ATOMIC, DELIBERATELY — and nothing on the hook path may grow
+    /// one.** Same argument as `hud_show_specials` above but stronger: the
+    /// hook never reads this at all. It is read once on the Space-HOLD path
+    /// inside a config borrow that already happens (engine thread), and
+    /// otherwise it only travels to the overlay page as an event. An atomic
+    /// here would be a second source of truth with no reader and one more
+    /// thing to forget to publish (PROBLEM 180's failure mode). Do not add
+    /// one; `pointer.rs`'s snapshot is unaffected by this setting because it
+    /// only ever holds the APPS ring.
+    ///
+    /// Default `"auto"`: this is a brand-new choice, and auto reproduces
+    /// exactly what every existing build already does — pick whatever fits.
+    /// Both paths matter and `first_install_tests` holds both to it: `Default`
+    /// governs a fresh install, the serde attribute governs the config already
+    /// on every existing user's disk, and nothing forces them to agree except
+    /// that test (see `pointer_hud_activation`, where the field-removal path
+    /// was the only one that reached anybody).
+    #[serde(default = "default_band_count")]
+    pub hud_band_count: String,
+
+    /// Use the NEW Magnetic Sector ring layout for the Space HUD, or the
+    /// CLASSIC ring that shipped in 1.0.88? **ON (= the new layout) by
+    /// default, by the owner's explicit decision on 2026-08-27.**
+    ///
+    /// `true` = the new layout, `false` = the classic one. The toggle is the
+    /// ESCAPE HATCH, not the invitation: his words were *"give an option to
+    /// use this new HUD layout or old layout — in settings, toggle"*, and the
+    /// new ring is what he wants to open the app and see.
+    ///
+    /// **THIS DELIBERATELY OVERRIDES THIS STRUCT'S OWN CONVENTION** that
+    /// brand-new behaviour ships OFF — the convention `hud_toast_flight`
+    /// above follows and documents. The precedent for overriding it is
+    /// `pointer_hud_activation` above, flipped by the same owner on the same
+    /// day for the same reason. **Do not "harmonise" these three fields.**
+    /// They disagree on purpose: `hud_toast_flight` is a bare
+    /// `#[serde(default)]` (new behaviour, OFF), `pointer_hud_activation` and
+    /// this one are `default = "default_true"` (new behaviour the owner chose
+    /// to ship ON), and `hud_show_specials` is `default_true` for a third
+    /// reason again (existing behaviour becoming optional). The deciding
+    /// question is never "what does the field next to it do?".
+    ///
+    /// So: `default = "default_true"`, NOT a bare `#[serde(default)]` — a
+    /// bool's `Default` is `false`, which would hand the classic layout to
+    /// every config already on disk and deliver the new one to nobody.
+    /// Frontend readers use `!== false`, NEVER `=== true`.
+    ///
+    /// **A DEFAULT ONLY EVER REACHES USERS WHOSE FILE PREDATES THE FIELD**,
+    /// so `first_install_tests` asserts BOTH paths — the fresh `Default` AND
+    /// the field-removed-from-an-old-config path. That second one is where
+    /// this flip actually lands, and it is the one that nearly went
+    /// unwritten: `pointer_hud_activation` had already been written to the
+    /// owner's own config on 2026-08-27, so its flip reached him through the
+    /// WRITTEN value, not through the default at all.
+    ///
+    /// **NO HOOK ATOMIC, DELIBERATELY.** Nothing on the hook path reads this
+    /// — the layout is chosen inside the overlay page, from measured label
+    /// widths, and this field travels there as the `hud-layout-changed` event
+    /// plus the `get_config` seed. Same argument as `hud_band_count` above,
+    /// and stronger: not even the engine consults it. An atomic here would be
+    /// a second source of truth with no reader and one more thing to forget
+    /// to publish (PROBLEM 180's failure mode). Do not add one.
+    #[serde(default = "default_true")]
+    pub hud_magnetic_layout: bool,
+
+    /// PROBLEM 195 — whether crash and error reports may be sent to Sentry.
+    ///
+    /// **TRUE MEANS SENDING IS HAPPENING.** This field is the positive
+    /// statement; the Settings switch is its NEGATION ("Don't send logs"), so
+    /// the switch reads `!send_logs` and writes the opposite of its own checked
+    /// state. Getting that backwards is the easiest possible mistake here and
+    /// the only one a user could not detect, so it is spelled out in three
+    /// places: here, in `settings-panel.ts`, and in `set_send_logs`.
+    ///
+    /// `default = "default_true"`, NOT a bare `#[serde(default)]`: a bool's
+    /// `Default` is `false`, so the bare attribute would silently invert the
+    /// intended default for every config written before 1.0.82 — i.e. every
+    /// existing user would be opted out while the UI showed them opted in.
+    ///
+    /// Read at runtime through `telemetry::SENDING_ENABLED`, not from here:
+    /// this struct is a snapshot behind an RwLock and the panic hook cannot
+    /// take a lock. `telemetry::publish` copies it into the atomic from both
+    /// the startup load and `config::save`.
+    #[serde(default = "default_true")]
+    pub send_logs: bool,
 }
 
 /// PROBLEM 105 — the profile every OTHER profile silently falls back to.
@@ -228,6 +409,9 @@ pub const FALLBACK_PROFILE: &str = "Founders";
 
 fn default_true() -> bool { true }
 fn default_motion() -> String { "full".into() }
+/// See `hud_band_count`. `"auto"` — the behaviour every build before 1.0.89
+/// already had, so an upgrading config changes nothing by acquiring the key.
+fn default_band_count() -> String { "auto".into() }
 /// PROBLEM 95 — the default is now chosen for SAFETY ACROSS UNKNOWN TYPISTS,
 /// not to reproduce the pre-slider build.
 ///
@@ -346,6 +530,31 @@ impl Default for AppConfig {
             run_at_startup: true,
             motion: default_motion(),
             hud_toast_flight: false,
+            // PROBLEM 209 — ON, by the owner's explicit decision on
+            // 2026-08-27, knowingly overriding the new-behaviour-defaults-off
+            // convention that the line above follows. Must agree with the
+            // `default = "default_true"` on the field; first_install_tests
+            // holds both to it.
+            pointer_hud_activation: true,
+            // PROBLEM 209 — ON. The specials ring has always been drawn; this
+            // setting only lets someone turn it off. An existing config must
+            // keep what it had.
+            hud_show_specials: true,
+            // "auto" — let the arithmetic pick the band count, which is what
+            // every build before this one did unconditionally. Must agree with
+            // `default = "default_band_count"` on the field; first_install_tests
+            // holds both to it.
+            hud_band_count: default_band_count(),
+            // ON — the new Magnetic Sector ring, by the owner's explicit
+            // decision on 2026-08-27, knowingly overriding the
+            // new-behaviour-defaults-off convention that `hud_toast_flight`
+            // above follows. Must agree with the `default = "default_true"`
+            // on the field; first_install_tests holds both to it.
+            hud_magnetic_layout: true,
+            // PROBLEM 195 — ON. Crash reporting is only useful if it is on by
+            // default; the opt-out is one switch at the bottom of Settings and
+            // PRIVACY.md says exactly what it sends.
+            send_logs: true,
         }
     }
 }
@@ -353,7 +562,8 @@ impl Default for AppConfig {
 /// A named shortcut profile containing per-key bindings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
-    /// Unique alphanumeric profile identifier (1–24 chars, `[a-zA-Z0-9_]`).
+    /// Unique profile name (1–24 chars, any printable text — see
+    /// `commands::regex_lite`, PROBLEM 197).
     pub name: String,
 
     /// Map of lowercase key character → binding.
@@ -377,6 +587,62 @@ pub struct KeyBinding {
     /// Absolute path to a custom icon override (base64 PNG).
     /// `null` = extract from `app` automatically.
     pub icon_override: Option<String>,
+
+    /// Absolute path to a SPECIFIC browser exe to launch a `web_url` into,
+    /// overriding the OS default-browser lookup. `None` = existing behaviour,
+    /// unchanged — `run_browser()` asks Windows who owns http/https.
+    ///
+    /// THE OWNER STATED THIS TWICE: *"make sure the default browser launches
+    /// from URL if not explicitly set to specific."* So this field is the ONLY
+    /// thing that can divert a URL away from the default browser, and
+    /// `smart_cascade` consults `browser_profiles::should_use_specific_browser`
+    /// before it chooses a path. See `hard_requirement_tests` in
+    /// `browser_profiles.rs` — the guard has its own test because a regression
+    /// here is invisible until someone's links start opening in the wrong
+    /// browser.
+    ///
+    /// `#[serde(default)]` is LOAD-BEARING and is written out explicitly rather
+    /// than inherited from anything: a plain `Option<T>` with no attribute is a
+    /// REQUIRED key to serde, so every config.json on disk today — none of
+    /// which has this key — would fail to deserialise and the user would lose
+    /// every binding they have. That is not hypothetical; PROBLEM 159 is this
+    /// project's own config-corruption incident from exactly this class of
+    /// mistake.
+    #[serde(default)]
+    pub browser_exe: Option<String>,
+
+    /// The Chromium INTERNAL profile folder name (e.g. `"Profile 1"`), passed
+    /// as `--profile-directory=`. `None` = launch that browser normally,
+    /// whatever its own default/last-used profile is.
+    ///
+    /// Two different meanings depending on the sibling fields, both deliberate:
+    ///   · with `web_url` + `browser_exe` — open that URL in that profile;
+    ///   · with `app` (which IS the browser exe) and NO url — "just open
+    ///     Brave's Studies profile". That binding still flows through the
+    ///     normal focus → minimize → launch cascade; the parameter only
+    ///     affects the LAUNCH leg (owner's decision 2026-08-26).
+    ///
+    /// Explicit `#[serde(default)]` for the same reason as above.
+    #[serde(default)]
+    pub browser_profile_dir: Option<String>,
+
+    /// The HUMAN-READABLE profile name (e.g. `"ARPON'S STUDIES"`) that
+    /// `browser_profile_dir` pointed at when the user picked it.
+    ///
+    /// Stored rather than looked up. The Guide HUD shows "Brave — Studies"
+    /// (owner's decision 2026-08-26) and the HUD is built on a latency-
+    /// sensitive path — it must appear inside the user's configured delay, so
+    /// re-reading and JSON-parsing the browser's ~96 KB `Local State` on every
+    /// Space-hold to translate `"Profile 1"` into a name is the wrong trade.
+    /// Storing it also survives the browser being uninstalled, so the key still
+    /// reads as something meaningful instead of degrading to a folder name.
+    ///
+    /// The cost is staleness: renaming the profile inside the browser will not
+    /// update this until the user re-picks it. That is the accepted trade.
+    ///
+    /// Explicit `#[serde(default)]` for the same reason as above.
+    #[serde(default)]
+    pub browser_profile_name: Option<String>,
 }
 
 impl KeyBinding {
@@ -401,6 +667,208 @@ pub struct ConflictResult {
     pub has_conflict: bool,
     pub conflicting_combo: Option<String>,
     pub description: Option<String>,
+}
+
+/// The upgrade path for the browser-profile fields (2026-08-26).
+///
+/// THIS IS THE ACTUAL SAFETY NET, not a formality. Every `config.json` on disk
+/// today was written before `browser_exe` / `browser_profile_dir` /
+/// `browser_profile_name` existed. A plain `Option<T>` field is REQUIRED to
+/// serde — absence is an error, not `None` — so shipping these three without an
+/// explicit `#[serde(default)]` on EACH one would make every existing config
+/// fail to load, and this project has already lived through that exact class of
+/// incident once (PROBLEM 159).
+///
+/// The fixture is written out as a LITERAL old-shaped JSON string rather than
+/// built by serialising a current `KeyBinding` and deleting keys. Both styles
+/// appear in this file and each is right for its job: the `AppConfig` tests
+/// above must round-trip a struct with 30-odd fields, half of which have no
+/// serde default, so building-then-deleting is the only maintainable option
+/// there. `KeyBinding` has four old fields, and here the literal is the POINT —
+/// it is a byte-accurate sample of what is actually sitting in the owner's
+/// `%APPDATA%\Spaceadom\config.json` right now, and it cannot silently start
+/// including the new keys the way a serialise-then-delete fixture could if
+/// someone later removes a `remove()` line.
+#[cfg(test)]
+mod key_binding_upgrade_tests {
+    use super::*;
+
+    /// A binding exactly as versions up to 1.0.84 wrote it: four keys, and the
+    /// three new ones ENTIRELY ABSENT from the JSON.
+    #[test]
+    fn a_binding_written_before_the_browser_fields_still_parses() {
+        let old = r#"{
+            "app": "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+            "web_url": null,
+            "label": "Brave",
+            "icon_override": null
+        }"#;
+
+        let b: KeyBinding = serde_json::from_str(old).expect(
+            "a KeyBinding written before the browser-profile fields MUST still \
+             deserialise — without an explicit #[serde(default)] on each new \
+             Option field this fails and every existing user loses every binding",
+        );
+
+        // The old fields survive untouched...
+        assert_eq!(b.label.as_deref(), Some("Brave"));
+        assert!(b.app.is_some(), "the old app path must round-trip");
+        assert!(b.web_url.is_none());
+        assert!(b.icon_override.is_none());
+
+        // ...and the new ones read as "never set", which is what routes this
+        // binding down the UNCHANGED default-browser path.
+        assert!(
+            b.browser_exe.is_none(),
+            "an absent browser_exe must read as None, never as an error"
+        );
+        assert!(
+            b.browser_profile_dir.is_none(),
+            "an absent browser_profile_dir must read as None"
+        );
+        assert!(
+            b.browser_profile_name.is_none(),
+            "an absent browser_profile_name must read as None"
+        );
+    }
+
+    /// The same proof one level up: a whole PROFILE full of old bindings, which
+    /// is the shape the loader actually meets. A field attribute can be right
+    /// on the struct and still be defeated by a container that fails first, so
+    /// the nesting is exercised rather than assumed.
+    #[test]
+    fn a_whole_profile_of_old_bindings_still_parses() {
+        let old = r#"{
+            "name": "Founders",
+            "bindings": {
+                "b": { "app": "brave.exe", "web_url": null, "label": "Brave", "icon_override": null },
+                "g": { "app": null, "web_url": "https://github.com", "label": "GitHub", "icon_override": null }
+            }
+        }"#;
+
+        let p: Profile = serde_json::from_str(old)
+            .expect("a profile written before the browser-profile fields must still load");
+        assert_eq!(p.bindings.len(), 2);
+        for (key, b) in &p.bindings {
+            assert!(b.browser_exe.is_none(), "key {key}: browser_exe must default to None");
+            assert!(b.browser_profile_dir.is_none(), "key {key}: browser_profile_dir must default to None");
+            assert!(b.browser_profile_name.is_none(), "key {key}: browser_profile_name must default to None");
+        }
+    }
+
+    /// The final link: run THIS MACHINE'S REAL `config.json` through the real
+    /// parser. The literal fixture above is a model of that file; this checks
+    /// the model against the thing it models, which is the only way to know the
+    /// fixture has not quietly gone stale.
+    ///
+    /// Ignored by default — it depends on a file outside the repo, so it is a
+    /// diagnostic rather than a gate (same reasoning as `icon_smoke`).
+    /// Run: `cargo test --lib -- --ignored --nocapture the_real_config`
+    #[test]
+    #[ignore]
+    fn the_real_config_on_this_machine_still_loads() {
+        let Some(appdata) = std::env::var_os("APPDATA") else {
+            println!("APPDATA unset — skipping");
+            return;
+        };
+        let path = std::path::PathBuf::from(appdata).join(r"Spaceadom\config.json");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            println!("no config at {} — skipping", path.display());
+            return;
+        };
+
+        let cfg: AppConfig = serde_json::from_str(&text).unwrap_or_else(|e| {
+            panic!(
+                "THE OWNER'S REAL CONFIG NO LONGER PARSES: {e}\n  {}\n\
+                 This is the PROBLEM 159 failure mode. Do not ship.",
+                path.display()
+            )
+        });
+
+        let bindings: usize = cfg.profiles.iter().map(|p| p.bindings.len()).sum();
+        println!(
+            "parsed {} ({} profiles, {} bindings, active '{}')",
+            path.display(),
+            cfg.profiles.len(),
+            bindings,
+            cfg.active_profile
+        );
+        assert!(bindings > 0, "the real config should contain bindings");
+        for p in &cfg.profiles {
+            for (k, b) in &p.bindings {
+                assert!(
+                    b.browser_exe.is_none(),
+                    "{}/{k}: a config written before this feature must read browser_exe as None",
+                    p.name
+                );
+            }
+        }
+    }
+
+    /// A binding that DOES carry the new fields must round-trip them, or the
+    /// user's choice would be silently dropped on the next save — a failure
+    /// with no symptom until the key opens the wrong profile.
+    #[test]
+    fn the_new_fields_round_trip_when_they_are_set() {
+        let b = KeyBinding {
+            app: None,
+            web_url: Some("https://example.com".into()),
+            label: Some("Example".into()),
+            icon_override: None,
+            browser_exe: Some(r"C:\Program Files\Google\Chrome\Application\chrome.exe".into()),
+            browser_profile_dir: Some("Profile 1".into()),
+            browser_profile_name: Some("Work".into()),
+        };
+        let json = serde_json::to_string(&b).expect("serialise");
+        let back: KeyBinding = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(back.browser_exe, b.browser_exe);
+        assert_eq!(back.browser_profile_dir.as_deref(), Some("Profile 1"));
+        assert_eq!(back.browser_profile_name.as_deref(), Some("Work"));
+    }
+
+    /// Rename-profile feature: bindings live INSIDE the `Profile` object
+    /// (`commands::apply_profile_rename` only ever touches the `name` field),
+    /// so the thing that could actually go wrong is the serde round-trip a
+    /// save/load cycle puts every profile through. This proves that changing
+    /// `name` — exactly what a rename does to the in-memory struct before
+    /// `config::save` writes it out — carries every binding across two full
+    /// JSON round-trips unchanged.
+    #[test]
+    fn a_profile_round_trip_carries_every_binding_across_a_rename() {
+        let mut bindings = HashMap::new();
+        bindings.insert(
+            "a".to_string(),
+            KeyBinding { app: Some("brave.exe".into()), ..Default::default() },
+        );
+        bindings.insert(
+            "g".to_string(),
+            KeyBinding { web_url: Some("https://github.com".into()), ..Default::default() },
+        );
+        let profile = Profile { name: "Old Name".into(), bindings };
+
+        // Round-trip once, as an ordinary save/load would.
+        let json = serde_json::to_string(&profile).expect("serialise");
+        let mut reloaded: Profile = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(reloaded.bindings.len(), 2, "first round-trip must keep both bindings");
+
+        // Now rename in place — the exact mutation `apply_profile_rename`
+        // performs — and round-trip again, as the SAVE the rename triggers
+        // would.
+        reloaded.name = "New Name".into();
+        let json2 = serde_json::to_string(&reloaded).expect("serialise after rename");
+        let renamed: Profile = serde_json::from_str(&json2).expect("deserialise after rename");
+
+        assert_eq!(renamed.name, "New Name");
+        assert_eq!(renamed.bindings.len(), 2, "a rename must not lose a binding");
+        assert_eq!(
+            renamed.bindings.get("a").and_then(|b| b.app.as_deref()),
+            Some("brave.exe")
+        );
+        assert_eq!(
+            renamed.bindings.get("g").and_then(|b| b.web_url.as_deref()),
+            Some("https://github.com")
+        );
+    }
 }
 
 #[cfg(test)]
@@ -433,6 +901,43 @@ mod first_install_tests {
             !d.hud_toast_flight,
             "the guide-to-toast flight must be OFF at first install"
         );
+        // PROBLEM 209 — the owner reversed PROBLEM 206's default on
+        // 2026-08-27, knowingly overriding the convention the assertion
+        // directly above enforces for `hud_toast_flight`. Point-to-launch is
+        // ON at first install: he wants it met, not found. If this assertion
+        // ever fails because someone "restored the convention", that is a
+        // decision being reversed and it needs the owner, not a patch.
+        assert!(
+            d.pointer_hud_activation,
+            "pointer HUD activation must be ON at first install (owner's decision, 2026-08-27)"
+        );
+        // PROBLEM 209 — the specials ring has been drawn since the HUD
+        // existed; making it optional must not change what a first install
+        // looks like.
+        assert!(
+            d.hud_show_specials,
+            "the HUD's specials ring must be SHOWN at first install"
+        );
+        // The band count and the specials ring are ONE system (see the field's
+        // comment). "auto" is the only value that reproduces every previous
+        // build's behaviour, so a first install must land there — and it must
+        // not land on "one" or "two", either of which would silently impose a
+        // layout on a user who never asked for one.
+        assert_eq!(
+            d.hud_band_count, "auto",
+            "the HUD band count must be AUTO at first install"
+        );
+        // 2026-08-27 - the owner asked for the new Magnetic Sector ring to be
+        // what a fresh install SEES, with the toggle as the way back to the
+        // 1.0.88 ring. That knowingly overrides the convention the
+        // `hud_toast_flight` assertion above enforces, exactly as
+        // `pointer_hud_activation` does. If this assertion ever fails because
+        // someone "restored the convention", that is a decision being
+        // reversed and it needs the owner, not a patch.
+        assert!(
+            d.hud_magnetic_layout,
+            "the new ring layout must be ON at first install (owner's decision, 2026-08-27)"
+        );
     }
 
     #[test]
@@ -447,6 +952,10 @@ mod first_install_tests {
         obj.remove("show_me_around");
         obj.remove("theme");
         obj.remove("hud_toast_flight");
+        obj.remove("pointer_hud_activation");
+        obj.remove("hud_show_specials");
+        obj.remove("hud_band_count");
+        obj.remove("hud_magnetic_layout");
         let c: AppConfig = serde_json::from_value(v).expect("a config without the new fields must still parse");
         assert!(!c.fun_mode, "a missing fun_mode must read as OFF");
         assert!(!c.show_me_around, "a missing show_me_around must read as OFF");
@@ -459,6 +968,119 @@ mod first_install_tests {
         assert!(
             !c.hud_toast_flight,
             "a config predating this field must read as OFF, not ON"
+        );
+        // PROBLEM 209 — THE FIELD-REMOVAL PATH IS WHERE THE DEFAULT FLIP
+        // ACTUALLY LANDS. Every config on disk today either predates
+        // pointer_hud_activation or was written with it false-by-default;
+        // `Default` alone would only reach a brand-new install, i.e. nobody.
+        // The serde attribute is what carries the owner's decision to the
+        // machines that already run the app, so an ABSENT field must read ON.
+        // (A config that says `false` explicitly still reads OFF — that is a
+        // user's own choice and serde never overrides it.)
+        assert!(
+            c.pointer_hud_activation,
+            "a config predating pointer_hud_activation must now read as ON \
+             (owner's decision, 2026-08-27) — this is the path the flip travels"
+        );
+        // PROBLEM 209 — and the opposite direction of the same rule: the
+        // specials ring has always been drawn, so a config that never heard
+        // of the setting must keep drawing it.
+        assert!(
+            c.hud_show_specials,
+            "a config predating hud_show_specials must read as ON — the ring \
+             has always been there and this only makes it optional"
+        );
+        // THE FIELD-REMOVAL PATH IS THE ONLY ONE ANY EXISTING USER TRAVELS —
+        // the same lesson `pointer_hud_activation` records directly above.
+        // Every config on disk today predates this key, and a `String`'s
+        // `Default` is the EMPTY string, so a bare `#[serde(default)]` would
+        // hand every one of them `""`. `""` is not one of the three values, so
+        // the reading side would have to guess, and a reader that guessed
+        // wrong would re-lay-out the HUD for people who never touched a
+        // setting. The named default is what stops that.
+        assert_eq!(
+            c.hud_band_count, "auto",
+            "a config predating hud_band_count must read as \"auto\", not \"\" \
+             — a bare #[serde(default)] gives a String the empty string"
+        );
+        // AND THIS IS THE PATH THE LAYOUT DEFAULT ACTUALLY TRAVELS. A default
+        // only ever reaches users whose file PREDATES the field: every config
+        // on disk today was written before 1.0.89, so `Default` alone would
+        // hand the new ring to nobody. A bool's `Default` is `false`, so a
+        // bare `#[serde(default)]` here would silently give every existing
+        // user the classic layout while the switch in Settings showed it on.
+        // (A config that says `false` explicitly still reads OFF - that is a
+        // user's own choice and serde never overrides it.)
+        assert!(
+            c.hud_magnetic_layout,
+            "a config predating hud_magnetic_layout must read as ON - this is the path the owner's 2026-08-27 default actually travels"
+        );
+    }
+
+    /// PROBLEM 195 — `send_logs` is the one bool in this struct whose default
+    /// is TRUE, and a bare `#[serde(default)]` would make it false without
+    /// changing a single visible thing: the app would simply stop reporting
+    /// crashes, for everybody, silently, forever. That is a failure with no
+    /// symptom, which is exactly the kind this project writes tests for.
+    ///
+    /// Both paths again, and here the UPGRADE path is the one that matters:
+    /// every config on disk today was written before this field existed.
+    /// 2026-08-27 — the new Magnetic Sector ring layout. Its own test, beside
+    /// `send_logs`'s, because it is the second field in this struct whose
+    /// default is TRUE for a reason that is NOT this codebase's convention,
+    /// and because the two assertions inside the shared first-install tests
+    /// above are easy to lose in a merge.
+    ///
+    /// **A DEFAULT ONLY EVER REACHES USERS WHOSE FILE PREDATES THE FIELD.**
+    /// That is why the second half of this test is the important one: every
+    /// config on disk today was written before 1.0.89, so `Default` alone
+    /// governs nobody but a brand-new install. A bool's `Default` is `false`,
+    /// so a bare `#[serde(default)]` would hand the CLASSIC ring to every
+    /// existing user while the switch in Settings, which reads `!== false`,
+    /// showed the new one selected — the app and its own UI disagreeing, with
+    /// no symptom the user could report.
+    #[test]
+    fn hud_magnetic_layout_defaults_to_true_on_both_paths() {
+        assert!(
+            AppConfig::default().hud_magnetic_layout,
+            "a fresh install must open on the NEW ring layout (owner's decision, 2026-08-27)"
+        );
+
+        let mut v = serde_json::to_value(AppConfig::default()).expect("serialise");
+        v.as_object_mut().expect("object").remove("hud_magnetic_layout");
+        let c: AppConfig = serde_json::from_value(v)
+            .expect("a config without hud_magnetic_layout must parse");
+        assert!(
+            c.hud_magnetic_layout,
+            "a config predating hud_magnetic_layout must read as ON - a bare              #[serde(default)] gives false for a bool and would deliver the              new layout to nobody who already runs the app"
+        );
+
+        // And the other direction: an EXPLICIT false is the user's own choice,
+        // and serde must never override it with the default.
+        let mut v = serde_json::to_value(AppConfig::default()).expect("serialise");
+        v.as_object_mut().expect("object")
+            .insert("hud_magnetic_layout".into(), serde_json::Value::Bool(false));
+        let c: AppConfig = serde_json::from_value(v).expect("parse");
+        assert!(
+            !c.hud_magnetic_layout,
+            "an explicit false must stay false - that is the escape hatch working"
+        );
+    }
+
+    #[test]
+    fn send_logs_defaults_to_true_on_both_paths() {
+        assert!(
+            AppConfig::default().send_logs,
+            "a fresh install must have crash reporting ON — the opt-out is the switch"
+        );
+
+        let mut v = serde_json::to_value(AppConfig::default()).expect("serialise");
+        v.as_object_mut().expect("object").remove("send_logs");
+        let c: AppConfig = serde_json::from_value(v).expect("a config without send_logs must parse");
+        assert!(
+            c.send_logs,
+            "a config predating send_logs must read as TRUE — a bare #[serde(default)] \
+             gives false for a bool and would silently opt every existing user out"
         );
     }
 }

@@ -64,6 +64,50 @@ pub fn is_excluded(foreground: &str, list: &[String]) -> bool {
     list.iter().any(|e| normalize_stem(e) == fg)
 }
 
+/// Our own exe stem, as `is_excluded` would see it.
+///
+/// PROBLEM 218 — falls back to the literal `spaceadom` rather than to nothing.
+/// `current_exe()` can fail, and failing toward "no name" would silently turn
+/// the self-exclusion guard below into a no-op — a guard that cannot fire is
+/// not a guard. The identity is fixed by CLAUDE.md (exe `spaceadom.exe`), so
+/// the fallback is a fact, not a guess. Under `cargo test` `current_exe()` is
+/// the TEST binary, which is why the filtering itself takes the stem as an
+/// argument and is tested separately.
+pub fn own_stem() -> String {
+    std::env::current_exe()
+        .ok()
+        .map(|p| normalize_stem(&p.to_string_lossy()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "spaceadom".to_string())
+}
+
+/// Drop any entry that names US. Pure, so it can be tested.
+///
+/// PROBLEM 218 — SPACEADOM MUST NEVER BE ABLE TO EXCLUDE ITSELF.
+///
+/// The reasoning is already written down in the frontend, in
+/// `src/components/settings-panel.ts` (the picker refuses `spaceadom` with
+/// *"Excluding the app that DRAWS this panel would be a trap: Spaceadom would
+/// stand down whenever its own dashboard had focus, and the setting that
+/// caused it would look like it had simply done nothing"*). The author saw the
+/// trap exactly and then guarded only the doorway they were standing in.
+///
+/// The backend accepted whatever the config held. `excluded_apps` reaches it
+/// from a hand-edited `config.json`, a restored backup, a profile import and a
+/// schema migration — none of which go through that picker — and the result
+/// would be report (B) verbatim: no HUD, no shortcuts, nothing at all while
+/// Spaceadom's own window is focused, working again the moment it is
+/// minimised, and no log line anywhere naming the cause.
+///
+/// GENERALISE: a rule enforced only in the UI is not enforced. Put it where
+/// the value is CONSUMED, not where it is entered.
+pub fn without_self(list: Vec<String>, own: &str) -> (Vec<String>, Vec<String>) {
+    let own = normalize_stem(own);
+    let (dropped, kept): (Vec<String>, Vec<String>) =
+        list.into_iter().partition(|e| !own.is_empty() && *e == own);
+    (kept, dropped)
+}
+
 /// Publish the config's exception list for the poller.
 ///
 /// PROBLEM 180 — MUST be called from BOTH the startup config load in `lib.rs`
@@ -77,6 +121,19 @@ pub fn publish_excluded_apps(cfg: &crate::config::AppConfig) {
         .map(|s| normalize_stem(s))
         .filter(|s| !s.is_empty())
         .collect();
+    // PROBLEM 218 — see `without_self`. Loud, because the alternative is an
+    // app that does nothing in its own window for a reason nobody can find.
+    let (list, dropped) = without_self(list, &own_stem());
+    if !dropped.is_empty() {
+        log::error!(
+            "exclusions: the app exception list named SPACEADOM ITSELF ({dropped:?}) — \
+             ignoring it. Honouring it would stand every shortcut and the Guide HUD down \
+             whenever Spaceadom's own window had focus, which reads to the user as \
+             \"the app only works if I minimise it\" and points at nothing. The settings \
+             picker already refuses this; the entry therefore came from a hand-edited \
+             config.json, a restored backup or an import (PROBLEM 218)."
+        );
+    }
     let mut guard = EXCLUDED_LIST.lock().unwrap_or_else(|p| p.into_inner());
     if *guard != list {
         log::info!("exclusions: {} app(s) excluded — {:?}", list.len(), list);
@@ -167,11 +224,6 @@ pub fn start_exclusion_watcher() {
 /// it, so the comparison can live in the pure, testable `is_excluded`.
 #[cfg(windows)]
 unsafe fn foreground_stem() -> String {
-    use windows::core::PWSTR;
-    use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
-        PROCESS_QUERY_LIMITED_INFORMATION,
-    };
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
     let hwnd = GetForegroundWindow();
@@ -181,6 +233,30 @@ unsafe fn foreground_stem() -> String {
 
     let mut pid = 0u32;
     GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    if pid == 0 {
+        return String::new();
+    }
+    process_stem_for_pid(pid)
+}
+
+/// The exe stem for an arbitrary process id, lowercased. Empty when it cannot
+/// be read.
+///
+/// Split out of `foreground_stem` (2026-08-26) so PiP — the release watcher's
+/// safety guard and the entry-timing log line — can resolve a name for a
+/// window whose pid it already holds, without re-querying the foreground
+/// window. Same OpenProcess/QueryFullProcessImageNameW plumbing, same cost:
+/// one process-handle open/close plus one kernel string query, deliberately
+/// only ever called from poller threads or per-tap paths, never from the
+/// keyboard-hook callback (see the header rule).
+#[cfg(windows)]
+pub(crate) unsafe fn process_stem_for_pid(pid: u32) -> String {
+    use windows::core::PWSTR;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
     if pid == 0 {
         return String::new();
     }
@@ -223,6 +299,67 @@ mod tests {
         assert_eq!(normalize_stem(""), "");
         // An exe whose NAME contains ".exe" must not lose the middle of it.
         assert_eq!(normalize_stem("my.exe.tool.exe"), "my.exe.tool");
+    }
+
+    /// PROBLEM 218 — the app must never be able to stand itself down.
+    ///
+    /// Every form below is one that HAS reached `excluded_apps`: the picker's
+    /// normalised stem, a full path from the Start-Menu scanner, and a
+    /// hand-edited entry with the extension left on. All three must be
+    /// dropped, because honouring any of them produces the owner's exact
+    /// report — nothing works while Spaceadom's own window has focus.
+    #[test]
+    fn spaceadom_can_never_exclude_itself() {
+        let own = "spaceadom";
+        for form in [
+            "spaceadom",
+            "spaceadom.exe",
+            "C:\\Users\\beamu\\AppData\\Local\\Spaceadom\\spaceadom.exe",
+            "SPACEADOM.EXE",
+        ] {
+            let list = vec![super::normalize_stem(form)];
+            let (kept, dropped) = super::without_self(list, own);
+            assert!(
+                kept.is_empty() && dropped.len() == 1,
+                "{form} must be dropped from the exception list"
+            );
+        }
+    }
+
+    /// The guard must be NARROW. Dropping anything else would silently delete
+    /// an exception the user deliberately set — the opposite failure, and just
+    /// as invisible.
+    #[test]
+    fn self_exclusion_guard_touches_nothing_else() {
+        let list = vec![
+            "photoshop".to_string(),
+            "spaceadom".to_string(),
+            "blender".to_string(),
+            // Not us: a different app whose name merely contains ours.
+            "spaceadom-helper".to_string(),
+        ];
+        let (kept, dropped) = super::without_self(list, "spaceadom");
+        assert_eq!(dropped, vec!["spaceadom".to_string()]);
+        assert_eq!(
+            kept,
+            vec![
+                "photoshop".to_string(),
+                "blender".to_string(),
+                "spaceadom-helper".to_string()
+            ]
+        );
+    }
+
+    /// A failure to read our own exe name must not turn the guard into a
+    /// no-op that quietly passes everything, NOR into a filter that eats the
+    /// whole list. `own_stem()` never returns empty, but this pins the
+    /// behaviour of the pure function if it ever did.
+    #[test]
+    fn an_empty_own_stem_drops_nothing() {
+        let list = vec!["photoshop".to_string(), "".to_string()];
+        let (kept, dropped) = super::without_self(list.clone(), "");
+        assert_eq!(kept, list);
+        assert!(dropped.is_empty());
     }
 
     #[test]

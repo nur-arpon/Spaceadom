@@ -560,6 +560,38 @@ body.nocturne #key-detail-panel { box-shadow: 0 24px 60px rgba(0, 0, 0, .55); }
      the hover lift and press shrink below. `backwards` still hides the tile
      during its stagger delay, then releases the transforms. */
   animation: st-pop-in 380ms var(--ease-spring) backwards;
+  /* PROBLEM 197 — up to RENDER_CAP (500, app-grid.ts) of these can exist at
+     once with NO virtualisation: every off-screen tile still has its disc
+     and <img> in the live render tree, so every scroll frame repaints all of
+     them, not just the ones on screen. `content-visibility: auto` skips
+     layout/paint/style work for whichever tiles are not near the viewport —
+     exactly the standard fix for a large unvirtualised list.
+     `contain-intrinsic-block-size` is required alongside it: without a
+     substitute size, a skipped tile's height collapses to 0 (its real height
+     comes entirely from its content — the 34px disc + the name line — which
+     content-visibility hides from layout while skipped), which would shrink
+     the grid's scrollHeight and jump the scrollbar/scroll position as tiles
+     enter and leave the skip state. The 80px comes from the tile's own CSS:
+     1.5px border + 10px padding + 34px disc + 6px gap + one line of 11px/1.5
+     line-height (16.5px) + 10px padding + 1.5px border ≈ 79.5px. `auto`
+     before it means "use the tile's last REAL measured size once it has
+     rendered at least once, and fall back to this estimate only before that"
+     — the standard `content-visibility: auto` + `contain-intrinsic-size:
+     auto <estimate>` pairing (not a bare estimate), so a slightly-off manual
+     measurement self-corrects after first paint instead of staying wrong.
+     ONLY the height is substituted (not `contain-intrinsic-inline-size`):
+     the tile's WIDTH comes from its grid column (`repeat(4, 1fr)`, `#ed-grid,
+     .ed-grid` above), which is an explicit track size the grid engine
+     computes independently of any one cell's content — content-visibility's
+     size containment only ever substitutes for a dimension that would
+     otherwise be intrinsic (content-derived), so the column width is
+     unaffected either way and constraining it here would be pure guesswork
+     for zero benefit.
+     This changes ONLY rendering cost for off-screen tiles — content-
+     visibility does not alter layout, paint output or the st-pop-in entrance
+     animation for any tile that IS on screen or has already entered view. */
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 80px;
 }
 .ed-tile:hover { transform: translateY(-3px); box-shadow: 0 10px 20px rgba(90, 60, 30, .16); }
 .ed-tile:active { transform: scale(.94); }
@@ -584,12 +616,479 @@ body.nocturne #key-detail-panel { box-shadow: 0 24px 60px rgba(0, 0, 0, .55); }
 }
 .ed-empty { padding: 14px; text-align: center; font-size: 12px; color: var(--st-text-dim); }
 
+/* --------------------------------------------------------------------------
+   Browser-profile chip + picker (components/browser-profile-picker.ts)
+
+   "Open this in a SPECIFIC browser profile". The row is hidden unless the key
+   is bound to a URL or to a detected browser, so most keys never see it.
+
+   The tiles REUSE `.ed-tile` / `.ed-tile-disc` / `.ed-tile-name` wholesale —
+   radius, hover lift, press shrink, the `.current` accent and the
+   content-visibility budget all come from the rules above. `.bp-tile` below
+   overrides ONLY what genuinely differs: these nest under a browser header, so
+   they are denser than a top-level app tile.
+   -------------------------------------------------------------------------- */
+.ed-bp-row {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 2px 10px;
+  animation: st-pop-in 360ms var(--ease-spring) both;
+  animation-delay: 40ms;
+}
+.ed-bp-row[hidden] { display: none; }
+.ed-bp-label {
+  font-size: 10px; font-weight: 700; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--st-text-dim);
+  flex-shrink: 0;
+}
+/* The 6s Undo after the chip's ✕. See `offerPinUndo` in key-detail-panel.ts for
+   why it is here and not inside the toast. */
+.ed-bp-undo {
+  flex-shrink: 0;
+  height: 22px; padding: 0 10px;
+  border: 1px solid var(--st-accent-brd);
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--st-accent-deep);
+  font: inherit; font-size: 10px; font-weight: 700;
+  letter-spacing: .06em; text-transform: uppercase;
+  cursor: pointer;
+  animation: st-pop-in 260ms var(--ease-spring) both;
+  transition: all var(--transition-fast);
+}
+.ed-bp-undo:hover { background: var(--st-accent-tint); }
+.ed-bp-undo:active { transform: scale(.94); }
+
+/* THE ROW ARITHMETIC, which is why it never wraps:
+     label "Browser profile"  ~110px  flex-shrink: 0  (10px/700/.1em uppercase)
+     gap                         8px
+     chip                    <=260px  max-width
+                            ────────
+                              378px   inside the row's 416px
+                                      (460 panel - 2x20 padding - 2x2 margin)
+   Nocturne's label runs a shade wider, so its chip caps at 230px instead —
+   re-checked per theme rather than assumed. The host owns the cap (and the
+   positioning context for the ✕), so the chip itself is simply 100% of it. */
+.bp-host { position: relative; display: inline-flex; align-items: center; min-width: 0; max-width: 260px; }
+body.nocturne .bp-host { max-width: 230px; }
+
+.bp-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  max-width: 100%;
+  height: 32px;
+  padding: 3px 10px 3px 3px;
+  border: 1.5px solid var(--st-hairline);
+  border-radius: var(--radius-full);      /* interactive => 999 */
+  background: transparent;                /* quiet until it holds something */
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+/* Unset, it reads as a LABEL, not a control — no fill, no border — until it is
+   hovered, at which point it takes the set chip's fill. This is the guard for
+   users who have never heard of browser profiles. */
+.bp-chip:not(.bp-chip-set) { border-color: transparent; }
+.bp-chip:hover { border-color: var(--st-accent-brd); background: var(--st-accent-tint); box-shadow: 0 4px 12px rgba(90, 60, 30, .12); }
+.bp-chip:active { transform: scale(.96); }
+.bp-chip.bp-chip-set {
+  border-color: var(--st-accent-brd);
+  background: var(--st-accent-tint);
+  padding-right: 28px;                    /* room for the ✕ */
+}
+.bp-chip-disc { width: 24px; height: 24px; font-size: 11px; }
+.bp-chip-disc img { width: 24px; height: 24px; }
+/* The "no specific browser" state is a glyph on a DASHED ring, not a coloured
+   initial — it is the ABSENCE of a choice and must not look like a browser
+   somebody picked. */
+.bp-chip-disc-none {
+  background: transparent;
+  border: 1px dashed var(--st-border);
+  color: var(--st-text-dim);
+  font-size: 12px;
+}
+.bp-chip-disc-warn { background: var(--st-danger); color: #fff; font-weight: 800; }
+
+/* Browser name HOLDS, profile name GIVES. The only thing in the chip allowed to
+   truncate is the profile name — "Chrome — Thesis — Literature Rev…" still
+   tells you it is Chrome, which is the half you needed. */
+.bp-chip-browser {
+  flex-shrink: 0; white-space: nowrap;
+  font-size: 12px; font-weight: 700;
+}
+.bp-chip-sep { flex-shrink: 0; font-size: 11px; color: var(--st-text-dim); }
+.bp-chip-profile, .bp-chip-text {
+  min-width: 0;
+  font-size: 12px; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.bp-chip-caret { font-size: 9px; opacity: .55; flex-shrink: 0; }
+
+/* One click, no confirm dialog — it is one press of work to undo and the row
+   carries an Undo for 6s. Outside the <button> because a button inside a button
+   is invalid HTML and its clicks are unreliable; placed by the host's
+   positioning context instead. */
+.bp-chip-x {
+  position: absolute; right: 5px; top: 50%;
+  transform: translateY(-50%);
+  width: 18px; height: 18px;
+  display: flex; align-items: center; justify-content: center;
+  border: none; border-radius: var(--radius-full);
+  background: var(--st-accent-brd);
+  color: var(--st-card);
+  font: inherit; font-size: 9px; line-height: 1;
+  padding: 0; cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.bp-chip-x:hover { background: var(--st-danger); color: #fff; }
+.bp-chip-x:active { transform: translateY(-50%) scale(.86); }
+
+/* A pinned browser that is gone, or a pinned profile folder that is gone. The
+   link STILL OPENED — this only reports which half failed. The binding is never
+   rewritten on our side: reinstalling the browser must just work again. */
+.bp-chip.bp-chip-warn { border-color: var(--st-danger); background: var(--st-danger-tint); }
+.bp-chip.bp-chip-warn .bp-chip-browser { color: var(--st-danger); }
+.bp-chip.bp-chip-warn .bp-chip-x { background: var(--st-danger); color: #fff; }
+.bp-chip-gone { color: var(--st-danger); }
+
+/* --------------------------------------------------------------------------
+   Page 2 — the profile page.
+
+   It REPLACES the `.bp-pop` popover this feature shipped with. That popover
+   hung off the chip inside a 460px panel and overflowed it by ~19px (measured:
+   panel right edge 870, popover right edge 888), which gave the editor a
+   horizontal scrollbar. A page inside the panel's own box cannot do that.
+
+   `inset: 0` against the panel — which is already `position: absolute`, so it
+   is the containing block — means the page is EXACTLY the panel's padding box.
+   Page 1 stays in the DOM underneath, so the panel's height never changes and
+   the keyboard behind it never re-layouts.
+   -------------------------------------------------------------------------- */
+#key-detail-panel.bp-paged { overflow: hidden; }
+.bp-page {
+  position: absolute; inset: 0; z-index: 12;
+  display: flex; flex-direction: column;
+  padding: 20px;
+  border-radius: 22px;                    /* matches the panel it covers */
+  background: rgba(var(--srf-rgb), .99);
+  overflow: hidden;
+  animation: bp-page-in 300ms cubic-bezier(.2, .8, .2, 1) both;
+}
+.bp-page.bp-page-out { animation: bp-page-out 195ms var(--ease-in) both; }
+@keyframes bp-page-in  { from { transform: translateX(100%); } to { transform: translateX(0); } }
+@keyframes bp-page-out { from { transform: translateX(0); } to { transform: translateX(100%); } }
+
+.bp-page-head { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.bp-page-btn {
+  flex-shrink: 0;
+  width: 28px; height: 28px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--st-border);
+  background: transparent;
+  color: var(--st-text-dim);
+  font: inherit; font-size: 13px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.bp-page-btn:hover { background: var(--bg-card-hover); color: var(--st-text); }
+.bp-page-btn:active { transform: scale(.9); }
+.bp-page-titles { flex: 1; min-width: 0; }
+.bp-page-title {
+  display: block;
+  font-family: var(--st-font-heading); font-size: 18px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.bp-page-sub {
+  display: block;
+  font-size: 12px; color: var(--st-text-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.bp-page-rule { flex-shrink: 0; height: 1px; margin: 12px 0 10px; background: var(--st-border); }
+.bp-page-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+
+/* Present ONLY above six profiles. Below that it would be furniture; at fifteen
+   it is the only way to reach the one you want without reading all of them. */
+.bp-filter-wrap { position: relative; display: flex; align-items: center; flex-shrink: 0; margin-bottom: 10px; }
+.bp-filter-glyph { position: absolute; left: 13px; font-size: 13px; color: var(--st-text-dim); pointer-events: none; }
+.bp-filter {
+  width: 100%; height: 34px;
+  padding: 0 32px 0 32px;
+  border: 1.5px solid var(--st-border);
+  border-radius: var(--radius-full);
+  background: rgba(var(--srf-rgb), 1);
+  color: var(--st-text);
+  font-family: var(--st-font-body); font-size: 12px;
+  outline: none;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+.bp-filter:focus { border-color: var(--st-accent-brd); box-shadow: 0 0 0 3px var(--accent-dim); }
+.bp-filter::placeholder { color: var(--st-text-dim); }
+.bp-filter-x {
+  position: absolute; right: 8px;
+  width: 18px; height: 18px;
+  display: flex; align-items: center; justify-content: center;
+  border: none; border-radius: var(--radius-full);
+  background: var(--st-border);
+  color: var(--st-card);
+  font: inherit; font-size: 9px; line-height: 1;
+  padding: 0; cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.bp-filter-x:hover { background: var(--st-accent); color: #fff; }
+.bp-filter-x[hidden] { display: none; }
+
+.bp-reset {
+  display: block; width: 100%; flex-shrink: 0;
+  padding: 8px 12px; margin-bottom: 10px;
+  border: 1.5px solid var(--st-hairline);
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: inherit; font: inherit; font-size: 12px; font-weight: 600;
+  text-align: left; cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.bp-reset:hover { background: var(--st-accent-tint); border-color: var(--st-accent-brd); }
+.bp-reset:active { transform: scale(.97); }
+
+/* Three rows. Six tiles fit without scrolling — that is where the filter's
+   threshold of 6 comes from. */
+.bp-scroll {
+  position: relative;
+  flex: 1 1 auto; min-height: 0;
+  max-height: 246px; overflow-y: auto;
+  margin: 0 -4px; padding: 0 4px 4px;
+}
+/* The bottom fade is GRADIENT STOPS ON THE PAGE'S OWN COLOUR — never a mask and
+   never a filter. `.is-scrollable` is set by JS from a real measurement, so a
+   short list is not dimmed for nothing. */
+.bp-scroll.is-scrollable::after {
+  content: "";
+  position: sticky; bottom: 0; left: 0;
+  display: block; height: 26px; margin-top: -26px;
+  background: linear-gradient(to bottom,
+              rgba(var(--srf-rgb), 0) 0%,
+              rgba(var(--srf-rgb), .72) 55%,
+              rgba(var(--srf-rgb), .99) 100%);
+  pointer-events: none;
+}
+
+/* One header per browser — drawn even when only ONE browser was detected, so
+   the page has the same shape on every machine (owner's decision
+   2026-08-26). */
+.bp-browser {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 2px 8px;
+  border-top: 1px solid var(--st-hairline);
+  margin-top: 4px;
+}
+.bp-browser:first-of-type { border-top: none; margin-top: 0; }
+.bp-browser-disc { width: 24px; height: 24px; font-size: 11px; }
+.bp-browser-disc img { width: 24px; height: 24px; }
+.bp-browser-name {
+  min-width: 0;
+  font-size: 14px; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* "2 profiles" at rest, "3 of 15" while filtering — the filter must never hide
+   how much it hid. */
+.bp-count {
+  margin-left: auto; flex-shrink: 0;
+  font-size: 11px; font-weight: 600; color: var(--st-text-dim);
+}
+/* Cache-first paint: last session's list is already usable, so a refresh says
+   so with a dot and a word rather than a spinner over readable content. */
+.bp-checking {
+  display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0;
+  font-size: 10px; font-weight: 600; letter-spacing: .04em;
+  color: var(--st-text-dim);
+}
+.bp-checking-dot {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--st-sage);
+  animation: bp-checking 1.4s ease-in-out infinite;
+}
+@keyframes bp-checking { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+
+.bp-grid { grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 6px; }
+/* Cached -> fresh: cross-fade in place. No spinner, no jump, no re-layout. */
+.bp-grid.bp-xfade { animation: bp-xfade 300ms var(--ease-out) both; }
+@keyframes bp-xfade { from { opacity: 0; } to { opacity: 1; } }
+
+.bp-tile {
+  padding: 8px 4px;
+  gap: 5px;
+  justify-content: center;
+  border-radius: 13px;                    /* cards => 13 */
+  /* MIN-height, never height. This is what lets `ARPON'S STUDIES` and
+     `Thesis — Literature Review and Reading Notes` GROW the tile instead of
+     being clipped by it. A fixed height here is the regression to watch for. */
+  min-height: 80px;
+  /* PROBLEM 197's pairing, re-measured for THIS tile rather than inherited:
+     `.ed-tile` substitutes 80px for a 34px-disc app tile. A bp-tile's floor is
+     now also 80px (min-height above), so that is the right estimate — a tile
+     with a long wrapped name is taller, and `auto` first means the real
+     measured size replaces the estimate after first paint anyway. */
+  contain-intrinsic-block-size: auto 80px;
+}
+.bp-tile .ed-tile-disc { width: 26px; height: 26px; font-size: 12px; }
+.bp-tile .ed-tile-disc img { width: 26px; height: 26px; }
+/* The app grid's names ellipsis on one line; a profile name WRAPS, because
+   min-height above gives it somewhere to go and a profile name is the thing the
+   user is actually choosing between. */
+.bp-tile .ed-tile-name {
+  font-size: 10px; line-height: 1.35;
+  white-space: normal; word-break: break-word;
+  text-overflow: clip;
+}
+/* The browser's own name for the profile — a SECOND, dimmer line under the
+   ACCOUNT LABEL, only ever present in the DOM when the tile is led by an
+   account (see browser-profile-picker.ts). A profile that is not signed in is
+   already headlined by this name and gets no element here at all, so its
+   height is unaffected — `.bp-tile`'s min-height above is what a name-only
+   tile still floors out at. Unlike the headline above, this truncates rather
+   than wraps: it is confirmation, not the thing being chosen. The full email
+   address is never drawn here — it lives in the tile's tooltip alone. */
+.bp-tile-sub {
+  max-width: 100%;
+  font-size: 9px;
+  color: var(--st-text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Empty results — both of them. Two different failures get two different
+   sentences: "something went wrong" leaves the user guessing which half to
+   fix. */
+.bp-nomatch {
+  display: flex; flex-direction: column; gap: 6px;
+  margin: 4px 0;
+  padding: 18px 14px;
+  text-align: center;
+  border: 1px dashed var(--st-border);
+  border-radius: 16px;                    /* container => 16 */
+  font-size: 12px; line-height: 1.5;
+  color: var(--st-text-dim);
+}
+.bp-nomatch strong { font-size: 13px; font-weight: 700; color: var(--st-text-soft); }
+
+.bp-page-foot { display: flex; align-items: center; gap: 10px; flex-shrink: 0; margin-top: 12px; }
+.bp-page-hint { flex: 1; min-width: 0; font-size: 12px; line-height: 1.4; color: var(--st-text-dim); }
+.bp-done { flex-shrink: 0; height: 34px; padding: 0 18px; }
+
+/* Long entrances become instant, loops stop; the responsive layer survives.
+   Same contract as design-system.css's `.reduced-motion` block. */
+:root.reduced-motion .bp-page,
+:root.reduced-motion .bp-page.bp-page-out,
+:root.reduced-motion .bp-grid.bp-xfade,
+:root.reduced-motion .ed-bp-row,
+:root.reduced-motion .ed-bp-undo {
+  animation: none !important;
+  opacity: 1 !important;
+  transform: none !important;
+}
+:root.reduced-motion .bp-checking-dot { animation: none !important; opacity: 1; }
+
 .ed-row { display: flex; gap: 8px; margin-top: 12px; align-items: stretch; }
 /* Browse spans the row now that the drag-and-drop hint is gone. */
 .ed-browse { flex: 1; justify-content: center; padding: 9px 16px; height: auto; }
 
 .ed-row-tight { display: flex; gap: 8px; margin-top: 8px; }
 #ed-path { flex: 1; min-width: 0; height: 36px; padding: 0 14px; font-size: 12px; }
+
+/* 4b — the leading disc in the paste row (owner's decision, 2026-08-26).
+   It lives INSIDE the field's box, so the row's height is unchanged and nothing
+   is added below it. Both the disc and the 38px of room for it arrive together,
+   on the same 90ms tween, the moment the field holds a link — a permanently
+   present disc would be a control that can do nothing on the common path, and
+   a permanently reserved gap would be the same problem with no disc in it. */
+.ed-path-wrap { position: relative; display: flex; flex: 1; min-width: 0; }
+.ed-path-wrap #ed-path {
+  transition: border-color var(--transition-fast),
+              box-shadow var(--transition-fast),
+              padding-left var(--transition-fast);
+}
+.ed-path-wrap.has-disc #ed-path { padding-left: 38px; }
+.ed-path-disc {
+  position: absolute; left: 5px; top: 50%;
+  transform: translateY(-50%);
+  width: 26px; height: 26px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0; overflow: hidden;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--st-text-dim);
+  font: inherit; font-size: 12px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.ed-path-disc[hidden] { display: none; }
+.ed-path-disc img { width: 22px; height: 22px; border-radius: var(--radius-full); object-fit: contain; }
+/* No real default-browser icon yet (see the TODO in browser-profile-picker.ts).
+   Until Rust can report it, the disc wears the app's existing UNSET treatment —
+   a dashed ring and `◍` — rather than a guessed icon. */
+.ed-path-disc-unset { border: 1px dashed var(--st-accent-brd); }
+.ed-path-disc:hover { background: var(--st-accent-tint); border-color: var(--st-accent); color: var(--st-accent-deep); }
+.ed-path-disc:active { transform: translateY(-50%) scale(.88); }
+
+/* --------------------------------------------------------------------------
+   The assigned-value pill (2026-08-27). See the markup comment in
+   key-detail-panel.ts for WHY it exists; this is only how it is sized.
+
+   IT BORROWS `.bp-chip` WHOLESALE — the browser-profile chip's radius, border,
+   accent tint, hover lift, press shrink, disc, "one part holds one part gives"
+   text rule and its `.bp-chip-x`. That is the owner's own comparison ("the way
+   they make a pill shape for the browser that is being used with the profile —
+   that's similar"), so the two are one family by construction and the next
+   change to the chip reaches both. Only the HOST differs, because the two live
+   in rows of different widths: `.bp-host` caps at 260px (230 in Nocturne) to
+   share a row with the "BROWSER PROFILE" label, and this one has the whole
+   paste field to fill. Overriding `body.nocturne .bp-host` from a single class
+   would be a specificity fight, so it gets its own host instead.
+
+   HEIGHT: 32px pill, `align-self: center`, in a row still held at 36px by
+   #ed-assign. Nothing is added below the row and the panel does not grow.
+
+   THE 4b DISC AND THE PILL ARE NEVER BOTH UP, and that falls out rather than
+   being enforced: the disc's job is "the link you are TYPING will open in X",
+   so it keys off `#ed-path`'s contents (syncPathDisc). Behind a pill that field
+   is empty, so the disc is down; click the pill to edit and the field holds the
+   URL again, so the disc comes straight back with its 90ms padding tween
+   intact. That is also the right answer semantically: once a URL is COMMITTED
+   the browser question belongs to the `.ed-bp-row` chip above, which is drawn
+   for exactly this binding — two controls for one choice, 300px apart, could
+   only ever disagree.
+   -------------------------------------------------------------------------- */
+#ed-path[hidden] { display: none; }        /* an ID rule in this row => its own [hidden] companion */
+.ed-val-host {
+  position: relative;                      /* the ✕'s positioning context, as .bp-host is for the chip */
+  display: inline-flex; align-items: center;
+  align-self: center;                      /* 32 in a 36 row */
+  min-width: 0; max-width: 100%;
+}
+.ed-val-host[hidden] { display: none; }    /* inline-flex above would otherwise beat [hidden] */
+.ed-val-chip {
+  max-width: 100%;
+  animation: st-pop-in 260ms var(--ease-spring) both;
+}
+/* Backstop only. The host name normally HOLDS while the path gives, but nothing
+   in this app may assume a fixed width around a name or a URL — so a hostname
+   long enough to eat the whole pill gives too, rather than overflowing it. */
+.ed-val-chip .bp-chip-browser { max-width: 60%; overflow: hidden; text-overflow: ellipsis; }
+/* A link is not a browser. The globe says "this assignment is a URL"; WHICH
+   browser opens it is the .ed-bp-row chip's answer, for this same binding. */
+.ed-val-disc-url {
+  background: var(--st-accent-tint);
+  border: 1px solid var(--st-accent-brd);
+  color: var(--st-accent-deep);
+  font-size: 12px;
+}
+/* Long entrances become instant; the element must still end up VISIBLE. */
+:root.reduced-motion .ed-val-chip {
+  animation: none !important;
+  opacity: 1 !important;
+  transform: none !important;
+}
+
 #ed-assign { height: 36px; padding: 0 16px; }
 #ed-assign:disabled { background: var(--st-border); border-color: var(--st-border); cursor: default; }
 
@@ -638,6 +1137,26 @@ body.nocturne #key-detail-panel { box-shadow: 0 24px 60px rgba(0, 0, 0, .55); }
   border-radius: 999px;
 }
 #settings-panel::-webkit-scrollbar-thumb:hover { background: var(--st-accent-brd); }
+/* PROBLEM 213 follow-up — closeSettingsPanel's animated exit (settings-
+   panel.ts). Entrance is .popover's st-pop-in at 420ms; exit runs ~65% of
+   that with --ease-in, the same ratio as .conflict-prompt.is-leaving and
+   #key-detail-panel.closing. JS never applies this class under
+   :root.reduced-motion (hides instantly instead), so no override is needed
+   here to keep that contract. */
+#settings-panel.closing {
+  /* .popover's st-pop-in entrance runs unconditionally (both fill mode) and
+     holds opacity:1 forever after — CSS animations win over a plain opacity
+     declaration regardless of selector specificity. closeSettingsPanel()
+     kills it inline a frame before adding this class (measured: cancelling
+     it in the SAME pass as the opacity change made the transition below skip
+     straight to its end value, no fade); this repeats "none" so the rule
+     reads complete on its own. */
+  animation: none;
+  opacity: 0;
+  transform: translateY(8px) scale(.92);
+  transition: opacity 270ms var(--ease-in), transform 270ms var(--ease-in);
+  pointer-events: none;
+}
 .set-title { font-family: var(--st-font-heading); font-size: 16px; margin-bottom: 12px; }
 .set-rows { display: flex; flex-direction: column; gap: 11px; }
 .set-row {
@@ -883,6 +1402,20 @@ body.nocturne #conflict-banner {
   border-radius: 12px;
   border: 1px solid var(--st-border);
   background: var(--st-card);
+  /* PROBLEM 197 — same fix as `.ed-tile` above, and for the same reason: this
+     grid has no cap and no virtualisation, it sits in NORMAL FLOW directly
+     inside #settings-panel (unlike `.ed-tile`, which is one layer down
+     inside its own `#ed-grid-scroll`/`.ed-grid-scroll` scroller), so a long
+     exception list adds its full paint cost to every #settings-panel scroll
+     frame with nothing in between. `width` is already a fixed 58px, so it is
+     unaffected by content-visibility's size containment (that only ever
+     substitutes for a dimension that would otherwise come from content) —
+     only the height needs a stand-in. 64px = 1px border + 7px padding + 30px
+     disc + 4px gap + one 10.5px/1.5 line-height name line (15.75px) + 5px
+     padding + 1px border ≈ 63.75px. `auto` first, same as `.ed-tile`, so the
+     real measured height wins the moment a tile has actually rendered once. */
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 64px;
 }
 .exc-tile-disc {
   display: flex;
@@ -1292,7 +1825,7 @@ body[data-fun="off"] .theme-seg-ind { transition: transform 200ms var(--ease-out
 /* --------------------------------------------------------------------------
    SKY MODE — the dashboard clears away and leaves only the sky
    -------------------------------------------------------------------------- */
-body.sky-mode #stage > *:not(#sky-return),
+body.sky-mode #stage > *:not(#sky-return):not(#gear-dock),
 body.sky-mode .topbar,
 body.sky-mode .dock {
   opacity: 0;
@@ -1305,7 +1838,7 @@ body.sky-mode .dock {
    pointer-events on #keyboard-scale and other leaves — and a child's
    `pointer-events: auto` beats its parent's `none`. So an invisible keyboard
    was still taking key presses in sky mode (owner, 2026-08-20). */
-body.sky-mode #stage > *:not(#sky-return) * { pointer-events: none !important; }
+body.sky-mode #stage > *:not(#sky-return):not(#gear-dock) * { pointer-events: none !important; }
 body:not(.sky-mode) #stage > *,
 body:not(.sky-mode) .topbar,
 body:not(.sky-mode) .dock {
@@ -1333,3 +1866,22 @@ body:not(.sky-mode) .dock {
 }
 #sky-return:hover { opacity: 1; transform: scale(1.09); color: var(--st-accent-deep); }
 #sky-return:focus-visible { opacity: 1; outline: 2px solid var(--st-accent-brd); outline-offset: 3px; }
+
+/* The OTHER way back: the settings gear stays reachable in sky mode too
+   (owner, 2026-08-27 — a faint arrow alone still stranded people). It is
+   exempted from both hiding rules above by :not(#gear-dock); this block only
+   adds the faint-until-approached dimming, matching #sky-return exactly, so
+   two escape hatches don't read as clutter on an otherwise empty sky. */
+body.sky-mode #gear-dock {
+  opacity: .28;
+  transition: opacity .22s var(--ease-out);
+}
+body.sky-mode #gear-dock:hover,
+body.sky-mode #gear-dock:focus-within {
+  opacity: 1;
+}
+body.sky-mode #gear-btn:focus-visible {
+  outline: 2px solid var(--st-accent-brd);
+  outline-offset: 3px;
+}
+:root.reduced-motion body.sky-mode #gear-dock { transition: none; }

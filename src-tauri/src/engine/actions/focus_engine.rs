@@ -28,7 +28,10 @@ use windows::Win32::{
         PROCESS_QUERY_LIMITED_INFORMATION},
     UI::WindowsAndMessaging::GetWindowThreadProcessId,
     UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, KEYBDINPUT, INPUT_KEYBOARD,
+        // No `SendInput` here on purpose — every injection in this file goes
+        // through `hook::send_keys_checked` (PROBLEM 227), which checks the
+        // return value and sends corrective KEYUPs.
+        INPUT, INPUT_0, KEYBDINPUT, INPUT_KEYBOARD,
         KEYEVENTF_KEYUP, KEYEVENTF_EXTENDEDKEY,
         VK_ESCAPE, VK_CONTROL, VK_F, VK_E, VK_L,
         VIRTUAL_KEY,
@@ -193,7 +196,10 @@ unsafe fn send_slash_class_key(c: char) {
     inputs.push(make_key_input(vk, none));
     inputs.push(make_key_input(vk, KEYEVENTF_KEYUP));
     if needs_shift { inputs.push(make_key_input(VK_SHIFT.0, KEYEVENTF_KEYUP)); }
-    SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    // PROBLEM 227 — checked: a partial insert of `Shift↓ vk↓` leaves SHIFT
+    // latched, and every subsequent keystroke the owner types is capitalised
+    // with nothing in the tree able to explain why.
+    let _ = crate::hook::send_keys_checked(&inputs, "focus: shifted character");
 }
 
 #[cfg(windows)]
@@ -207,7 +213,7 @@ unsafe fn send_key(vk: u16, extended: bool) {
         make_key_input(vk, flags),
         make_key_input(vk, up_flags),
     ];
-    SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    let _ = crate::hook::send_keys_checked(&inputs, "focus: single key");
 }
 
 #[cfg(windows)]
@@ -218,7 +224,9 @@ unsafe fn send_ctrl(vk: u16) {
         make_key_input(vk, KEYEVENTF_KEYUP),
         make_key_input(VK_CONTROL.0, KEYEVENTF_KEYUP),
     ];
-    SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    // PROBLEM 227 — checked: a partial insert leaves CTRL latched, which turns
+    // the next thing the owner types into shortcuts.
+    let _ = crate::hook::send_keys_checked(&inputs, "focus: Ctrl+key");
 }
 
 #[cfg(windows)]
@@ -251,7 +259,10 @@ unsafe fn send_char(c: char) {
             },
         },
     ];
-    SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    // A UNICODE event carries its character in `wScan` and latches nothing, so
+    // there is no corrective KEYUP to send — but a short insert still means the
+    // character never arrived, and that was invisible.
+    let _ = crate::hook::send_keys_checked(&inputs, "focus: unicode character");
 }
 
 #[cfg(windows)]

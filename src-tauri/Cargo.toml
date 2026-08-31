@@ -1,6 +1,6 @@
 [package]
 name = "spaceadom"
-version = "1.0.80"
+version = "1.0.95"
 description = "Spaceadom — hold Space + tap a key to launch, focus or minimise any app"
 authors = ["Spaceadom"]
 edition = "2021"
@@ -42,6 +42,34 @@ crossbeam-channel = "0.5"
 # Logging
 log            = "0.4"
 log4rs         = { version = "1", default-features = false, features = ["file_appender", "rolling_file_appender", "compound_policy", "size_trigger", "fixed_window_roller", "pattern_encoder"] }
+
+# Crash / error reporting — PROBLEM 195. Everything about it lives in
+# src/telemetry.rs, including where to paste the DSN.
+#
+# `default-features = false` IS LOAD-BEARING. DO NOT "TIDY" IT AWAY.
+# The default feature set includes `panic`, which makes `sentry::init()` call
+# `std::panic::set_hook` itself. This app has exactly ONE panic hook by rule
+# (CLAUDE.md; PROBLEM 131 — two hooks, the second silently replaced the first
+# for months and the loser left no trace), and a hook installed from inside a
+# dependency is one no grep of this repo would ever show. Panics are forwarded
+# by hand instead, from the existing hook, via telemetry::capture_panic.
+#
+# The four features that ARE on, and why each is needed:
+#   backtrace — sentry::integrations::backtrace::current_stacktrace(), which is
+#               what gives a forwarded panic a resolved call path.
+#   contexts  — OS / device / Rust-version context on each event. Without it a
+#               crash report cannot say which Windows build it came from.
+#   reqwest   — the HTTP transport. The crate's default `transport` feature is
+#               reqwest + native-tls; this takes reqwest without it.
+#   rustls    — TLS in pure Rust. Nothing on this build machine is installed
+#               system-wide (the toolchain is on D:), so native-tls/openssl and
+#               the optional `curl` transport are both wrong here.
+# Deliberately OFF: panic (above), debug-images, logs, metrics, release-health,
+# native-tls, curl, tokio.
+sentry     = { version = "0.49", default-features = false, features = ["backtrace", "contexts", "reqwest", "rustls"] }
+# The `log` → Sentry bridge. `SentryLogger::with_dest(...)` wraps log4rs's
+# logger rather than replacing it, so the local debug.log is untouched.
+sentry-log = "0.49"
 
 # Misc utilities
 once_cell = "1"

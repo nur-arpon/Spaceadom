@@ -52,6 +52,52 @@ fn main() {
             tauri_build::Attributes::new().windows_attributes(windows),
         )
         .expect("failed to run tauri-build with the app manifest");
+
+        // PROBLEM 226 — `cargo test --lib` binaries link WITHOUT the manifest
+        // above, so they load comctl32 v5, are missing `TaskDialogIndirect`,
+        // and die `0xC0000139`/`0xC0000138` at PROCESS STARTUP (Windows
+        // resolves the whole import table before `main` runs) — or, off this
+        // machine, pop an Entry-Point-Not-Found modal that HANGS the test
+        // run. Documented in PROJECT_STATUS.md 2026-08-29 (Opus 5, PiP
+        // session) but left unfixed there ("Your call."). This is that call
+        // — and the one-line fix that comment proposed (mirror `-bins` with
+        // `cargo:rustc-link-arg-tests=`) turned out not to exist for this
+        // crate. Recorded here so nobody re-tries it:
+        //
+        //   1. `cargo:rustc-link-arg-tests=` is REJECTED outright —
+        //      `error: invalid instruction ... does not have a test target`
+        //      — because this crate's 239 tests are all `#[cfg(test)]` unit
+        //      tests run via `--lib`, and Cargo's "-tests" scoping targets
+        //      only `Test`-kind targets (files under `tests/`), which this
+        //      crate has none of. Proved both on this crate and on a
+        //      from-scratch repro with only a `#[lib]`+`#[test]`: identical
+        //      error either way.
+        //   2. The bare, un-suffixed `cargo:rustc-link-arg=` DOES reach the
+        //      lib's own `--test` harness (proved with `-vv`: the flag shows
+        //      up on that link line) — but it ALSO reaches `bins`, on top of
+        //      the manifest `-bins` above already supplies. Reproduced: two
+        //      copies of the SAME resource file on ONE link line →
+        //      `CVTRES fatal error CVT1100: duplicate resource, type:
+        //      MANIFEST, name:1` → `LNK1123`. That is not a test-only
+        //      failure, it is `spaceadom.exe` itself failing to link —
+        //      unshippable, so this path is out.
+        //
+        // What actually works, proved end-to-end below: don't put a second
+        // manifest anywhere. Delay-load comctl32.dll instead, so the loader
+        // never resolves `TaskDialogIndirect` (or anything else from it) at
+        // PROCESS STARTUP — only on first actual call. None of the 239 tests
+        // call it, so the import is simply never touched and the harness
+        // starts clean. `/DELAYLOAD` is a linker flag, not a resource, so —
+        // unlike the manifest — applying it to `bins` too is harmless: a
+        // fresh scratch repro built a bin carrying the real manifest (via
+        // `-bins`, unmodified) PLUS this delay-load pair and linked clean,
+        // then a lib built the same way ran its unit tests clean. Confirmed
+        // even the pathological case is safe: forcing the delay-loaded call
+        // to actually run (a test that is never otherwise exercised) exits
+        // immediately via the delay-load failure handler (`0xC06D007F`) —
+        // a clean process exit, never a hang, never a modal.
+        println!("cargo:rustc-link-arg=/DELAYLOAD:comctl32.dll");
+        println!("cargo:rustc-link-arg=delayimp.lib");
         // The cfg block below is the non-Windows path; on Windows this arm is
         // the whole function, so the early return is redundant (clippy).
     }

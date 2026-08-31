@@ -1,6 +1,8 @@
 # Release readiness — Spaceadom
 
-**Updated 2026-08-22 for 1.0.72.** Originally rewritten 2026-08-20. The previous version of this file was
+**Updated 2026-08-26 for 1.0.82** (crash reporting — PROBLEM 195; see the
+Sentry lines in §2 and §3). Previously updated 2026-08-22 for 1.0.72,
+originally rewritten 2026-08-20. The version of this file before that was
 written for 1.0.0 and had gone false in three places: it said
 `bundle.targets` was `["msi"]` (it is `["nsis", "msi"]`), that the app needs an
 administrator account (it has not since PROBLEM 61 removed elevation), and that
@@ -28,7 +30,7 @@ Two questions, answered separately, because they have very different answers:
 | What they will hit | Why | What to say |
 | --- | --- | --- |
 | **SmartScreen: "Windows protected your PC"** | The installer is unsigned. Windows warns about every unsigned installer from a publisher it has not seen before. | "Click More info → Run anyway." |
-| **Antivirus may look twice** | An app that watches every keystroke looks, to a scanner, exactly like one that records them. | It records nothing and sends nothing; `PRIVACY.md` says precisely what the local log contains. |
+| **Antivirus may look twice** | An app that watches every keystroke looks, to a scanner, exactly like one that records them. | It records no keystrokes. Since 1.0.82 it does send crash and error reports to Sentry — nothing about normal use — and "Don't send logs" at the bottom of Settings switches that off. `PRIVACY.md` says precisely what is sent and what the local log contains. |
 | **Shortcuts pause over an admin window** | Windows UIPI: a non-elevated hook receives nothing while an elevated window has focus. | Affects every app of this kind, including PowerToys. Click a normal window and it resumes. |
 
 **Known limits worth being honest about, also in the README:** Smart Search
@@ -57,6 +59,12 @@ publishes a way in); Guide HUD is primary-monitor-only by explicit decision.
 - **Hook eviction** — a watchdog re-installs the hook, and after two failed
   attempts rebuilds the whole hook thread.
 - **Crash reporting** — one panic hook, symbols shipped, last-action context.
+  **Since 1.0.82 it also reports off the machine** (PROBLEM 195): crashes and
+  `log::error!` lines go to Sentry, everything quieter is dropped, and the
+  "Don't send logs" switch at the bottom of Settings stops it dead with no
+  restart. Ships with an EMPTY DSN placeholder in
+  `src-tauri/src/telemetry.rs` — **paste the real DSN there before the build
+  you actually ship, or every report goes nowhere and the feature is decoration.**
 - **Corrupt config** — since 1.0.71 the newest backup that parses is restored
   rather than factory-resetting the user (PROBLEM 159), covered by four tests.
 - **Two installs at once** — detected, and removable in one prompt.
@@ -143,7 +151,21 @@ not apply.
   global hook plus terminating other processes plus a `runas` elevation will
   get a manual review, and an undisclosed one gets rejected.
 - **Privacy policy URL.** `PRIVACY.md` exists and now covers the
-  process-closing capability; it needs to be reachable at a public URL.
+  process-closing capability **and the crash reporting added in 1.0.82**; it
+  needs to be reachable at a public URL.
+- **Declare the crash reporting in the Store's data-collection questionnaire**
+  (new, 1.0.82 / PROBLEM 195). The submission form asks what the app collects
+  and where it goes; the honest answer is *diagnostics — crash and error
+  reports, sent to Sentry (a third-party processor), with a user-facing
+  opt-out.* Undeclared data collection is a certification failure, and it is
+  also the kind that gets found, because the binary links `reqwest`. **The
+  `PRIVACY.md` URL submitted must be the version that describes it.**
+- **Paste the real Sentry DSN before building the Store variant.**
+  `src-tauri/src/telemetry.rs`'s `SENTRY_DSN` ships empty; an empty DSN means
+  the client never starts. Not a blocker for certification — a build with it
+  empty sends nothing at all and is entirely legitimate — but shipping the
+  Store build without it means no crash reports from the audience most likely
+  to produce interesting ones. Decide deliberately, do not discover it later.
 - **Age rating, screenshots, description.**
 
 ### Disclosure text, ready to paste into certification notes
@@ -151,9 +173,20 @@ not apply.
 > Spaceadom is a keyboard productivity tool. It installs a global low-level
 > keyboard hook (`WH_KEYBOARD_LL`) so that holding the spacebar acts as a
 > modifier: Space+letter launches, focuses or minimises an app. Tapping Space
-> alone always types a space. The hook reads key codes only; nothing is
-> recorded, stored or transmitted — the app is fully offline and contacts no
-> server. It also uses `SendInput` to send the shortcut keystrokes that focus a
+> alone always types a space. The hook reads key codes only; keystrokes are
+> never recorded, stored or transmitted.
+>
+> The app contacts exactly one server, for one purpose: crash and error
+> reporting via Sentry (sentry.io). A report is sent only when the application
+> crashes or logs an ERROR, and contains the error message, the source location
+> and call stack inside our own code, the app version and the OS version.
+> Ordinary usage is never reported — no analytics, no telemetry about which
+> shortcuts are used or which applications are launched — and Sentry's
+> personally-identifiable-information option is explicitly disabled. Users can
+> stop it entirely with the "Don't send logs" switch at the bottom of Settings,
+> which takes effect immediately. This is described in the privacy policy.
+>
+> It also uses `SendInput` to send the shortcut keystrokes that focus a
 > text box (for example `/` on YouTube), tagged with a private `dwExtraInfo`
 > cookie so it never re-processes its own input.
 >

@@ -15,6 +15,9 @@
 ///  10. Show tray; settings window starts hidden (visible: false in tauri.conf.json)
 
 mod browser;
+/// Chromium browser + profile detection, and every branch that decides whether
+/// a binding launches into a specific profile or the untouched default browser.
+mod browser_profiles;
 mod commands;
 /// PROBLEM 131 — breadcrumbs read by the panic hook.
 mod crash_context;
@@ -26,7 +29,14 @@ mod guide_hud;
 mod hook;
 mod icon_extractor;
 mod logger;
+/// PROBLEM 224 — takes `WM_ENDSESSION` before tao can set its runner to
+/// `Destroyed`, which is the whole of the "cannot move state from Destroyed"
+/// crash. Installed from `create_app_windows`, from `setup()` and from
+/// `display_watch::rebuild_once`; all three are idempotent.
+mod session_end;
 mod startup;
+/// PROBLEM 195 — crash/error reporting to Sentry, and its kill switch.
+mod telemetry;
 mod tray;
 
 use commands::{ConfigState, IconCacheState};
@@ -191,9 +201,20 @@ pub fn spawn_show_fallback(app_handle: &tauri::AppHandle) {
                 if commands::DASHBOARD_READY.load(std::sync::atomic::Ordering::Relaxed) {
                     return; // the ready beacon already showed it
                 }
+                // PROBLEM 205 — this used to say "showing the window anyway"
+                // and it said it HERE, before `run_on_main_thread`. That is a
+                // statement of INTENT dressed as a statement of FACT, and the
+                // one case it gets wrong is the exact case this fallback
+                // exists for: when the main thread is blocked, the closure
+                // below does not run, the window is never shown, and the log
+                // still claims it was. Two hours of a startup investigation
+                // were spent trusting that line. Record the ASK here and the
+                // EVENT inside the closure — never one line for both.
                 log::warn!(
-                    "setup: dashboard_ready never arrived after 10s — showing the \
-                     window anyway (frontend wedged or webview dead; PROBLEM 74)"
+                    "setup: dashboard_ready never arrived after 10s — ASKING the \
+                     main thread to show the window (frontend wedged or webview \
+                     dead; PROBLEM 74). If no 'show-fallback: window shown' line \
+                     follows, the main thread is blocked and it never happened."
                 );
                 let app3 = app2.clone();
                 let _ = app2.run_on_main_thread(move || {
@@ -202,12 +223,324 @@ pub fn spawn_show_fallback(app_handle: &tauri::AppHandle) {
                         ensure_on_screen(&w); // PROBLEM 83
                         let _ = w.show();
                         let _ = w.set_focus();
+                        log::warn!(
+                            "show-fallback: window shown by the 10s fallback \
+                             (main thread reached it)"
+                        );
+                    } else {
+                        log::warn!(
+                            "show-fallback: reached the main thread but there is \
+                             no 'settings' window to show"
+                        );
                     }
                 });
             })
             .ok();
     }
 }
+
+/// PROBLEM 215 — false until `create_app_windows` has run. Read by the Guide
+/// HUD so a Space hold during the autostart settle window logs "still starting"
+/// instead of "the overlay is broken": during that window there is deliberately
+/// no overlay to find, and calling that an error would train the owner to
+/// ignore the line that means something.
+static WINDOWS_CREATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// PROBLEM 59/76/215 — how long an `--autostart` launch waits before creating
+/// its windows. TEN seconds, unchanged from PROBLEM 76: at a real logon the Run
+/// key already fires 1-2 minutes after power-on, and the old 30s stacked on top
+/// of that is what made the owner conclude the app "didn't start". What
+/// PROBLEM 215 changed is WHAT waits — the hook and the engine no longer do.
+const AUTOSTART_SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// PROBLEM 215 — has the UI been built yet? See `create_app_windows`.
+pub fn windows_created() -> bool {
+    WINDOWS_CREATED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+
+/// PROBLEM 215 — WINDOW CREATION, SPLIT OFF FROM EVERYTHING ELSE.
+///
+/// The owner: *"When restarting my laptop this app needs a long time to show
+/// up. The main features — app opening, the Space HUD and toast — should come
+/// up as soon as possible."* After a reboot his shortcuts were dead for over
+/// ten seconds, and the reason was one line in `run()`:
+///
+///     if --autostart { sleep(10s) }   // PROBLEM 59/76
+///
+/// That sleep is REAL and it stays. PROBLEM 59 is measured: at a cold logon the
+/// WebView2 runtime is often not serviceable yet, `CreateCoreWebView2Controller`
+/// fails with HRESULT(0x80070490) ERROR_NOT_FOUND, Tauri destroys the host
+/// window, and the user gets an app with no dashboard and no Guide HUD while
+/// the log claims success. Waiting is what stops that.
+///
+/// But the wait was in the WRONG PLACE. It sat before `tauri::Builder`, so it
+/// delayed the keyboard hook and the engine as well — and NEITHER OF THOSE
+/// NEEDS WEBVIEW2. Nothing in `WH_KEYBOARD_LL` cares whether Edge has finished
+/// starting.
+///
+/// So the sleep did not move; the work moved out from behind it. Both windows
+/// are now declared `"create": false` in tauri.conf.json, which tells Tauri not
+/// to build them during its own setup, and this function builds them from that
+/// same declaration (`WebviewWindowBuilder::from_config` — the documented way,
+/// and it cannot drift from the config the way a hand-copied builder can:
+/// PROBLEM 81). On a manual launch it is called inline from `setup()`, at the
+/// same instant Tauri would have created them. On `--autostart` it is called
+/// from a settle thread after the same 10s, ON THE MAIN THREAD.
+///
+/// What the user gets at logon: hook armed and tray icon present within the
+/// first second; the dashboard and the overlay ten seconds later.
+///
+/// WHAT HAPPENS IF SPACE IS HELD DURING THE SETTLE WINDOW — decided, not
+/// accidental: the shortcut WORKS (launch, focus, minimise, boss key, PiP are
+/// all Rust) and NOTHING is drawn. There is no half-HUD to look broken, because
+/// the overlay window does not exist yet, so every show path takes its
+/// `if let Some(win)` miss and returns without emitting. `guide_hud` logs one
+/// calm line saying the app is still settling rather than shouting an error.
+/// Silent but functional, which is the accepted trade.
+///
+/// PROBLEM 74 IS UNTOUCHED. This function never shows a window. The dashboard
+/// still appears only when the frontend calls `dashboard_ready`, or from the
+/// 10s `spawn_show_fallback`. "Boot, then show" still holds.
+///
+/// Idempotent on purpose (PROBLEM 214's lesson, applied ahead of time): the
+/// settle thread, the tray's "Open Settings" and the single-instance handler
+/// can all reach it, and whoever arrives first does the work.
+pub fn create_app_windows(app_handle: &tauri::AppHandle) {
+    use tauri::Manager;
+    if WINDOWS_CREATED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let app_handle = app_handle.clone();
+
+    // Build what tauri.conf.json declares, from the declaration itself.
+    for wc in app_handle.config().app.windows.clone() {
+        if app_handle.get_webview_window(&wc.label).is_some() {
+            continue;
+        }
+        let label = wc.label.clone();
+        match tauri::WebviewWindowBuilder::from_config(&app_handle, &wc).and_then(|b| b.build()) {
+            Ok(_) => {
+                log::info!("setup: window '{label}' created from its tauri.conf.json declaration")
+            }
+            Err(e) => log::error!(
+                "setup: window '{label}' could not be created ({e}) — the PROBLEM 59 recovery \
+                 below will try again with an explicit builder"
+            ),
+        }
+    }
+
+    // 9b. Configure the always-on-top HUD/toast overlay.
+    //
+    // HISTORY (do not repeat):
+    // • overlay.html existed but NO window ever loaded it — HUD/toasts
+    //   rendered into the hidden dashboard. Fixed by declaring the
+    //   window (2026-08-10, part 2).
+    // • First attempt used a FULLSCREEN TRANSPARENT window. WebView2
+    //   accepted it, JS ran, events arrived — and nothing EVER composed
+    //   to the screen on this machine. Verified with an in-page probe
+    //   ("overlay: webview JS alive") plus screenshots: JS alive,
+    //   pixels absent. Same minefield as the 2026-07-10 "white box"
+    //   saga, failing invisible instead of white.
+    // • Current design copies what install-v11 (AHK) proved on this
+    //   exact machine: an OPAQUE dark window, sized to its content,
+    //   shown on demand and hidden after — never a fullscreen
+    //   transparent sheet. Sizing/positioning happens in guide_hud and
+    //   show_toast at display time.
+    // The overlay is TRANSPARENT (re-tested 2026-08-10: the old
+    // "composes zero pixels" finding was specific to a FULLSCREEN
+    // transparent window; this small on-demand one renders fine).
+    // All of its runtime configuration lives in
+    // configure_overlay_window() — shared with the PROBLEM 59
+    // rebuild path, which used to produce a half-configured window
+    // (PROBLEM 81).
+    {
+        use tauri::Manager;
+        if let Some(overlay) = app_handle.get_webview_window("overlay") {
+            configure_overlay_window(&overlay);
+        } else {
+            log::error!("setup: 'overlay' window missing — HUD and toasts will not be visible");
+        }
+    }
+
+
+    // 9c. Fit the dashboard to the monitor's WORK AREA and centre it.
+    //
+    // The V14 board is fixed-geometry (1046 x 320 design px) and the
+    // frontend scales it down to whatever space it is given. That only
+    // works if the WINDOW itself fits the display: the previous attempt
+    // opened wider than the monitor and the keyboard ran off the edge,
+    // which is the failure the user actually saw. Clamp to 92% of the
+    // monitor rather than maximising — maximising a 2560x1440 display
+    // leaves the keyboard adrift in empty cream.
+    {
+        use tauri::Manager;
+        if let Some(win) = app_handle.get_webview_window("settings") {
+            // current_monitor, NOT primary_monitor: this machine has a
+            // 1920x1080 primary and a 2560x1600 @150% secondary, and
+            // Windows may open the window on either. Fitting it to the
+            // monitor it is ACTUALLY on is the only version that is
+            // right in both cases. (The Guide HUD stays
+            // primary-monitor-only — that is a separate, explicit user
+            // decision; do not "unify" the two.)
+            fit_dashboard_to_work_area(&win);
+
+            // PROBLEM 70 — show the dashboard only when a HUMAN started
+            // the app. At logon (`--autostart`) Spaceadom must come up
+            // silently: hook armed, tray icon present, NO window in the
+            // user's face. They open the dashboard when they want it —
+            // tray click, tray "Open Settings", or launching the app
+            // again (single-instance fronts the existing window).
+            //
+            // PROBLEM 74 — and even on a manual launch, DO NOT show it
+            // here. The window used to appear while WebView2 was still
+            // doing its first-run initialisation, and that gap — a
+            // visible window whose webview cannot pump messages yet —
+            // IS the "(Not Responding)" both testers reported. The
+            // frontend now calls `dashboard_ready` as the LAST step of
+            // its bootstrap, and the window is shown then: the user's
+            // first sight of the dashboard is one that can already
+            // paint and respond. A 10s fallback below covers a wedged
+            // frontend (better a sluggish window than none).
+            spawn_show_fallback(&app_handle);
+        }
+    }
+
+    // PROBLEM 86 — register our own windows with the opacity action,
+    // so Space+scroll can never fade Spaceadom's own dashboard or
+    // overlay. (The registry was a dead thread_local before; see
+    // opacity.rs.)
+    #[cfg(windows)]
+    {
+        use tauri::Manager;
+        for label in ["settings", "overlay"] {
+            if let Some(w) = app_handle.get_webview_window(label) {
+                if let Ok(h) = w.hwnd() {
+                    engine::actions::opacity::register_own_hwnd(h.0 as isize);
+                }
+            }
+        }
+    }
+
+    // 11. Close-to-tray for settings window
+    tray::setup_close_to_tray(&app_handle);
+
+    // PROBLEM 59 — never claim success when the webviews are missing.
+    //
+    // The windows are declared in tauri.conf.json, so Tauri builds them
+    // before setup() runs. On a COLD BOOT the WebView2 runtime is often
+    // not serviceable yet and CreateCoreWebView2Controller fails with
+    // HRESULT(0x80070490) ERROR_NOT_FOUND; Tauri then destroys the host
+    // window. The old code logged "fully initialised" regardless, so a
+    // tester saw an app with no dashboard and no Guide HUD while the log
+    // looked perfectly healthy. Detect it, say so, and rebuild once.
+    {
+        use tauri::Manager;
+        for (label, url) in [("settings", "index.html"), ("overlay", "overlay.html")] {
+            if app_handle.get_webview_window(label).is_some() {
+                continue;
+            }
+            log::error!(
+                "setup: webview '{label}' DOES NOT EXIST — WebView2 failed to attach \
+                 (cold-boot race, or no WebView2 runtime installed). Rebuilding it."
+            );
+            // PROBLEM 81 — the rebuild must recreate the window with
+            // the SAME properties tauri.conf.json declares, or the
+            // replacement is an opaque, decorated, focus-stealing
+            // rectangle. The builder mirrors the conf declaration
+            // field-for-field; the runtime half (click-through, DWM
+            // border, no-activate) is reapplied below via the same
+            // function the normal setup path uses.
+            let mut builder = tauri::WebviewWindowBuilder::new(
+                &app_handle,
+                label,
+                tauri::WebviewUrl::App(url.into()),
+            )
+            .visible(false);
+            if label == "overlay" {
+                builder = builder
+                    .title("Spaceadom Overlay")
+                    .transparent(true)
+                    .decorations(false)
+                    .always_on_top(true)
+                    .skip_taskbar(true)
+                    .resizable(false)
+                    .focused(false)
+                    .shadow(false)
+                    .inner_size(600.0, 460.0);
+            } else {
+                builder = builder
+                    .title("Spaceadom")
+                    .theme(Some(tauri::Theme::Light)) // mirrors conf "theme": "Light"
+                    .inner_size(1220.0, 880.0)
+                    .min_inner_size(720.0, 520.0)
+                    .center();
+            }
+            match builder.build() {
+                Ok(w) => {
+                    // No direct show here (PROBLEM 74): the rebuilt
+                    // webview boots index.html, whose bootstrap ends in
+                    // `dashboard_ready` — the window appears then,
+                    // already responsive.
+                    log::info!("setup: webview '{label}' rebuilt successfully");
+                    if label == "overlay" {
+                        configure_overlay_window(&w);
+                    } else {
+                        // PROBLEM 90 — a rebuilt settings window has NO
+                        // CloseRequested handler, so the X button would
+                        // exit the app (killing the hook) instead of
+                        // hiding to tray. Re-attach it here; step 11's
+                        // one-shot call bound to the window this
+                        // replaced.
+                        tray::attach_close_to_tray(&w);
+                        // PROBLEM 91 — step 9c's work-area fit and its
+                        // 10s show-fallback both ran BEFORE this window
+                        // existed, so without these the rebuilt
+                        // dashboard keeps a raw 1220x880 at a hard
+                        // 720x520 floor (off-screen on a small laptop)
+                        // and, if its frontend also wedges, is never
+                        // shown at all.
+                        fit_dashboard_to_work_area(&w);
+                        spawn_show_fallback(&app_handle);
+                    }
+                    // PROBLEM 86 — the own-window registration loop runs
+                    // before this rebuild, so a rebuilt window would be
+                    // fadeable by Space+scroll.
+                    #[cfg(windows)]
+                    if let Ok(h) = w.hwnd() {
+                        engine::actions::opacity::register_own_hwnd(h.0 as isize);
+                    }
+                }
+                Err(e) => log::error!(
+                    "setup: webview '{label}' rebuild FAILED: {e}. The app is running \
+                     without its UI — install the WebView2 Runtime, or restart the app."
+                ),
+            }
+        }
+    }
+
+    // PROBLEM 117 — the overlay stops compositing when the display
+    // arrangement changes underneath it, while every readback still
+    // says visible=true. Watch for the change and rebuild. Started
+    // AFTER set_app_handle so a rebuild can hide the HUD first.
+    display_watch::start(app_handle.clone());
+
+    // PROBLEM 224 — re-arm the WM_ENDSESSION guard now that `settings` and
+    // `overlay` exist. `setup()` already armed it on tao's event target (the
+    // window that actually sets `Destroyed`); this pass adds the two Tauri
+    // windows, and re-arming tao's costs nothing because SetWindowSubclass
+    // REPLACES an entry with the same (procedure, id) pair.
+    //
+    // This runs on the MAIN THREAD, and it has to: `EnumThreadWindows` is
+    // thread-scoped, so the same call from a worker would find nothing and
+    // install nothing. Every caller of `create_app_windows` is on the main
+    // thread — `setup()` inline, the settle thread via `run_on_main_thread`,
+    // and the single-instance handler.
+    session_end::install();
+
+    log::info!("setup: windows created and configured");
+}
+
 
 /// PROBLEM 89 — set once the app has a tray icon and windows, i.e. once there
 /// is SOME way for the user to see that Spaceadom is alive. Before this point
@@ -322,11 +655,22 @@ pub fn configure_overlay_window(overlay: &tauri::WebviewWindow) {
             log::info!("overlay: configured (on-demand, click-through)");
         }
         Err(e) => {
+            // PROBLEM 217 — the target moves this line off the automatic log
+            // bridge and onto `report_degraded`, which rate-limits it. The
+            // severity in debug.log is unchanged: still ERROR, same wording.
             log::error!(
+                target: telemetry::DEGRADED_TARGET,
                 "overlay: click-through FAILED ({e}) — overlay disabled; \
                  HUD/toasts will not be shown"
             );
             guide_hud::OVERLAY_DISABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+            telemetry::report_degraded(
+                telemetry::Degraded::OverlayDisabled,
+                &format!(
+                    "set_ignore_cursor_events failed ({e}) — OVERLAY_DISABLED set at window \
+                     configuration, so the HUD and every sound are suppressed"
+                ),
+            );
         }
     }
 }
@@ -357,6 +701,45 @@ pub fn run() {
     let data_dir = startup::data_dir();
     logger::init(&data_dir);
     log::info!("Spaceadom starting — data dir: {}", data_dir.display());
+    // PROBLEM 224 — WHICH BUILD IS THIS.
+    //
+    // Every crash investigation in this project has had to answer that
+    // question from outside the log: an installer timestamp, a file size, an
+    // ASCII marker hunt. debug.log never said it, so a log on its own could
+    // never identify the build that crashed — and with two installers, a Store
+    // build and a repo build all able to be the running exe, that is a real
+    // ambiguity, not a theoretical one. One line fixes it permanently, and it
+    // doubles as a long ASCII marker for the installed-exe check in CLAUDE.md.
+    log::info!(
+        "Spaceadom build — version {} ({} bytes at {})",
+        env!("CARGO_PKG_VERSION"),
+        std::env::current_exe()
+            .and_then(|p| std::fs::metadata(&p).map(|m| m.len()))
+            .map(|n| n.to_string())
+            .unwrap_or_else(|_| "unknown".into()),
+        std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "unknown path".into())
+    );
+
+    // PROBLEM 195 — start the Sentry client. Returns None (and this is a
+    // no-op) while `telemetry::SENTRY_DSN` is the empty placeholder, which is
+    // what ships until the owner pastes his own DSN in.
+    //
+    // BOUND TO A NAME ON PURPOSE. `ClientInitGuard` closes and flushes the
+    // client when it drops, so `let _ = telemetry::init();` would drop it at
+    // the end of this statement and switch reporting off on the line that
+    // turned it on. It has to live as long as `run()` does.
+    //
+    // Nothing can actually be SENT yet: `SENDING_ENABLED` starts false and is
+    // only seeded once the config has been read, a few steps below. That is
+    // deliberate — until the config is loaded we do not know whether this user
+    // has switched sending off, and the only safe answer to that is silence.
+    let _sentry_guard = telemetry::init();
+    log::info!(
+        "telemetry: sentry client {} — see src/telemetry.rs to paste a DSN",
+        if _sentry_guard.is_some() { "started" } else { "INERT (no DSN compiled in)" }
+    );
 
     // PROBLEM 125 — a panic used to leave NOTHING behind.
     //
@@ -383,25 +766,25 @@ pub fn run() {
     // having lost. (Same class as PROBLEMS 118/120/129 — a stale thing
     // outliving the thing that replaced it.)
 
-    // 2a. PROBLEM 64 + 59 — the HKCU Run autostart path. A Run value cannot
-    // express the Scheduled Task's `/DELAY 0000:30`, so when the app was
-    // started BY that Run value (`--autostart`) the cold-boot wait happens
-    // here instead: launching at logon races Edge/WebView2's brokers, the GPU
-    // stack and the disk, and losing that race is PROBLEM 59's dead-app.
-    // A manual launch never carries the flag and is not delayed.
-    // PROBLEM 76 — 10s, not 30s. At a REAL logon the Run key already fires
-    // ~1–2 minutes after power-on (Windows startup + sign-in + shell), and the
-    // old 30s stacked ON TOP of that: the user opened the laptop, saw no tray
-    // icon, pressed Space+key into a dead hook, and reasonably concluded the
-    // app "didn't start" (observed at a real reboot, log-verified: boot
-    // 14:20:48 → Run key fired 14:22:31 → hook live 14:23:01). The blanket
-    // sleep predates the two real defences we now have — the webview-existence
-    // check + rebuild (PROBLEM 59) and the dashboard_ready beacon (PROBLEM 74)
-    // — so it no longer needs to carry the whole cold-boot risk by itself.
-    if std::env::args().any(|a| a == "--autostart") {
-        log::info!("autostart launch — waiting 10s for the shell to settle (PROBLEM 59/76)");
-        std::thread::sleep(std::time::Duration::from_secs(10));
-    }
+    // 2a. PROBLEM 64 + 59 + 76 — the HKCU Run autostart path. A Run value cannot
+    // express the Scheduled Task's `/DELAY 0000:30`, so when the app is started
+    // BY that Run value (`--autostart`) the cold-boot wait has to happen inside
+    // the app: launching at logon races Edge/WebView2's brokers, the GPU stack
+    // and the disk, and losing that race is PROBLEM 59's dead-app. PROBLEM 76
+    // measured the size of it at a REAL logon (boot 14:20:48 → Run key fired
+    // 14:22:31 → hook live 14:23:01) and cut 30s to 10s.
+    //
+    // *** THE SLEEP USED TO BE RIGHT HERE, AND THAT WAS THE BUG (PROBLEM 215). ***
+    //
+    // It sat before `tauri::Builder`, so it delayed EVERYTHING — including the
+    // keyboard hook and the engine, neither of which touches WebView2. After a
+    // reboot the owner's shortcuts were dead for ten seconds for a reason that
+    // has nothing to do with keyboards.
+    //
+    // The wait was not removed; it was moved to the only thing that needs it.
+    // `AUTOSTART_SETTLE` + `create_app_windows` now delay the WINDOW/WEBVIEW
+    // creation alone, from `setup()`, after the hook, the engine and the tray
+    // are already live. Do not put a sleep back on this line.
 
     // 2b. Panic hook — a Rust panic otherwise vanishes without a trace in a
     // release build, and "the app just disappeared" is the one report a
@@ -425,7 +808,31 @@ pub fn run() {
         // thread is survivable and a panic on the main thread is not, and the
         // 14 recorded crashes could not be told apart without it.
         let thread = std::thread::current().name().unwrap_or("<unnamed>").to_string();
+
+        // PROBLEM 224 — ONE PANIC MUST BE ONE SENTRY EVENT.
+        //
+        // All three `log::error!` lines in this hook carry
+        // `telemetry::DEGRADED_TARGET`, and that is the ONLY thing the target
+        // changes. In debug.log they are still ERROR, still the same wording,
+        // still in the same order — the target is a routing label, not a
+        // severity, and nothing is hidden from the user's own machine.
+        //
+        // What it stops: `logger.rs` bridges every record to Sentry through
+        // `telemetry::log_filter`, which sends anything at ERROR or above, and
+        // this hook then ALSO calls `capture_panic` a few lines down. One panic
+        // therefore cost FOUR events — three log records plus one exception —
+        // and they grouped into TWO separate Sentry issues, so a single crash
+        // read as two unrelated bugs. `log_filter` drops DEGRADED_TARGET
+        // records (PROBLEM 217 added that rule for the same double-reporting
+        // reason), so the only thing that leaves the machine now is
+        // `capture_panic`'s single Fatal exception — the one event of the four
+        // that carries a real stack trace.
+        //
+        // The alternative was dropping `capture_panic` and keeping the log
+        // route. It was rejected: that keeps three events instead of one, and
+        // loses the stacktrace and the `thread` tag with them.
         log::error!(
+            target: telemetry::DEGRADED_TARGET,
             "PANIC on thread '{thread}' at {loc}: {msg}. This is a crash, not a handled \
              error — please report it with the lines above from debug.log."
         );
@@ -434,7 +841,8 @@ pub fn run() {
         // on the stack; this says the overlay had been rebuilt twice and a
         // display changed 4 seconds ago, which is usually what identifies the
         // trigger for a crash that only happens on someone else's machine.
-        log::error!("{}", crash_context::snapshot());
+        // PROBLEM 224 — same target, same reason as the line above.
+        log::error!(target: telemetry::DEGRADED_TARGET, "{}", crash_context::snapshot());
 
         // PATCH 5d — without a backtrace, a panic INSIDE a dependency (the
         // tao "cannot move state from Destroyed" report) names the crate's
@@ -446,10 +854,35 @@ pub fn run() {
         // target/release and the installer shipped only the .exe. The pdb is
         // now installed BESIDE the exe (tauri.conf.json `resources`), which is
         // where dbghelp looks, so these frames resolve on the user's machine.
+        // PROBLEM 224 — same target, same reason. This is also the single most
+        // expensive line in the hook (`force_capture` symbolises every frame),
+        // which is why it stays BELOW the two cheap ones: if the process is
+        // killed mid-hook, the panic line and the app context are already on
+        // disk.
         log::error!(
+            target: telemetry::DEGRADED_TARGET,
             "backtrace:\n{}",
             std::backtrace::Backtrace::force_capture()
         );
+
+        // PROBLEM 195 — forward the crash to Sentry, from INSIDE this hook.
+        //
+        // THIS IS THE WHOLE REASON `sentry`'s default `panic` feature is
+        // disabled in Cargo.toml. That feature makes `sentry::init()` install
+        // its own panic hook — a SECOND one, the exact thing PROBLEM 131 cost
+        // months, except worse, because a hook installed from inside a
+        // dependency does not appear in any grep of this repo. Doing it by
+        // hand here keeps the count at one and keeps the three log::error!
+        // lines above, which are what a user without a network connection
+        // still gets. (The wording avoids the hook-installing function's
+        // literal name on purpose: grepping this file for that name is a
+        // tripwire in this project, and a comment must not move its number.)
+        //
+        // Placed AFTER the logging on purpose: debug.log is the record that
+        // always works, and nothing that talks to a network is allowed to run
+        // before it. `capture_panic` returns immediately unless the user has
+        // left sending on AND a DSN was compiled in.
+        telemetry::capture_panic(&msg, &thread);
 
         // PROBLEM 89 — a panic on the MAIN thread BEFORE the UI exists is an
         // invisible death: no window, no tray, and a GUI process has no
@@ -489,6 +922,20 @@ pub fn run() {
     // as in config::save, or an excluded app is not excluded until the first
     // save of the session.
     hook::exclusions::publish_excluded_apps(&shared_config.read().unwrap_or_else(|p| p.into_inner()));
+    // PROBLEM 206 — seed the pointer-HUD toggle, same both-ends rule. The
+    // atomic starts false; skipping this line is the silent failure where the
+    // feature works all session and then reads OFF for the entire next launch
+    // until the user touches any setting.
+    hook::publish_pointer_hud_activation(&shared_config.read().unwrap_or_else(|p| p.into_inner()));
+    // PROBLEM 195, and the same both-ends rule a third time: `SENDING_ENABLED`
+    // starts FALSE, so this is the line that actually turns crash reporting on
+    // for a user who has not opted out. Without it nothing would be sent until
+    // the user happened to save a setting — and a crash during startup, which
+    // is the crash worth having most, would never be reported at all.
+    //
+    // This is also the first moment in the process where consent is KNOWN,
+    // which is why it is not seeded any earlier.
+    telemetry::publish(&shared_config.read().unwrap_or_else(|p| p.into_inner()));
 
     // ----------------------------------------------------------------
     // 4b. PROBLEM 80 — overlay compositing mode. MUST run before the Tauri
@@ -594,6 +1041,16 @@ pub fn run() {
             if args.iter().any(|a| a == "--autostart") {
                 return;
             }
+            // PROBLEM 215 — a real user launch during the autostart settle
+            // window finds no window to front. Asking for the app IS asking
+            // for its UI, so build it now rather than opening nothing.
+            if app.get_webview_window("settings").is_none() {
+                log::info!(
+                    "single-instance: a manual launch arrived before the settle wait \r
+                     finished — creating the windows now (PROBLEM 215)"
+                );
+                create_app_windows(app);
+            }
             if let Some(win) = app.get_webview_window("settings") {
                 let _ = win.unminimize(); // geometry is meaningless while minimized
                 ensure_on_screen(&win); // PROBLEM 83 — that monitor may be gone
@@ -622,24 +1079,36 @@ pub fn run() {
             commands::undo_last_change,
             commands::undo_available,
             commands::set_overlay_compositing,
+            // PROBLEM 195 — the "Don't send logs" switch.
+            commands::set_send_logs,
             commands::restart_elevated,
             commands::overlay_ready,
             commands::overlay_log,
+            commands::overlay_error,
             commands::overlay_fit,
             commands::overlay_fit_hud,
             commands::overlay_fit_handover,
             commands::overlay_shape,
             commands::overlay_toasts_done,
+            // PROBLEM 206 — the Guide HUD's chip geometry, for pointer
+            // activation. Same CSS-px + dpr convention as overlay_shape.
+            commands::publish_hud_chips,
             commands::find_browser_cmd,
             commands::validate_browser,
+            // TASK 3 — the OS default browser (path + name + icon) for the
+            // key editor's paste-row disc. Same resolver the engine uses to
+            // open an unpinned URL, so the two cannot disagree.
+            commands::get_default_browser,
             commands::show_conflict_check,
             commands::create_profile,
             commands::delete_profile,
             commands::rename_profile,
             commands::list_start_menu_apps,
+            browser_profiles::list_browser_profiles,
             commands::toggle_bypass,
             commands::open_log_folder,
             commands::frontend_log,
+            commands::frontend_error,
             commands::dashboard_ready,
             commands::get_stale_task,
             commands::repair_stale_task,
@@ -675,6 +1144,13 @@ pub fn run() {
                 // ask Windows which window is in front.
                 hook::exclusions::start_exclusion_watcher();
 
+                // 8c. Start the Guide-HUD pointer watcher (PROBLEM 206): the
+                // ~60Hz poller that turns the mouse hook's cursor atomics and
+                // the published chip geometry into an armed-chip decision.
+                // Same shape as the two pollers above, for the same reason —
+                // the hook callback may do lock-free atomics only.
+                hook::pointer::start_pointer_watcher();
+
                 // PROBLEM 88 — the 500ms "copier" thread that used to live
                 // here is GONE. It was the only writer to
                 // hook::FULLSCREEN_ACTIVE, so if the watcher thread died while
@@ -705,87 +1181,12 @@ pub fn run() {
             // Wire guide HUD event emitter (renders into the "overlay" window)
             guide_hud::set_app_handle(app_handle.clone());
 
-            // PROBLEM 117 — the overlay stops compositing when the display
-            // arrangement changes underneath it, while every readback still
-            // says visible=true. Watch for the change and rebuild. Started
-            // AFTER set_app_handle so a rebuild can hide the HUD first.
-            display_watch::start(app_handle.clone());
+            // 9b/9c, the PROBLEM 86 opacity registration, step 11's
+            // close-to-tray and the PROBLEM 59 recovery all MOVED into
+            // `create_app_windows` (PROBLEM 215). They are dispatched below,
+            // after the tray, because not one of them is needed for Space+key
+            // to work and every one of them needs WebView2.
 
-            // 9b. Configure the always-on-top HUD/toast overlay.
-            //
-            // HISTORY (do not repeat):
-            // • overlay.html existed but NO window ever loaded it — HUD/toasts
-            //   rendered into the hidden dashboard. Fixed by declaring the
-            //   window (2026-08-10, part 2).
-            // • First attempt used a FULLSCREEN TRANSPARENT window. WebView2
-            //   accepted it, JS ran, events arrived — and nothing EVER composed
-            //   to the screen on this machine. Verified with an in-page probe
-            //   ("overlay: webview JS alive") plus screenshots: JS alive,
-            //   pixels absent. Same minefield as the 2026-07-10 "white box"
-            //   saga, failing invisible instead of white.
-            // • Current design copies what install-v11 (AHK) proved on this
-            //   exact machine: an OPAQUE dark window, sized to its content,
-            //   shown on demand and hidden after — never a fullscreen
-            //   transparent sheet. Sizing/positioning happens in guide_hud and
-            //   show_toast at display time.
-            // The overlay is TRANSPARENT (re-tested 2026-08-10: the old
-            // "composes zero pixels" finding was specific to a FULLSCREEN
-            // transparent window; this small on-demand one renders fine).
-            // All of its runtime configuration lives in
-            // configure_overlay_window() — shared with the PROBLEM 59
-            // rebuild path, which used to produce a half-configured window
-            // (PROBLEM 81).
-            {
-                use tauri::Manager;
-                if let Some(overlay) = app_handle.get_webview_window("overlay") {
-                    configure_overlay_window(&overlay);
-                } else {
-                    log::error!("setup: 'overlay' window missing — HUD and toasts will not be visible");
-                }
-            }
-
-
-            // 9c. Fit the dashboard to the monitor's WORK AREA and centre it.
-            //
-            // The V14 board is fixed-geometry (1046 x 320 design px) and the
-            // frontend scales it down to whatever space it is given. That only
-            // works if the WINDOW itself fits the display: the previous attempt
-            // opened wider than the monitor and the keyboard ran off the edge,
-            // which is the failure the user actually saw. Clamp to 92% of the
-            // monitor rather than maximising — maximising a 2560x1440 display
-            // leaves the keyboard adrift in empty cream.
-            {
-                use tauri::Manager;
-                if let Some(win) = app_handle.get_webview_window("settings") {
-                    // current_monitor, NOT primary_monitor: this machine has a
-                    // 1920x1080 primary and a 2560x1600 @150% secondary, and
-                    // Windows may open the window on either. Fitting it to the
-                    // monitor it is ACTUALLY on is the only version that is
-                    // right in both cases. (The Guide HUD stays
-                    // primary-monitor-only — that is a separate, explicit user
-                    // decision; do not "unify" the two.)
-                    fit_dashboard_to_work_area(&win);
-
-                    // PROBLEM 70 — show the dashboard only when a HUMAN started
-                    // the app. At logon (`--autostart`) Spaceadom must come up
-                    // silently: hook armed, tray icon present, NO window in the
-                    // user's face. They open the dashboard when they want it —
-                    // tray click, tray "Open Settings", or launching the app
-                    // again (single-instance fronts the existing window).
-                    //
-                    // PROBLEM 74 — and even on a manual launch, DO NOT show it
-                    // here. The window used to appear while WebView2 was still
-                    // doing its first-run initialisation, and that gap — a
-                    // visible window whose webview cannot pump messages yet —
-                    // IS the "(Not Responding)" both testers reported. The
-                    // frontend now calls `dashboard_ready` as the LAST step of
-                    // its bootstrap, and the window is shown then: the user's
-                    // first sight of the dashboard is one that can already
-                    // paint and respond. A 10s fallback below covers a wedged
-                    // frontend (better a sluggish window than none).
-                    spawn_show_fallback(&app_handle);
-                }
-            }
 
             // 9d. Report other keyboard remappers into the log at startup.
             // A tester's shortcuts silently did nothing and his own first
@@ -807,21 +1208,6 @@ pub fn run() {
             tray::build_tray(&app_handle)?;
             log::info!("setup: system tray built");
 
-            // PROBLEM 86 — register our own windows with the opacity action,
-            // so Space+scroll can never fade Spaceadom's own dashboard or
-            // overlay. (The registry was a dead thread_local before; see
-            // opacity.rs.)
-            #[cfg(windows)]
-            {
-                use tauri::Manager;
-                for label in ["settings", "overlay"] {
-                    if let Some(w) = app_handle.get_webview_window(label) {
-                        if let Ok(h) = w.hwnd() {
-                            engine::actions::opacity::register_own_hwnd(h.0 as isize);
-                        }
-                    }
-                }
-            }
 
             // 10b. PROBLEM 76 — one-time promotion of the tray icon out of the
             // Win11 overflow flyout, so the user can SEE the app is running.
@@ -884,102 +1270,69 @@ pub fn run() {
                     .ok();
             }
 
-            // 11. Close-to-tray for settings window
-            tray::setup_close_to_tray(&app_handle);
-
-            // PROBLEM 59 — never claim success when the webviews are missing.
+            // PROBLEM 224 — arm the WM_ENDSESSION guard as early as the app
+            // has anything to guard.
             //
-            // The windows are declared in tauri.conf.json, so Tauri builds them
-            // before setup() runs. On a COLD BOOT the WebView2 runtime is often
-            // not serviceable yet and CreateCoreWebView2Controller fails with
-            // HRESULT(0x80070490) ERROR_NOT_FOUND; Tauri then destroys the host
-            // window. The old code logged "fully initialised" regardless, so a
-            // tester saw an app with no dashboard and no Guide HUD while the log
-            // looked perfectly healthy. Detect it, say so, and rebuild once.
-            {
-                use tauri::Manager;
-                for (label, url) in [("settings", "index.html"), ("overlay", "overlay.html")] {
-                    if app_handle.get_webview_window(label).is_some() {
-                        continue;
-                    }
-                    log::error!(
-                        "setup: webview '{label}' DOES NOT EXIST — WebView2 failed to attach \
-                         (cold-boot race, or no WebView2 runtime installed). Rebuilding it."
-                    );
-                    // PROBLEM 81 — the rebuild must recreate the window with
-                    // the SAME properties tauri.conf.json declares, or the
-                    // replacement is an opaque, decorated, focus-stealing
-                    // rectangle. The builder mirrors the conf declaration
-                    // field-for-field; the runtime half (click-through, DWM
-                    // border, no-activate) is reapplied below via the same
-                    // function the normal setup path uses.
-                    let mut builder = tauri::WebviewWindowBuilder::new(
-                        &app_handle,
-                        label,
-                        tauri::WebviewUrl::App(url.into()),
-                    )
-                    .visible(false);
-                    if label == "overlay" {
-                        builder = builder
-                            .title("Spaceadom Overlay")
-                            .transparent(true)
-                            .decorations(false)
-                            .always_on_top(true)
-                            .skip_taskbar(true)
-                            .resizable(false)
-                            .focused(false)
-                            .shadow(false)
-                            .inner_size(600.0, 460.0);
-                    } else {
-                        builder = builder
-                            .title("Spaceadom")
-                            .theme(Some(tauri::Theme::Light)) // mirrors conf "theme": "Light"
-                            .inner_size(1220.0, 880.0)
-                            .min_inner_size(720.0, 520.0)
-                            .center();
-                    }
-                    match builder.build() {
-                        Ok(w) => {
-                            // No direct show here (PROBLEM 74): the rebuilt
-                            // webview boots index.html, whose bootstrap ends in
-                            // `dashboard_ready` — the window appears then,
-                            // already responsive.
-                            log::info!("setup: webview '{label}' rebuilt successfully");
-                            if label == "overlay" {
-                                configure_overlay_window(&w);
-                            } else {
-                                // PROBLEM 90 — a rebuilt settings window has NO
-                                // CloseRequested handler, so the X button would
-                                // exit the app (killing the hook) instead of
-                                // hiding to tray. Re-attach it here; step 11's
-                                // one-shot call bound to the window this
-                                // replaced.
-                                tray::attach_close_to_tray(&w);
-                                // PROBLEM 91 — step 9c's work-area fit and its
-                                // 10s show-fallback both ran BEFORE this window
-                                // existed, so without these the rebuilt
-                                // dashboard keeps a raw 1220x880 at a hard
-                                // 720x520 floor (off-screen on a small laptop)
-                                // and, if its frontend also wedges, is never
-                                // shown at all.
-                                fit_dashboard_to_work_area(&w);
-                                spawn_show_fallback(&app_handle);
-                            }
-                            // PROBLEM 86 — the own-window registration loop runs
-                            // before this rebuild, so a rebuilt window would be
-                            // fadeable by Space+scroll.
-                            #[cfg(windows)]
-                            if let Ok(h) = w.hwnd() {
-                                engine::actions::opacity::register_own_hwnd(h.0 as isize);
-                            }
+            // THIS CALL IS NOT REDUNDANT WITH THE ONE IN `create_app_windows`,
+            // and the autostart path is why. tao's `Tao Thread Event Target`
+            // window — the ONE window whose WM_ENDSESSION handler sets the
+            // runner to `Destroyed` — exists from the moment the event loop is
+            // built, i.e. before this `setup` closure runs. `create_app_windows`
+            // is delayed ten seconds on an autostart launch (the split below),
+            // so relying on it alone would leave the crash live for the first
+            // ten seconds of every logon: a reboot-driven shutdown or an
+            // installer arriving in that window is exactly the case that
+            // produced the recorded crashes.
+            //
+            // Main thread, as `EnumThreadWindows` requires: the setup closure
+            // runs on it.
+            session_end::install();
+
+            // PROBLEM 215 — THE SPLIT. Everything above this line is live NOW:
+            // the hook, the engine, the guide-HUD wiring, the tray icon. Only
+            // the windows wait, and only on an autostart launch.
+            if autostart_launch() {
+                log::info!(
+                    "autostart launch — hook and engine are LIVE now; only the window/webview \
+                     creation waits {}s for the shell to settle (PROBLEM 59/76/215). A Space \
+                     hold before then still launches, focuses and minimises; it simply draws \
+                     no HUD.",
+                    AUTOSTART_SETTLE.as_secs()
+                );
+                let settle_handle = app_handle.clone();
+                if std::thread::Builder::new()
+                    .name("st-window-settle".into())
+                    .spawn(move || {
+                        std::thread::sleep(AUTOSTART_SETTLE);
+                        let h = settle_handle.clone();
+                        // ON THE MAIN THREAD: window creation is not thread-safe
+                        // anywhere in Win32, and this is the same hop the
+                        // display-watch rebuild uses.
+                        if let Err(e) = settle_handle.run_on_main_thread(move || {
+                            create_app_windows(&h);
+                        }) {
+                            log::error!(
+                                "setup: could not reach the main thread to create the windows \
+                                 after the settle wait ({e}) — the app has a tray icon and a \
+                                 working hook but no UI"
+                            );
                         }
-                        Err(e) => log::error!(
-                            "setup: webview '{label}' rebuild FAILED: {e}. The app is running \
-                             without its UI — install the WebView2 Runtime, or restart the app."
-                        ),
-                    }
+                    })
+                    .is_err()
+                {
+                    log::error!(
+                        "setup: could not spawn the settle thread — creating the windows now \
+                         instead, accepting the PROBLEM 59 cold-boot risk"
+                    );
+                    create_app_windows(&app_handle);
                 }
+            } else {
+                // A manual launch: the same instant Tauri itself would have
+                // built them, so nothing about this path changed.
+                create_app_windows(&app_handle);
             }
+
+
 
             log::info!("SpaceToggle OS fully initialised");
             println!("✅ Spaceadom initialised & ready.");

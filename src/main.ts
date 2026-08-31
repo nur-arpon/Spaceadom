@@ -46,14 +46,32 @@ import { sfx, bindSfxConfig, wireSfxUnlock } from "./sfx";
 import { SPECIALS, toggleSpecialCard } from "./components/special-cards";
 import { dismissAll } from "./dismissable";
 import { wireKeyWake, applyKeyWakeMotion } from "./key-wake";
+import { installJsErrorReporter } from "./js-error-reporter";
 
 import type { AppConfig, HookStatus, KeyBinding } from "./types";
+
+// PROBLEM 217 — the dashboard had NO global error handler at all, and
+// `frontend_log` (its only bridge to Rust) logs at INFO, which is below the
+// crash reporter's floor. So every JavaScript failure in the dashboard stayed
+// on the user's machine — the whole UI layer, invisible.
+//
+// Installed at MODULE level, not inside bootstrap(): an exception thrown while
+// bootstrap is still running is the most valuable one there is, and a handler
+// registered at the end of bootstrap would miss exactly those. The reporter
+// itself cannot throw and cannot re-enter — see js-error-reporter.ts.
+installJsErrorReporter("frontend_error");
 
 /** One other keyboard remapper found running (Rust: hook::conflicts::Conflict). */
 export interface Conflict {
   process: string;
   product: string;
   detail: string;
+  /** PROBLEM 198 — full exe path, resolved live while the process is still
+   *  running. Empty when Rust could not read it (a protected process, or it
+   *  exited between the scan and the query) — the settings panel's icon
+   *  lookup treats that exactly like "no path available" and falls back to
+   *  the letter disc, same as every other icon in this app. */
+  path: string;
 }
 
 /** Cached for the Settings › Conflicts section so it doesn't re-scan on every
@@ -96,14 +114,37 @@ function wireAmbientPause(): void {
   set(!document.hasFocus());
 }
 
-/** Esc is the guaranteed way out of sky mode. */
+/**
+ * Esc is the guaranteed way out of sky mode — but the settings gear now stays
+ * reachable while the sky is up too (owner, 2026-08-27: a faint arrow alone
+ * still stranded people), and its popover has its own Escape-driven dismissal
+ * lower down in bootstrap(). Escape must peel, not clear — the same rule
+ * dismissable.ts already applies to its own stack of surfaces: closing an open
+ * settings popover takes priority, and Esc only leaves the sky once nothing is
+ * open. So bail out here and let the ordinary Escape handler close the
+ * popover instead; firing both on one press would exit the sky AND drop
+ * whatever the popover was doing.
+ */
 function wireSkyEscape(): void {
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && document.body.classList.contains("sky-mode")) {
-      e.preventDefault();
-      void leaveSkyMode();
-    }
+    if (e.key !== "Escape" || !document.body.classList.contains("sky-mode")) return;
+    if (isSettingsPanelOpen()) return;
+    e.preventDefault();
+    void leaveSkyMode();
   });
+}
+
+/**
+ * PROBLEM 205 — one greppable startup mark in `debug.log`.
+ *
+ * `grep "boot:" debug.log` gives the whole bootstrap timeline. Fire-and-
+ * forget, and errors are swallowed: telemetry must never be able to break the
+ * thing it is measuring.
+ */
+function mark(what: string): void {
+  void invoke("frontend_log", {
+    msg: `${what} (+${Math.round(performance.now())}ms)`,
+  }).catch(() => {});
 }
 
 async function bootstrap(): Promise<void> {
@@ -169,6 +210,14 @@ async function bootstrap(): Promise<void> {
       () => void persistConfig(),
     );
   }
+  // PROBLEM 205 — startup telemetry. Between `dashboard-js: motion:` and
+  // `dashboard-js: frontend ready` there used to be NOT ONE line, and that gap
+  // was 14.66s of a 15.8s startup (≈85% of a median one). An operation nobody
+  // logs is invisible twice over: you cannot see its cost, and you cannot see
+  // what it is blocking. These three marks turn "where did the time go?" into
+  // a grep. `performance.now()` is ms since this document started, so the
+  // three are directly comparable with each other and with Rust's own marks.
+  mark("boot: keyboard matrix wired");
 
   // ---- key editor ----
   const panelEl = document.getElementById("key-detail-panel");
@@ -181,6 +230,15 @@ async function bootstrap(): Promise<void> {
         const profile = appConfig.profiles.find(
           (p) => p.name === appConfig!.active_profile,
         );
+        // A FULL REPLACE, not a merge — and that is only safe because
+        // `commit()` in key-detail-panel.ts normalises to a COMPLETE
+        // KeyBinding first. It did not, and the three optional
+        // browser-profile fields (`browser_exe?` and friends) were therefore
+        // deleted by omission every time a caller left them off, which is why
+        // a profile pin never once survived to config.json. If you ever make
+        // this line merge instead, the panel's callers must go back to nulling
+        // those three explicitly — see `BINDING_RESET` in keyboard-matrix.ts,
+        // whose `updateBinding` DOES merge and needed exactly that.
         if (profile) profile.bindings[key] = binding;
         await persistConfig();
         refreshBoard();
@@ -188,6 +246,7 @@ async function bootstrap(): Promise<void> {
       },
     );
   }
+  mark("boot: key editor wired");
 
   // ---- profiles + settings ----
   initProfileEditor(appConfig, (name: string) => {
@@ -290,6 +349,12 @@ async function bootstrap(): Promise<void> {
 
   console.info("Spaceadom: dashboard initialised");
 
+  // PROBLEM 205 — the last mark before the window is asked for. The delta
+  // between this and Rust's `dashboard-js: frontend ready` is pure IPC queue
+  // time: if they are seconds apart, something non-async is holding the main
+  // thread, not the frontend being slow.
+  mark("boot: bootstrap complete, calling dashboard_ready");
+
   // PROBLEM 74 — LAST step, after every component above is wired: tell Rust
   // the frontend is alive. Rust shows the window only now, so the first thing
   // the user ever sees is a dashboard that can paint and respond — never the
@@ -370,6 +435,18 @@ export function applyLook(): void {
  */
 export function applySkyMode(on: boolean): void {
   document.body.classList.toggle("sky-mode", on);
+  // PROBLEM 213 follow-up (owner, 2026-08-28) — the settings popover is what
+  // the user was just standing in when they flipped this switch, and it has
+  // no reason to keep sitting open over an empty sky: #gear-dock/#gear-btn
+  // stay reachable (exempted from the hiding rule below), but the popover
+  // itself should close. Route through settings-panel.ts's OWN close
+  // function rather than touching #settings-panel here — it now has its own
+  // animated exit (see closeSettingsPanel), so this reads as deliberate
+  // rather than a glitchy snap. Only on ENTERING sky mode: leaving it must
+  // not disturb a panel the user reopened from the gear while the sky was up
+  // (the "hide the keyboard" toggle's own applySkyMode(false) call happens
+  // from inside exactly that reopened panel).
+  if (on) closeSettingsPanel();
   let back = document.getElementById("sky-return");
   if (on && !back) {
     const btn = document.createElement("button");

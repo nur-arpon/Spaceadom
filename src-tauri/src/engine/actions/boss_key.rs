@@ -81,7 +81,7 @@ fn set_system_mute(mute: bool) {
 #[cfg(windows)]
 unsafe fn send_win_m() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
     const VK_LWIN: u16 = 0x5B;
     const VK_M: u16 = 0x4D;
@@ -114,7 +114,8 @@ unsafe fn send_win_m() {
 
     // Win↓  M↓  M↑  Win↑
     let inputs = [dn(VK_LWIN), dn(VK_M), up(VK_M), up(VK_LWIN)];
-    SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    // PROBLEM 227 — checked: a partial insert here leaves LWIN latched.
+    let _ = crate::hook::send_keys_checked(&inputs, "boss key: Win+M");
     
     // Explicitly MUTE the system
     set_system_mute(true);
@@ -125,7 +126,7 @@ unsafe fn send_win_m() {
 #[cfg(windows)]
 unsafe fn send_win_shift_m() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
     const VK_LWIN: u16 = 0x5B;
     const VK_LSHIFT: u16 = 0xA0;
@@ -165,7 +166,8 @@ unsafe fn send_win_shift_m() {
         up(VK_LSHIFT),
         up(VK_LWIN),
     ];
-    SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    // PROBLEM 227 — checked: a partial insert here leaves LWIN and LSHIFT latched.
+    let _ = crate::hook::send_keys_checked(&inputs, "boss key: Win+Shift+M");
 
     // Explicitly UNMUTE the system
     set_system_mute(false);

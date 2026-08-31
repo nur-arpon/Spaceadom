@@ -142,6 +142,18 @@ pub fn set_app_handle(handle: AppHandle) {
     let _ = APP_HANDLE.set(handle);
 }
 
+/// Clone of the app handle for callers OUTSIDE the engine — e.g. the
+/// fullscreen watcher thread raising a PiP-release toast (pip.rs §7).
+/// `AppHandle` is Clone + Send + Sync, and a second `OnceLock` elsewhere
+/// would just be a copy of this one that could drift — so this module, which
+/// already owns the static the hook thread's watchdog relies on, hands it
+/// out. `None` only in the brief setup window before `set_app_handle` has
+/// run; callers skip quietly, matching the defensive `let Some(handle) =
+/// APP_HANDLE.get() else { return }` style used everywhere else here.
+pub fn app_handle() -> Option<AppHandle> {
+    APP_HANDLE.get().cloned()
+}
+
 /// Payload sent to the frontend for the guide HUD display.
 /// Specials and apps are SEPARATE lists: the user's explicit direction
 /// (2026-08-10) is that the HUD's job is teaching the special functions —
@@ -289,7 +301,53 @@ pub fn show_guide_hud(
             } else {
                 return;
             }
+        } else if !crate::windows_created() {
+            // PROBLEM 215 — the autostart settle window. The overlay is not
+            // missing; it has not been built yet, and that is deliberate: the
+            // hook comes up ten seconds ahead of WebView2 on purpose. The
+            // shortcut itself still works, only the drawing is absent. Say so
+            // calmly — an ERROR here would train the owner to ignore the line
+            // that means something.
+            log::info!(
+                "guide_hud: still starting — the overlay webview is not built yet \
+                 (autostart settle, PROBLEM 59/76/215). The shortcut works; no HUD is \
+                 drawn for this hold."
+            );
+        } else {
+            // PROBLEM 214 — the window is gone while the flag still says the
+            // overlay is fine. Nothing on this side of the app can rebuild it,
+            // so tell the display watcher to drop its backoff and heal on its
+            // next poll. The user must never have to restart for this.
+            log::error!(
+                "guide_hud: the overlay window does not exist — the HUD cannot be shown. \
+                 Asking the display watcher to rebuild it now; no restart is required \
+                 (PROBLEM 214)."
+            );
+            crate::display_watch::heal_now();
         }
+    } else {
+        // PROBLEM 214 — THIS is the state the owner reported as "shortcuts work,
+        // the HUD and the sound are dead". The overlay window itself was
+        // healthy; a second, racing rebuild had set this flag on its way out.
+        // Do not return silently: say so, and ask for a heal.
+        // PROBLEM 217 — this fires on EVERY hold while the flag is set, which
+        // is the worst possible shape for an unbounded reporting path: one
+        // event per shortcut press. The target takes it off the automatic
+        // bridge; `report_degraded` sends a rate-limited one instead. debug.log
+        // still gets every line, at ERROR, unchanged.
+        log::error!(
+            target: crate::telemetry::DEGRADED_TARGET,
+            "guide_hud: OVERLAY_DISABLED is set, so the HUD and every sound are suppressed \
+             (the sound kit is WebAudio inside the overlay page, so it dies with it). \
+             Asking the display watcher to rebuild and re-enable the overlay; no restart \
+             is required (PROBLEM 214)."
+        );
+        crate::telemetry::report_degraded(
+            crate::telemetry::Degraded::OverlayDisabled,
+            "OVERLAY_DISABLED was set when a HUD was requested — the HUD and every sound \
+             are suppressed; a rebuild has been asked for",
+        );
+        crate::display_watch::heal_now();
     }
 
     // And again before the content emit: the page treats `guide-hud-show` as
@@ -299,6 +357,11 @@ pub fn show_guide_hud(
     if abort_if_stale(epoch, handle.get_webview_window("overlay").as_ref(), "before emit") {
         return;
     }
+    // PROBLEM 206 — record which key each chip will launch, in the SAME order
+    // the page builds its chips from this payload's `apps`. Geometry arrives
+    // separately (the page calls `publish_hud_chips` after layout); until it
+    // does, the zeroed geometry count keeps pointer activation inert.
+    crate::hook::pointer::publish_keys(&payload.apps);
     // GLOBAL broadcast, on purpose. Targeted emits (emit_to) silently never
     // reached this page's listeners regardless of how they were registered —
     // Tauri 2's target matching is stricter than it looks (Labeled vs
@@ -342,6 +405,11 @@ pub fn hide_guide_hud_pending(action_pending: bool) {
     // is still false, the guard skips its whole body, and putting the
     // invalidation inside it would do nothing in the only case that matters.
     end_hold();
+    // PROBLEM 206 — a hidden HUD has nothing to point at. Cleared on every
+    // hide path (two relaxed stores, cheap enough for the typed-space path);
+    // the `st-hud-pointer` poller also gates on `is_visible()`, so this is
+    // the second lock on the same door.
+    crate::hook::pointer::clear_chips();
     if HUD_VISIBLE.swap(false, Ordering::Relaxed) {
         if let Some(handle) = APP_HANDLE.get() {
             if action_pending {

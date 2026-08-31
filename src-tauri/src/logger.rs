@@ -65,8 +65,31 @@ pub fn init(log_dir: &PathBuf) {
         return;
     };
 
+    // PROBLEM 195 — the Sentry bridge WRAPS log4rs rather than replacing it.
+    //
+    // This used to be one line: `log4rs::init_config(config)`, which builds the
+    // logger AND installs it as the global `log::Log`. Only one thing can be
+    // the global logger, so bolting Sentry on afterwards is not possible — it
+    // has to be `log4rs::Logger::new(config)` (the same logger, not installed)
+    // handed to `SentryLogger::with_dest`, which forwards EVERY record to
+    // log4rs unchanged and additionally offers it to `telemetry::log_filter`.
+    //
+    // Consequence worth stating plainly: debug.log is completely unaffected by
+    // any of this. Same appender, same pattern, same rotation, same levels.
+    // Sentry only ever sees a copy, and only of what `log_filter` lets through
+    // (ERROR and above, and only while the user has not switched sending off).
+    //
+    // `init_config` also set the max level for us; doing this by hand means
+    // setting it by hand, or every record below Info is filtered out by `log`
+    // itself before either destination sees it.
+    let logger = log4rs::Logger::new(config);
+    let max_level = logger.max_log_level();
+    let bridged = sentry_log::SentryLogger::with_dest(logger)
+        .filter(|metadata| crate::telemetry::log_filter(metadata));
+
     // Ignore error if already initialised (e.g., during tests)
-    let _ = log4rs::init_config(config);
+    let _ = log::set_boxed_logger(Box::new(bridged));
+    log::set_max_level(max_level);
 
     log::info!("SpaceToggle OS logger initialised");
 }

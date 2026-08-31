@@ -224,6 +224,34 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
                                             .or_else(|| bind.app.clone())
                                             .or_else(|| bind.web_url.clone())
                                             .unwrap_or_default();
+                                        // 2026-08-26 — a key pinned to a
+                                        // browser profile reads "Brave —
+                                        // Studies", not just "Brave", because
+                                        // "Brave" on three different keys tells
+                                        // the user nothing.
+                                        //
+                                        // The human name is READ FROM THE
+                                        // BINDING, never resolved here: this
+                                        // runs on the Space-hold path, which
+                                        // must produce a HUD inside the user's
+                                        // configured delay, and translating
+                                        // "Profile 1" into a name means opening
+                                        // and JSON-parsing the browser's
+                                        // ~96 KB `Local State` on every hold.
+                                        // `browser_profile_name` exists so that
+                                        // I/O never touches this path — see the
+                                        // field's comment in schema.rs.
+                                        //
+                                        // A binding with no profile gets its
+                                        // label back byte-for-byte
+                                        // (`hud_label`'s own test), and the
+                                        // chip already truncates with an
+                                        // ellipsis at 118px, so a long pair
+                                        // cannot disturb the ring.
+                                        let label = crate::browser_profiles::hud_label(
+                                            &label,
+                                            bind.browser_profile_name.as_deref(),
+                                        );
                                         binds.push((key.to_uppercase(), label));
                                     }
                                 }
@@ -231,16 +259,52 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
                                 // System-wide shortcuts — separate list; the
                                 // HUD renders these FIRST (user's direction:
                                 // specials are the hard-to-remember part).
-                                let specials: Vec<(String, String)> = vec![
-                                    ("Esc".to_string(), "Boss Key (Hide All + Mute)".to_string()),
-                                    ("`".to_string(), "Multi-Corner PiP Mode".to_string()),
-                                    ("⌫".to_string(), "Force Close App".to_string()),
-                                    ("RAlt".to_string(), "Cycle OS Profiles".to_string()),
-                                    (",".to_string(), "Contextual Search/Input".to_string()),
-                                    (".".to_string(), "Pause Spaceadom".to_string()),
-                                    ("Scroll".to_string(), "Layer Opacity".to_string()),
-                                    ("Up/Dn ×2".to_string(), "Scroll Top/Bottom".to_string()),
-                                ];
+                                //
+                                // The empty vec is still the ONLY mechanism —
+                                // the page draws what it is given, so there is
+                                // no second event and no toast.ts coupling —
+                                // but since 1.0.89 it is no longer the whole
+                                // DECISION. Two settings decide together, and
+                                // they are split by who can actually know the
+                                // answer:
+                                //
+                                //   RUST decides, here, deterministically:
+                                //     · `hud_show_specials` off  -> empty
+                                //     · `hud_band_count == "two"` -> empty
+                                //       (the specials occupy the INNER band, so
+                                //       they cannot coexist with two app bands;
+                                //       no measurement is needed to know that)
+                                //
+                                //   THE PAGE decides the rest:
+                                //     · `hud_band_count == "auto"` with
+                                //       specials on -> the vec is sent, and the
+                                //       page drops it if the labels turn out to
+                                //       need two bands. Band count depends on
+                                //       MEASURED label widths, which exist
+                                //       nowhere but in the overlay document, so
+                                //       Rust cannot resolve "auto" and must not
+                                //       pretend to.
+                                //
+                                // So: a non-empty vec here means "show these IF
+                                // one band is enough", not "show these".
+                                // `specials_for_hud` below is that rule alone,
+                                // as a pure function, because the truth table
+                                // is the part worth a test.
+                                //
+                                // The KEYS THEMSELVES ARE UNTOUCHED. Esc still
+                                // fires the Boss Key, backtick still PiPs, and
+                                // so on — every one of those lives in the hook
+                                // and the KeyCombo arm below, neither of which
+                                // has ever consulted this list. Do not gate
+                                // anywhere else: a hidden ring must stay a
+                                // hidden ring, not a disabled feature.
+                                //
+                                // Free to read: `cfg` is already borrowed and
+                                // this is the Space-HOLD path, not the hook.
+                                let specials = specials_for_hud(
+                                    cfg.hud_show_specials,
+                                    &cfg.hud_band_count,
+                                );
 
                                 (name, binds, specials)
                             };
@@ -282,6 +346,7 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
                 KeyCombo::Special(name)   => handle_special(name, state_arc),
                 KeyCombo::Escape          => handle_boss_key(state_arc),
                 KeyCombo::Backtick        => handle_pip(state_arc),
+                KeyCombo::Tab             => handle_fullscreen_pip(state_arc),
                 KeyCombo::Backspace       => handle_force_close(state_arc),
                 KeyCombo::Comma           => handle_focus(state_arc),
                 KeyCombo::RightAlt        => handle_profile_cycle(state_arc),
@@ -289,6 +354,24 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
                 KeyCombo::DownArrow       => handle_double_tap_down(state_arc),
                 KeyCombo::Period          => handle_bypass_toggle(state_arc),
             }
+        }
+
+        // ---------------------------------------------------------------
+        // Pointer activation (PROBLEM 206) — the cursor was resting on a
+        // Guide-HUD chip when Space was released or the left button went
+        // down. Deliberately the SAME shape as KeyCombo above: cancel the
+        // HUD with `true` (a toast is coming — the overlay window must stay
+        // up for the PROBLEM 135 handover), then the ordinary alpha path:
+        // handle_alpha → smart_cascade → toast.
+        // ---------------------------------------------------------------
+        HookEvent::PointerActivate(ch) => {
+            crate::hook::drain_hook_diagnostics();
+            {
+                let mut s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
+                s.cancel_hud(true);
+            }
+            log::info!("engine: pointer activation → Space+{ch} (armed chip on the guide HUD)");
+            handle_alpha(ch, state_arc);
         }
 
         // ---------------------------------------------------------------
@@ -320,12 +403,17 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
 fn handle_special(key_name: String, state_arc: &Arc<Mutex<EngineState>>) {
     println!("Received modifier: Space, Trigger: Key({})", key_name);
 
-    let (binding, fallback) = {
+    let (binding, fallback, claims) = {
         let s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
         let cfg = s.config.read().unwrap_or_else(|p| p.into_inner());
         let bind = cfg.special_keys.get(&key_name).cloned();
+        // Which browser profiles OTHER reachable bindings have pinned — read
+        // inside the read guard the binding lookup already holds open, so this
+        // costs no extra lock and no I/O on the Space-hold latency path. See
+        // `browser_profiles::active_profile_claims`.
+        let claims = crate::browser_profiles::active_profile_claims(&cfg);
         // Founders-profile fallback not applicable for special keys, but keep API consistent
-        (bind, None::<crate::config::KeyBinding>)
+        (bind, None::<crate::config::KeyBinding>, claims)
     };
 
     let Some(bind) = binding else {
@@ -355,7 +443,8 @@ fn handle_special(key_name: String, state_arc: &Arc<Mutex<EngineState>>) {
         s.app_handle.clone()
     };
     
-    let outcome = actions::smart_cascade::smart_cascade(&bind, fallback.as_ref(), Some(app_handle));
+    let outcome =
+        actions::smart_cascade::smart_cascade(&bind, fallback.as_ref(), &claims, Some(app_handle));
 
     let s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
     s.emit_toast(&cascade_toast(outcome, &label, fallback.as_ref()));
@@ -387,11 +476,20 @@ fn handle_alpha(ch: char, state_arc: &Arc<Mutex<EngineState>>) {
     log::info!("engine: combo Space+{ch} received");
             crate::crash_context::note_action(format!("Space+{ch}"));
 
-    let (profile_name, binding, fallback) = {
+    let (profile_name, binding, fallback, claims) = {
         let s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
         let cfg = s.config.read().unwrap_or_else(|p| p.into_inner());
         let pname = cfg.active_profile.clone();
         let key = ch.to_string();
+
+        // Which browser profiles OTHER reachable bindings have pinned. Read
+        // here, inside the read guard the binding lookup already holds open —
+        // the config is an in-memory Arc<RwLock<AppConfig>>, so this is a walk
+        // over the active profile's bindings and nothing else: no second lock,
+        // no file I/O, no cache to go stale. For everyone who pins nothing it
+        // allocates nothing and returns empty, and an empty claim list means
+        // the cascade takes the byte-for-byte pre-2026-08-27 path.
+        let claims = crate::browser_profiles::active_profile_claims(&cfg);
 
         let binding = cfg.profiles.iter()
             .find(|p| p.name == pname)
@@ -402,7 +500,7 @@ fn handle_alpha(ch: char, state_arc: &Arc<Mutex<EngineState>>) {
             .find(|p| p.name == crate::config::schema::FALLBACK_PROFILE)
             .and_then(|p| p.bindings.get(&key).cloned());
 
-        (pname, binding, fallback)
+        (pname, binding, fallback, claims)
     };
 
     // A key that is UNASSIGNED in the active profile must still honour the
@@ -456,6 +554,7 @@ fn handle_alpha(ch: char, state_arc: &Arc<Mutex<EngineState>>) {
     let outcome = actions::smart_cascade::smart_cascade(
         &bind,
         if substituted { None } else { fallback.as_ref() },
+        &claims,
         Some(app_handle),
     );
 
@@ -489,6 +588,25 @@ fn handle_pip(state_arc: &Arc<Mutex<EngineState>>) {
     };
 
     let msg = actions::pip::toggle_pip(&pip_cache);
+    crate::show_toast(&app_handle, &msg);
+}
+
+/// Space+Tab — fullscreen-preserving PiP (pip.rs §9, PROBLEM 219).
+///
+/// The same three lines as `handle_pip`, against the same cache HANDLE — but
+/// since PROBLEM 220 the two keys own SEPARATE namespaces inside it, keyed by
+/// `(hwnd, mode)`. Neither key can see the other's bounds, corner index or
+/// fullscreen capture, and pressing one on a window the other is holding takes
+/// the window over: the first key's tile is restored, then this key enters
+/// fresh. They shared one entry per window until 1.0.93, which the owner
+/// reported as *"it did behave oddly."*
+fn handle_fullscreen_pip(state_arc: &Arc<Mutex<EngineState>>) {
+    let (pip_cache, app_handle) = {
+        let s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
+        (s.pip_cache.clone(), s.app_handle.clone())
+    };
+
+    let msg = actions::pip::toggle_fullscreen_pip(&pip_cache);
     crate::show_toast(&app_handle, &msg);
 }
 
@@ -526,7 +644,7 @@ fn handle_force_close(state_arc: &Arc<Mutex<EngineState>>) {
     // make_input) so our own hook passes them straight through.
     #[cfg(windows)]
     unsafe {
-        use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP};
+        use windows::Win32::UI::Input::KeyboardAndMouse::{KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP};
         const VK_MENU: u16 = 0x12;
         const VK_F4: u16 = 0x73;
         let inputs = [
@@ -535,7 +653,10 @@ fn handle_force_close(state_arc: &Arc<Mutex<EngineState>>) {
             make_input(VK_F4, KEYEVENTF_KEYUP),
             make_input(VK_MENU, KEYEVENTF_KEYUP),
         ];
-        SendInput(&inputs, std::mem::size_of::<windows::Win32::UI::Input::KeyboardAndMouse::INPUT>() as i32);
+        // PROBLEM 227 — checked. A partial insert of `Alt↓ F4↓` leaves ALT
+        // latched, and a latched Alt is the one that opens menu bars and
+        // KeyTips in every app the owner uses.
+        let _ = crate::hook::send_keys_checked(&inputs, "force close: Alt+F4");
     }
     log::info!("force_close: sent Alt+F4 to foreground window");
     let s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
@@ -603,7 +724,8 @@ fn send_ctrl_key(vk: u16) {
             make_input(vk, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP),
             make_input(VK_CONTROL.0, KEYEVENTF_KEYUP),
         ];
-        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        // PROBLEM 227 — checked: a partial insert leaves CTRL latched.
+        let _ = crate::hook::send_keys_checked(&inputs, "media/tab: Ctrl+key");
     }
 }
 
@@ -634,4 +756,162 @@ fn tick_count() -> u64 {
     unsafe { windows::Win32::System::SystemInformation::GetTickCount64() }
     #[cfg(not(windows))]
     0
+}
+
+/// The system-wide shortcuts the HUD's INNER ring lists, in ring order.
+///
+/// A `const` and not a literal inside the builder so the truth table below can
+/// be tested against the real list rather than a copy of it.
+///
+/// NINE since 2026-08-29 (pip.rs §9, PROBLEM 219). The label is deliberately
+/// SHORT: specials render at their full label and a long one widens the inner
+/// ring for every chip on it, so "Fullscreen PiP" — shorter than the
+/// "Multi-Corner PiP Mode" already sitting next to it — cannot be the entry
+/// that decides the ring's size. `toast.ts` measures the labels it is given
+/// and has a documented ladder that passes at twelve specials, so the count
+/// itself is inside what the overlay was built for.
+/// Declared as a SLICE, not a fixed-size array, so the Tab row below can be
+/// commented in or out without also editing a length that would then be the
+/// one thing left to get wrong.
+const HUD_SPECIALS: &[(&str, &str)] = &[
+    ("Esc", "Boss Key (Hide All + Mute)"),
+    ("`", "Multi-Corner PiP Mode"),
+    // SPACE+TAB SPLIT — 1.0.91 ships this line COMMENTED OUT on purpose.
+    // The feature's code stays in the tree (pip.rs §9, PROBLEM 219); only its
+    // advertisement and its key registration (hook/mod.rs, `VK_TAB`) are
+    // disabled, pending the owner's verdict after testing. 1.0.92 = this exact
+    // tree with BOTH lines uncommented. Do not delete either one.
+    ("Tab", "Fullscreen PiP"), // ← 1.0.92 ON / 1.0.91 commented out
+    ("⌫", "Force Close App"),
+    ("RAlt", "Cycle OS Profiles"),
+    (",", "Contextual Search/Input"),
+    (".", "Pause Spaceadom"),
+    ("Scroll", "Layer Opacity"),
+    ("Up/Dn ×2", "Scroll Top/Bottom"),
+];
+
+/// Which specials go into the `GuideHudPayload` — the DETERMINISTIC half of
+/// the rows/specials system, and nothing else.
+///
+/// `hud_band_count` and `hud_show_specials` are one system because the
+/// specials occupy the HUD's INNER band, so they only exist when the apps need
+/// just the outer one. The full table, and who resolves each row:
+///
+/// ```text
+///   rows   specials   sent from here   who decides the final look
+///   one    on         the eight        Rust — inner ring + apps outer
+///   one    off        empty            Rust — one app band, no inner ring
+///   two    on         empty            Rust — two app bands win outright
+///   two    off        empty            Rust
+///   auto   on         the eight        THE PAGE — it drops them if the
+///                                      measured labels need two bands
+///   auto   off        empty            Rust
+/// ```
+///
+/// So a NON-EMPTY return means "show these if one band is enough", not "show
+/// these". `"auto"` cannot be resolved here: the band count falls out of
+/// measured label widths, which exist only in the overlay document. Anything
+/// that is not `"one"` or `"two"` is treated as `"auto"` — an old config that
+/// somehow carries `""` or a typo must behave like every previous build did,
+/// never like a layout the user did not choose.
+pub(crate) fn specials_for_hud(show_specials: bool, band_count: &str) -> Vec<(String, String)> {
+    if !show_specials || band_count == "two" {
+        return Vec::new();
+    }
+    HUD_SPECIALS
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect()
+}
+
+#[cfg(test)]
+mod band_gate_tests {
+    use super::*;
+
+    /// All SIX rows of the rows x specials table, in one place, because the
+    /// bug this guards against is silent: a HUD that renders two app bands AND
+    /// an inner ring has no room for both and the page would simply overlap
+    /// them. There is no error, no log line and nothing to see except a mess.
+    #[test]
+    fn the_six_rows_and_specials_combinations() {
+        let n = HUD_SPECIALS.len();
+
+        // rows = one — the only shape where Rust itself says "draw the ring".
+        assert_eq!(
+            specials_for_hud(true, "one").len(),
+            n,
+            "one row + specials ON must send the whole list"
+        );
+        assert!(
+            specials_for_hud(false, "one").is_empty(),
+            "one row + specials OFF must send an empty list"
+        );
+
+        // rows = two — the new gate. The specials cannot coexist with two app
+        // bands and Rust knows that WITHOUT measuring anything, so it decides.
+        assert!(
+            specials_for_hud(true, "two").is_empty(),
+            "two rows must drop the specials even with the setting ON — the \
+             inner band is spoken for"
+        );
+        assert!(
+            specials_for_hud(false, "two").is_empty(),
+            "two rows + specials OFF is empty for both reasons at once"
+        );
+
+        // rows = auto — Rust keeps sending; the PAGE drops them if the
+        // measured labels turn out to need two bands. Sending an empty vec
+        // here would make "auto" mean "never show specials", which is not what
+        // the owner asked for.
+        assert_eq!(
+            specials_for_hud(true, "auto").len(),
+            n,
+            "auto + specials ON must still SEND them — only the page can know \
+             whether one band fits"
+        );
+        assert!(
+            specials_for_hud(false, "auto").is_empty(),
+            "auto + specials OFF must send an empty list"
+        );
+    }
+
+    /// An unrecognised value must behave like `"auto"`, never like `"two"`.
+    /// `""` is what a bare `#[serde(default)]` on a String would have produced
+    /// for every config on disk — the failure schema.rs's named default exists
+    /// to prevent — and it must not be the value that silently hides the ring.
+    #[test]
+    fn an_unknown_band_count_falls_back_to_auto_not_to_two() {
+        for v in ["", "AUTO", "1", "one row", "three", "auto"] {
+            assert_eq!(
+                specials_for_hud(true, v).len(),
+                HUD_SPECIALS.len(),
+                "{v:?} must behave like auto — only the literal \"two\" hides the ring"
+            );
+        }
+    }
+
+    /// The gate must not quietly edit the list it is gating.
+    #[test]
+    fn the_sent_list_is_the_real_one_in_ring_order() {
+        let sent = specials_for_hud(true, "one");
+        // Counted from the real list, NOT a literal, because Space+Tab is
+        // deliberately commented out of `HUD_SPECIALS` in 1.0.91 and back in
+        // for 1.0.92 — the same test has to pass for both builds.
+        assert_eq!(sent.len(), HUD_SPECIALS.len());
+        assert_eq!(sent[0].0, "Esc");
+        assert_eq!(sent[0].1, "Boss Key (Hide All + Mute)");
+        assert_eq!(sent[sent.len() - 1].0, "Up/Dn ×2");
+        assert_eq!(sent[1].0, "`");
+        // Tab sits next to the backtick, because the two PiPs are the pair a
+        // user has to tell apart and the ring is the only place that says so.
+        // Asserted only WHEN PRESENT: absent is the legitimate 1.0.91 shape.
+        if let Some(i) = sent.iter().position(|(k, _)| k == "Tab") {
+            assert_eq!(i, 2, "Tab must sit immediately after the backtick");
+            assert_eq!(
+                sent[i].1, "Fullscreen PiP",
+                "the label must stay SHORT — specials render at their full label and a long one \
+                 widens the inner ring for every chip on it"
+            );
+        }
+    }
 }

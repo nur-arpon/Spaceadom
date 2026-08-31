@@ -1,4 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { installJsErrorReporter } from "./js-error-reporter";
+import { applyBandCount } from "./components/hud-band-count";
+import { applyHudLayout } from "./components/hud-layout";
 import {
   initToastListener,
   applyTheme,
@@ -28,12 +32,16 @@ document.body.classList.add("st-overlay");
 // Surface overlay JS failures in the Rust log — the webview console is
 // invisible in production, so without this an exception here just looks
 // like "the HUD didn't appear".
-window.addEventListener("error", (e) => {
-  invoke("overlay_log", { msg: `error: ${e.message} @ ${e.filename}:${e.lineno}` }).catch(() => {});
-});
-window.addEventListener("unhandledrejection", (e) => {
-  invoke("overlay_log", { msg: `unhandled rejection: ${e.reason}` }).catch(() => {});
-});
+//
+// PROBLEM 217 — these two handlers used to be written out here and reported
+// through `overlay_log`, which is `log::warn!` and therefore BELOW the crash
+// reporter's floor: an exception in this file reached the local debug.log and
+// nowhere else. They are now the shared reporter, which routes to
+// `overlay_error` (ERROR, so it can be reported), adds the column and the
+// stack, and rate-limits itself so a HUD that throws on every hold cannot
+// flood. This REPLACES the pair — there is still exactly one `error` and one
+// `unhandledrejection` listener on this window.
+installJsErrorReporter("overlay_error");
 
 window.addEventListener("DOMContentLoaded", () => {
   // This webview is the ONLY registered listener for backend toast/HUD events.
@@ -55,12 +63,37 @@ window.addEventListener("DOMContentLoaded", () => {
   // in the light palette every launch and only correct itself the next time
   // the user touched the toggle — a split-theme app, which the design rules
   // out explicitly ("ONE setting drives everything").
+  // HALF ONE of the band-count wiring: the LISTENER. `save_config` emits this
+  // globally (`emit`, never `emit_to` — the only arrangement that has ever
+  // delivered here), and it is registered from THIS file rather than from
+  // `initToastListener` because the value lives in its own leaf module.
+  listen<string>("hud-band-count-changed", (e) => {
+    applyBandCount(e.payload);
+  }).catch((e) =>
+    invoke("overlay_log", { msg: `band-count listen FAILED: ${e}` }).catch(() => {}),
+  );
+
+  // HALF ONE of the ring-LAYOUT wiring, and the same shape as the band count
+  // directly above: `save_config` emits this globally (`emit`, never
+  // `emit_to`), and it is registered from THIS file rather than from
+  // `initToastListener` because the value lives in its own leaf module.
+  //
+  // The payload is the raw config BOOL. `applyHudLayout` is the only place it
+  // is ever turned into a name, so nothing downstream compares it.
+  listen<boolean>("hud-layout-changed", (e) => {
+    applyHudLayout(e.payload);
+  }).catch((e) =>
+    invoke("overlay_log", { msg: `hud-layout listen FAILED: ${e}` }).catch(() => {}),
+  );
+
   invoke<{
     dark_mode?: boolean;
     theme?: string;
     sound_enabled?: boolean;
     motion?: string;
     hud_toast_flight?: boolean;
+    hud_band_count?: string;
+    hud_magnetic_layout?: boolean;
   }>("get_config")
     .then((cfg) => {
       applyTheme(!!cfg?.dark_mode);
@@ -78,6 +111,29 @@ window.addEventListener("DOMContentLoaded", () => {
       // `=== true`: the key is absent from every config written before 1.0.73
       // and absent must mean OFF.
       applyFlight(cfg?.hud_toast_flight === true);
+      // HALF TWO, and the one that gets skipped: the SEED. Without it the
+      // listener above only corrects the overlay the next time the user
+      // touches the setting, so a first launch — or the overlay Rust rebuilds
+      // when the display setup changes — would lay the ring out on this
+      // module's default while the dashboard showed something else. Exactly
+      // the split-state failure the theme rule exists to prevent.
+      //
+      // No `=== true` / `!== false` question to get wrong here: it is a string
+      // enum, and `applyBandCount` normalises anything that is not "one" or
+      // "two" — `undefined` included — to "auto".
+      applyBandCount(cfg?.hud_band_count);
+      // HALF TWO for the ring layout, for exactly the reason spelled out
+      // above: without the seed, a first launch — or the overlay Rust
+      // rebuilds when the display setup changes — would draw whichever
+      // layout the module defaults to until the user next flipped the
+      // switch. Both halves, every time.
+      //
+      // The raw bool is handed straight in: `applyHudLayout` applies the
+      // `!== false` rule (absent means the NEW ring, because the key is
+      // missing from every config written before 1.0.89). Do not "help" by
+      // writing `cfg?.hud_magnetic_layout === true` here — that would ship
+      // the flip to nobody.
+      applyHudLayout(cfg?.hud_magnetic_layout);
       // Same "Visual effects" resolution as the dashboard (PROBLEM 47). The
       // overlay is a SEPARATE document, so it must set the class on its own
       // <html> — the dashboard's copy is invisible to it. Without this the

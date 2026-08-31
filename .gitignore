@@ -41,8 +41,29 @@ _REAL-CONFIG-BACKUP.json
 _safety-config.json
 _config-before-*.json
 _config-wiped-*.json
+_config-live-copy.json
+# …and every dated variant of it. 1.0.95: `_config-live-copy-1029-preinstall.json`
+# sat un-ignored beside the plain name for three releases — a bare filename in
+# this list only ever covers the ONE copy somebody happened to make. Glob it.
+_config-live-copy-*.json
 config.json
 config.json.*
+# postinstall-probe.ps1 copies the LIVE config to this exact name on every
+# install, so it is regenerated constantly and carries the full personal
+# binding set. Same class as the copies above; added 1.0.95.
+config-copy.json
+# Scratch directory for one-off probe output (exe reads, marker scans, config
+# excerpts). Everything in it is a measurement of the owner's machine.
+_probe/
+
+# scripts/config-check.cmd copies the LIVE config out through explorer.exe (the
+# only way to read the real file — see CLAUDE.md on the config.json shadow) and
+# writes its findings, log excerpts included, beside it. Both carry the same
+# personal data as the recovered copies above. Added 1.0.88, when the copy
+# landed on an un-ignored name and nearly got committed.
+config-check.txt
+preinstall-probe.txt
+postinstall-probe.txt
 
 # ---------------------------------------------------------------------------
 # Scratch output from diagnostic scripts. Transient by nature.
@@ -79,3 +100,8 @@ src-tauri/symbols/
 # not source.
 install-check.txt
 install-proof.txt
+
+# PROBLEM 196 - the real Sentry DSN. Safe to ship IN THE BUILT APP (a DSN
+# can only submit events, never read the account), but not safe to publish
+# in git history - see src-tauri/src/sentry_dsn.example.txt for setup.
+src-tauri/src/sentry_dsn.txt

@@ -15,7 +15,28 @@ import { askConfirm } from "./confirm-dialog";
 import { offerUndo } from "../main";
 import type { AppConfig } from "../types.ts";
 
-const PROFILE_NAME_RE = /^[a-zA-Z0-9_]{1,24}$/;
+/// PROBLEM 197 — this used to be `/^[a-zA-Z0-9_]{1,24}$/`, and nothing in the
+/// app ever needed it that strict. The owner, 2026-08-26: *"why is new
+/// profile name restricted to only letters, numbers or underscore? People
+/// might want to name with space or dash or anything."*
+///
+/// Traced every use of a profile name before answering: it's a plain JSON
+/// string, compared with `==`, and the one place the frontend touches it
+/// structurally is `row.dataset.profileName = profile.name` — an HTML
+/// `data-*` attribute, which accepts any string, no escaping required. It is
+/// never a filename, a CSS selector, or anything with real syntax rules — the
+/// restriction had no technical basis, just an unexamined "identifier-safe"
+/// default. Mirror of `regex_lite` in src-tauri/src/commands.rs — the two
+/// MUST stay in sync, since the frontend check exists only to fail fast
+/// before the round trip; Rust's is the one that is actually enforced.
+///
+/// Length 1–24 and no control characters — a stray tab/newline could still
+/// break the single-line pill this renders into. The `u` flag makes `{1,24}`
+/// count by Unicode CODE POINT rather than UTF-16 code unit, so one emoji
+/// outside the BMP costs 1 toward the limit, not 2 — matching how Rust's
+/// `chars().count()` in `regex_lite` counts the same string. Spaces, dashes,
+/// punctuation, accented letters and emoji are all fine now.
+const PROFILE_NAME_RE = /^[^\x00-\x1f\x7f]{1,24}$/u;
 
 let _config: AppConfig | null = null;
 let _onProfileSwitch: ((name: string) => void) | null = null;
@@ -84,6 +105,12 @@ function renderProfileList(): void {
     const nameEl = document.createElement("span");
     nameEl.className = "profile-row-name";
     nameEl.textContent = profile.name;      // textContent — user data
+    // Rename has no button of its own (unlike delete's ✕) — the pill is
+    // already the busiest row in the popover, and every other rename-style
+    // control in this app (the key-detail-panel URL field) is click-to-edit
+    // in place, not a dedicated button. The tooltip is the only affordance,
+    // so it has to say the actual gesture rather than just "rename".
+    nameEl.title = `Double-click to rename ${profile.name}`;
     const countEl = document.createElement("span");
     countEl.className = "profile-row-count";
     countEl.textContent = `${count} ${count === 1 ? "key" : "keys"}`;
@@ -162,7 +189,7 @@ function startInlineRename(row: HTMLElement, oldName: string): void {
     const newName = input.value.trim();
     if (!newName || newName === oldName) { renderProfileList(); return; }
     if (!PROFILE_NAME_RE.test(newName)) {
-      showToast("⚠️ Name: 1–24 chars, letters/numbers/underscore");
+      showToast("⚠️ Name must be 1–24 characters");
       renderProfileList();
       return;
     }
@@ -374,7 +401,7 @@ function wireNewProfile(): void {
 async function create(input: HTMLInputElement, close: () => void): Promise<void> {
   const name = input.value.trim();
   if (!PROFILE_NAME_RE.test(name)) {
-    showToast("⚠️ Name: 1–24 chars, letters/numbers/underscore");
+    showToast("⚠️ Name must be 1–24 characters");
     input.classList.add("error");
     return;
   }

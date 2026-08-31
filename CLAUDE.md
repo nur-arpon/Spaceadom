@@ -215,6 +215,22 @@ removes it with one permission prompt.
   `log::info!` format strings are ASCII-searchable inside the exe.
   `[Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))` then test
   for markers like `url_focus:`, `aumid_focus:`.
+- **NOT EVERY RUST LITERAL IS A USABLE MARKER (measured 2026-08-27).** A SHORT
+  literal that is only ever copied into a `String` may never exist contiguously
+  in the binary at all. `st-hud-pointer` (14 bytes, a thread name) tested
+  **False in a freshly-built exe that certainly contained it**: at offset
+  0x2C8B3 the compiler materialises it with two OVERLAPPING immediate stores
+  (`mov rcx,"-pointer"` → `[rax+6]`, then `mov rcx,"st-hud-p"` → `[rax]`), so
+  the bytes are assembled at runtime and never sit together on disk. Longer
+  thread names in the same file DO survive in `.rodata`
+  (`st-exclusion-watcher` at 20 bytes, `st-hook-supervisor` at 18).
+  **Use a long `log::` FORMAT STRING as the marker, never a short identifier —
+  and confirm the marker is present in the freshly-built exe BEFORE trusting
+  its absence from the installed one as evidence.** Shipping an unconfirmed
+  marker means a False reads as "the fix did not ship" when it means "the
+  marker was never findable", which is how a working build gets discredited.
+  Same family as the env-var trap above: **a check that cannot produce a
+  negative result — or that produces one for the wrong reason — is not a check.**
 - **This does NOT work for FRONTEND markers any more (measured 2026-08-20).**
   Tauri v2 compresses the embedded `dist2` assets, so CSS class names and JS
   strings are not findable in the exe. `st-hud-glow` — the example this file
@@ -394,6 +410,29 @@ overlay.html       The on-demand HUD/toast surface (see window rules below).
   `Start-Process explorer.exe -ArgumentList 'C:\path	o\script.cmd'`.
   **A verification performed by the sandboxed process cannot detect the
   sandbox.**
+- **PRINTING `%LOCALAPPDATA%` IS NOT PROOF THAT YOU ESCAPED THE CONTAINER**
+  (measured 2026-08-27). MSIX redirects at the FILESYSTEM layer, so the path
+  STRING is byte-identical inside and outside — an agent printed
+  `C:\Users\beamu\AppData\Local` from an explorer-launched probe, concluded it
+  had escaped, and was right only by luck: the same env var reads the same from
+  inside. The env-var test cannot fail, which is exactly why it proves nothing.
+  **The only valid proof is a DIFFERENTIAL** — read the SAME path string from
+  both contexts and compare what comes back. The real measurement that night:
+  `…\Local\Spaceadom\spaceadom.exe` returned **v1.0.53, 14,109,184 bytes**
+  in-sandbox and **v1.0.86, 18,868,224 bytes** via `explorer.exe`. Two
+  different files at one path is the only thing that demonstrates redirection.
+  Generalise: **a check that cannot produce a negative result is not a check.**
+  Validate any sandbox-escape technique against a known-redirected path before
+  trusting it (see also "Verification techniques expire").
+- **`config.json` is shadowed even though `debug.log` beside it is not**
+  (observed twice, 2026-08-26/27). Both live in `%APPDATA%\Spaceadom\`, which
+  is Roaming and NOT supposed to be redirected — yet `debug.log` tracks the real
+  clock to the second while `config.json` returned a months-stale copy (47,754
+  bytes, dated Aug 18) against a real file of 62,463 bytes. **So the usual tell
+  — "this whole folder looks stale" — is absent.** Never diagnose from a
+  `config.json` read in this shell. Copy it out via `explorer.exe` first, and
+  cross-check its byte size against what `debug.log` says was last saved; if
+  they disagree you are reading a shadow.
 - Never report anything as fixed/working/verified unless you observed it
   working. Label untested things untested. Ask the user to hand-test what
   injection can't reach.

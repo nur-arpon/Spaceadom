@@ -93,6 +93,32 @@ pub fn save_config(
         // page, so the switch in the dashboard's Settings panel can only reach
         // it through here. Same global-emit rule as the two above.
         let _ = app.emit("flight-changed", new_config.hud_toast_flight);
+        // The HUD's band count lives entirely in the OVERLAY page — the ring
+        // arithmetic runs against MEASURED label widths, which exist nowhere
+        // else — so the Settings pill can only reach it through here. Same
+        // global-emit rule as the four above; `emit_to` has never delivered in
+        // this app.
+        //
+        // THIS IS ONLY HALF THE WIRING. An event that fires on CHANGE leaves a
+        // freshly-created overlay (first launch, or a display-change rebuild)
+        // carrying whatever the module defaulted to, so `overlay.ts` ALSO
+        // seeds `hud_band_count` from `get_config` on load. Both halves are
+        // required — that is the rule CLAUDE.md records for the theme, and the
+        // half that gets skipped is always this second one.
+        let _ = app.emit("hud-band-count-changed", new_config.hud_band_count.clone());
+        // The Magnetic Sector ring vs the classic 1.0.88 ring. Same story as
+        // the band count directly above: the layout is chosen inside the
+        // OVERLAY page, so the Settings toggle can only reach it from here,
+        // and it is a GLOBAL `emit` because `emit_to` has never delivered in
+        // this app.
+        //
+        // AND THE SAME SECOND HALF: `overlay.ts` also seeds
+        // `hud_magnetic_layout` from `get_config` on load, because an event
+        // that fires on CHANGE leaves a freshly-created overlay (first
+        // launch, or a display-change rebuild) drawing whatever the module
+        // defaulted to. Both halves are required; this one is never the half
+        // that gets skipped.
+        let _ = app.emit("hud-layout-changed", new_config.hud_magnetic_layout);
     }
 
     // Persist to disk
@@ -177,8 +203,62 @@ pub struct AppInfo {
     pub icon_base64: Option<String>,
 }
 
+/// Scan both Start Menu trees plus `shell:AppsFolder` and return every
+/// bindable application, icons included.
+///
+/// **This is the most expensive command in the app — measured ~12s on the
+/// owner's machine — and it is NOT `async`, so it runs ON THE MAIN THREAD.**
+/// See `dashboard_ready` below for the rule; the short version is that a
+/// `#[tauri::command]` declared `fn` executes on the main thread and every
+/// other IPC call from every webview queues behind it.
+///
+/// PROBLEM 205 — it was left synchronous DELIBERATELY, after the conversion
+/// was attempted and stopped. Making it `async` moves the whole body onto an
+/// async-runtime worker, and the body does NOT only shell out to PowerShell:
+/// the per-app loop below calls `icon_extractor::extract_icon`, which is
+/// in-process COM (`CoInitializeEx` + `IShellItemImageFactory`). Every one of
+/// the four call sites of `extract_icon` in this crate is inside a
+/// non-`async` command, so that COM has never once run off the main thread in
+/// this app — there is no evidence it survives an apartment created on a
+/// pooled runtime worker with no message pump, and its failure mode is a
+/// silent `None` (letter discs instead of icons) or a hang. Converting it
+/// needs its own testing pass on a real build.
+///
+/// It is ALSO not the one-line change it looks like. `pub fn` → `pub async fn`
+/// on its own does not compile, measured 2026-08-27:
+///
+/// ```text
+/// error[E0277]: async commands that contain references as inputs must
+///               return a `Result`
+///   --> src\commands.rs:210:72
+///     | pub async fn list_start_menu_apps(cache: State<'_, IconCacheState>)
+///     |     -> Vec<AppInfo> {
+///     |        ^^^ the trait `AsyncCommandMustReturnResult` is not
+///     |            implemented for `Vec<AppInfo>`
+/// error[E0597]: `__tauri_message__` does not live long enough
+/// ```
+///
+/// Carrying the `'_` lifetime is necessary but NOT sufficient: Tauri also
+/// forces a `Result` return on any async command holding a borrowed input.
+/// `-> Result<Vec<AppInfo>, String>` with `Ok(apps)` DOES compile cleanly
+/// (verified, then reverted) and needs no frontend change, because Tauri
+/// resolves the JS promise with the `Ok` value. That is the shape to use when
+/// someone takes the COM question on properly — the cheapest safe version of
+/// which is to SPLIT this command: leave the `extract_icon` loop on the main
+/// thread and move only the PowerShell scan (which owns most of the 12s, and
+/// whose COM lives in PowerShell's own process) off it.
+///
+/// The cost is therefore kept OFF startup on the frontend side instead: the
+/// key editor no longer warms this at bootstrap, it is fetched on the first
+/// editor open, and `app-grid.ts` shows its "Scanning this device…" state
+/// while it is in flight.
+///
+/// The timing log below is the other half of the fix. This command used to
+/// emit nothing at all, which is why 12 of the 15.8 seconds the owner spent
+/// staring at no window were invisible in `debug.log`.
 #[tauri::command]
 pub fn list_start_menu_apps(cache: State<'_, IconCacheState>) -> Vec<AppInfo> {
+    let t_start = std::time::Instant::now();
     let script = r#"
         $ErrorActionPreference = 'SilentlyContinue'
         $paths = @(
@@ -233,6 +313,7 @@ pub fn list_start_menu_apps(cache: State<'_, IconCacheState>) -> Vec<AppInfo> {
     cmd.creation_flags(CREATE_NO_WINDOW);
 
     let output = cmd.output();
+    let t_powershell = t_start.elapsed();
 
     let mut apps = Vec::new();
     if let Ok(out) = output {
@@ -241,6 +322,32 @@ pub fn list_start_menu_apps(cache: State<'_, IconCacheState>) -> Vec<AppInfo> {
             for v in parsed {
                 if let (Some(name), Some(path)) = (v["Name"].as_str(), v["Path"].as_str()) {
                     let exe_path = path.to_string();
+
+                    // PROBLEM 193 — never offer an uninstaller/installer as a
+                    // bindable "app" in the FIRST PLACE. `check_app_path`
+                    // existed only on the manual file-browse path (PROBLEM
+                    // 96); every picker built from THIS scan — the key
+                    // editor's app grid, the App Exceptions picker, and any
+                    // grid added after this comment — walked straight past
+                    // it, because the Start Menu genuinely contains these
+                    // shortcuts (installers often add one under a "Tools"
+                    // subfolder right next to the real app). Live incident:
+                    // the owner bound a key to "Uninstall PASCO Capstone" from
+                    // the grid, believing it was the application itself.
+                    //
+                    // Checked against BOTH the shortcut's own display name and
+                    // its resolved target: a shortcut can be named
+                    // innocuously while its target is `unins000.exe`, or vice
+                    // versa. Filtering HERE, not per-picker, is the fix that
+                    // cannot be forgotten by the next grid — same reasoning as
+                    // `is_known_process` being the one matcher `conflicts.rs`
+                    // and `conflict_close.rs` both share.
+                    if check_app_path(name.to_string()).is_some()
+                        || check_app_path(exe_path.clone()).is_some()
+                    {
+                        continue;
+                    }
+
                     // Icons come from IShellItemImageFactory, which resolves
                     // .exe, .lnk AND shell:AppsFolder\<AUMID> Store apps —
                     // so there is no longer a path type to special-case.
@@ -267,6 +374,18 @@ pub fn list_start_menu_apps(cache: State<'_, IconCacheState>) -> Vec<AppInfo> {
         }
     }
     apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    // Same shape as `browser_profiles: found N Chromium browser(s) in Xms`.
+    // The split matters: PowerShell (the recursive .lnk walk + WScript.Shell +
+    // shell:AppsFolder) and the in-process icon pass are two different costs
+    // with two different fixes, and one total cannot tell them apart.
+    log::info!(
+        "start_menu_scan: found {} app(s) in {}ms on the MAIN THREAD \
+         (powershell {}ms, icons {}ms)",
+        apps.len(),
+        t_start.elapsed().as_millis(),
+        t_powershell.as_millis(),
+        t_start.elapsed().saturating_sub(t_powershell).as_millis(),
+    );
     apps
 }
 
@@ -403,6 +522,25 @@ pub fn check_app_path(path: String) -> Option<String> {
     // morph is the confirmed-correct overlay design (CLAUDE.md), so the
     // message fits the surface rather than the surface being rebuilt.
     if stem.starts_with("unins") || stem == "uninstall" || stem == "uninstaller" {
+        return Some("That's an uninstaller — pick the app's own shortcut".into());
+    }
+    // PROBLEM 193 — `stem == "uninstall"` only ever matched a shortcut named
+    // EXACTLY "Uninstall.lnk". The one every real installer actually writes is
+    // "Uninstall <App Name>.lnk" — Windows' own naming convention, and it
+    // slipped straight through this check. Live incident: the owner picked
+    // "Uninstall PASCO Capstone" from the app grid (Start Menu \ Tools\)
+    // believing it was the app itself, and Space+key would have re-run the
+    // uninstaller on every press had he not caught it.
+    //
+    // Checking the FIRST TOKEN, not a substring: "uninstall" appearing
+    // anywhere would also catch a legitimate app that happens to have the
+    // word in its own name (rare, but "install"'s whole-stem-only rule above
+    // exists for exactly that reason — "InstallShield Player"). Windows'
+    // convention always puts "Uninstall" first, so anchoring there keeps the
+    // same conservative promise this function documents: whole words, known
+    // positions, never a bare substring.
+    let tokens_for_uninstall = tokenize_stem(&raw_stem);
+    if tokens_for_uninstall.first().is_some_and(|t| t == "uninstall") {
         return Some("That's an uninstaller — pick the app's own shortcut".into());
     }
 
@@ -910,6 +1048,54 @@ pub fn set_overlay_compositing(
 }
 
 // ---------------------------------------------------------------------------
+// Crash reporting (PROBLEM 195)
+// ---------------------------------------------------------------------------
+
+/// The "Don't send logs" switch, from the bottom of Settings.
+///
+/// **`send_logs` IS THE POSITIVE STATEMENT: true means sending is happening.**
+/// The switch the user sees is its negation, so the frontend passes
+/// `!checked`. Written out here as well as in `schema.rs` and
+/// `settings-panel.ts` because an inverted privacy toggle is the one bug in
+/// this app a user could never detect for themselves — it would look correct
+/// and do the opposite.
+///
+/// Goes through its own command rather than `persistConfig()` for the same
+/// reason `set_overlay_compositing` does, plus one of its own: the runtime
+/// state lives in an ATOMIC that the panic hook reads without taking a lock,
+/// and this is the call that flips it. `config::save` republishes it too, so
+/// the two can never drift; this command exists so the flip is immediate and
+/// unconditional rather than a side effect of a save that might not happen.
+///
+/// No restart, and no second `sentry::init()`: the very next log record and
+/// the very next panic read the new value.
+#[tauri::command]
+pub fn set_send_logs(
+    send_logs: bool,
+    state: State<'_, ConfigState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let mut cfg = state.0.write().unwrap_or_else(|p| p.into_inner());
+    cfg.send_logs = send_logs;
+    let snapshot = cfg.clone();
+    drop(cfg);
+
+    // Flip the atomic FIRST. If the disk write fails, the user's stated wish
+    // is still honoured for this session — the failure mode of the reverse
+    // order is "you asked me to stop and I kept sending until you restarted",
+    // which is the one outcome that is not acceptable here.
+    crate::telemetry::set_sending_enabled(send_logs);
+
+    config::save(&snapshot)?;
+    let _ = app.emit("config-updated", snapshot);
+    log::info!(
+        "telemetry: user set send_logs={send_logs} — crash and error reports {}",
+        if send_logs { "will be sent to Sentry" } else { "will NOT leave this machine" }
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Elevation command
 // ---------------------------------------------------------------------------
 
@@ -943,6 +1129,43 @@ pub fn frontend_log(msg: String) {
     log::info!("dashboard-js: {msg}");
 }
 
+// ---------------------------------------------------------------------------
+// PROBLEM 217 — the ERROR-severity siblings of the two bridges above.
+//
+// WHY SIBLINGS AND NOT A LEVEL PARAMETER. `frontend_log` and `overlay_log` have
+// call sites all over `src/` (key-detail-panel, toast, main, overlay), every one
+// of them passing a single `msg`. Adding a level argument — even an optional one
+// — means either touching all of them or relying on an `Option` that reads as
+// "somebody forgot" at every call site. A second command adds nothing to the
+// existing ones and changes no existing behaviour: INFO and WARN stay exactly
+// where they were, and the new commands are used only by the two global error
+// handlers.
+//
+// WHY IT MATTERS. `SENTRY_MINIMUM_LEVEL` is `Error`, so INFO and WARN never
+// leave the machine. Until now that meant no JavaScript failure anywhere in the
+// dashboard or the overlay — the entire UI layer — could ever be reported. A
+// wedged frontend or a dead HUD is precisely what a friend reports as "it looks
+// broken", and it was the one thing the crash reporter could not see.
+//
+// Both go through `telemetry::report_frontend_error`, which writes the local
+// `debug.log` line unconditionally and rate-limits what it submits.
+// ---------------------------------------------------------------------------
+
+/// A DASHBOARD JavaScript error. Logged at ERROR, so it reaches the crash
+/// reporter — subject, like everything else, to the "Don't send logs" switch.
+#[tauri::command]
+pub fn frontend_error(msg: String) {
+    crate::telemetry::report_frontend_error("dashboard-js", &msg);
+}
+
+/// The same for the OVERLAY webview. `overlay_log` stays at WARN for the
+/// routine chatter (listener registration, fit results); this is for the two
+/// global handlers only.
+#[tauri::command]
+pub fn overlay_error(msg: String) {
+    crate::telemetry::report_frontend_error("overlay-js", &msg);
+}
+
 /// PROBLEM 74 — set once the dashboard frontend has finished bootstrapping.
 /// Read by the 10s show-fallback in lib.rs so it never double-shows.
 pub static DASHBOARD_READY: std::sync::atomic::AtomicBool =
@@ -968,7 +1191,26 @@ pub fn dashboard_ready(app: tauri::AppHandle, window: tauri::WebviewWindow) {
     if autostart {
         return;
     }
-    // Window ops belong on the main thread; a command handler is not on it.
+    // THE RULE, and it is the opposite of what this comment used to assert
+    // (PROBLEM 205). In Tauri v2:
+    //
+    //   · `#[tauri::command] fn foo(..)`        → runs ON THE MAIN THREAD.
+    //   · `#[tauri::command] async fn foo(..)`  → runs on the async runtime,
+    //                                             i.e. OFF the main thread.
+    //
+    // This comment used to read "a command handler is not on it", which is
+    // true only for `async` commands. Because `dashboard_ready` is NOT async,
+    // this handler is ALREADY on the main thread and `run_on_main_thread`
+    // below is a no-op hop — harmless, and kept because the rule it encodes
+    // (window ops belong on the main thread) stays correct if this command is
+    // ever made async.
+    //
+    // The cost of believing the old wording: every synchronous command in
+    // this file was assumed to be off the main thread, so nobody suspected
+    // `list_start_menu_apps` (~12s, sync) of serialising the entire IPC bus
+    // for both webviews for ~60 versions. If you add a command that does more
+    // than a few milliseconds of work, it must be `async` — or its cost must
+    // be kept off any path the user waits on, and it must LOG its duration.
     let app2 = app.clone();
     let _ = app.run_on_main_thread(move || {
         use tauri::Manager;
@@ -1523,6 +1765,18 @@ fn compositing_selftest(app: tauri::AppHandle) {
                     "compositing: overlay pixels did not change across 450ms while visible \
                      (strike {strikes}/3) — GPU composition may be dead on this machine"
                 );
+                // PROBLEM 217 — promoted. The user sees "the HUD stopped
+                // appearing"; nothing in the app tells them why, and at WARN
+                // this never left the machine. Rate-limited per condition, so a
+                // machine that strikes on every hold reports once, not once a
+                // second.
+                crate::telemetry::report_degraded(
+                    crate::telemetry::Degraded::OverlayCompositingStrike,
+                    &format!(
+                        "the overlay was visible and composed nothing for 450ms \
+                         (strike {strikes}/3) — the HUD and toasts may be invisible"
+                    ),
+                );
                 if strikes >= 3 && software {
                     // PROBLEM 122 — already in software rendering, so there is
                     // no further rendering mode to fall back to. The remaining
@@ -1542,6 +1796,17 @@ fn compositing_selftest(app: tauri::AppHandle) {
                             "compositing: 3 dead verdicts while ALREADY in software mode — \
                              the overlay window itself has stopped compositing. Rebuilding it \
                              (attempt {n}/{MAX_REBUILDS}); PROBLEM 122."
+                        );
+                        // PROBLEM 217 — promoted: already in software mode and
+                        // still composing nothing is the worst overlay state
+                        // there is, and it was invisible to the reporter.
+                        crate::telemetry::report_degraded(
+                            crate::telemetry::Degraded::OverlayCompositingDead,
+                            &format!(
+                                "3 dead verdicts while ALREADY in software rendering — the \
+                                 overlay window has stopped compositing; rebuilding it \
+                                 (attempt {n}/{MAX_REBUILDS})"
+                            ),
                         );
                         crate::display_watch::rebuild_overlay(&app);
                         STRIKES.store(0, Ordering::SeqCst); // a fresh three chances
@@ -1589,6 +1854,14 @@ fn compositing_selftest(app: tauri::AppHandle) {
                          Restarting Spaceadom silently to apply (the overlay is invisible \
                          anyway; the dashboard, if open, will close and can be reopened \
                          from the tray)."
+                    );
+                    // PROBLEM 217 — promoted. The self-test declaring GPU
+                    // composition dead is a verdict about the user's machine
+                    // that nobody but the log ever heard.
+                    crate::telemetry::report_degraded(
+                        crate::telemetry::Degraded::OverlayCompositingDead,
+                        "3 dead verdicts — GPU composition declared dead, switched to \
+                         SOFTWARE rendering and restarting to apply",
                     );
                     // Detached relaunch with a 2s gap so the single-instance
                     // mutex of THIS process is released before the new one
@@ -1657,6 +1930,51 @@ pub fn overlay_shape(app: tauri::AppHandle, rects: Vec<ShapeRect>, dpr: f64) {
     }
     let Some(win) = app.get_webview_window("overlay") else { return };
     set_overlay_region(&win, &rects, dpr);
+}
+
+/// PROBLEM 206 — the Guide HUD's chip geometry, published by the overlay page
+/// once per HUD show (and once per resize rebuild), for pointer activation.
+///
+/// Convention is deliberately IDENTICAL to `overlay_shape`: rectangles in CSS
+/// px relative to the overlay window's client area, plus `dpr`, and Rust
+/// multiplies the two to reach physical pixels (`apply_region`'s exact
+/// floor/ceil convention). The window is undecorated and shadowless, so its
+/// outer position IS its client origin.
+///
+/// The position is READ BACK from the window, never taken from what a fit
+/// requested: the log records asked (202,247) vs GOT (203,247) — a 1px
+/// logical rounding artefact that would shear every hit-test rect.
+#[tauri::command]
+pub fn publish_hud_chips(
+    app: tauri::AppHandle,
+    chips: Vec<crate::hook::pointer::ChipRectIn>,
+    dpr: f64,
+) {
+    use tauri::Manager;
+    let Some(win) = app.get_webview_window("overlay") else {
+        return;
+    };
+    let Ok(pos) = win.outer_position() else {
+        // No position, no hit-testing: leaving the previous snapshot up
+        // would aim the cursor at rects belonging to an old placement.
+        crate::hook::pointer::clear_chips();
+        log::warn!("publish_hud_chips: overlay position unreadable — chip snapshot cleared");
+        return;
+    };
+    // PROBLEM 209 — the directional hit-test needs the ring's CENTRE, and the
+    // ring is centred on the window's client area (`#st-hud` is
+    // `position: fixed; inset: 0`; every chip is placed with `calc(50% + …)`).
+    // So the size is now as load-bearing as the position, and it is read back
+    // for the same reason: `overlay_fit_hud` may have CLAMPED the requested
+    // size to 94% of the monitor, and the page then centres itself in what it
+    // actually got. Asking for the size we requested would put the centre off
+    // by half the clamp on a small display — i.e. rotate every sector.
+    let Ok(size) = win.inner_size() else {
+        crate::hook::pointer::clear_chips();
+        log::warn!("publish_hud_chips: overlay size unreadable — chip snapshot cleared");
+        return;
+    };
+    crate::hook::pointer::publish_chips(pos.x, pos.y, size.width, size.height, &chips, dpr);
 }
 
 /// Which monitor the HUD and toasts should appear on.
@@ -1876,6 +2194,61 @@ pub fn validate_browser(path: String) -> bool {
     browser::validate_browser_path(&path)
 }
 
+/// The OS default browser, for the key editor's paste row (TASK 3, 2026-08-26).
+///
+/// NOT `find_browser_cmd`, which is a different question with a similar name:
+/// that one walks four hardcoded Brave/Chrome install paths and answers "is
+/// there a Chromium browser lying around?". This one asks Windows which
+/// browser the USER chose, through the same resolver the engine uses when it
+/// opens a URL with nothing pinned (`smart_cascade::default_browser_exe` →
+/// HKCU UrlAssociations\https\UserChoice → ProgId → shell\open\command). One
+/// resolver, so the disc in the editor cannot show a different browser than
+/// the key actually opens — a second registry walk that could disagree is
+/// PROBLEM 60's whole class of bug.
+///
+/// Cheap enough to call whenever the editor opens: two registry reads plus one
+/// icon extraction, and the icon comes from the SAME `IconCacheState` as
+/// `list_start_menu_apps` and `list_browser_profiles`, keyed by exe path — so
+/// a browser already drawn anywhere in the app costs nothing to draw again.
+/// `None` means no http/https handler is registered (or its command line will
+/// not parse), which is the same condition that makes `run_browser` fail.
+#[derive(serde::Serialize)]
+pub struct DefaultBrowserInfo {
+    /// Absolute path to the browser executable.
+    pub exe: String,
+    /// Human name, e.g. "Edge" — the same naming used by the fallback toasts,
+    /// so the editor and the toast never call one browser two things.
+    pub name: String,
+    /// Base64 PNG, 48px, or `None` if the shell had no image for it.
+    pub icon_base64: Option<String>,
+}
+
+#[tauri::command]
+pub fn get_default_browser(cache: State<'_, IconCacheState>) -> Option<DefaultBrowserInfo> {
+    let exe = crate::engine::actions::smart_cascade::default_browser_exe()?;
+
+    let cached = {
+        let lock = cache.0.lock().unwrap_or_else(|p| p.into_inner());
+        lock.get(&exe).cloned()
+    };
+    let icon_base64 = match cached {
+        Some(hit) => Some(hit),
+        None => crate::icon_extractor::extract_icon(&exe).inspect(|b64| {
+            cache
+                .0
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(exe.clone(), b64.clone());
+        }),
+    };
+
+    Some(DefaultBrowserInfo {
+        name: crate::browser_profiles::display_name_for_exe(&exe),
+        exe,
+        icon_base64,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Conflict detection
 // ---------------------------------------------------------------------------
@@ -1918,17 +2291,22 @@ pub fn show_conflict_check(key_combo: String) -> ConflictResult {
 // Profile management commands
 // ---------------------------------------------------------------------------
 
-/// Create a new empty profile. Validates name against alphanumeric rules.
+/// Create a new empty profile. See `regex_lite` (PROBLEM 197) for what a
+/// valid name actually requires — it is far looser than "alphanumeric" now.
 #[tauri::command]
 pub fn create_profile(
     name: String,
     state: State<'_, ConfigState>,
 ) -> Result<(), String> {
-    // Validate name: 1–24 chars, alphanumeric + underscore only
-    let re = regex_lite(&name);
-    if !re {
-        return Err("Profile name must be 1–24 alphanumeric characters (a-z, A-Z, 0-9, _)".into());
+    if !regex_lite(&name) {
+        return Err("Profile name must be 1–24 characters, not blank".into());
     }
+    // Store the TRIMMED name, not the raw one `regex_lite` validated. Storing
+    // "Foo " and later comparing against a freshly-typed "Foo" would make two
+    // profiles that look identical in the pill but are != to every
+    // name-keyed lookup in this file (PROBLEM 85's exact failure mode, from a
+    // different cause) — validate and store the SAME string.
+    let name = name.trim().to_string();
 
     let mut cfg = state.0.write().unwrap_or_else(|p| p.into_inner());
     if cfg.profiles.iter().any(|p| p.name == name) {
@@ -2010,23 +2388,22 @@ pub fn delete_profile(
     config::save(&snapshot)
 }
 
-/// Rename an existing profile.
-#[tauri::command]
-pub fn rename_profile(
-    old_name: String,
-    new_name: String,
-    state: State<'_, ConfigState>,
+/// PROBLEM 85 (root cause half) — renaming B to A's name used to create
+/// TWO profiles called "A": every name-keyed lookup became ambiguous, and
+/// delete-by-name removed both at once. create_profile always had this
+/// guard; rename never did. `new_name != old_name` keeps a same-name
+/// rename a no-op instead of an error.
+///
+/// Pure `&mut AppConfig` logic, extracted out of `rename_profile` so the two
+/// guarantees that matter most — `active_profile` follows a rename of the
+/// profile it points at, and bindings are untouched by a rename — can be
+/// asserted by a unit test instead of only by hand on the real machine (see
+/// `profile_rename_tests` below). No live Tauri `State` is needed to call it.
+fn apply_profile_rename(
+    cfg: &mut AppConfig,
+    old_name: &str,
+    new_name: &str,
 ) -> Result<(), String> {
-    if !regex_lite(&new_name) {
-        return Err("Profile name must be 1–24 alphanumeric characters".into());
-    }
-
-    let mut cfg = state.0.write().unwrap_or_else(|p| p.into_inner());
-    // PROBLEM 85 (root cause half) — renaming B to A's name used to create
-    // TWO profiles called "A": every name-keyed lookup became ambiguous, and
-    // delete-by-name removed both at once. create_profile always had this
-    // guard; rename never did. `new_name != old_name` keeps a same-name
-    // rename a no-op instead of an error.
     if new_name != old_name && cfg.profiles.iter().any(|p| p.name == new_name) {
         return Err(format!("Profile '{new_name}' already exists"));
     }
@@ -2035,23 +2412,219 @@ pub fn rename_profile(
         .iter_mut()
         .find(|p| p.name == old_name)
         .ok_or_else(|| format!("Profile '{old_name}' not found"))?;
-    profile.name = new_name.clone();
+    profile.name = new_name.to_string();
 
+    // Same `cfg`, same pass as the rename above: no reader can ever observe
+    // a profile renamed but `active_profile` still pointing at the old name
+    // (or the other way around), because both mutations land before the
+    // caller's single `config::save`.
     if cfg.active_profile == old_name {
-        cfg.active_profile = new_name;
+        cfg.active_profile = new_name.to_string();
     }
+    Ok(())
+}
+
+/// Rename an existing profile.
+#[tauri::command]
+pub fn rename_profile(
+    old_name: String,
+    new_name: String,
+    state: State<'_, ConfigState>,
+) -> Result<(), String> {
+    if !regex_lite(&new_name) {
+        return Err("Profile name must be 1–24 characters, not blank".into());
+    }
+    // Same reasoning as create_profile: store what was validated.
+    let new_name = new_name.trim().to_string();
+
+    let mut cfg = state.0.write().unwrap_or_else(|p| p.into_inner());
+    apply_profile_rename(&mut cfg, &old_name, &new_name)?;
     let snapshot = cfg.clone();
     drop(cfg);
     config::save(&snapshot)
 }
 
 /// Validate a profile name string without regex crate dependency.
+/// PROBLEM 197 — this used to accept only `[a-zA-Z0-9_]`, and there was never
+/// a reason for it. The owner, 2026-08-26: *"why is new profile name
+/// restricted to only letters, numbers or underscore? People might want to
+/// name with space or dash or anything."*
+///
+/// Traced every use of a profile name in this codebase before answering: it
+/// is a plain JSON string field, compared with `==`, and on the frontend
+/// written into exactly one HTML `data-*` attribute
+/// (`row.dataset.profileName`), which accepts any string with no escaping
+/// needed. It is never a filename, a registry key, a shell argument, or a CSS
+/// selector — nothing that has real character-set rules. `install-v11.ps1`,
+/// the AutoHotkey original this app ports, never even had custom profile
+/// names — just three hardcoded ones compared as string literals — so the
+/// restriction was not inherited from a real constraint there either. It
+/// looks like a generic "identifier-safe" habit applied when CUSTOM profiles
+/// were added later, never revisited.
+///
+/// Now: any length-1-24 string, trimmed, that is not all whitespace and
+/// contains no control characters (0x00-0x1F, 0x7F/DEL) — a control
+/// character could still break the single-line pill it is displayed in, or
+/// embed a stray tab/newline nobody meant to type. Everything else —
+/// spaces, dashes, punctuation, accented letters, emoji — is fine, because
+/// nothing downstream has ever needed it not to be.
 fn regex_lite(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 24
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    let trimmed = name.trim();
+    !trimmed.is_empty()
+        && trimmed.chars().count() <= 24
+        && trimmed.chars().all(|c| !c.is_control())
+}
+
+/// Rename-profile feature: name validation (`regex_lite`) and the
+/// `apply_profile_rename` guarantees — active profile follows a rename of
+/// itself, bindings are untouched, duplicates and unknown names are rejected.
+/// All against a plain in-memory `AppConfig`, no Tauri `State` needed.
+#[cfg(test)]
+mod profile_rename_tests {
+    use super::*;
+    use crate::config::KeyBinding;
+
+    fn profile_with_binding(name: &str, app: &str) -> Profile {
+        let mut bindings = std::collections::HashMap::new();
+        bindings.insert(
+            "a".to_string(),
+            KeyBinding {
+                app: Some(app.to_string()),
+                ..Default::default()
+            },
+        );
+        Profile { name: name.to_string(), bindings }
+    }
+
+    /// Two profiles, `active` marked as the one currently active — mirrors
+    /// what `rename_profile` actually receives via `ConfigState`, minus the
+    /// `Arc<RwLock<_>>` wrapper the command peels off before ever touching
+    /// the data.
+    fn two_profile_config(active: &str) -> AppConfig {
+        let mut cfg = AppConfig::default();
+        cfg.profiles = vec![
+            profile_with_binding("Founders", "brave.exe"),
+            profile_with_binding("Work", "chrome.exe"),
+        ];
+        cfg.active_profile = active.to_string();
+        cfg
+    }
+
+    // --- regex_lite (name validation) ---------------------------------
+
+    #[test]
+    fn regex_lite_rejects_empty_and_whitespace_only() {
+        assert!(!regex_lite(""), "empty must be rejected");
+        assert!(!regex_lite("   "), "spaces-only must be rejected");
+        assert!(!regex_lite("\t\t\t"), "tabs-only must be rejected");
+    }
+
+    #[test]
+    fn regex_lite_accepts_24_chars_rejects_25() {
+        let ok = "a".repeat(24);
+        let too_long = "a".repeat(25);
+        assert!(regex_lite(&ok), "exactly 24 characters must be accepted");
+        assert!(!regex_lite(&too_long), "25 characters must be rejected");
+    }
+
+    #[test]
+    fn regex_lite_rejects_control_characters() {
+        assert!(!regex_lite("bad\u{7}name"), "BEL must be rejected");
+        assert!(!regex_lite("line1\nline2"), "embedded newline must be rejected");
+        assert!(!regex_lite("a\tb"), "embedded tab must be rejected");
+        assert!(!regex_lite("del\u{7f}ete"), "DEL (0x7F) must be rejected");
+    }
+
+    /// PROBLEM 197 — the whole point of the relaxed charset: spaces, dashes,
+    /// punctuation, accented letters and emoji must all be accepted now.
+    #[test]
+    fn regex_lite_accepts_the_owners_actual_profile_names_and_more() {
+        assert!(regex_lite("Founders"));
+        assert!(regex_lite("sexy_tumar_mexy"));
+        assert!(regex_lite("Work - Home"));
+        assert!(regex_lite("Étude 🎮"));
+        assert!(regex_lite("  Trimmed  "), "surrounding whitespace is trimmed, not rejected");
+    }
+
+    // --- apply_profile_rename ------------------------------------------
+
+    #[test]
+    fn rename_updates_the_profile_name() {
+        let mut cfg = two_profile_config("Founders");
+        apply_profile_rename(&mut cfg, "Work", "Office").expect("rename should succeed");
+        assert!(cfg.profiles.iter().any(|p| p.name == "Office"));
+        assert!(!cfg.profiles.iter().any(|p| p.name == "Work"));
+    }
+
+    /// The feature's core promise: rename the ACTIVE profile and
+    /// `active_profile` must move with it in the same call, not on some
+    /// later save.
+    #[test]
+    fn renaming_the_active_profile_updates_active_profile_atomically() {
+        let mut cfg = two_profile_config("Founders");
+        apply_profile_rename(&mut cfg, "Founders", "Home Base").expect("rename should succeed");
+        assert_eq!(
+            cfg.active_profile, "Home Base",
+            "active_profile must follow a rename of the profile it points at"
+        );
+        assert!(cfg.profiles.iter().any(|p| p.name == "Home Base"));
+        assert!(
+            !cfg.profiles.iter().any(|p| p.name == "Founders"),
+            "the old name must not linger anywhere"
+        );
+    }
+
+    #[test]
+    fn renaming_an_inactive_profile_leaves_active_profile_untouched() {
+        let mut cfg = two_profile_config("Founders");
+        apply_profile_rename(&mut cfg, "Work", "Office").expect("rename should succeed");
+        assert_eq!(
+            cfg.active_profile, "Founders",
+            "renaming a profile that is not active must not move active_profile"
+        );
+    }
+
+    #[test]
+    fn rename_rejects_a_duplicate_target_name() {
+        let mut cfg = two_profile_config("Founders");
+        let err = apply_profile_rename(&mut cfg, "Work", "Founders").unwrap_err();
+        assert!(err.contains("already exists"), "unexpected message: {err}");
+        // Nothing must have moved.
+        assert!(cfg.profiles.iter().any(|p| p.name == "Work"));
+        assert_eq!(cfg.active_profile, "Founders");
+    }
+
+    /// PROBLEM 85 — a same-name rename is a deliberate no-op, not an error
+    /// (the user re-typed exactly what was already there).
+    #[test]
+    fn rename_to_the_same_name_is_a_no_op_not_an_error() {
+        let mut cfg = two_profile_config("Founders");
+        apply_profile_rename(&mut cfg, "Founders", "Founders")
+            .expect("renaming a profile to its own current name must succeed");
+        assert_eq!(cfg.active_profile, "Founders");
+        assert_eq!(cfg.profiles.iter().filter(|p| p.name == "Founders").count(), 1);
+    }
+
+    #[test]
+    fn rename_of_an_unknown_profile_errors() {
+        let mut cfg = two_profile_config("Founders");
+        let err = apply_profile_rename(&mut cfg, "Ghost", "New Name").unwrap_err();
+        assert!(err.contains("not found"), "unexpected message: {err}");
+    }
+
+    /// The bindings live inside the `Profile` object being renamed — a
+    /// rename must never touch them.
+    #[test]
+    fn rename_preserves_bindings() {
+        let mut cfg = two_profile_config("Founders");
+        apply_profile_rename(&mut cfg, "Work", "Office").expect("rename should succeed");
+        let renamed = cfg.profiles.iter().find(|p| p.name == "Office").unwrap();
+        assert_eq!(
+            renamed.bindings.get("a").and_then(|b| b.app.as_deref()),
+            Some("chrome.exe"),
+            "rename must not lose or alter bindings"
+        );
+    }
 }
 
 /// Open the log folder in Explorer so a tester can grab debug.log (and its
@@ -2086,4 +2659,81 @@ pub fn set_startup_enabled(
     #[cfg(windows)]
     crate::startup::apply_task_enabled(enabled);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// PROBLEM 217 — the frontend bridges' SEVERITY is the whole point of the change,
+// so it is what gets asserted. Everything else about these commands is a one
+// line call; the level is the part that decides whether a JavaScript failure on
+// somebody else's machine is ever seen.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod frontend_bridge_tests {
+    use std::sync::Mutex;
+
+    /// A capturing `log::Log`. There is exactly one logger per process, and in
+    /// the test binary nothing else installs one — `logger::init` is only ever
+    /// called from `run()`.
+    static CAPTURED: Mutex<Vec<(log::Level, String, String)>> = Mutex::new(Vec::new());
+
+    struct Capture;
+    impl log::Log for Capture {
+        fn enabled(&self, _m: &log::Metadata<'_>) -> bool {
+            true
+        }
+        fn log(&self, r: &log::Record<'_>) {
+            CAPTURED
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push((r.level(), r.target().to_owned(), r.args().to_string()));
+        }
+        fn flush(&self) {}
+    }
+
+    static LOGGER: Capture = Capture;
+
+    /// `frontend_log` must stay INFO — many existing call sites depend on it
+    /// being quiet, and INFO is below `SENTRY_MINIMUM_LEVEL`, so those lines
+    /// stay on the machine. `frontend_error` must be ERROR, or the whole
+    /// change is decorative.
+    #[test]
+    fn frontend_error_is_error_while_frontend_log_stays_info() {
+        assert!(
+            log::set_logger(&LOGGER).is_ok(),
+            "no other test may install a logger — this one has to be the global one to observe levels"
+        );
+        log::set_max_level(log::LevelFilter::Trace);
+
+        // Unique markers: the suite runs in parallel and other modules log into
+        // the same buffer.
+        super::frontend_log("P216-plain-marker".into());
+        super::frontend_error("P216-error-marker".into());
+        super::overlay_error("P216-overlay-marker".into());
+
+        let captured = CAPTURED.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let find = |needle: &str| {
+            captured
+                .iter()
+                .find(|(_, _, m)| m.contains(needle))
+                .unwrap_or_else(|| panic!("'{needle}' never reached the logger"))
+                .clone()
+        };
+
+        let (level, _target, msg) = find("P216-plain-marker");
+        assert_eq!(level, log::Level::Info, "frontend_log must stay INFO: {msg}");
+        assert!(msg.starts_with("dashboard-js: "), "the log convention must not drift: {msg}");
+
+        let (level, target, msg) = find("P216-error-marker");
+        assert_eq!(level, log::Level::Error, "frontend_error must be ERROR: {msg}");
+        assert!(msg.starts_with("dashboard-js: "), "the log convention must not drift: {msg}");
+        assert_eq!(
+            target,
+            crate::telemetry::DEGRADED_TARGET,
+            "it is reported by hand and rate-limited, so the automatic bridge must skip it"
+        );
+
+        let (level, _target, msg) = find("P216-overlay-marker");
+        assert_eq!(level, log::Level::Error, "overlay_error must be ERROR: {msg}");
+        assert!(msg.starts_with("overlay-js: "), "the log convention must not drift: {msg}");
+    }
 }

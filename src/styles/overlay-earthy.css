@@ -210,9 +210,27 @@ body.nocturne[data-theme="warcry"] {
 @keyframes st-toast-glow { 0%,100% { opacity: .5 } 50% { opacity: .9 } }
 
 /* ---------------- Guide HUD — radial bloom ---------------- */
+/* ENTRANCE and EXIT are two different motions, and they used to be one.
+   This element carried a single `transition: … 220ms cubic-bezier(.4,0,1,1)`
+   applied to both directions, which meant the HUD ARRIVED on an ease-IN curve
+   (accelerating away from rest — it reads as being yanked on) and left over
+   exactly as long as it took to arrive. CLAUDE.md's design rules are explicit:
+   "exits run at ~65% of entrance time with --ease-in".
+
+     entrance  --hud-in   220ms  ease-out  (the curve .pulse already uses)
+     exit      --hud-out  143ms  ease-in   = 65% of the entrance
+
+   The two durations are HANDED IN by toast.ts (showGuideHud sets --hud-in /
+   --hud-out from HUD_IN_MS / HUD_OUT_MS), because HUD_OUT_MS is what the
+   teardown timers count with and a comment saying "MUST match" is not a
+   mechanism. Literals below are first-paint fallbacks only; if you change
+   them, change the constants, not these. */
 #st-hud { position: fixed; inset: 0; z-index: 25; pointer-events: none;
-  transition: opacity 220ms cubic-bezier(.4,0,1,1), transform 220ms cubic-bezier(.4,0,1,1); }
-#st-hud.hidden { opacity: 0; transform: scale(.93); }
+  transition: opacity   var(--hud-in, 220ms) cubic-bezier(.2,.8,.2,1),
+              transform var(--hud-in, 220ms) cubic-bezier(.2,.8,.2,1); }
+#st-hud.hidden { opacity: 0; transform: scale(.93);
+  transition: opacity   var(--hud-out, 143ms) cubic-bezier(.4,0,1,1),
+              transform var(--hud-out, 143ms) cubic-bezier(.4,0,1,1); }
 
 /* ---------------------------------------------------------------------------
    REMOVED 2026-08-11, and DO NOT PUT IT BACK without reading this.
@@ -284,6 +302,482 @@ body.nocturne[data-theme="warcry"] {
 /* hard bound so arbitrary app names can never break the ring */
 .st-chip span { white-space: nowrap; max-width: 118px; overflow: hidden; text-overflow: ellipsis; }
 
+/* ===========================================================================
+   v1.0.89, MAGNETIC SECTOR — THE AT-REST LABEL CAP, and why it is a variable.
+
+   toast.ts publishes `--chip-cap` on #st-hud. It must NOT write an inline
+   `max-width` on the span instead: an inline declaration beats
+   `#st-hud.tight-chips .st-chip.ap span` outright, so the (d) rung of the
+   ladder would still be applied, still be reported as applied, and do nothing.
+   Handed over as a variable, the cascade below stays in charge.
+
+   SCOPED TO `.ap`. Specials are the innermost band, they sit inside the dead
+   zone, they can never be aimed at and therefore never bloom — a clipped
+   special is clipped forever ("Force" for "Force Close App"), so they keep
+   their full labels at rest and their own `.tight-sp` rung further down is the
+   only thing that ever cuts them.
+
+   THE REST CAP IS A BACKSTOP, NOT THE CLIPPING RULE. The clipping rule is
+   "first whole word", done in TS by swapping the span's text — a whole word is
+   recognisable and a severed one is not. This cap only catches a first word
+   that is itself a URL or a filesystem path, which is real: a binding with no
+   `label` falls back to `bind.app` or `bind.web_url`, and those are one token
+   with no spaces in them.
+
+   SPECIFICITY, deliberately: `.st-chip.ap span` (0,2,1) beats the base
+   `.st-chip span` (0,1,1); the tight rung carries #st-hud so it beats both;
+   and the bloom rule carries #st-hud AND three classes so it beats the tight
+   rung — otherwise an armed chip in a (d)-rung HUD would open to 92px and the
+   whole point of blooming would be lost exactly when the ring is busiest. */
+.st-chip.ap span { max-width: var(--chip-cap, 118px); }
+#st-hud.tight-chips .st-chip.ap span { max-width: min(92px, var(--chip-cap, 118px)); }
+/* ===========================================================================
+   BLOOM LIFTS **BOTH** CAPS, AND THE SECOND ONE IS THE BUG FROM 1.0.90.
+
+   The owner, with screenshots: *"you can see the most left side, most right of
+   the name got cut when i focused on it in space hud — make sure this type of
+   visual bug doesn't appear regardless of the big name."*
+
+   The span cap was already lifted here. The PILL cap was not, and that is what
+   cut the label. `.st-chip > i` is bound at 212px (168px at rung (d)), and
+   inside that pill `.st-chip-browser` is `flex-shrink: 0` while
+   `.st-chip-profile` is `flex-shrink: 1; min-width: 0`. So when a bloomed
+   `Youtube — ARPON'S STUDIES` needs 201px and rung (d) allows 168, the ONLY
+   part that can give is the profile half — and the user reads
+   `Youtube — ARPON'S STU…` on the one chip that exists to be read in full.
+   Measured: a bloomed `Google Chrome — ARPON'S STUDIES AND RESEARCH` wanted
+   186px of profile span and was squeezed to 62px while its own `max-width`
+   said 118px. The span cap was never the binding constraint; the pill was.
+
+   BOTH GO TO `none` BY DEFAULT — "regardless of the big name" is the
+   requirement, so there is no length at which the armed label starts lying.
+   What bounds it instead is the WINDOW: toast.ts sizes the overlay window for
+   the widest BLOOMED chip at its ring position, so a longer label buys window
+   rather than an ellipsis. The two variables exist only for the degenerate
+   case where even 94% of the monitor is not enough; toast.ts sets them, says
+   so in the log, and never fails silently.
+
+   Specificity: (1,3,1) each, so they beat `#st-hud.tight-chips .st-chip.ap
+   span` and `#st-hud.tight-chips .st-chip > i` (both (1,2,1)) outright — an
+   armed chip in a rung-(d) HUD must open fully, and that is exactly the HUD
+   that is busiest and most needs it.
+   =========================================================================== */
+#st-hud .st-chip.ap.bloom span { max-width: var(--bloom-cap, none); }
+#st-hud .st-chip.ap.bloom > i  { max-width: var(--bloom-pill, none); }
+/* ===========================================================================
+   THE LABEL CAP SNAPS. IT MUST NEVER TRANSITION. 1.0.90.
+
+   This rule used to read `transition: max-width 200ms cubic-bezier(.2,.8,.2,1)`
+   — "max-width IS the reveal", borrowed from the toasts. On a toast that is
+   right: the pill is empty and grows into place. On a CHIP it is wrong, and
+   measurably so. Blooming swaps the span's TEXT to the full label in one frame
+   (toast.ts `setChipLabel`) and then widened the box over 200ms, so for a fifth
+   of a second the finished text sat in a box too small for it and the user read
+   `Youtube — ARPON'S STU…`. Every time they aimed. That is the owner's bug
+   report — *"the name got cut when i focused on it"* — and a screenshot taken
+   during those 200ms shows exactly what he sent.
+
+   MEASURED, because "it looks fine now" was not good enough. Seeking the live
+   CSSTransition objects via `getAnimations()` + `currentTime` and sampling 22
+   points across the duration: with the cap left at its `none` default there is
+   no `max-width` transition at all (`none` is not an interpolable value, so the
+   browser snaps it) and 0 of 1716 sampled moments were ellipsized. Set the same
+   cap to an interpolable `260px` and THREE `max-width` transitions appear at
+   200ms and the label is ellipsized again. So the good behaviour today is an
+   ACCIDENT of `none`, and `toast.ts` already has a branch that sets
+   `--bloom-pill` to a px value when the screen is too small. One edit away from
+   the bug coming back.
+
+   So it is removed rather than left to luck, and in BOTH directions:
+     · OUTWARD, the text must be complete the instant it is complete;
+     · RETURN, a profile chip's resting state is LEGITIMATELY clipped
+       (`.st-chip-browser` holds, `.st-chip-profile` gives — that is the whole
+       point of the two-span split), and animating INTO that clip would mean
+       200ms of the name being progressively eaten. Snapping lands on the
+       settled, intended state immediately.
+
+   NOTHING IS LOST. The bloom is still animated, just on the property that
+   should carry it: the cell's `transform` runs the radial push over 170ms on
+   `cubic-bezier(.34,1.3,.4,1)` (verified running, --px = -40px), so the chip
+   still visibly moves out and the ring still parts around what you are aiming
+   at. Only the truncation went away.
+   =========================================================================== */
+/* A key pinned to a browser profile reads "Brave — STUDIES" on ONE line. The
+   browser name holds and the profile name gives, so the difference between
+   three keys that all say "Brave" is the part that survives truncation. The
+   118px cap above becomes the PROFILE span's cap; the pill as a whole is bound
+   at 212px so a long pair still cannot disturb the ring (which measures real
+   rendered widths anyway — PROBLEM 77).
+   NO filters and NO blur here, ever: this window is transparent and
+   click-through, and a large blurred surface makes it compose zero pixels
+   (PROBLEM 37). Every soft edge in this file is a gradient stop. */
+.st-chip > i { max-width: 212px; }
+.st-chip .st-chip-browser { flex-shrink: 0; max-width: none; }
+/* The pill's own 8px gap is right between the key badge and the label, and far
+   too loose either side of a dash. Pulled back to 4px rather than re-nesting
+   the three spans in a wrapper the ring's width measurement would have to learn
+   about. */
+.st-chip .st-chip-sep { flex-shrink: 0; max-width: none; opacity: .55; margin: 0 -4px; }
+.st-chip .st-chip-profile { min-width: 0; flex-shrink: 1; }
+
+/* ===========================================================================
+   PROBLEM 208, rungs (c) and (d) — the two CONCESSIONS the ring may make when
+   growing the ellipse and closing the inter-chip gap still are not enough.
+
+   toast.ts walks a four-rung ladder and puts these classes on #st-hud; it
+   re-measures the chips after each toggle and accepts a rung only when the
+   measured overlap count is ZERO. Neither class is ever applied "because the
+   list is long" — only because the geometry was proven not to fit without it.
+
+   Keep both SMALL. A HUD you read at a glance from the middle of the screen
+   stops working long before the text becomes technically unreadable, so (c)
+   is one step of ~1px padding and ~0.75px font, not a free-for-all, and (d)
+   only trims the truncation cap. If a config ever needs more than this, the
+   right answer is a second page of the ring, not smaller type.
+   =========================================================================== */
+#st-hud.dense-chips .st-chip.sp > i { padding: 6px 11px; font-size: 11.75px; }
+#st-hud.dense-chips .st-chip.ap > i { padding: 4px 9px;  font-size: 10.75px; }
+#st-hud.dense-chips .st-chip > i    { gap: 6px; }
+#st-hud.dense-chips .st-chip kbd    { min-width: 16px; height: 18px;
+                                      padding: 0 4px; font-size: 10px; }
+/* (d) — last resort. The BROWSER name still holds and the PROFILE still
+   gives; only the caps move (118 → 92, 212 → 168). */
+#st-hud.tight-chips .st-chip span { max-width: 92px; }
+#st-hud.tight-chips .st-chip > i  { max-width: 168px; }
+
+/* ===========================================================================
+   v1.0.88 — THE INNER RING'S OWN CONCESSIONS, `.dense-sp` and `.tight-sp`.
+
+   Same idea as (c) and (d) above and deliberately NOT the same rules, because
+   the two rings are being asked for opposite things now. The outer ring GROWS
+   first and condenses only if growing ran out of screen. The inner ring
+   CONDENSES first and grows only if condensing ran out of room — the owner's
+   1.0.88 direction: the specials "are not doing anything for the moving-
+   cursor-to-launch thing", so they must hug SPACE rather than push out to
+   arm's length. toast.ts `fitInner` walks s0..s4 and, exactly as with the
+   outer ladder, accepts a rung only at a MEASURED overlap count of zero.
+
+   `.tight-sp` cuts deeper than `.tight-chips` does (92px → 84px), and that is
+   a judgement, not an oversight. An app chip's LABEL is the thing you are
+   choosing between — "Chrome" vs "Chrome — Thesis" is the whole point of the
+   ring. A special's label is not: its KEY BADGE is the actionable half, the
+   nine specials are a fixed list, and the owner's own word for how they are
+   used is "glanced". "Boss Key (Hide All + Mute)" reading as "Boss Key (Hi…"
+   beside a legible `Esc` badge loses nothing you were going to act on.
+
+   These come AFTER the dense-chips/tight-chips rules so that when a HUD needs
+   BOTH ladders the tighter, special-only value wins on source order (equal
+   specificity) — and the `.tight-sp` selector carries an extra `.sp`, so it
+   beats `#st-hud.tight-chips .st-chip span` outright.
+   =========================================================================== */
+#st-hud.dense-sp .st-chip.sp > i { padding: 5px 10px; font-size: 11.5px; gap: 6px; }
+#st-hud.dense-sp .st-chip.sp kbd { min-width: 16px; height: 18px;
+                                   padding: 0 4px; font-size: 10px; }
+#st-hud.tight-sp .st-chip.sp span { max-width: 84px; }
+#st-hud.tight-sp .st-chip.sp > i  { max-width: 152px; }
+
+/* ===========================================================================
+   ARMED CHIP — "release Space now and THIS is what happens".
+
+   Driven entirely by the `hud-pointer` event (Rust decides which one); this
+   file only has to make it unmistakable from the centre of the screen. So the
+   armed chip stops being a chip and becomes the SAME loud accent surface the
+   SPACE pill wears: --st-space-bg / --st-space-brd with white text, which is
+   the single loudest element each of the three palettes owns. No new token is
+   introduced — earthy gets terracotta, warcry blood crimson, starry the
+   moonlit blue, and each already contrasts hard against its own chip
+   backgrounds (which are deliberately quiet tints of the same family).
+
+   NO FILTERS AND NO BLUR, per PROBLEM 37: the halo is box-shadow (the same
+   mechanism --st-shadow already uses on every chip on screen, so it is proven
+   to composite here) and a bordered ::after ring. A `filter: blur()` glow is
+   what once made this entire window compose zero pixels.
+
+   The scale lives on the .st-chip CELL, not on the inner <i>: the <i> is
+   driven by `st-bloom-in` with `fill: both`, and a filled animation beats a
+   plain `transform` declaration, so a transform written there would silently
+   never apply. The cell has no animation of its own.
+   =========================================================================== */
+/* Declared on the BASE, not only on `.armed`, so arming and DISARMING are
+   symmetric — a transition written only on the target state animates in and
+   snaps out. Neither of these can disturb the entrance: a chip is created
+   already at its base transform, and `st-bloom-in` drives transform/opacity
+   on the inner <i> while these transitions cover only colour and shadow. */
+.st-chip { transition: transform 170ms cubic-bezier(.34,1.3,.4,1); }
+
+/* ===========================================================================
+   v1.0.89 — THE BLOOM PUSH. The armed chip and its two angular neighbours move
+   outward; everything else holds still.
+
+   ON THE CELL, NEVER ON THE INNER <i>. `st-bloom-in` runs on the <i> with
+   `fill: both`, and a filled animation beats a plain `transform` declaration —
+   a push written there would silently never apply. That is the same trap the
+   `.armed` scale block above documents, and it is written out a second time
+   here because this is the third feature to reach for it.
+
+   ONE transform property means ONE transition, so the push shares the armed
+   scale's existing 170ms spring above rather than declaring a second, losing
+   curve of its own. --px/--py default to 0px, so an unbloomed chip's transform
+   is arithmetically identical to what it was before this rule existed.
+
+   The push is set INLINE by toast.ts as two custom properties (never as a
+   transform, and never as a `left`/`top` — `offsetLeft` must stay the resting
+   layout position so the published hit-test rects and the plume's endpoints
+   cannot be contaminated by a chip that has moved). Under reduced motion
+   toast.ts simply does not set them: an inline custom property would beat any
+   rule here that tried to zero it, so the gate has to live in JS.
+   =========================================================================== */
+.st-chip { transform: translate(-50%, -50%) translate(var(--px, 0px), var(--py, 0px)); }
+/* Above the crowd it is pushing past, and below the armed chip's own layer. */
+.st-chip.bloom { z-index: 2; }
+.st-chip > i { transition: background-color 140ms cubic-bezier(.2,.8,.2,1),
+                           border-color     140ms cubic-bezier(.2,.8,.2,1),
+                           color            140ms cubic-bezier(.2,.8,.2,1),
+                           box-shadow       140ms cubic-bezier(.2,.8,.2,1); }
+/* The push is repeated here because `.st-chip.armed` (0,2,0) outranks the
+   `.st-chip` rule that carries it — an armed chip that forgot it would be the
+   ONE chip in the ring that refuses to move. Order in the list matters: the
+   translate must come BEFORE the scale, or the 1.1 would multiply the push. */
+.st-chip.armed { z-index: 3;
+  transform: translate(-50%, -50%) translate(var(--px, 0px), var(--py, 0px)) scale(1.1); }
+.st-chip.armed > i {
+  background: var(--st-space-bg);
+  border-color: var(--st-space-brd);
+  color: #fff;
+  /* keep the base shadow, then two hard-edged accent rings — spread only, no
+     blur radius on the halo pair, so this is a flat fill and not a soft glow */
+  box-shadow: var(--st-shadow),
+              0 0 0 3px rgba(var(--st-glow-rgb), .38),
+              0 0 0 7px rgba(var(--st-glow-rgb), .16); }
+/* The key badge inverts, so the letter you are about to fire is the highest-
+   contrast thing in the whole ring. */
+.st-chip.armed kbd { background: #fff; color: var(--st-space-bg); }
+.st-chip.armed .st-chip-sep { opacity: .75; }
+/* One outward pulse per arming — an ARRIVAL beat, not a permanent loop. Three
+   iterations, then it stops and the static ring below is what remains: the
+   highlight must never depend on motion to be visible (see the reduced-motion
+   block near the end of this file). transform + opacity only, one small
+   element, which is all this software compositor should be asked for. */
+.st-chip.armed::after { content: ""; position: absolute; left: 50%; top: 50%;
+  width: 100%; height: 100%; box-sizing: border-box;
+  transform: translate(-50%, -50%); border-radius: 999px;
+  border: 2px solid rgba(var(--st-glow-rgb), .85); pointer-events: none;
+  animation: st-chip-armed 1100ms cubic-bezier(.22,1,.36,1) 3; }
+@keyframes st-chip-armed {
+  0%   { transform: translate(-50%,-50%) scale(1);    opacity: .9; }
+  70%  { transform: translate(-50%,-50%) scale(1.42); opacity: 0; }
+  100% { transform: translate(-50%,-50%) scale(1.42); opacity: 0; }
+}
+
+/* ===========================================================================
+   THRUSTER PLUME — SPACE ──► the armed chip.  v1.0.88.
+
+   Selection went DIRECTIONAL: the angle from the ring centre to the cursor
+   picks a chip, and the cursor never has to reach it. That is invisible
+   unless something draws the line, and the owner was specific about what the
+   line is: "It should look like the boost behind a spaceship — from the Space
+   to the app — so a person can visually see which app is going to be
+   launched depending on their cursor."
+
+   ── THERE IS NO `filter` AND NO `backdrop-filter` IN THIS BLOCK ────────────
+   Read the removal note at the top of this file first if you are tempted.
+   A 560x320 element at blur(34px) made the ENTIRE overlay window compose zero
+   pixels — HUD and toasts both — while Rust reported it correctly sized and
+   visible and the JS ran clean (PROBLEM 37). EVERY soft edge below is a
+   GRADIENT STOP instead, which is the mitigation that note actually
+   prescribes ("use a plain radial-gradient with NO filter:blur, or bake the
+   blur into the gradient stops").
+
+   The taper is geometric, not filtered, and that is the trick worth keeping:
+   each layer is ONE `radial-gradient(ellipse … at 0% 50%)`. A radial gradient
+   anchored on the left edge falls off in BOTH axes at once — so a single
+   paint gives a soft top edge, a soft bottom edge AND a length-wise fade, in
+   the shape of a leaf: fat and hot at the nozzle, thinning to nothing at the
+   tip. Three of them at different aspect ratios stack into a plume. Every
+   vertical radius is <= 50% (i.e. <= the box half-height) so each gradient
+   reaches full transparency BEFORE the box edge; a larger one would clip and
+   leave a hard horizontal line down the beam. Every horizontal radius is
+   <= 100% for the same reason at the tip.
+
+   FOOTPRINT, stated because that is the axis PROBLEM 37 lives on: the
+   rasterised box is `--beam-nom` x 56 = 880x56 = 49,280px², and it stays that
+   size for ANY beam length because length is applied afterwards as scaleX.
+   That is smaller than #st-toastglow (340x150 = 51,000px²), which carries an
+   actual blur(22px) and is proven to composite here, and less than half of
+   `.pulse` (340x340). Three unfiltered gradient layers at that size are not
+   in the same class as the thing that broke.
+
+   COLOUR comes from ONE existing token and no new ones. `--st-glow-rgb` is
+   each palette's accent as r,g,b — and it is numerically identical to that
+   palette's `--st-space-bg` in all three (earthy 198,113,57 = #c67139;
+   warcry 184,48,36 = #b83024; starry 107,140,214 = #6b8cd6). So the plume is
+   literally the SPACE pill's own colour at varying alpha, which is also
+   exactly what the armed chip is made of (its fill is --st-space-bg, its halo
+   is rgba(var(--st-glow-rgb), .38/.16)). The fire at both ends of the beam is
+   the same fire, in every palette, by construction rather than by matching.
+   No white-hot core: earthy is the LIGHT theme and this window sits on the
+   user's own desktop, where white would read as a wash-out rather than heat.
+
+   MOTION is transform + opacity only, on four small elements. Aiming is
+   `rotate()`; reaching is `scaleX()`. Nothing animates width, so nothing
+   lays out while the beam sweeps — the rule PROBLEM 115 set for this
+   software-composited window. toast.ts writes exactly two custom properties
+   per index change and runs no per-frame JS at all.
+
+   Z-ORDER: written into #st-hud BEFORE `.space` and before every chip, and
+   all of them are positioned at z-index auto/0 inside #st-hud's own stacking
+   context — so paint order is tree order and the plume passes BEHIND the
+   SPACE pill and behind every label. It reads as coming out from under the
+   ring rather than lying on top of it, and the first ~115px of it (the
+   hottest part) is occluded by the pill, so the visible plume begins at the
+   pill's own edge in every direction.
+   =========================================================================== */
+#st-hud .st-beam {
+  --beam-h: 56px;
+  position: absolute; left: 50%; top: 50%;
+  width: var(--beam-nom, 880px); height: var(--beam-h);
+  /* Pins the ROTATION PIVOT on the ring centre with no JS: `top: 50%` puts the
+     box top there, the negative margin lifts it by half its height, and the
+     transform-origin then sits at exactly (50%, 50%) of #st-hud — which is
+     also where `.space` centres itself. The two cannot drift apart, because
+     neither of them is positioned by a number this file has to keep in sync.
+     Derived from --beam-h rather than written as -28px for the same reason. */
+  margin-top: calc(var(--beam-h) / -2);
+  transform-origin: 0 50%;
+  transform: rotate(var(--beam-ang, 0rad)) scaleX(var(--beam-scale, 0));
+  opacity: 0; z-index: 0; pointer-events: none;
+  /* Disarm is a FAST fade (the owner should never see a beam for an app he is
+     no longer pointing at), arm is a slightly softer one, and the sweep
+     between two chips is the HUD's own entrance curve. */
+  transition: opacity 100ms linear,
+              transform 190ms cubic-bezier(.2,.8,.2,1);
+}
+#st-hud .st-beam.on {
+  opacity: 1;
+  transition: opacity 150ms cubic-bezier(.2,.8,.2,1),
+              transform 190ms cubic-bezier(.2,.8,.2,1);
+}
+/* One frame with no transition, so an arm that FOLLOWS A DISARM lands at its
+   new angle instead of sweeping there from a beam nobody could see. */
+#st-hud .st-beam.st-beam-jump { transition: none !important; }
+
+#st-hud .st-beam > div { position: absolute; inset: 0; pointer-events: none; }
+
+/* Layer 1 — the envelope (wide, faint, reaches the full length) over the body
+   (half the height, ~82% of the reach: where the body ends and only the
+   envelope carries on IS the taper). Two gradients, one element, one paint. */
+#st-hud .st-beam .jet {
+  background:
+    radial-gradient(ellipse 100% 50% at 0% 50%,
+      rgba(var(--st-glow-rgb), .26)   0%,
+      rgba(var(--st-glow-rgb), .20)  20%,
+      rgba(var(--st-glow-rgb), .13)  44%,
+      rgba(var(--st-glow-rgb), .06)  70%,
+      rgba(var(--st-glow-rgb), 0)   100%),
+    radial-gradient(ellipse 82% 30% at 0% 50%,
+      rgba(var(--st-glow-rgb), .52)   0%,
+      rgba(var(--st-glow-rgb), .40)  22%,
+      rgba(var(--st-glow-rgb), .25)  48%,
+      rgba(var(--st-glow-rgb), .10)  74%,
+      rgba(var(--st-glow-rgb), 0)   100%);
+}
+/* Layer 2 — the flicker tongue. Breathes in LENGTH as well as brightness, so
+   the plume licks rather than merely dims. */
+#st-hud .st-beam .lick {
+  background: radial-gradient(ellipse 64% 20% at 0% 50%,
+      rgba(var(--st-glow-rgb), .46)   0%,
+      rgba(var(--st-glow-rgb), .28)  30%,
+      rgba(var(--st-glow-rgb), .11)  62%,
+      rgba(var(--st-glow-rgb), 0)   100%);
+  transform-origin: 0 50%;
+}
+/* Layer 3 — the hot core: a thin, near-opaque jet down the axis. */
+#st-hud .st-beam .core {
+  background: radial-gradient(ellipse 46% 9% at 0% 50%,
+      rgba(var(--st-glow-rgb), .92)   0%,
+      rgba(var(--st-glow-rgb), .78)  24%,
+      rgba(var(--st-glow-rgb), .48)  52%,
+      rgba(var(--st-glow-rgb), .16)  78%,
+      rgba(var(--st-glow-rgb), 0)   100%);
+}
+/* Scoped to `.on` so a disarmed beam costs the compositor nothing at all —
+   there is no point ticking two animations inside an opacity:0 subtree. The
+   two periods are deliberately not multiples of each other: 880 and 640 drift
+   in and out of phase over ~7s, which reads as combustion. Matched periods
+   read as a heartbeat, which is the wrong instrument entirely. */
+#st-hud .st-beam.on .lick { animation: st-beam-lick 640ms ease-in-out infinite alternate; }
+#st-hud .st-beam.on .core { animation: st-beam-core 880ms ease-in-out infinite alternate; }
+@keyframes st-beam-lick {
+  from { opacity: .34; transform: scaleX(.88); }
+  to   { opacity: .74; transform: scaleX(1.05); }
+}
+@keyframes st-beam-core {
+  from { opacity: .80; }
+  to   { opacity: 1; }
+}
+
+/* ---------------------------------------------------------------------------
+   AIMING — the specials ring gets out of the way while you point.
+
+   Owner, 1.0.88: the ring is "too hard to look at the whole screen" during
+   the gesture. The specials are irrelevant the moment a beam exists — the
+   user is choosing an APP — so the whole inner ring drops to a ghost for as
+   long as one is armed, and returns when the pointer falls back into the dead
+   zone. At rest the HUD still shows everything, which is the reference the
+   specials are there to be.
+
+   Opacity on the CELL, never on the inner <i>: the <i> is driven by
+   `st-bloom-in` with `fill: both`, and a filled animation beats a plain
+   declaration, so an opacity written there would silently never apply. Same
+   reasoning as `.armed`'s scale living on the cell. Restated because it has
+   now caught two separate features in this file.
+
+   Declared on the BASE `.st-chip.sp` as well as on the aiming state, so
+   fading OUT and coming BACK are both animated — a transition written only on
+   the target state animates in and snaps out.
+
+   The exit collapse below still wins: `#st-hud.collapsing .st-chip.sp` has
+   equal specificity and comes LATER in this file, so a HUD torn down while
+   aiming collapses to opacity 0 rather than lingering at .12.
+   --------------------------------------------------------------------------- */
+#st-hud .st-chip.sp { transition: transform 170ms cubic-bezier(.34,1.3,.4,1),
+                                  opacity   150ms cubic-bezier(.2,.8,.2,1); }
+#st-hud.aiming .st-chip.sp { opacity: .12;
+  transition: opacity 120ms cubic-bezier(.2,.8,.2,1); }
+
+/* ===========================================================================
+   HUD EXIT — a per-RING collapse, inside the 143ms exit window.
+
+   The chips had a staggered per-item ENTRANCE (st-bloom-in, delayed per chip)
+   and NO per-item exit at all: the parent simply faded as one block.
+
+   A true per-CHIP staggered exit is NOT what shipped here, and the reason is
+   arithmetic rather than taste. The exit window is 143ms (65% of the 220ms
+   entrance, which is the design rule). Spread over 26 outer chips that is a
+   ~1.3ms step — invisible. Making it visible means running the exit for
+   300ms+, which means raising HUD_OUT_MS, and HUD_OUT_MS is what the two
+   teardown timers in hideGuideHud count with — the same choreography
+   PROBLEM 135 was fought over. Lengthening the exit to win a stagger nobody
+   asked for is not worth touching that.
+
+   What DOES fit is two beats: the outer ring folds first, the inner ring
+   follows 33ms behind, and the last chip is gone at 33 + 110 = 143ms exactly.
+   Reads as a collapse toward SPACE rather than a block fade, costs nothing,
+   and leaves every teardown timer where it was.
+
+   `.collapsing` and not `#st-hud.hidden .st-chip` on purpose: `.hidden` is
+   ALSO on the element during the build phase of a show (that is deliberate —
+   the window move must happen while nothing is visible), so chips would be
+   born collapsed and then transition into place, fighting st-bloom-in for the
+   entrance. toast.ts adds `collapsing` only on the four real exit paths.
+   =========================================================================== */
+#st-hud.collapsing .st-chip.ap,
+#st-hud.collapsing .st-chip.sp {
+  opacity: 0; transform: translate(-50%, -50%) scale(.72);
+  transition: opacity   110ms cubic-bezier(.4,0,1,1),
+              transform 110ms cubic-bezier(.4,0,1,1); }
+#st-hud.collapsing .st-chip.sp { transition-delay: 33ms; }
+
 @keyframes st-bloom-in {
   0%   { opacity: 0; transform: translate(var(--fx), var(--fy)) scale(.2); }
   62%  { opacity: 1; transform: translate(calc(var(--fx) * -.06), calc(var(--fy) * -.06)) scale(1.06); }
@@ -324,6 +818,73 @@ body.nocturne[data-theme="warcry"] {
 :root.reduced-motion .st-toast.open,
 :root.reduced-motion .st-toast.leave { transition-duration: 120ms !important; }
 :root.reduced-motion #st-hud { transition-duration: 120ms !important; }
+
+/* --- PROBLEM 208's new motion, all of it guarded ------------------------- */
+
+/* The exit collapse is a nicety; with effects off the chips go with the
+   parent. Durations AND delays, or the 33ms inner-ring beat would survive as
+   a lone stutter. Final state is what matters, and it is already correct. */
+:root.reduced-motion #st-hud.collapsing .st-chip.ap,
+:root.reduced-motion #st-hud.collapsing .st-chip.sp {
+  transition-duration: 0ms !important; transition-delay: 0ms !important; }
+
+/* THE ARMED CHIP MUST STILL BE OBVIOUS WITH MOTION OFF.
+   Only the pulse is an animation, and that is precisely why the highlight was
+   NOT built as one: the accent fill, the white text, the inverted key badge,
+   the two box-shadow rings and the ::after ring are all STATIC and all
+   survive this block. Killing the animation leaves the ::after ring at its
+   base declaration — a solid accent outline sitting on the chip — so the
+   armed state loses a flourish and nothing else.
+   This is the PROBLEM 50 lesson applied forward: a transform that exists only
+   inside keyframes is lost the moment the animation is removed, so the ring's
+   centring lives on the element and is repeated here. */
+:root.reduced-motion .st-chip.armed::after {
+  animation: none !important;
+  transform: translate(-50%, -50%) !important;
+  opacity: 1 !important; }
+:root.reduced-motion .st-chip,
+:root.reduced-motion .st-chip > i { transition: none !important; }
+/* .armed's scale is a transform on the CELL, and the reduced-motion rule for
+   `.st-chip > i` above sets `transform: none` on the INNER element only — so
+   the cell keeps its own translate/scale. Restated here so a future edit to
+   that rule cannot silently un-centre an armed chip. */
+:root.reduced-motion .st-chip.armed {
+  transform: translate(-50%, -50%) scale(1.1) !important; }
+
+/* --- v1.0.88's new motion, all of it guarded ----------------------------- */
+
+/* THE PLUME MUST STILL BE THERE WITH MOTION OFF — and more so than anything
+   else in this file, because for a reduced-motion user the beam and the chip
+   highlight are the ONLY two things saying which app is armed, and the chip
+   highlight has just lost its arrival pulse. So this does NOT hide the beam:
+   it renders it STATIC. Full opacity, no flicker, no sweep — the beam simply
+   IS at the new angle the instant Rust arms a different chip.
+
+   Note what is deliberately NOT written here: `.st-beam` keeps its own
+   `transform`. That transform is the aim and the reach; killing it the way
+   the reduced-motion rules kill `.st-chip > i`'s would leave a full-length
+   beam pointing due east at every chip. Only the TRANSITION goes. */
+:root.reduced-motion #st-hud .st-beam { transition: none !important; }
+:root.reduced-motion #st-hud .st-beam.on .lick,
+:root.reduced-motion #st-hud .st-beam.on .core {
+  animation: none !important; opacity: 1 !important; }
+/* PROBLEM 50 once more: `.lick`'s scaleX exists ONLY inside st-beam-lick's
+   keyframes, so removing the animation drops it back to whatever the element
+   itself declares. That is currently the identity transform and this line is
+   therefore a no-op today — it is written anyway so that a future edit giving
+   `.lick` a base transform cannot silently mis-place it here, which is the
+   exact shape of the bug that put a 340px ring 170px off-centre on a tester's
+   screen. */
+:root.reduced-motion #st-hud .st-beam.on .lick { transform: none !important; }
+
+/* The specials' aiming fade stays — it is a STATE, not a flourish, and with
+   motion off it simply swaps instantly instead of crossfading. `.st-chip`'s
+   transitions are already killed wholesale a few rules above; restated on the
+   aiming selector so the intent survives an edit to either one. Ghosted-not-
+   gone is the right answer here too: at .12 the specials are still findable if
+   you look for them, they have just stopped competing for the glance. */
+:root.reduced-motion #st-hud .st-chip.sp,
+:root.reduced-motion #st-hud.aiming .st-chip.sp { transition: none !important; }
 
 
 /* ================= WARP HANDOVER — toast pill <-> SPACE pill ================

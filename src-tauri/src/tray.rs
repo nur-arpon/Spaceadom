@@ -70,6 +70,14 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
 }
 
 fn restore_window(app: &AppHandle) {
+    // PROBLEM 215 — during an autostart launch the windows do not exist for
+    // the first 10s. The user clicking "Open Settings" is a direct request for
+    // the UI, which outranks waiting out the cold-boot settle: build it now.
+    // `create_app_windows` is idempotent, so this is a no-op once they exist.
+    if app.get_webview_window("settings").is_none() {
+        log::info!("tray: the dashboard was asked for before the settle wait finished — creating the windows now (PROBLEM 215)");
+        crate::create_app_windows(app);
+    }
     if let Some(win) = app.get_webview_window("settings") {
         // PROBLEM 83 — the window may be positioned on a monitor that was
         // unplugged since it was last shown; showing it there is invisible.

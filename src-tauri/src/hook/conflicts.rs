@@ -24,6 +24,19 @@ pub struct Conflict {
     pub product: String,
     /// Plain-English explanation of the risk.
     pub detail: String,
+    /// PROBLEM 198 — the full path to the running exe on disk, resolved live
+    /// while it is still running (empty string if that failed — a protected
+    /// process, or it exited between the snapshot and the query). Exists so
+    /// the settings panel can show a REAL icon for a process that will never
+    /// have a Start-Menu-scan match: spacedesk's background service,
+    /// `spacedeskService.exe`, ships with no Start Menu shortcut at all —
+    /// only its separate "spacedesk DRIVER Console" GUI does, under a
+    /// different exe (`spacedeskConsole.exe`) and therefore a different stem.
+    /// `findAppByStem` on the service's stem is structurally unable to match
+    /// anything, no matter how the Start-Menu scan is tuned — this field is
+    /// what lets the frontend fall back to extracting the icon straight from
+    /// the exe file itself (`extract_icon_cmd`) instead.
+    pub path: String,
 }
 
 /// Known keyboard-remapping / macro software, matched on process name.
@@ -93,6 +106,7 @@ pub fn detect() -> Vec<Conflict> {
                                 process: name.clone(),
                                 product: (*product).to_string(),
                                 detail: (*detail).to_string(),
+                                path: full_path_for_pid(entry.th32ProcessID),
                             });
                         }
                     }
@@ -117,6 +131,40 @@ pub fn detect() -> Vec<Conflict> {
         }
     }
     found
+}
+
+/// PROBLEM 198 — the full exe path for a still-running process, or "" if it
+/// cannot be read. Same `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` +
+/// `QueryFullProcessImageNameW` pattern as `hook::exclusions::foreground_stem`
+/// and the PID resolvers in `engine::actions::smart_cascade` and
+/// `hook::fullscreen` — copied rather than re-derived, per this codebase's own
+/// rule that two matchers/resolvers for the same thing are how they drift.
+/// Called once per detected conflict, while `detect()` already has the PID
+/// from the SAME toolhelp snapshot entry, so this costs one extra handle open
+/// per conflict (at most a handful) rather than a second live process scan.
+#[cfg(windows)]
+fn full_path_for_pid(pid: u32) -> String {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return String::new();
+        };
+        let mut buf = [0u16; 260];
+        let mut size = buf.len() as u32;
+        let pwstr = PWSTR(buf.as_mut_ptr());
+        let ok = QueryFullProcessImageNameW(handle, PROCESS_NAME_FORMAT(0), pwstr, &mut size);
+        let _ = CloseHandle(handle);
+        if ok.is_err() {
+            return String::new();
+        }
+        String::from_utf16_lossy(&buf[..size as usize])
+    }
 }
 
 #[cfg(not(windows))]

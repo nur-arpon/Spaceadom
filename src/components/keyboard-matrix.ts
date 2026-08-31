@@ -20,6 +20,27 @@ import type { AppConfig, KeyBinding, Profile } from "../types.ts";
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * The browser-profile fields, cleared (2026-08-26).
+ *
+ * Spread into EVERY `updateBinding` call that replaces or clears what a key
+ * points at. `updateBinding` merges, so an omitted field keeps its old value —
+ * and these three describe the target being replaced. Without this, dropping a
+ * new URL onto a key that was pinned to "Brave — Studies" would silently keep
+ * opening the new site in that profile, and clearing a key would leave the pin
+ * behind in config.json to be resurrected by the next merge.
+ *
+ * One named constant rather than three literals per call site, for the same
+ * reason `is_known_process` is shared between the two conflict modules: a rule
+ * that must be remembered at each of several sites is a rule that gets missed
+ * at the site added next.
+ */
+const BINDING_RESET = {
+  browser_exe: null,
+  browser_profile_dir: null,
+  browser_profile_name: null,
+} as const;
+
 export function cleanLabel(raw: string): string {
   // 1. Remove common extensions
   let cleaned = raw.replace(/\.(exe|lnk|bat|cmd|url|app|com|org|net|io|co)$/i, "");
@@ -453,6 +474,7 @@ async function assignAppBinding(
     web_url: null,
     label,
     icon_override: iconB64 ?? undefined,
+    ...BINDING_RESET,
   });
 
   applyKeyState(cell, key);
@@ -470,7 +492,13 @@ async function assignUrlBinding(
   try { hostname = new URL(url).hostname; } catch (_) { /* keep raw */ }
 
   const label = cleanLabel(hostname);
-  updateBinding(key, { app: null, web_url: url, label, icon_override: undefined });
+  updateBinding(key, {
+    app: null,
+    web_url: url,
+    label,
+    icon_override: undefined,
+    ...BINDING_RESET,
+  });
   applyKeyState(cell, key);
   animateKeyPop(cell);
   showToast(`🌐 URL mapped: ${label} → Space+${key.toUpperCase()}`);
@@ -527,6 +555,18 @@ function getBinding(key: string): KeyBinding | undefined {
   return profile?.bindings[key];
 }
 
+/**
+ * MERGES into the existing binding — which is what the three callers below
+ * want, and is also a trap worth naming (2026-08-26).
+ *
+ * A `Partial<KeyBinding>` that omits a field LEAVES THE OLD VALUE IN PLACE. So
+ * every caller that replaces what a key points at must null the
+ * browser-profile fields explicitly: those three describe the target being
+ * replaced, and carrying them over means a key re-bound to a new URL silently
+ * keeps opening in the browser profile the PREVIOUS binding was pinned to.
+ * `BINDING_RESET` below exists so that cannot be forgotten one caller at a
+ * time.
+ */
 function updateBinding(key: string, binding: Partial<KeyBinding>): void {
   if (!_config) return;
   const profile = _config.profiles.find(
@@ -541,7 +581,13 @@ function updateBinding(key: string, binding: Partial<KeyBinding>): void {
 }
 
 function clearBinding(key: string, cell: HTMLDivElement): void {
-  updateBinding(key, { app: null, web_url: null, label: null, icon_override: null });
+  updateBinding(key, {
+    app: null,
+    web_url: null,
+    label: null,
+    icon_override: null,
+    ...BINDING_RESET,
+  });
   applyKeyState(cell, key);
   animateKeyPop(cell);
   showToast(`🗑️ Cleared: Space+${key.toUpperCase()}`);

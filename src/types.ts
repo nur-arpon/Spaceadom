@@ -18,10 +18,36 @@ export interface KeyBinding {
   label: string | null;
   /** Base64-encoded PNG icon override. null = auto-extract from app. */
   icon_override?: string | null;
+  /**
+   * Absolute path to a SPECIFIC browser exe to open `web_url` in, overriding
+   * the OS default-browser lookup. null/absent = unchanged behaviour.
+   *
+   * The owner's hard requirement, stated twice: *"make sure the default
+   * browser launches from URL if not explicitly set to specific."* This field
+   * is the ONLY thing that diverts a URL, and Rust re-checks that on its side
+   * (`browser_profiles::should_use_specific_browser`). Never write `""` here —
+   * write null. Rust treats blank as unset, but only as a backstop.
+   */
+  browser_exe?: string | null;
+  /** Chromium internal profile folder ("Profile 1"), for --profile-directory=. */
+  browser_profile_dir?: string | null;
+  /**
+   * The profile's ACCOUNT LABEL as it read when picked — the signed-in email's
+   * local part ("nur.arpon"), or the browser's own display name ("ARPON'S
+   * STUDIES") when the profile is not signed in. Stored so the Guide HUD can
+   * show "Chrome — nur.arpon" without re-reading the browser's Local State on
+   * the latency-sensitive Space-hold path.
+   *
+   * NEVER the full address: this field is written to `config.json` and read
+   * back into toasts and the HUD, and an address belongs in neither.
+   * Pins written before 1.0.95 hold the display name and are NOT migrated —
+   * re-picking the profile is one press and rewrites it.
+   */
+  browser_profile_name?: string | null;
 }
 
 export interface Profile {
-  /** Unique alphanumeric profile identifier (1–24 chars). */
+  /** Unique profile name (1–24 chars, any printable text — PROBLEM 197). */
   name: string;
   /** Map of lowercase key character → binding. Keys: a–z. */
   bindings: Record<string, KeyBinding>;
@@ -84,6 +110,93 @@ export interface AppConfig {
    * for the motion to stop.
    */
   hud_toast_flight?: boolean;
+  /**
+   * PROBLEM 206 — pointer activation on the Guide HUD. **ON by default since
+   * PROBLEM 209.**
+   *
+   * On: while Space is held and the ring is up, pointing the cursor in a
+   * chip's DIRECTION arms it (the chip lights up), and releasing Space — or
+   * clicking — launches that binding. The cursor never has to reach the chip.
+   *
+   * Read it as `!== false`, NEVER `=== true` — the OPPOSITE of
+   * `hud_toast_flight` directly above, and the same as `send_logs` below. The
+   * key is absent from every config written before 1.0.88, and absent must
+   * now mean ON: the owner flipped this default on 2026-08-27, knowingly
+   * overriding his own new-behaviour-defaults-off convention, and `=== true`
+   * would quietly deliver that flip to nobody who already runs the app.
+   */
+  pointer_hud_activation?: boolean;
+  /**
+   * PROBLEM 209 — show the SPECIAL keys on the Space HUD's inner ring?
+   * ON by default.
+   *
+   * Display only. Esc, the backtick PiP, the Boss Key and the rest keep
+   * working exactly as before when this is off; only the ring stops drawing
+   * them. Rust does the whole job by sending an empty `specials` list.
+   *
+   * Read it as `!== false`, NEVER `=== true`: the ring has been drawn since
+   * the HUD existed, so a config that predates the setting must keep drawing
+   * it. Existing behaviour becoming optional, not new behaviour arriving —
+   * which is a different question from the one `hud_toast_flight` answers,
+   * even though the two rows sit side by side in Settings.
+   */
+  hud_show_specials?: boolean;
+  /**
+   * How many RINGS of app shortcuts the Space HUD lays out. Default "auto".
+   *
+   * A STRING ENUM, like `motion` above and unlike every switch around it —
+   * three states cannot be a bool, and pretending otherwise is how a setting
+   * ends up with a fourth state nobody named. Read it with a fallback, never
+   * with a comparison chain: anything that is not exactly "one" or "two" means
+   * "auto", including the `undefined` that every config written before 1.0.89
+   * supplies and the `""` a bare serde default would have produced.
+   *
+   * **IT IS ONE SYSTEM WITH `hud_show_specials` ABOVE.** The specials occupy
+   * the HUD's inner band, so they can only be drawn when the apps need just
+   * the outer one:
+   *
+   *   one  + specials on  -> specials inner ring, apps outer ring
+   *   one  + specials off -> a single app band, no inner ring
+   *   two  + either       -> two app bands, specials not rendered
+   *   auto + specials on  -> specials IF the apps fit one ring, else dropped
+   *   auto + specials off -> band count by arithmetic
+   *
+   * Rust resolves the deterministic rows of that table by sending an empty
+   * specials list (engine/mod.rs `specials_for_hud`). "auto" is the overlay
+   * page's call and only the page's, because the band count depends on
+   * MEASURED label widths. So Settings must never present the two controls as
+   * independent — see the inert treatment of the specials switch when this is
+   * "two".
+   */
+  hud_band_count?: "auto" | "one" | "two";
+  /**
+   * Use the NEW Magnetic Sector ring for the Space HUD, or the CLASSIC ring
+   * that shipped in 1.0.88? **ON (= the new ring) by default.**
+   *
+   * `true` = the new layout, `false` = the classic one. The toggle in
+   * Settings ("New ring layout") is the ESCAPE HATCH, not the invitation —
+   * the owner asked for the new ring to be what the app opens with, and for
+   * the switch to be the way back.
+   *
+   * Read it as `!== false`, NEVER `=== true` — the same as
+   * `pointer_hud_activation` above and the OPPOSITE of `hud_toast_flight`.
+   * The key is absent from every config written before 1.0.89, and absent
+   * must mean ON: a default only ever reaches users whose file predates the
+   * field, so `=== true` would quietly deliver the new ring to nobody who
+   * already runs the app.
+   *
+   * **DO NOT COMPARE THIS BOOL ANYWHERE DOWNSTREAM.** The overlay reads it
+   * through `components/hud-layout.ts`, which normalises it to a NAME
+   * (`"magnetic"` | `"classic"`) exactly once. Settings is the only other
+   * reader, and only to draw its own switch.
+   *
+   * **IT GATES `hud_band_count` ABOVE.** The rows pill only means anything
+   * for the new ring; the classic ring has its own fixed shape. Settings
+   * therefore greys the pill out while this is off — presentation only, the
+   * stored row choice is never written, so turning the layout back on
+   * restores it.
+   */
+  hud_magnetic_layout?: boolean;
   /** Spaceadom logon task enabled (run at startup). ON by default. */
   run_at_startup?: boolean;
   /**
@@ -96,6 +209,18 @@ export interface AppConfig {
    * its own, so the gear panel's toggle is the only way back (PROBLEM 92).
    */
   overlay_compositing?: "auto" | "software";
+  /**
+   * PROBLEM 195 — may crash and error reports be sent to Sentry?
+   *
+   * **TRUE MEANS SENDING IS HAPPENING**, and true is the default. The switch
+   * in Settings is called "Don't send logs", which is the NEGATION of this
+   * field: it renders as `checked = !send_logs` and writes `!checked`.
+   *
+   * Read it as `!== false`, like `run_at_startup` and NOT like
+   * `hud_toast_flight`: it is absent from every config written before 1.0.82,
+   * and absent must mean ON, which is what Rust's serde default also says.
+   */
+  send_logs?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -126,6 +251,74 @@ export interface AppInfo {
   path: string;
   /** Base64 PNG from IShellItemImageFactory. Render it; never a letter disc. */
   icon_base64: string | null;
+}
+
+/** One profile inside one detected browser (mirrors Rust `BrowserProfile`). */
+export interface BrowserProfile {
+  /** Chromium's internal folder name — what --profile-directory= wants. */
+  directory: string;
+  /** The human name from the browser's own Local State. */
+  display_name: string;
+  /**
+   * The signed-in account email, from Local State's `info_cache[dir].user_name`.
+   * `null` when the profile is not signed in — MEASURED 2026-08-31 (see the
+   * Rust doc comment on `BrowserProfile::email`): that covers both a present-
+   * but-empty `user_name` (Edge, Samsung) and the key being absent entirely
+   * (Brave), which Rust already collapses to one value here. Never render an
+   * empty line for it — check for `null`/falsy, not for `""`.
+   *
+   * RENDER THIS IN A TOOLTIP ONLY. The visible label is `account_label`.
+   */
+  email: string | null;
+  /**
+   * **The label to render.** The local part of `email` (everything before the
+   * `@`), or `display_name` when the profile is not signed in. Computed in
+   * Rust (`browser_profiles::account_label`) so the picker, the HUD chip, the
+   * key-editor chip and the toasts cannot drift apart.
+   *
+   * Optional in the TYPE, not in the data: `readLastKnown()` deserialises a
+   * list that a build of 1.0.94 or earlier may have written to localStorage,
+   * and that shape has no such field. Read it through `labelOf()`, never
+   * directly, so a cached tile falls back to the display name instead of
+   * painting `undefined`.
+   */
+  account_label?: string;
+}
+
+/**
+ * One Chromium browser found on this PC (mirrors Rust `DetectedBrowser`).
+ *
+ * Detection is structural, not a vendor list: anything with a Chromium-shaped
+ * `Local State` AND a resolvable launcher exe qualifies, so forks are picked up
+ * without a code change. Measured on the owner's machine 2026-08-26: Brave,
+ * Chrome, Edge, Samsung Browser and (MSIX-packaged) Arc.
+ */
+/**
+ * The OS default browser (mirrors Rust `DefaultBrowserInfo`, added with
+ * `get_default_browser` 2026-08-26).
+ *
+ * Resolved from the SAME place `run_browser` resolves it — the http/https
+ * UserChoice handler — deliberately, so the key editor's leading disc can never
+ * show a different browser than the key actually opens. `null` from the command
+ * means no handler is registered (or its command line will not parse), which is
+ * the same condition that makes launching a URL fail.
+ */
+export interface DefaultBrowserInfo {
+  /** Absolute path to the browser executable. */
+  exe: string;
+  /** Human name, e.g. "Edge" — the same naming the fallback toasts use. */
+  name: string;
+  /** Base64 PNG, 48px, from the same extractor and cache as AppInfo's. */
+  icon_base64: string | null;
+}
+
+export interface DetectedBrowser {
+  browser_name: string;
+  browser_exe: string;
+  user_data_dir: string;
+  /** Base64 PNG. Same extractor and cache as AppInfo's. */
+  icon_base64: string | null;
+  profiles: BrowserProfile[];
 }
 
 // ---------------------------------------------------------------------------

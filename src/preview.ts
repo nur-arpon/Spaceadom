@@ -5,11 +5,24 @@
  * a stub config so the design can be compared to Dashboard Earthy v2.dc.html
  * without the Rust backend. Not a Vite build input; it never ships.
  *
- * Query flags: ?dark  ?profiles  ?gear  ?specials  ?editor
+ * Query flags: ?dark  ?profiles  ?gear  ?specials  ?editor  ?rows2  ?classic
+ *
+ * ?rows2 selects "2 rows" on the Shortcut-rows pill, which is the ONLY way to
+ * see the inert treatment of the "Show special keys" switch without the
+ * backend — and an inert control is exactly the kind of state that ships
+ * broken because nobody looked at it.
+ *
+ * ?classic turns "New ring layout" OFF, which is the same thing one row up:
+ * the ONLY way to see the Shortcut-rows pill greyed out and its reason note
+ * shown without a backend. Two dependent controls, two flags, for the same
+ * reason.
  */
 import { initKeyboardMatrix, DESIGN_W, DESIGN_H } from "./components/keyboard-matrix";
 import type { AppConfig, KeyBinding } from "./types";
-import { toggleSwitchHtml, sliderShell } from "./components/controls";
+import {
+  toggleSwitchHtml, sliderShell, segRowHtml, paintInert,
+  SPECIALS_INERT_NOTE, ROWS_INERT_NOTE,
+} from "./components/controls";
 import { SPECIALS, toggleSpecialCard } from "./components/special-cards";
 import { openConflictPrompt } from "./components/conflict-prompt";
 import { buildStarrySky } from "./components/starry-sky";
@@ -37,6 +50,16 @@ const config: AppConfig = {
   // PROBLEM 174 — off, matching the shipped default, so the harness shows the
   // switch in the state a new user actually meets.
   hud_toast_flight: false,
+  // "auto" is the shipped default; ?rows2 shows the two-row state, where the
+  // specials switch below goes inert.
+  hud_band_count: q.has("rows2") ? "two" : "auto",
+  // ON is the shipped default (schema.rs, the owner's 2026-08-27 decision),
+  // so the harness shows the switch in the state a new user actually meets.
+  // ?classic flips it, which is what greys the rows pill out below.
+  hud_magnetic_layout: !q.has("classic"),
+  // PROBLEM 195 — true, matching the shipped default, so the harness shows the
+  // "Don't send logs" switch in the OFF state a new user actually meets.
+  send_logs: true,
   opacity_floor_pct: 30,
   browser_path: null,
   fullscreen_allowlist: [],
@@ -141,19 +164,64 @@ const PREVIEW_TOGGLES: [string, string, boolean][] = [
   ["motion",    "Visual effects",   true],
   ["hideboard", "Hide the keyboard", false],
   ["software",  "Software overlay", false],
+  // PROBLEM 209 — both default ON, so the harness shows them ON. The preview
+  // exists to look like a real first install; a switch that renders off here
+  // and on in the app is exactly the drift this file was written to prevent.
+  ["hudpointer", "Point to launch",  true],
+  // Also ON by default (2026-08-27). It gates the rows pill rendered just
+  // below it, so it comes FIRST — each of these three rows gates the next,
+  // and a reason has to be visible from the control it explains.
+  ["hudlayout", "New ring layout", !q.has("classic")],
+  // The rows pill is rendered BETWEEN these two below — the switch list stops
+  // here so "Show special keys" can carry the inert treatment that the pill
+  // above it causes. Keeping them adjacent is the point of the whole group.
+  ["hudspecials", "Show special keys", true],
 ];
+/** ?rows2 — the state where "Show special keys" has nothing to do. */
+const previewInert = config.hud_band_count === "two";
+/** ?classic — the state where the Shortcut-rows pill has nothing to do. */
+const previewRowsInert = config.hud_magnetic_layout === false;
 document.body.dataset.fun = q.has("fun") ? "on" : "off";
 
 document.getElementById("settings-panel")!.innerHTML = `
   <div class="set-title">Settings</div>
   <div class="set-rows">
-    ${PREVIEW_TOGGLES.map(([id, label, on], i) => `
+    ${PREVIEW_TOGGLES.map(([id, label, on], i) => {
+      // The rows pill is emitted immediately BEFORE the specials switch, in
+      // the same order and the same grouping the panel uses — the harness
+      // exists to catch exactly this kind of drift.
+      // The pill is rendered LIVE, with the same wrapper and the same hidden
+      // note the panel emits. `paintInert` — the SAME function the panel
+      // calls, from the same leaf module — greys it below. The harness must
+      // not own a second copy of the treatment: the copy is what drifts, and
+      // what it drops is `disabled`.
+      const pill = id !== "hudspecials" ? "" : `
       <div class="set-item" style="animation-delay:${60 + i * 45}ms">
-        <div class="set-row">
-          <button type="button" class="set-row-label">${label}</button>
-          ${toggleSwitchHtml(id, on)}
+        <div class="set-row set-row-stack">
+          <button type="button" class="set-row-label">Shortcut rows</button>
+          <span id="set-hudrows-wrap">${segRowHtml(
+            "hudrows",
+            [["auto", "Auto"], ["one", "1 row"], ["two", "2 rows"]],
+            config.hud_band_count ?? "auto",
+            "background:var(--st-accent);",
+            "Shortcut rows",
+          )}</span>
         </div>
-      </div>`).join("")}
+        <div class="set-note" id="set-hudrows-note" style="margin-top:6px; display:none;">${ROWS_INERT_NOTE}</div>
+      </div>`;
+      const inert = id === "hudspecials" && previewInert;
+      const sw = toggleSwitchHtml(id, on);
+      return `${pill}
+      <div class="set-item" style="animation-delay:${60 + i * 45}ms">
+        <div class="set-row" aria-disabled="${inert}">
+          <button type="button" class="set-row-label">${label}</button>
+          ${inert
+            ? `<span style="opacity:.45; pointer-events:none;">${sw.replace("<input ", "<input disabled ")}</span>`
+            : sw}
+        </div>
+        ${inert ? `<div class="set-note" style="margin-top:6px;">${SPECIALS_INERT_NOTE}</div>` : ""}
+      </div>`;
+    }).join("")}
   </div>
   <div class="divider" style="margin:14px 0 10px;"></div>
   ${([["wpm", "Typing speed", 30, 150, 65],
@@ -178,6 +246,23 @@ document.getElementById("settings-panel")!.innerHTML = `
     <button class="btn">Reset to defaults</button>
     <button class="btn btn-danger">Clear all</button>
   </div>`;
+
+// THE DEPENDENCY, LIVE IN THE HARNESS. Same call the panel makes once per
+// render(), same function, same leaf module — so what is measured here
+// is the shipping treatment and not an imitation of it. Flipping "New ring
+// layout" in the preview greys and un-greys the rows pill exactly as it does
+// in the app, which is the only way to LOOK at an inert control before
+// shipping it.
+//
+// Nothing here writes `config.hud_band_count`: the pill keeps whichever row
+// was selected, so turning the layout back on restores it. That is the whole
+// claim the panel makes, and it is checkable right here.
+const previewRowsWrap = () => document.getElementById("set-hudrows-wrap");
+const previewRowsNote = () => document.getElementById("set-hudrows-note");
+paintInert(previewRowsWrap(), previewRowsNote(), previewRowsInert);
+document.getElementById("set-hudlayout")?.addEventListener("change", (e) => {
+  paintInert(previewRowsWrap(), previewRowsNote(), !(e.target as HTMLInputElement).checked);
+});
 
 // The one-render-one-animation rule, mirrored: stamp the switch the user just
 // flipped and clear every other. The CHARACTER mapping is not duplicated here

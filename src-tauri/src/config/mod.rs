@@ -253,6 +253,24 @@ pub fn save(config: &AppConfig) -> Result<(), String> {
     // here and the startup load in lib.rs. Published from save alone, the
     // feature would be dead from launch until the user happened to save.
     crate::hook::exclusions::publish_excluded_apps(config);
+    // PROBLEM 206 — the same PROBLEM 180 rule, fourth instance: the
+    // pointer-HUD toggle is read on the hook path as an atomic. Published
+    // HERE, in the one funnel every mutation goes through — reset_config and
+    // friends included; publishing at the save_config COMMAND would miss
+    // them, which is PROBLEM 180's exact bug.
+    crate::hook::publish_pointer_hud_activation(config);
+    // PROBLEM 195, same rule a third time — the crash-reporting kill switch is
+    // a runtime-checked atomic (the panic hook cannot take this struct's lock),
+    // so it has to be republished on every save AND seeded at the startup load
+    // in lib.rs. This is the line that makes the "Don't send logs" switch take
+    // effect immediately instead of at the next launch.
+    crate::telemetry::publish(config);
+    // `hud_band_count` and `hud_show_specials` are deliberately ABSENT from
+    // this list. Nothing on the hook path reads either of them: both are read
+    // on the engine thread inside a config borrow that already happens, and
+    // both reach the overlay page as a Tauri event from `save_config`. An
+    // atomic here would be a second source of truth with no reader — see
+    // `hud_band_count`'s comment in schema.rs. Do not add one.
     save_to_disk(config, &path).map_err(|e| e.to_string())
 }
 
@@ -580,7 +598,17 @@ fn parse_map_body(body: &str) -> std::collections::HashMap<String, schema::KeyBi
 
             map.insert(
                 key.to_string(),
-                schema::KeyBinding { app, web_url: web, label, icon_override: None },
+                // The v11 AutoHotkey script this parses has no concept of a
+                // browser profile, so these are always absent on this route.
+                schema::KeyBinding {
+                    app,
+                    web_url: web,
+                    label,
+                    icon_override: None,
+                    browser_exe: None,
+                    browser_profile_dir: None,
+                    browser_profile_name: None,
+                },
             );
             i += 6; // advance past this entry
         } else {

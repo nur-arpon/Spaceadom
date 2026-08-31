@@ -10,6 +10,15 @@ fn binding(app: Option<&str>, web: Option<&str>, label: &str) -> KeyBinding {
         web_url: web.map(str::to_string),
         label: Some(label.to_string()),
         icon_override: None,
+        // Seed bindings never pin a browser profile: a stock profile cannot
+        // know which profiles exist on the machine it lands on, and pinning one
+        // that is not there would be worse than the default-browser behaviour
+        // it replaces. `..Default::default()` is deliberately NOT used — a new
+        // field should show up here as a compile error so the decision gets
+        // made once, rather than defaulting itself in silently.
+        browser_exe: None,
+        browser_profile_dir: None,
+        browser_profile_name: None,
     }
 }
 

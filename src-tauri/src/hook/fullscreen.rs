@@ -54,6 +54,42 @@ pub fn start_fullscreen_watcher(flag: Arc<AtomicBool>, allowlist: Vec<String>) {
                     });
                     flag.store(detected, Ordering::Relaxed);
                     crate::hook::FULLSCREEN_ACTIVE.store(detected, Ordering::Relaxed);
+
+                    // PiP release-on-enlarge (pip.rs §7, 2026-08-26) —
+                    // piggybacked on THIS existing 500ms tick by the owner's
+                    // explicit decision: no new thread, no new timer ("THE
+                    // LAG I ALREADY SAW, WHILE 4 CORNERS, I DONT WANT MORE
+                    // LAG"). With no PiP active the call is one uncontended
+                    // mutex lock and an is_empty check.
+                    //
+                    // Deliberately NOT keyed off `detected`: a maximised
+                    // (non-fullscreen) PiP window must release too, and a
+                    // DIFFERENT app going fullscreen must NOT release PiP —
+                    // floating over other apps is the point of the feature,
+                    // so pip.rs only ever examines its own cached windows.
+                    //
+                    // catch_unwind for the same reason as the probe above: a
+                    // panic here would kill this thread, and a dead watcher
+                    // strands FULLSCREEN_ACTIVE at its last value (the
+                    // PROBLEM 88 failure shape).
+                    //
+                    // A PANIC is not the only way to strand that flag — a
+                    // BLOCK strands it just as completely, and catch_unwind
+                    // does nothing about that. `release_enlarged` therefore
+                    // does only bookkeeping-class work itself and hands its
+                    // SetWindowPos/SetWindowPlacement calls (SendMessage-class
+                    // against a foreign window, no timeout, hostage to a
+                    // wedged Electron pump) to its own short-lived thread,
+                    // which also raises the toast. Nothing on this tick can
+                    // wait on another process. See pip.rs §7.
+                    std::panic::catch_unwind(|| {
+                        crate::engine::actions::pip::release_enlarged()
+                    })
+                    .unwrap_or_else(|_| {
+                        log::error!(
+                            "fullscreen: pip release pass panicked — skipping this tick"
+                        );
+                    });
                 }
             }
         })
