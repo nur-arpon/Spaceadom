@@ -73,6 +73,36 @@ jobs:
             exit 1
           }
 
+      # The Sentry DSN is deliberately NOT in the repo (owner's rule since
+      # 1.0.82): telemetry.rs does include_str!("sentry_dsn.txt") and the file
+      # is gitignored. That broke this pipeline — every tag from v1.0.82 on
+      # would have failed to COMPILE here, which is why no release newer than
+      # v1.0.80 exists. The DSN now arrives as an Actions secret and is
+      # written before the build.
+      #
+      # Security note, considered and accepted 2026-08-31: a DSN is a
+      # WRITE-ONLY ingest key that already ships inside every distributed
+      # installer (extractable with a strings tool), so the secret discloses
+      # nothing the binaries have not. Holding it lets someone send fake
+      # events, never read any.
+      #
+      # FAIL LOUDLY if the secret is missing: without this guard the build
+      # would need the file and die with a confusing include_str! error — or
+      # worse, a future refactor could make a DSN-less build succeed silently,
+      # shipping installers that can never report a crash. An installer that
+      # cannot phone home is exactly the artifact this project must never
+      # publish unknowingly.
+      - name: Write Sentry DSN from secret
+        shell: pwsh
+        run: |
+          $dsn = "${{ secrets.SENTRY_DSN }}"
+          if ([string]::IsNullOrWhiteSpace($dsn)) {
+            Write-Host "::error::The SENTRY_DSN repository secret is not set. Add it (Settings > Secrets and variables > Actions) with the contents of src-tauri/src/sentry_dsn.txt from the dev machine. No installer was built."
+            exit 1
+          }
+          Set-Content -Path src-tauri/src/sentry_dsn.txt -Value $dsn -NoNewline -Encoding ascii
+          Write-Host "sentry_dsn.txt written ($($dsn.Length) chars — value masked by Actions)."
+
       - name: Set up Node
         uses: actions/setup-node@v5
         with:
