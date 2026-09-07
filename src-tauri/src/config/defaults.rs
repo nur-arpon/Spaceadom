@@ -2,7 +2,7 @@
 /// Mirrors the V11 AHK RouteShortcut() maps exactly (install-v11.ps1 lines 472–557).
 
 use super::schema::{KeyBinding, Profile};
-use std::collections::HashMap;
+use super::schema::BindingMap;
 
 fn binding(app: Option<&str>, web: Option<&str>, label: &str) -> KeyBinding {
     KeyBinding {
@@ -24,7 +24,7 @@ fn binding(app: Option<&str>, web: Option<&str>, label: &str) -> KeyBinding {
 
 /// Founders profile — productivity / communication / web-focused.
 pub fn founders_profile() -> Profile {
-    let mut b: HashMap<String, KeyBinding> = HashMap::new();
+    let mut b: BindingMap = BindingMap::new();
     b.insert("a".into(), binding(None, Some("https://gemini.google.com"), "Gemini"));
     b.insert("b".into(), binding(Some("brave.exe"), None, "Brave"));
     b.insert("c".into(), binding(Some("chrome.exe"), None, "Chrome"));
@@ -51,12 +51,12 @@ pub fn founders_profile() -> Profile {
     b.insert("x".into(), binding(None, Some("https://x.com"), "X"));
     b.insert("y".into(), binding(None, Some("https://youtube.com"), "YouTube"));
     b.insert("z".into(), binding(Some("Zoom.exe"), None, "Zoom"));
-    Profile { name: "Founders".into(), bindings: b }
+    Profile { name: "Founders".into(), bindings: b, emoji: None }
 }
 
 /// Gamers profile — gaming launchers and services.
 pub fn gamers_profile() -> Profile {
-    let mut b: HashMap<String, KeyBinding> = HashMap::new();
+    let mut b: BindingMap = BindingMap::new();
     b.insert("a".into(), binding(Some("RadeonSoftware.exe"), None, "Radeon"));
     b.insert("b".into(), binding(Some("Battle.net.exe"), None, "Battle.net"));
     b.insert("c".into(), binding(Some("cs2.exe"), None, "CS2"));
@@ -83,12 +83,12 @@ pub fn gamers_profile() -> Profile {
     b.insert("x".into(), binding(Some("Xbox.exe"), None, "Xbox"));
     b.insert("y".into(), binding(None, Some("https://gaming.youtube.com"), "YT Gaming"));
     b.insert("z".into(), KeyBinding::default());
-    Profile { name: "Gamers".into(), bindings: b }
+    Profile { name: "Gamers".into(), bindings: b, emoji: None }
 }
 
 /// Professionals profile — creative and productivity tools.
 pub fn professionals_profile() -> Profile {
-    let mut b: HashMap<String, KeyBinding> = HashMap::new();
+    let mut b: BindingMap = BindingMap::new();
     b.insert("a".into(), binding(Some("Photoshop.exe"), None, "Photoshop"));
     b.insert("b".into(), binding(Some("blender.exe"), None, "Blender"));
     b.insert("c".into(), binding(Some("Canva.exe"), None, "Canva"));
@@ -115,7 +115,7 @@ pub fn professionals_profile() -> Profile {
     b.insert("x".into(), KeyBinding::default());
     b.insert("y".into(), KeyBinding::default());
     b.insert("z".into(), KeyBinding::default());
-    Profile { name: "Professionals".into(), bindings: b }
+    Profile { name: "Professionals".into(), bindings: b, emoji: None }
 }
 
 /// Returns all three built-in seed profiles.

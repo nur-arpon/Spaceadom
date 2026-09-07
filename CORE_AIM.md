@@ -18,6 +18,25 @@ The **undeniable, non-negotiable** goal is to provide a "layman-friendly" visual
   implemented: a shortcut that opens a window would have to steal a key from
   the twenty-six the user owns.)
 - The interface must allow users to map specific keys to specific apps or URLs across different profiles.
+- **First-run tour (added 2026-09-04, PROBLEM 242).** The app must introduce
+  itself once. On the first launch after an install the dashboard shows a
+  guided first bind — the two-line promise ("Hold Space, tap any app's
+  initial letter — boom ! it opens."), then pick a letter → bind it → use it
+  → done. It is shown exactly once (`config.tour_done`), Skip means never
+  again, and Settings' header carries "Show me the walkthrough" as the way
+  back in. **This is a layman-friendliness aim, not a nicety:** section 1
+  says the interface must be usable without writing code or scripts, and the
+  one action the whole app rests on — HOLDING Space — cannot be discovered by
+  pressing things, because the hook swallows Space system-wide. A user who
+  never guesses it never fires a single shortcut. Removing the tour puts that
+  discovery back on luck.
+  - Its last step advances only on a REAL launch, reported by the engine
+    (`st-launched`, `engine/mod.rs::handle_alpha`, gated on the cascade not
+    having Failed). Do not re-implement it as a keyboard listener in the
+    page: the page cannot see Space.
+  - Step 3 deliberately un-dims the dashboard so the Guide HUD's ring appears
+    naturally under the user's own hand. **That ring is the discovery moment
+    — do not suppress the HUD during the tour** (owner's decision).
 
 ### Smart Cascade (Summon & Vanish)
 - Pressing `Space + Key` must act intelligently:

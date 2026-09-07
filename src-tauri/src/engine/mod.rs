@@ -88,6 +88,28 @@ impl EngineState {
         let _ = self.app_handle.emit("bypass-toggled", active);
     }
 
+    /// PROBLEM 242 — "a shortcut just really fired", for the DASHBOARD.
+    ///
+    /// Nothing reported this before. `toast-notification` fires on every
+    /// combo but is a deliberate overlay-only broadcast (`lib.rs::show_toast`),
+    /// and `app-launched` in `smart_cascade` only covers a genuine shell
+    /// launch — not the focus and minimize legs of the cascade, which are
+    /// most of what a working shortcut does. The first-run tour's last step
+    /// asks the user to actually USE their new binding, and the page cannot
+    /// answer "did that work?" on its own: the hook swallows Space
+    /// system-wide, so no keyboard listener in the webview will ever see the
+    /// combo. This is the only thing in the process that knows.
+    ///
+    /// Global `emit`, never `emit_to` — that has never worked here.
+    /// Fire-and-forget: a dashboard that is closed has no listener, and the
+    /// engine must not care.
+    fn emit_launched(&self, key: char, label: &str) {
+        let _ = self.app_handle.emit(
+            "st-launched",
+            serde_json::json!({ "key": key.to_string(), "label": label }),
+        );
+    }
+
     /// `action_pending`: true when a combo fired and its toast is about to
     /// arrive - the overlay window must stay up for the handover (PROBLEM 135).
     fn cancel_hud(&mut self, action_pending: bool) {
@@ -169,6 +191,15 @@ pub fn start_engine(
 }
 
 async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
+    // PROBLEM 259 — the own-window fallback's Space-down is THE SAME EVENT
+    // with a different witness: the dashboard page saw it because the hook
+    // could not (PROBLEM 257). Normalised here, at the door, so there is
+    // exactly ONE `SpaceDown` arm and the HUD / cascade / SpaceUp paths below
+    // cannot drift into two behaviours. The only thing the origin changes is
+    // the sentence the arm logs — see there.
+    let via_own_window_page = matches!(event, HookEvent::OwnWindowSpaceDown);
+    let event = if via_own_window_page { HookEvent::SpaceDown } else { event };
+
     match event {
         // ---------------------------------------------------------------
         // Space held down — start the Guide HUD timer
@@ -193,68 +224,84 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
             // inside show_guide_hud itself, where it cannot be raced.
             let epoch = guide_hud::begin_hold();
 
+            // PROBLEM 257 — ONE line per hold, at the moment the hold starts,
+            // naming the window it started over. This event can only come from
+            // the primary keyboard hook (nothing else sends `SpaceDown`), so
+            // the line's existence IS the proof that the hook saw the Space;
+            // a hold the owner made that has no such line never reached the
+            // hook at all — which is the 2026-09-06 regression, and until this
+            // line the only witness was a 60-second aggregate counter. Runs on
+            // the async runtime, not in the callback, so the foreground query
+            // is legal here (the same reasoning as PROBLEM 243's shown-over
+            // line). `over own window` is the phrase the install-proof script
+            // asserts (CLAUDE.md keyboard-hook law 6).
+            #[cfg(windows)]
+            {
+                let own = crate::hook::exclusions::own_stem();
+                let fg = unsafe { crate::hook::exclusions::foreground_stem() };
+                let phrase = guide_hud::shown_over_phrase(&fg, &own);
+                if via_own_window_page {
+                    // PROBLEM 259 — the fallback's per-hold line, and it must
+                    // NOT be able to satisfy CLAUDE.md law 6.
+                    //
+                    // `scripts/install-proof.ps1` reads `hold start (hold #N)`
+                    // + `over own window` as the proof the KEYBOARD HOOK is
+                    // alive over our own window. This Space never touched the
+                    // hook, so this line deliberately omits the words `hold
+                    // start` — a fallback hold can never be mistaken for that
+                    // proof, and the two facts stay separately observable.
+                    // The fallback's own proof pair is this marker followed by
+                    // `guide_hud: shown over own window`.
+                    log::info!(
+                        "own-window fallback: Space-down came from the dashboard page \
+                         (PROBLEM 257 fallback), hook silent — fallback hold #{} began \
+                         (hud hold #{epoch}) {phrase}. The keyboard hook did NOT see this \
+                         Space; the page did, and `own_window_space_down` passed it to the \
+                         engine. Everything after this line is the ordinary path: the ring, \
+                         the cascade and the toast are the same code. If you are checking \
+                         CLAUDE.md law 6, THIS LINE IS NOT THAT PROOF — law 6 wants a \
+                         'hold start (hold #N) … over own window' line, which only the hook \
+                         can produce.",
+                        crate::hook::own_window_hold_count()
+                    );
+                } else {
+                    log::info!(
+                        "hold start (hold #{epoch}): the primary keyboard hook saw this \
+                         Space-down and delivered it {phrase} (PROBLEM 257). If no \
+                         'guide_hud: overlay window shown (hold #{epoch})' follows, the fault \
+                         is between the engine and the HUD; if a hold you made has NO line \
+                         like this one, the hook never saw the Space — grep 'KEYBOARD DEAF, \
+                         PROVEN' and 'own-window fallback:'."
+                    );
+                }
+            }
+
             let state_clone = Arc::clone(state_arc);
             tauri::async_runtime::spawn(async move {
                 tokio::select! {
                     _ = tokio::time::sleep(tokio::time::Duration::from_millis(hud_delay_ms)) => {
                         // Show HUD if not cancelled
                         if !*cancel_rx.borrow() {
-                            let (profile_name, bindings, specials) = {
+                            let (profile_name, emoji, bindings, specials) = {
                                 let s = state_clone.lock().unwrap_or_else(|p| p.into_inner());
                                 let cfg = s.config.read().unwrap_or_else(|p| p.into_inner());
                                 let name = cfg.active_profile.clone();
-                                let mut binds: Vec<(String, String)> = Vec::new();
 
                                 // CORE_AIM: the HUD must show the CURRENT
                                 // PROFILE's shortcuts — the user's actual app
                                 // keys first, system shortcuts after.
-                                if let Some(profile) =
-                                    cfg.profiles.iter().find(|p| p.name == name)
-                                {
-                                    let mut keys: Vec<_> = profile
-                                        .bindings
-                                        .iter()
-                                        .filter(|(_, b)| b.is_mapped())
-                                        .collect();
-                                    keys.sort_by(|a, b| a.0.cmp(b.0));
-                                    for (key, bind) in keys {
-                                        let label = bind
-                                            .label
-                                            .clone()
-                                            .or_else(|| bind.app.clone())
-                                            .or_else(|| bind.web_url.clone())
-                                            .unwrap_or_default();
-                                        // 2026-08-26 — a key pinned to a
-                                        // browser profile reads "Brave —
-                                        // Studies", not just "Brave", because
-                                        // "Brave" on three different keys tells
-                                        // the user nothing.
-                                        //
-                                        // The human name is READ FROM THE
-                                        // BINDING, never resolved here: this
-                                        // runs on the Space-hold path, which
-                                        // must produce a HUD inside the user's
-                                        // configured delay, and translating
-                                        // "Profile 1" into a name means opening
-                                        // and JSON-parsing the browser's
-                                        // ~96 KB `Local State` on every hold.
-                                        // `browser_profile_name` exists so that
-                                        // I/O never touches this path — see the
-                                        // field's comment in schema.rs.
-                                        //
-                                        // A binding with no profile gets its
-                                        // label back byte-for-byte
-                                        // (`hud_label`'s own test), and the
-                                        // chip already truncates with an
-                                        // ellipsis at 118px, so a long pair
-                                        // cannot disturb the ring.
-                                        let label = crate::browser_profiles::hud_label(
-                                            &label,
-                                            bind.browser_profile_name.as_deref(),
-                                        );
-                                        binds.push((key.to_uppercase(), label));
-                                    }
-                                }
+                                //
+                                // EXTRACTED to `hud_apps_for` in 1.0.96, and
+                                // the reason is worth a line: the Settings
+                                // PREVIEW (`commands::preview_hud_layout`) has
+                                // to build the SAME list from the SAME config,
+                                // and a preview that showed a different label
+                                // set from the real ring would be a lie told by
+                                // the feature whose entire job is showing the
+                                // truth. One function, two callers, no second
+                                // copy to drift.
+                                let binds = hud_apps_for(&cfg, &name);
+                                let emoji = profile_emoji_for(&cfg, &name);
 
                                 // System-wide shortcuts — separate list; the
                                 // HUD renders these FIRST (user's direction:
@@ -306,9 +353,11 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
                                     &cfg.hud_band_count,
                                 );
 
-                                (name, binds, specials)
+                                (name, emoji, binds, specials)
                             };
-                            guide_hud::show_guide_hud(epoch, &profile_name, bindings, specials);
+                            guide_hud::show_guide_hud(
+                                epoch, &profile_name, emoji, bindings, specials,
+                            );
                         }
                     }
                     _ = cancel_rx.changed() => {
@@ -390,6 +439,23 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
                 s.cancel_hud(false);
             }
             actions::opacity::decrease_opacity();
+        }
+
+        // PROBLEM 259 — unreachable by construction: the normalisation at the
+        // top of this function rewrites `OwnWindowSpaceDown` to `SpaceDown`
+        // before the match. Written as an EXPLICIT arm rather than a `_` so
+        // that the next variant added to `HookEvent` still fails the build
+        // here instead of being silently swallowed — and as a log line rather
+        // than `unreachable!()` so that a future refactor which breaks the
+        // normalisation loses one keypress with an explanation, instead of
+        // panicking the dispatch task (PROBLEM 82's isolation would catch it,
+        // but "an action PANICKED" names nothing).
+        HookEvent::OwnWindowSpaceDown => {
+            log::error!(
+                "engine: OwnWindowSpaceDown reached the match — the PROBLEM 259 \
+                 normalisation at the top of dispatch() has been broken; that hold \
+                 did nothing"
+            );
         }
     }
 }
@@ -568,6 +634,15 @@ fn handle_alpha(ch: char, state_arc: &Arc<Mutex<EngineState>>) {
         });
     } else {
         s.emit_toast(&cascade_toast(outcome, &label, fallback.as_ref()));
+    }
+
+    // PROBLEM 242 — tell the dashboard a shortcut REALLY fired. Gated on the
+    // same outcome the toast is: `Failed` means nothing was focused, launched
+    // or minimized, so a key that did nothing must not read as a success on
+    // the other side. That gate is what makes the tour's "wrong key does
+    // nothing, no error, it waits" behaviour fall out for free.
+    if outcome != actions::smart_cascade::CascadeOutcome::Failed {
+        s.emit_launched(ch, &label);
     }
 }
 
@@ -824,6 +899,177 @@ pub(crate) fn specials_for_hud(show_specials: bool, band_count: &str) -> Vec<(St
         .collect()
 }
 
+/// The APP half of the `GuideHudPayload`: one `(KEY, label)` pair per MAPPED
+/// binding in `profile_name`, sorted by key.
+///
+/// This was inline in the SpaceDown arm until 1.0.96 and was lifted out for one
+/// reason: the Settings preview must show the SAME chips the real ring shows.
+/// A preview built from its own copy of this walk would drift the first time
+/// either copy was edited, and the drift would be invisible — the preview would
+/// simply be subtly wrong about the thing it exists to demonstrate.
+///
+/// STILL ON THE SPACE-HOLD LATENCY PATH, so the rules that governed it inline
+/// still govern it here: no I/O, no locks of its own, and the browser-profile
+/// name is READ from the binding rather than resolved.
+pub(crate) fn hud_apps_for(
+    cfg: &crate::config::AppConfig,
+    profile_name: &str,
+) -> Vec<(String, String)> {
+    let mut binds: Vec<(String, String)> = Vec::new();
+    let Some(profile) = cfg.profiles.iter().find(|p| p.name == profile_name) else {
+        return binds;
+    };
+    let mut keys: Vec<_> = profile.bindings.iter().filter(|(_, b)| b.is_mapped()).collect();
+    keys.sort_by(|a, b| a.0.cmp(b.0));
+    for (key, bind) in keys {
+        let label = bind
+            .label
+            .clone()
+            .or_else(|| bind.app.clone())
+            .or_else(|| bind.web_url.clone())
+            .unwrap_or_default();
+        // 2026-08-26 — a key pinned to a browser profile reads "Brave —
+        // Studies", not just "Brave", because "Brave" on three different keys
+        // tells the user nothing.
+        //
+        // The human name is READ FROM THE BINDING, never resolved here: this
+        // runs on the Space-hold path, which must produce a HUD inside the
+        // user's configured delay, and translating "Profile 1" into a name
+        // means opening and JSON-parsing the browser's ~96 KB `Local State` on
+        // every hold. `browser_profile_name` exists so that I/O never touches
+        // this path — see the field's comment in schema.rs.
+        //
+        // A binding with no profile gets its label back byte-for-byte
+        // (`hud_label`'s own test), and the chip already truncates with an
+        // ellipsis at 118px, so a long pair cannot disturb the ring.
+        let label =
+            crate::browser_profiles::hud_label(&label, bind.browser_profile_name.as_deref());
+        binds.push((key.to_uppercase(), label));
+    }
+    binds
+}
+
+/// The active profile's emoji, for the glyph beside the SPACE pill.
+///
+/// `None` is the NORMAL state, not a degraded one: it is the correct answer for
+/// every profile the user has not given an emoji, and `Profile::emoji`'s own
+/// comment states the rule every surface owes it — *render your existing look
+/// when it is None*. The page honours that literally: with `None` it appends no
+/// element to the pill at all, so the wordmark's box, its centring and its
+/// `st-space-pop` are byte-identical to every build before this one.
+///
+/// THE `filter` IS NOT DEFENSIVE PADDING. `emoji_is_valid` already rejects an
+/// empty string on the way IN, but this reads a file that can be hand-edited
+/// and that predates the field, and `Some("")` would put an empty span inside
+/// the pill: nothing visible, and yet not the same DOM as `None`. One condition
+/// here is cheaper than a second "is it really absent" rule in the renderer.
+///
+/// Trimmed rather than tested as-is because a whitespace-only value is the same
+/// non-answer as an empty one — and `emoji_is_valid` rejects internal
+/// whitespace too, so nothing legitimate is lost by it.
+pub(crate) fn profile_emoji_for(
+    cfg: &crate::config::AppConfig,
+    profile_name: &str,
+) -> Option<String> {
+    cfg.profiles
+        .iter()
+        .find(|p| p.name == profile_name)
+        .and_then(|p| p.emoji.clone())
+        .filter(|e| !e.trim().is_empty())
+}
+
+/* ===========================================================================
+   THE SETTINGS PREVIEW — payload half. `commands::preview_hud_layout` is the
+   command; everything about WHAT gets drawn lives here, beside the real
+   builder, so the two can be read against each other on one screen.
+
+   WHAT A PREVIEW IS: the REAL ring, with the user's REAL bindings, drawn in a
+   layout he has not chosen yet. It is not a mock-up and it is not a
+   screenshot — a mock-up cannot tell him whether HIS twenty-six labels fit,
+   which is the only question he is actually asking.
+
+   WHAT IT IS NOT: a config write. The override travels in the payload and
+   expires with the show (`guide_hud::HudPreview`). A preview he cancels must
+   leave his HUD exactly as he found it.
+   =========================================================================== */
+
+/// The three previewable layouts, named as the owner names them in Settings.
+///
+/// They are NOT a third setting. Each one is a (layout, band-count) PAIR drawn
+/// from the two settings that already exist, which is why the mapping lives in
+/// one function instead of being spelled out at the call site three times:
+///
+/// ```text
+///   compact  magnetic + auto   the shipped default — bands only if needed
+///   wide     classic           the 1.0.88 ring; band count does not apply
+///   double   magnetic + two    two app bands, so no specials by construction
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PreviewLayout {
+    Compact,
+    Wide,
+    Double,
+}
+
+impl PreviewLayout {
+    /// Parse the command's string. UNKNOWN IS AN ERROR, NOT A DEFAULT — and
+    /// that is the opposite of how every config field in this app is
+    /// normalised, on purpose. A config value arrives from a file that may
+    /// predate the field, so falling back to the shipped default is the only
+    /// safe reading. This value arrives from a button that was just clicked, so
+    /// a value we do not recognise means the dashboard and the backend disagree
+    /// about what the buttons are — and silently previewing "compact" for a
+    /// click on "double" would teach the owner something false about his own
+    /// app.
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        match s {
+            "compact" => Some(PreviewLayout::Compact),
+            "wide" => Some(PreviewLayout::Wide),
+            "double" => Some(PreviewLayout::Double),
+            _ => None,
+        }
+    }
+
+    /// `(layout, bands)` in the PAGE's vocabulary — `hud-layout.ts`'s
+    /// `HudLayout` and `hud-band-count.ts`'s `HudBandCount`.
+    pub(crate) fn overrides(self) -> (&'static str, &'static str) {
+        match self {
+            PreviewLayout::Compact => ("magnetic", "auto"),
+            PreviewLayout::Wide => ("classic", "auto"),
+            PreviewLayout::Double => ("magnetic", "two"),
+        }
+    }
+}
+
+/// Build the payload for one preview.
+///
+/// THE SPECIALS ARE GATED ON THE OVERRIDE, NOT ON THE SAVED SETTING, and that
+/// is the one place a preview could quietly become wrong. `specials_for_hud`'s
+/// truth table says two app bands and the specials ring cannot coexist — the
+/// specials ARE the inner band. So `double` must send an empty vec, exactly as
+/// a real hold with `hud_band_count == "two"` does; passing the saved
+/// `hud_band_count` here would send eight specials into a two-band ring and the
+/// page would draw three rings on top of each other. The user's own
+/// `hud_show_specials` is still honoured — it answers "does he want them at
+/// all", which the preview has no business overriding.
+pub(crate) fn preview_payload(
+    cfg: &crate::config::AppConfig,
+    layout: PreviewLayout,
+) -> crate::guide_hud::GuideHudPayload {
+    let (mode, bands) = layout.overrides();
+    let name = cfg.active_profile.clone();
+    crate::guide_hud::GuideHudPayload {
+        profile_emoji: profile_emoji_for(cfg, &name),
+        apps: hud_apps_for(cfg, &name),
+        specials: specials_for_hud(cfg.hud_show_specials, bands),
+        profile: name,
+        preview: Some(crate::guide_hud::HudPreview {
+            layout: mode.to_string(),
+            bands: bands.to_string(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod band_gate_tests {
     use super::*;
@@ -888,6 +1134,200 @@ mod band_gate_tests {
                 "{v:?} must behave like auto — only the literal \"two\" hides the ring"
             );
         }
+    }
+
+    /// THE PREVIEW'S THREE NAMES MAP ONTO THE TWO SETTINGS THAT EXIST, and
+    /// nothing else. If this ever drifts, the owner clicks "Double" and is
+    /// shown "Compact" with no error anywhere — the preview lying about the
+    /// only thing it does.
+    #[test]
+    fn the_three_preview_layouts_map_to_the_settings_that_exist() {
+        assert_eq!(
+            PreviewLayout::parse("compact").unwrap().overrides(),
+            ("magnetic", "auto"),
+            "compact is the shipped default: the magnetic ring, bands only if needed"
+        );
+        assert_eq!(
+            PreviewLayout::parse("wide").unwrap().overrides(),
+            ("classic", "auto"),
+            "wide is the 1.0.88 ring; classic ignores the band count entirely, so the \
+             value paired with it must be the one that changes nothing"
+        );
+        assert_eq!(
+            PreviewLayout::parse("double").unwrap().overrides(),
+            ("magnetic", "two"),
+            "double is two APP bands"
+        );
+    }
+
+    /// An unknown name must be REFUSED, not defaulted. This is the one place in
+    /// the app where that is right: the string comes from a button in our own
+    /// dashboard, so an unrecognised value means the two halves disagree.
+    #[test]
+    fn an_unknown_preview_layout_is_refused_rather_than_defaulted() {
+        for v in ["", "COMPACT", "magnetic", "two", "compact ", "classic"] {
+            assert!(
+                PreviewLayout::parse(v).is_none(),
+                "{v:?} must not parse — a preview that silently draws the wrong shape is \
+                 worse than one that does not appear"
+            );
+        }
+    }
+
+    /// THE ROW THAT MATTERS: `double` must send NO specials, because the
+    /// specials ARE the inner band and two app bands leave no room for it.
+    /// Gated on the OVERRIDE, never on the saved `hud_band_count` — a preview
+    /// built from the saved value would send eight specials into a two-band
+    /// ring and the page would draw three rings over each other.
+    #[test]
+    fn the_preview_gates_specials_on_the_override_not_on_the_saved_setting() {
+        let n = HUD_SPECIALS.len();
+        for (name, layout) in [
+            ("compact", PreviewLayout::Compact),
+            ("wide", PreviewLayout::Wide),
+            ("double", PreviewLayout::Double),
+        ] {
+            let (_, bands) = layout.overrides();
+            let with_setting_on = specials_for_hud(true, bands);
+            let with_setting_off = specials_for_hud(false, bands);
+            if layout == PreviewLayout::Double {
+                assert!(
+                    with_setting_on.is_empty(),
+                    "{name}: two app bands must drop the specials even with the setting ON"
+                );
+            } else {
+                assert_eq!(
+                    with_setting_on.len(),
+                    n,
+                    "{name}: the user's own 'show specials' setting is still honoured"
+                );
+            }
+            assert!(
+                with_setting_off.is_empty(),
+                "{name}: specials OFF is the user's decision and no preview may override it"
+            );
+        }
+    }
+
+    /// `hud_apps_for` is the SpaceDown arm's own walk, lifted out verbatim so
+    /// the preview cannot show a different chip set from the real ring. The
+    /// properties worth pinning are the ones the ring depends on: only MAPPED
+    /// keys, sorted, and the key upper-cased for the badge.
+    #[test]
+    fn hud_apps_for_returns_only_mapped_keys_sorted_and_upper_cased() {
+        use crate::config::{KeyBinding, Profile};
+        let mut cfg = crate::config::AppConfig::default();
+        let mut bindings = crate::config::BindingMap::new();
+        bindings.insert(
+            "c".to_string(),
+            KeyBinding { label: Some("Chrome".into()), app: Some("chrome.exe".into()),
+                         ..Default::default() },
+        );
+        bindings.insert(
+            "a".to_string(),
+            KeyBinding { label: Some("Afterburner".into()), app: Some("ab.exe".into()),
+                         ..Default::default() },
+        );
+        // Present but UNMAPPED — the ring must not draw a chip for it.
+        bindings.insert("z".to_string(), KeyBinding::default());
+        cfg.profiles = vec![Profile { name: "Preview Test".into(), bindings, emoji: None }];
+        cfg.active_profile = "Preview Test".into();
+
+        let apps = hud_apps_for(&cfg, "Preview Test");
+        assert_eq!(
+            apps,
+            vec![
+                ("A".to_string(), "Afterburner".to_string()),
+                ("C".to_string(), "Chrome".to_string()),
+            ],
+            "mapped keys only, sorted by key, badge upper-cased"
+        );
+        assert!(
+            hud_apps_for(&cfg, "A Profile That Does Not Exist").is_empty(),
+            "an unknown profile must produce an empty ring, never a panic"
+        );
+    }
+
+    /// The preview payload is a PROJECTION: same profile, same chips as the
+    /// real path, plus the override. If these two ever diverge the preview
+    /// stops being evidence about the user's own config.
+    #[test]
+    fn the_preview_payload_carries_the_same_chips_as_a_real_hold() {
+        use crate::config::{KeyBinding, Profile};
+        let mut cfg = crate::config::AppConfig::default();
+        let mut bindings = crate::config::BindingMap::new();
+        bindings.insert(
+            "b".to_string(),
+            KeyBinding { label: Some("Brave".into()), app: Some("brave.exe".into()),
+                         ..Default::default() },
+        );
+        cfg.profiles = vec![Profile {
+            name: "Live".into(),
+            bindings,
+            emoji: Some("🎯".into()),
+        }];
+        cfg.active_profile = "Live".into();
+        cfg.hud_show_specials = true;
+
+        let p = preview_payload(&cfg, PreviewLayout::Compact);
+        assert_eq!(p.profile, "Live");
+        assert_eq!(p.apps, hud_apps_for(&cfg, "Live"), "the same chips, from the same builder");
+        assert_eq!(
+            p.profile_emoji.as_deref(),
+            Some("🎯"),
+            "the preview shows the profile's own emoji — it is a projection of the real ring, \
+             not a sample of one"
+        );
+        let pv = p.preview.expect("a preview payload must carry its override");
+        assert_eq!((pv.layout.as_str(), pv.bands.as_str()), ("magnetic", "auto"));
+
+        // And the real path's payload must carry NO override, or the page
+        // would honour a stale preview on an ordinary Space-hold.
+        let d = preview_payload(&cfg, PreviewLayout::Double);
+        assert!(d.specials.is_empty(), "double sends no specials");
+        assert_eq!(d.preview.map(|p| p.bands), Some("two".to_string()));
+    }
+
+    /// THE THREE STATES THE SPACE PILL HAS TO SURVIVE. The absent case is the
+    /// one that matters most: `None` is what every existing user has, and the
+    /// page's contract is that `None` draws the pill EXACTLY as it drew before
+    /// this feature existed. A blank string must reach the page as `None` too,
+    /// or the renderer would need a second "is it really absent" rule.
+    #[test]
+    fn profile_emoji_is_absent_blank_or_real_and_blank_reads_as_absent() {
+        use crate::config::Profile;
+        let mk = |emoji: Option<&str>| {
+            let mut cfg = crate::config::AppConfig::default();
+            cfg.profiles = vec![Profile {
+                name: "P".into(),
+                bindings: crate::config::BindingMap::new(),
+                emoji: emoji.map(str::to_string),
+            }];
+            cfg.active_profile = "P".into();
+            cfg
+        };
+        assert_eq!(profile_emoji_for(&mk(None), "P"), None, "absent stays absent");
+        assert_eq!(
+            profile_emoji_for(&mk(Some("")), "P"),
+            None,
+            "an empty string is a non-answer, and must not become an empty element in the pill"
+        );
+        assert_eq!(
+            profile_emoji_for(&mk(Some("   ")), "P"),
+            None,
+            "whitespace-only is the same non-answer"
+        );
+        assert_eq!(
+            profile_emoji_for(&mk(Some("🎯")), "P").as_deref(),
+            Some("🎯"),
+            "a real emoji reaches the payload unchanged"
+        );
+        assert_eq!(
+            profile_emoji_for(&mk(Some("🎯")), "Some Other Profile"),
+            None,
+            "an unknown profile must produce None, never a panic and never another \
+             profile's emoji"
+        );
     }
 
     /// The gate must not quietly edit the list it is gating.

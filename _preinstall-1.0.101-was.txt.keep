@@ -1,0 +1,28 @@
+=== preinstall-probe (baseline BEFORE 1.0.101) ===
+when: Sat 09/05/2026 14:59:31.44
+probe ran at: 2026-09-05 14:59:31
+LOCALAPPDATA as seen out here: C:\Users\beamu\AppData\Local
+exe path: C:\Users\beamu\AppData\Local\Spaceadom\spaceadom.exe
+PRE version: 1.0.100
+PRE written: 09/04/2026 22:12:58
+PRE size: 21193216
+PRE marker 'rival install': True
+PRE marker 'start_menu_scan:': True
+PRE marker 'hud-band-count-changed': True
+PRE marker 'restored to TRUE FULLSCREEN': True
+PRE marker 'picker_worker: st-picker-scan started (os thread ': True
+PRE marker 'rival install: REFUSING the elevated removal for ': True
+PRE marker 'updater: install kind decided': True
+PRE marker 'installing SILENTLY now (setup.exe /S /UPDATE /R /ARGS': True
+PRE marker 'theme: watching the Windows app light/dark setting every ': False
+PRE marker 'rival install: this PACKAGED copy found an unpackaged per-user install beside it (PROBLEM 250 follow-up ': False
+PRE marker 'safe-mode: this process is the surviving single instance ': False
+PRE marker 'the one-time config snapshot would copy config.json and the backups into a subfolder': False
+PRE Run key: "C:\Users\beamu\AppData\Local\Spaceadom\spaceadom.exe" --autostart
+PRE running: pid=59576 path=C:\Users\beamu\AppData\Local\Spaceadom\spaceadom.exe started=9/5/2026 2:11:35 PM
+PRE debug.log size: 5000677  lastWrite: 09/05/2026 14:46:35
+PRE config.json size: 77912  lastWrite: 09/05/2026 14:11:38
+PRE config.json SHA256: 4CE86B4417F22ADCFB25E6F5A0CD883F280D62D5C0D0E2C76A5FD9C4E425F302
+PRE config copied out to: D:\Claude-Projects\SpaceToggle-V14\_config-live-copy-1.0.101-pre.json
+PRE profiles: 5  [sexy_tumar_mexy, Gamers, Founders, Professionals, cxvb]
+=== probe done ===

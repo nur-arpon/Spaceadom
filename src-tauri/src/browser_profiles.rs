@@ -1512,9 +1512,30 @@ static SCAN_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<Vec<DetectedBrows
 /// Icons come from the SAME extractor and the SAME `IconCacheState` as
 /// `list_start_menu_apps`, so a browser already drawn in the app grid costs
 /// nothing to draw again here.
+///
+/// PROBLEM 237 — `async`, on a `spawn_blocking` thread with its own balanced
+/// STA (`icon_extractor::ComSta`): the AppData walk is ~2.5 s and the per-
+/// browser icon is in-process COM, and both used to run on the MAIN THREAD as
+/// one of the three commands `warmPickerData()` fires together. `Result`
+/// because Tauri demands it of an async command borrowing `State<'_>`; the
+/// frontend's `invoke<DetectedBrowser[]>` is unaffected (the promise resolves
+/// with the `Ok` value, and its `.catch` already exists).
 #[tauri::command]
-pub fn list_browser_profiles(
+pub async fn list_browser_profiles(
     cache: tauri::State<'_, crate::commands::IconCacheState>,
+) -> Result<Vec<DetectedBrowser>, String> {
+    let cache = std::sync::Arc::clone(&cache.0);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _com = crate::icon_extractor::ComSta::new();
+        list_browser_profiles_blocking(&cache)
+    })
+    .await
+    .map_err(|e| format!("browser scan could not run: {e}"))
+}
+
+/// The body of `list_browser_profiles`, on whatever thread the caller chose.
+fn list_browser_profiles_blocking(
+    cache: &std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
 ) -> Vec<DetectedBrowser> {
     let slot = SCAN_CACHE.get_or_init(|| std::sync::Mutex::new(None));
     let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
@@ -1526,7 +1547,7 @@ pub fn list_browser_profiles(
     let mut found = scan_browsers();
 
     for b in &mut found {
-        let mut lock = cache.0.lock().unwrap_or_else(|p| p.into_inner());
+        let mut lock = cache.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(hit) = lock.get(&b.browser_exe) {
             b.icon_base64 = Some(hit.clone());
         } else if let Some(b64) = crate::icon_extractor::extract_icon(&b.browser_exe) {
@@ -1536,9 +1557,10 @@ pub fn list_browser_profiles(
     }
 
     log::info!(
-        "browser_profiles: found {} Chromium browser(s) in {}ms — {}",
+        "browser_profiles: found {} Chromium browser(s) in {}ms on thread {} — {}",
         found.len(),
         started.elapsed().as_millis(),
+        crate::picker_worker::os_thread_id(),
         found
             .iter()
             .map(|b| format!("{} ({} profile(s))", b.browser_name, b.profiles.len()))
@@ -2807,19 +2829,19 @@ mod window_profile_tests {
     #[test]
     fn claims_come_from_the_active_profile_and_the_special_keys() {
         use crate::config::{AppConfig, Profile};
-        use std::collections::HashMap;
+        use crate::config::BindingMap;
 
-        let mut active = HashMap::new();
+        let mut active = BindingMap::new();
         active.insert(
             "n".to_string(),
             app_binding(r"C:\x\brave.exe", Some("Profile 1")),
         );
-        let mut idle = HashMap::new();
+        let mut idle = BindingMap::new();
         idle.insert(
             "q".to_string(),
             app_binding(r"C:\x\brave.exe", Some("Profile 9")),
         );
-        let mut specials = HashMap::new();
+        let mut specials = BindingMap::new();
         specials.insert(
             "F5".to_string(),
             url_binding("https://x.example", Some(r"C:\x\chrome.exe"), Some("Profile 6")),
@@ -2828,8 +2850,8 @@ mod window_profile_tests {
         let cfg = AppConfig {
             active_profile: "Work".to_string(),
             profiles: vec![
-                Profile { name: "Work".into(), bindings: active },
-                Profile { name: "Games".into(), bindings: idle },
+                Profile { name: "Work".into(), bindings: active, emoji: None },
+                Profile { name: "Games".into(), bindings: idle, emoji: None },
             ],
             special_keys: specials,
             ..Default::default()

@@ -22,11 +22,82 @@
 /// Two things to remember if you touch this:
 ///  - GetImage returns PARGB. Un-premultiply before writing PNG or every
 ///    semi-transparent edge pixel comes out too dark.
-///  - It needs COM on the calling thread; `CoInitializeEx` is called here
-///    and `RPC_E_CHANGED_MODE` is deliberately ignored (the thread already
-///    having a different apartment is fine for this).
+///  - It needs COM on the calling thread. `ComSta` below takes care of it,
+///    BALANCED: every successful `CoInitializeEx` (S_OK *and* S_FALSE both
+///    bump the apartment's refcount) is paired with a `CoUninitialize` on
+///    drop, and `RPC_E_CHANGED_MODE` (the thread already owns a *different*
+///    apartment) is left alone because the shell objects work from an MTA
+///    too — they are just marshalled. Before 2026-09-04 the init was
+///    unbalanced, which was harmless on the main thread (already an STA for
+///    life) and would have leaked a permanent STA onto every pooled runtime
+///    thread once the callers went `async` — see PROBLEM 237.
+///
+/// THREADING (PROBLEM 237, measured): this whole file runs correctly on a
+/// dedicated non-main STA thread with NO message pump. `IShellItem` /
+/// `IShellItemImageFactory` are in-proc shell objects created in whichever
+/// apartment calls `SHCreateItemFromParsingName`, and `GetImage` is a
+/// synchronous in-apartment call, so nothing needs to be pumped. Proof:
+/// `picker_worker::tests::icons_extract_on_a_non_main_sta_thread`.
 
 use base64::{engine::general_purpose::STANDARD, Engine};
+
+/// One thread's membership of a single-threaded COM apartment, released on
+/// drop — and released ONLY if this call is the one that succeeded.
+///
+/// `CoInitializeEx` returns S_OK (we created the apartment), S_FALSE (it was
+/// already there; the refcount went up anyway) or `RPC_E_CHANGED_MODE` (the
+/// thread already belongs to an MTA; nothing was counted). The first two are
+/// `Ok` and must be balanced by a `CoUninitialize`; the third must not be,
+/// or we would decrement somebody else's count. That is exactly what `.is_ok()`
+/// tells apart, so the guard stores it.
+///
+/// Why STA and not MTA: `SHCreateItemFromParsingName` may instantiate
+/// third-party icon handlers (`IExtractIcon` shell extensions), and those are
+/// overwhelmingly registered `ThreadingModel=Apartment`. From an MTA thread
+/// COM would still work, but by spinning up a hidden host STA and marshalling
+/// every call across — slower and with more that can time out. A worker that
+/// IS an STA gets them in-process and direct. This is the same choice
+/// `smart_cascade::run_browser` made for its dedicated thread, and the one
+/// Explorer's own helper threads make.
+pub struct ComSta(bool);
+
+impl ComSta {
+    /// Join (or create) this thread's STA. Never fails; a `RPC_E_CHANGED_MODE`
+    /// thread simply gets a guard that will not uninitialise anything.
+    pub fn new() -> Self {
+        #[cfg(windows)]
+        unsafe {
+            use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+            ComSta(CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok())
+        }
+        #[cfg(not(windows))]
+        {
+            ComSta(false)
+        }
+    }
+
+    /// True when this guard's own `CoInitializeEx` succeeded (S_OK or S_FALSE)
+    /// and will therefore be balanced on drop. Exposed for the proof test,
+    /// which asserts the worker thread genuinely joined an apartment.
+    pub fn joined(&self) -> bool {
+        self.0
+    }
+}
+
+impl Default for ComSta {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for ComSta {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if self.0 {
+            unsafe { windows::Win32::System::Com::CoUninitialize() };
+        }
+    }
+}
 
 /// Icon edge in pixels. 48 stays crisp on high-DPI displays while keeping
 /// the base64 payload small (the picker sends one per app in a single IPC
@@ -39,42 +110,51 @@ const ICON_PX: i32 = 48;
 /// Store app, or any other shell-parsable path. Returns `None` if the shell
 /// has no image for it.
 pub fn extract_icon(target: &str) -> Option<String> {
+    extract_icon_checked(target).ok()
+}
+
+/// `extract_icon`, but a failure says WHICH call failed and with what HRESULT
+/// (`"SHCreateItemFromParsingName: 0x80070002"`). The picker's proof test
+/// needs that: a `None` cannot distinguish "the shell has no image for this"
+/// from "COM is broken on this thread", and the second is the one the test
+/// exists to rule out.
+pub fn extract_icon_checked(target: &str) -> Result<String, String> {
     #[cfg(windows)]
     {
         let rgba = shell_icon_rgba(target, ICON_PX)?;
-        let png = encode_rgba_as_png(&rgba, ICON_PX as u32, ICON_PX as u32)?;
-        Some(STANDARD.encode(&png))
+        let png = encode_rgba_as_png(&rgba, ICON_PX as u32, ICON_PX as u32)
+            .ok_or_else(|| "png encode failed".to_string())?;
+        Ok(STANDARD.encode(&png))
     }
     #[cfg(not(windows))]
     {
         let _ = target;
-        None
+        Err("not windows".into())
     }
 }
 
 /// Ask the shell for `target`'s icon and return straight RGBA8 pixels.
 #[cfg(windows)]
-fn shell_icon_rgba(target: &str, size: i32) -> Option<Vec<u8>> {
+fn shell_icon_rgba(target: &str, size: i32) -> Result<Vec<u8>, String> {
     use windows::core::{Interface, HSTRING, PCWSTR};
     use windows::Win32::Foundation::SIZE;
     use windows::Win32::Graphics::Gdi::{
         DeleteObject, GetDIBits, GetDC, ReleaseDC, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
         DIB_RGB_COLORS,
     };
-    use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
     use windows::Win32::UI::Shell::{
         IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK,
         SIIGBF_ICONONLY,
     };
 
     unsafe {
-        // Ignore the result: RPC_E_CHANGED_MODE just means this thread is
-        // already in a different apartment, which works fine here.
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        // Balanced on every exit path, including the `?`s below — see ComSta.
+        let _com = ComSta::new();
 
         let wide = HSTRING::from(target);
         let factory: IShellItemImageFactory =
-            SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None).ok()?;
+            SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None)
+                .map_err(|e| format!("SHCreateItemFromParsingName: 0x{:08X}", e.code().0))?;
 
         // BIGGERSIZEOK: prefer a larger source over an upscaled small one.
         // ICONONLY: never substitute a document thumbnail for the app icon.
@@ -83,7 +163,7 @@ fn shell_icon_rgba(target: &str, size: i32) -> Option<Vec<u8>> {
                 SIZE { cx: size, cy: size },
                 SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK,
             )
-            .ok()?;
+            .map_err(|e| format!("IShellItemImageFactory::GetImage: 0x{:08X}", e.code().0))?;
 
         let mut bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
@@ -113,7 +193,7 @@ fn shell_icon_rgba(target: &str, size: i32) -> Option<Vec<u8>> {
         let _ = DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(hbitmap.0));
 
         if scanlines == 0 {
-            return None;
+            return Err("GetDIBits: 0 scanlines".into());
         }
 
         // Premultiplied BGRA → straight RGBA.
@@ -148,7 +228,7 @@ fn shell_icon_rgba(target: &str, size: i32) -> Option<Vec<u8>> {
             }
         }
 
-        Some(pixels)
+        Ok(pixels)
     }
 }
 

@@ -14,6 +14,11 @@
 ///   9. Wire close-to-tray for settings window
 ///  10. Show tray; settings window starts hidden (visible: false in tauri.conf.json)
 
+/// PROBLEM 253 — "is this copy a portable, self-contained build (a
+/// `portable.txt` marker beside the exe), and if so where does ALL of its
+/// data live?" The one resolver every data-path site (`startup::data_dir`,
+/// `config::backup_dir`, and everything built on top of them) goes through.
+mod portable;
 mod browser;
 /// Chromium browser + profile detection, and every branch that decides whether
 /// a binding launches into a specific profile or the untouched default browser.
@@ -21,6 +26,10 @@ mod browser_profiles;
 mod commands;
 /// PROBLEM 131 — breadcrumbs read by the panic hook.
 mod crash_context;
+/// PROBLEM 253 — the "Report a problem" bundle: one zip of the log tail, a
+/// scrubbed config and a system summary, revealed in Explorer and NEVER
+/// uploaded.
+mod diagnostics;
 mod config;
 mod display_watch;
 mod rival_install;
@@ -29,15 +38,37 @@ mod guide_hud;
 mod hook;
 mod icon_extractor;
 mod logger;
+/// PROBLEM 250 — "is this copy running from an MSIX package (the Microsoft
+/// Store build)?", and the four things that are silently wrong when it is:
+/// the in-app updater, autostart, the config's real location, and the
+/// rival-install banner's one-click repair.
+mod packaged;
+mod picker_worker;
 /// PROBLEM 224 — takes `WM_ENDSESSION` before tao can set its runner to
 /// `Destroyed`, which is the whole of the "cannot move state from Destroyed"
 /// crash. Installed from `create_app_windows`, from `setup()` and from
 /// `display_watch::rebuild_once`; all three are idempotent.
+/// PROBLEM 253 — three failed startups in a row and the NEXT launch comes up
+/// with no keyboard hook, no overlay and a banner. The counter lives in
+/// `boot-attempts.json`; a clean `WM_ENDSESSION` exit is explicitly excluded
+/// from it (PROBLEM 224 would otherwise make every third reboot look like a
+/// crash).
+mod safe_mode;
 mod session_end;
 mod startup;
 /// PROBLEM 195 — crash/error reporting to Sentry, and its kill switch.
 mod telemetry;
 mod tray;
+// PROBLEM 245 — the in-app updater.
+mod updater;
+// PROBLEM 249 — "What's new": the GitHub release notes for this version.
+mod release_notes;
+/// REVIEW FIXES 2026-09-05 (H4) — the ONE reading of Windows' app light/dark
+/// setting, and the `os-theme-changed` event both windows resolve "auto"
+/// against. `prefers-color-scheme` inside a webview reports what that webview
+/// was configured to prefer, which is why the dashboard and the overlay used
+/// to disagree.
+mod theme_watch;
 
 use commands::{ConfigState, IconCacheState};
 use crossbeam_channel::bounded;
@@ -318,6 +349,25 @@ pub fn create_app_windows(app_handle: &tauri::AppHandle) {
         if app_handle.get_webview_window(&wc.label).is_some() {
             continue;
         }
+        // PROBLEM 253 — safe mode creates the dashboard and NOTHING else.
+        //
+        // The overlay is a transparent, always-on-top, click-through WebView2
+        // window, and CLAUDE.md's window rules are a list of the ways it has
+        // failed on this project's own machines — a fullscreen transparent
+        // sheet that composed zero pixels, a blur that made the whole window
+        // vanish, a driver change that killed compositing while every readback
+        // said "visible". It is a plausible cause of a launch that has now died
+        // three times, and it is the one window the user does not need in order
+        // to reach the button that fixes things.
+        if wc.label == "overlay" && safe_mode::active() {
+            log::warn!(
+                "setup: SAFE MODE — the 'overlay' window was deliberately NOT created. The \
+                 Guide HUD and toasts are absent for this launch; they come back at the next \
+                 restart after 'Turn back on'. This is not the PROBLEM 59 cold-boot failure — \
+                 nothing tried and failed."
+            );
+            continue;
+        }
         let label = wc.label.clone();
         match tauri::WebviewWindowBuilder::from_config(&app_handle, &wc).and_then(|b| b.build()) {
             Ok(_) => {
@@ -358,6 +408,10 @@ pub fn create_app_windows(app_handle: &tauri::AppHandle) {
         use tauri::Manager;
         if let Some(overlay) = app_handle.get_webview_window("overlay") {
             configure_overlay_window(&overlay);
+        } else if safe_mode::active() {
+            // PROBLEM 253 — expected, not a fault. An ERROR here would be the
+            // log telling a reader the overlay broke when it was never built.
+            log::info!("setup: no overlay to configure — safe mode did not create one");
         } else {
             log::error!("setup: 'overlay' window missing — HUD and toasts will not be visible");
         }
@@ -440,6 +494,17 @@ pub fn create_app_windows(app_handle: &tauri::AppHandle) {
             if app_handle.get_webview_window(label).is_some() {
                 continue;
             }
+            // PROBLEM 253 — the recovery must not undo the safe-mode decision.
+            //
+            // This branch exists to rebuild a window WebView2 failed to attach
+            // to. In safe mode the overlay is missing because we chose not to
+            // build it, and a recovery that cannot tell those two apart would
+            // faithfully rebuild the exact window safe mode was avoiding —
+            // silently, and with an ERROR line claiming a cold-boot failure
+            // that never happened.
+            if label == "overlay" && safe_mode::active() {
+                continue;
+            }
             log::error!(
                 "setup: webview '{label}' DOES NOT EXIST — WebView2 failed to attach \
                  (cold-boot race, or no WebView2 runtime installed). Rebuilding it."
@@ -474,7 +539,19 @@ pub fn create_app_windows(app_handle: &tauri::AppHandle) {
                     .theme(Some(tauri::Theme::Light)) // mirrors conf "theme": "Light"
                     .inner_size(1220.0, 880.0)
                     .min_inner_size(720.0, 520.0)
-                    .center();
+                    .center()
+                    // PROBLEM 235 — Tauri v2 enables its OWN native drag-drop
+                    // handler per window by default, which swallows HTML5
+                    // dragstart/dragover/drop before the page ever sees them
+                    // (the profile popover's reorder handles worked in the Vite
+                    // preview and did nothing in the real WebView). This
+                    // fallback rebuild path must mirror `dragDropEnabled: false`
+                    // on the "settings" window in tauri.conf.json, which is
+                    // where the NORMAL boot path (`WebviewWindowBuilder::
+                    // from_config`, above) gets it from — this hand-built
+                    // branch only runs after a cold-boot WebView2 failure and
+                    // would silently re-enable native drag-drop if it forgot.
+                    .drag_and_drop(false);
             }
             match builder.build() {
                 Ok(w) => {
@@ -523,7 +600,29 @@ pub fn create_app_windows(app_handle: &tauri::AppHandle) {
     // arrangement changes underneath it, while every readback still
     // says visible=true. Watch for the change and rebuild. Started
     // AFTER set_app_handle so a rebuild can hide the HUD first.
-    display_watch::start(app_handle.clone());
+    // PROBLEM 253 — and not in safe mode. `display_watch` polls for an overlay
+    // that is missing and rebuilds it (`rebuild_once`), which is exactly right
+    // when a display change killed it and exactly wrong here: it would put the
+    // overlay back a few seconds after safe mode decided not to have one, and
+    // then report `OverlayRebuildFailed` if it could not. The watcher is a
+    // recovery for a window that is supposed to exist.
+    if safe_mode::active() {
+        log::warn!(
+            "setup: SAFE MODE — the display watcher was NOT started, because its job is to \
+             rebuild a missing overlay and this launch has no overlay by design."
+        );
+    } else {
+        display_watch::start(app_handle.clone());
+    }
+
+    // REVIEW FIXES 2026-09-05 (H4) — started in safe mode TOO, unlike the
+    // display watcher above. That one is skipped because its job is to rebuild
+    // an overlay this launch deliberately does not have; this one only reads a
+    // registry value and emits an event, and a safe-mode launch still shows
+    // the dashboard — in the wrong palette, if nothing tells it what Windows
+    // wants. See theme_watch.rs for why this is a poll and not
+    // WM_SETTINGCHANGE.
+    theme_watch::start(app_handle.clone());
 
     // PROBLEM 224 — re-arm the WM_ENDSESSION guard now that `settings` and
     // `overlay` exist. `setup()` already armed it on tao's event target (the
@@ -537,6 +636,26 @@ pub fn create_app_windows(app_handle: &tauri::AppHandle) {
     // thread — `setup()` inline, the settle thread via `run_on_main_thread`,
     // and the single-instance handler.
     session_end::install();
+
+    // 1.0.96 — THE ONE-SHOT OVERLAY RE-TEST. One line on purpose; the whole
+    // decision (is this machine in software rendering? has it been re-checked?
+    // draw, watch, judge, write, log) lives in `commands::retest_software_
+    // overlay_once`, beside the self-test machinery it reuses.
+    //
+    // HERE and not earlier because this is the first point at which the overlay
+    // window is known to exist. It returns immediately on every machine that is
+    // not in software rendering, and it defers its own work by 8s on a
+    // background thread, so nothing about the startup path changes.
+    #[cfg(windows)]
+    commands::retest_software_overlay_once(&app_handle);
+
+    // PROBLEM 237 — pre-warm the app picker. One channel send on this thread;
+    // the scan itself runs seconds later on `st-picker-scan`, a below-normal
+    // STA worker, and only if `warm_picker_at_startup` says so. HERE because
+    // this is the point that follows both launch paths' settle (inline on a
+    // manual launch, after AUTOSTART_SETTLE on an autostart one), so the hook,
+    // the engine and the tray are all already live before it is even queued.
+    picker_worker::warm_at_boot(&app_handle);
 
     log::info!("setup: windows created and configured");
 }
@@ -721,6 +840,37 @@ pub fn run() {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "unknown path".into())
     );
+    // PROBLEM 250 — and WHICH WORLD is this. Third line of every log, right
+    // after "which version, from where", because a Store install behaves
+    // differently in four places and none of the differences are visible from
+    // a version number or a path. `grep package-identity-probe debug.log`.
+    packaged::log_identity_once();
+
+    // PROBLEM 253 — FOURTH line of every log: is this a safe-mode launch?
+    //
+    // Placed here, immediately after the logger, because the answer decides
+    // what `setup()` does — no hook, no overlay — so it has to be known before
+    // the Tauri builder exists.
+    //
+    // **REVIEW FIXES 2026-09-05 (C1): this call is now READ-ONLY.** It used to
+    // write `failed_starts + 1` here too, and that made every duplicate launch
+    // a recorded startup crash: `tauri-plugin-single-instance` initialises
+    // AFTER this line and a second instance exits from inside it with
+    // `cleanup_before_exit()` + `process::exit(0)` — no `RunEvent`, so
+    // `note_clean_exit()` never runs and the `+1` stuck. Three double-clicks on
+    // the icon put a healthy app in safe mode. The increment moved to
+    // `safe_mode::note_surviving_instance()`, the first line of `setup()`,
+    // which only the surviving instance ever reaches.
+    //
+    // Deliberately BEFORE `telemetry::init()`: reading a small JSON file cannot
+    // fail in a way that matters (every failure reads as zero), and a crash
+    // reporter that has not started yet is a smaller loss than a boot decision
+    // that never got made.
+    let safe_mode_launch = safe_mode::begin();
+    // PROBLEM 253 — and, right after "which world", WHERE that world's data
+    // lives. A portable copy resolves every data path under its own exe
+    // directory instead of %APPDATA%; this is the one line that says so.
+    portable::log_root_once();
 
     // PROBLEM 195 — start the Sentry client. Returns None (and this is a
     // no-op) while `telemetry::SENTRY_DSN` is the empty placeholder, which is
@@ -837,6 +987,20 @@ pub fn run() {
              error — please report it with the lines above from debug.log."
         );
 
+        // PROBLEM 253 — tell the boot counter this launch faulted.
+        //
+        // ABOVE the backtrace and above `capture_panic` on purpose. Both of
+        // those can take real time (`force_capture` symbolises every frame; the
+        // Sentry flush waits up to two seconds), and if the process is killed
+        // part-way through this hook, the ONE fact that decides whether the
+        // next launch protects the user has to already be on disk.
+        //
+        // A no-op after the first 30 seconds: a panic in a long-running session
+        // is not a STARTUP crash, and treating it as one would eventually
+        // disarm the shortcuts of somebody whose app works perfectly well for
+        // an hour at a time.
+        safe_mode::note_panic();
+
         // PROBLEM 131 — what the app was DOING. A backtrace says which code was
         // on the stack; this says the overlay had been rebuilt twice and a
         // display changed 4 seconds ago, which is usually what identifies the
@@ -910,6 +1074,13 @@ pub fn run() {
     // 4. Config (before startup registration — the task's enabled state
     //    comes from config.run_at_startup)
     // ----------------------------------------------------------------
+    // PROBLEM 250 — BEFORE load_or_init, and only ever on a packaged first
+    // launch: take a durable snapshot of the config and its backups, so a user
+    // who installs from the Store and then uninstalls the unpackaged copy
+    // cannot lose their profiles to that uninstaller. A no-op for every NSIS
+    // and MSI install, which is every install that exists today.
+    packaged::migrate_legacy_data_once();
+
     let shared_config = config::load_or_init();
 
     // PROBLEM 180 — publish which optional special keys are bound BEFORE the
@@ -1031,6 +1202,10 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        // PROBLEM 245 — the in-app updater. Registered here; DRIVEN entirely
+        // from Rust (updater.rs), so no updater permission is granted to any
+        // window and the frontend never touches it.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             use tauri::Manager;
             // A second AUTOSTART instance (PROBLEM 64: the Run-key launch
@@ -1079,6 +1254,16 @@ pub fn run() {
             commands::undo_last_change,
             commands::undo_available,
             commands::set_overlay_compositing,
+            // 1.0.96 — the Conflicts-area "The ring isn't showing?" tool that
+            // replaced the "Software overlay" switch. Re-runs the pixel
+            // self-test on demand and writes the verdict, in both directions.
+            commands::run_overlay_fix,
+            // 1.0.96 — the "Restart now" the ring check offers when its verdict
+            // changed. NOT `AppHandle::restart()`: that spawns before it exits
+            // and single-instance then kills the newcomer (see the command).
+            commands::restart_app,
+            // PROBLEM 245 — "Updated to 1.0.X", asked once by the dashboard.
+            commands::get_update_notice,
             // PROBLEM 195 — the "Don't send logs" switch.
             commands::set_send_logs,
             commands::restart_elevated,
@@ -1093,6 +1278,9 @@ pub fn run() {
             // PROBLEM 206 — the Guide HUD's chip geometry, for pointer
             // activation. Same CSS-px + dpr convention as overlay_shape.
             commands::publish_hud_chips,
+            // 1.0.96 — Settings previews the REAL ring in a layout the user has
+            // not chosen yet. Writes nothing and cannot launch anything.
+            commands::preview_hud_layout,
             commands::find_browser_cmd,
             commands::validate_browser,
             // TASK 3 — the OS default browser (path + name + icon) for the
@@ -1103,6 +1291,16 @@ pub fn run() {
             commands::create_profile,
             commands::delete_profile,
             commands::rename_profile,
+            // 1.0.96 — the profile editor's edit mode. `reorder_profiles` is
+            // the one to notice: `profiles` is the order RAlt cycles in, so a
+            // drag is a behaviour change and the command validates the whole
+            // set rather than trusting the list the DOM produced.
+            commands::reorder_profiles,
+            commands::duplicate_profile,
+            commands::set_profile_emoji,
+            commands::open_emoji_panel,
+            commands::export_profile,
+            commands::import_profile,
             commands::list_start_menu_apps,
             browser_profiles::list_browser_profiles,
             commands::toggle_bypass,
@@ -1119,45 +1317,135 @@ pub fn run() {
             commands::open_startup_manager,
             commands::reinstall_hook,
             commands::set_startup_enabled,
+            // PROBLEM 250 — the Store build's two extra questions: who owns
+            // "Run at startup" here, and where does the user uninstall the
+            // other copy.
+            commands::get_packaged_startup,
+            // PROBLEM 254 — "is this the unzipped, portable copy?" One bool,
+            // for the frontend paths where only the WORDING differs (the
+            // rival-install banner). The Settings "Run at startup" row needs
+            // no new command: its portable case rides on
+            // `get_packaged_startup`'s existing tuple.
+            commands::is_portable_install,
+            commands::open_installed_apps,
+            // PROBLEM 249 — the manual check, the rollback, and What's New.
+            updater::check_for_updates_now,
+            updater::rollback_available,
+            updater::rollback_to_previous,
+            release_notes::get_release_notes,
+            release_notes::get_whats_new,
+            // PROBLEM 253 — safe mode and "Report a problem".
+            commands::get_safe_mode,
+            commands::safe_mode_turn_back_on,
+            commands::build_diagnostics_bundle,
+            commands::open_issues_page,
+            // PROBLEM 255 — Settings ▸ About's version / install-kind /
+            // data-folder line. Without this line `fetchAboutInfo()`'s first
+            // branch always throws and every build silently shows the
+            // `getVersion()`-only fallback — a correct degrade path, but not
+            // the one the row was built for.
+            commands::get_about_info,
+            // REVIEW FIXES 2026-09-05 (H4) — the SEED half of the OS
+            // light/dark wiring. `os-theme-changed` only fires on a change, so
+            // without this a freshly-created window (a first launch, or the
+            // overlay display_watch.rs rebuilds when the monitors move) would
+            // resolve "auto" against theme-resolve.ts's daylight default until
+            // the user next touched their Windows setting. Both halves, every
+            // time.
+            theme_watch::get_os_prefers_dark,
+            // PROBLEM 259 — the own-window fallback (PROBLEM 257's workaround).
+            // The dashboard page feeds the Space it can see to the engine
+            // because the keyboard hook cannot see it while our own window
+            // holds the foreground. All three guards live in `hook::`.
+            commands::own_window_space_down,
+            commands::own_window_key,
+            commands::own_window_space_up,
         ])
         // --- App setup callback ---
         .setup(move |app| {
             let app_handle = app.handle().clone();
 
+            // REVIEW FIXES 2026-09-05 (C1) — THE BOOT COUNTER'S INCREMENT, and
+            // it must stay the FIRST statement in this closure.
+            //
+            // `setup()` is the earliest point at which this process is known to
+            // have won the single-instance mutex: plugin initialisation runs
+            // strictly earlier (tauri 2.11 `app.rs` — `initialize_plugins`
+            // :2440, `(setup)(app)` :2531) and a duplicate launch exits from
+            // inside `tauri-plugin-single-instance` with `process::exit(0)`,
+            // never reaching this line. Incrementing any earlier counted the
+            // user's double-clicks on the tray icon as startup crashes.
+            //
+            // First, not last: everything below it — the hook, the overlay, the
+            // engine — is what safe mode exists to recover from, so a crash in
+            // any of it has to find the `+1` already on disk.
+            safe_mode::note_surviving_instance();
+
+            // PROBLEM 253 — start the 30-second health timer, on every
+            // launch, safe mode or not. It is what resets the boot counter, so
+            // a launch that never starts it is a launch that counts as a
+            // failure however well it goes.
+            safe_mode::spawn_healthy_timer();
+
             // 7. Spawn hook thread
             {
                 let cfg = shared_config.read().unwrap_or_else(|p| p.into_inner());
-                hook::spawn_hook_thread(hook_tx.clone(), cfg.rollover_ms);
-                log::info!("setup: hook thread spawned");
+                // PROBLEM 253 — THE SAFE-MODE BRANCH. This is the one that
+                // matters: `spawn_hook_thread` installs WH_KEYBOARD_LL, and a
+                // hook is the single most likely thing to be killing a launch
+                // that has now died three times in a row. The channel is parked
+                // instead, so the dashboard's "Turn back on" can spawn exactly
+                // this thread later without a restart.
+                if safe_mode_launch {
+                    safe_mode::arm_pending_hook(hook_tx.clone(), cfg.rollover_ms);
+                    log::warn!(
+                        "setup: SAFE MODE — the keyboard hook thread was NOT spawned and \
+                         the fullscreen / exception / pointer watchers were not started. \
+                         Space is an ordinary space until the user presses 'Turn back \
+                         on'. See the {} line above.",
+                        safe_mode::MARKER
+                    );
+                    // The report goes out from here rather than from
+                    // `safe_mode::begin()` because `telemetry::publish` has now
+                    // run — consent is known, and a report sent before that
+                    // would be sent without it.
+                    telemetry::report_degraded(
+                        telemetry::Degraded::SafeModeEntered,
+                        &safe_mode::describe(),
+                    );
+                } else {
+                    hook::spawn_hook_thread(hook_tx.clone(), cfg.rollover_ms);
+                    log::info!("setup: hook thread spawned");
 
-                // 8. Start fullscreen watcher
-                let fullscreen_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let flag_clone = Arc::clone(&fullscreen_flag);
-                hook::fullscreen::start_fullscreen_watcher(
-                    flag_clone,
-                    cfg.fullscreen_allowlist.clone(),
-                );
+                    // 8. Start fullscreen watcher
+                    let fullscreen_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let flag_clone = Arc::clone(&fullscreen_flag);
+                    hook::fullscreen::start_fullscreen_watcher(
+                        flag_clone,
+                        cfg.fullscreen_allowlist.clone(),
+                    );
 
-                // 8b. Start the App-exceptions watcher. Same shape as the
-                // fullscreen watcher above: a named 500ms poller that writes
-                // one atomic the hook reads, because the hook callback may not
-                // ask Windows which window is in front.
-                hook::exclusions::start_exclusion_watcher();
+                    // 8b. Start the App-exceptions watcher. Same shape as the
+                    // fullscreen watcher above: a named 500ms poller that writes
+                    // one atomic the hook reads, because the hook callback may not
+                    // ask Windows which window is in front.
+                    hook::exclusions::start_exclusion_watcher();
 
-                // 8c. Start the Guide-HUD pointer watcher (PROBLEM 206): the
-                // ~60Hz poller that turns the mouse hook's cursor atomics and
-                // the published chip geometry into an armed-chip decision.
-                // Same shape as the two pollers above, for the same reason —
-                // the hook callback may do lock-free atomics only.
-                hook::pointer::start_pointer_watcher();
+                    // 8c. Start the Guide-HUD pointer watcher (PROBLEM 206): the
+                    // ~60Hz poller that turns the mouse hook's cursor atomics and
+                    // the published chip geometry into an armed-chip decision.
+                    // Same shape as the two pollers above, for the same reason —
+                    // the hook callback may do lock-free atomics only.
+                    hook::pointer::start_pointer_watcher();
 
-                // PROBLEM 88 — the 500ms "copier" thread that used to live
-                // here is GONE. It was the only writer to
-                // hook::FULLSCREEN_ACTIVE, so if the watcher thread died while
-                // a game had the flag true, this loop re-stored `true` forever
-                // and the hook passed EVERY key through — the whole app inert,
-                // silently, until restart. start_fullscreen_watcher now writes
-                // the flag directly (and fails toward "not fullscreen").
+                    // PROBLEM 88 — the 500ms "copier" thread that used to live
+                    // here is GONE. It was the only writer to
+                    // hook::FULLSCREEN_ACTIVE, so if the watcher thread died while
+                    // a game had the flag true, this loop re-stored `true` forever
+                    // and the hook passed EVERY key through — the whole app inert,
+                    // silently, until restart. start_fullscreen_watcher now writes
+                    // the flag directly (and fails toward "not fullscreen").
+                } // end of the PROBLEM 253 safe-mode else
             }
 
             // 9. Start async engine actor
@@ -1220,6 +1508,21 @@ pub fn run() {
                 std::thread::Builder::new()
                     .name("st-tray-promote".into())
                     .spawn(move || {
+                        // PROBLEM 250 follow-up (LIVE TEST 2026-09-05,
+                        // FINDING D) — a packaged copy has nothing to do here
+                        // and must not spend 24 seconds finding that out.
+                        //
+                        // `promote_tray_icon_once` refuses under a package and
+                        // says why once (its doc comment has the measurement:
+                        // HKCU writes go to the package's private hive and the
+                        // shell never sees them). Without this return the loop
+                        // below would sleep 3 s eight times, every launch,
+                        // forever — the once-gate can never close, because it
+                        // only closes on a successful promotion.
+                        if crate::packaged::is_packaged() {
+                            startup::promote_tray_icon_once();
+                            return;
+                        }
                         // PROBLEM 142 — gate on the exe PATH, not a bare bool.
                         //
                         // The old `tray_promoted` flag latched true on
@@ -1334,6 +1637,17 @@ pub fn run() {
 
 
 
+            // PROBLEM 245 — the in-app updater. Two calls, both cheap and both
+            // off the critical path: note which version is launching (for the
+            // one-time "Updated to" toast), then start the st-updater thread,
+            // which sleeps past the settle before its first check.
+            updater::record_launch_version(&app_handle.package_info().version.to_string());
+            updater::schedule(app_handle.clone());
+            // PROBLEM 249 — "What's new". Its own thread, 25 s out, behind both
+            // window creation and the updater's first check. Reads the notice
+            // record_launch_version just wrote WITHOUT consuming it.
+            release_notes::schedule(app_handle.clone());
+
             log::info!("SpaceToggle OS fully initialised");
             println!("✅ Spaceadom initialised & ready.");
             // PROBLEM 89 — from here the user has a tray icon: a later panic
@@ -1361,6 +1675,26 @@ pub fn run() {
                 // its own map, so running twice restores nothing twice.
                 if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
                     engine::actions::pip::restore_all();
+                    // PROBLEM 253 — an ORDERLY exit is not a startup crash.
+                    //
+                    // This covers the tray's "Exit Spaceadom", the updater
+                    // exiting so its installer can replace the exe, and any
+                    // other `app.exit()`. Quitting the app within thirty
+                    // seconds of launching it is a completely ordinary thing to
+                    // do, and doing it three times would otherwise disarm the
+                    // user's shortcuts and tell them their app had crashed.
+                    //
+                    // The OTHER clean-exit path — `WM_ENDSESSION`, a sign-out
+                    // or an installer's Restart Manager — never reaches here at
+                    // all: `session_end.rs` calls `std::process::exit(0)` from
+                    // inside its own handler, deliberately, so tao's runner is
+                    // never told (PROBLEM 224). That one calls
+                    // `note_clean_exit` from `session_end::teardown`. Two
+                    // paths, because there genuinely are two exits.
+                    //
+                    // Idempotent: it writes one number, and both events firing
+                    // writes it twice.
+                    safe_mode::note_clean_exit();
                 }
             })
         });

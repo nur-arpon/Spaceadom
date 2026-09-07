@@ -95,21 +95,29 @@ pub fn init(log_dir: &PathBuf) {
 }
 
 /// Returns the canonical log directory, creating it if necessary.
+///
+/// **PROBLEM 253/254 — this is the folder "Open log folder" opens, so it has
+/// to be the folder the logger was actually pointed at.** `run()` calls
+/// `logger::init(&startup::data_dir())`, and since PROBLEM 254 made
+/// `startup::data_dir()` portable-aware — a `portable.txt` beside the exe
+/// moves every file this app writes into `<exe dir>\data\` — a second,
+/// independent computation of `%APPDATA%\Spaceadom` here would open an empty
+/// folder (or somebody's months-old installed-copy log) on a portable copy
+/// while looking perfectly correct. `diagnostics.rs` already made exactly
+/// this choice for the same reason and said so in a comment; this removes the
+/// second definition rather than leaving two.
+///
+/// For an ordinary installed copy this returns exactly what it always did,
+/// `%APPDATA%\Spaceadom` — `portable::roaming_default()` computes it the same
+/// way the deleted `dirs_or_appdata()` did. The one behavioural difference is
+/// in the degenerate case where `%APPDATA%` is unset: the old local helper
+/// fell back to the exe's own directory, `portable::roaming_default()` falls
+/// back to the relative path `Spaceadom`. That is the fallback the LOGGER
+/// ITSELF has already been using since PROBLEM 254 (`run()` passes
+/// `startup::data_dir()` to `init`), so aligning this with it removes a
+/// disagreement rather than creating one.
 pub fn log_dir() -> PathBuf {
-    let base = dirs_or_appdata();
+    let base = crate::startup::data_dir();
     std::fs::create_dir_all(&base).ok();
     base
-}
-
-fn dirs_or_appdata() -> PathBuf {
-    // %APPDATA%\Spaceadom
-    std::env::var("APPDATA")
-        .map(|p| PathBuf::from(p).join("Spaceadom"))
-        .unwrap_or_else(|_| {
-            std::env::current_exe()
-                .unwrap_or_default()
-                .parent()
-                .unwrap_or(std::path::Path::new("."))
-                .to_path_buf()
-        })
 }

@@ -915,9 +915,19 @@ pub fn start_pointer_watcher() {
                 let mut seen_hold: u64 = u64::MAX;
                 let mut hold_start_cursor: Option<(i32, i32)> = None;
                 let mut chips = [(0i32, 0i32, 0i32, 0i32); MAX_CHIPS];
+                // PROBLEM 261 — when the fallback reaper last probed the
+                // foreground. `0` is "never", and `tick_count()` never returns
+                // 0 in practice, so the first probe happens on the first tick
+                // of the first fallback hold.
+                let mut last_fg_probe: u64 = 0;
                 loop {
                     let enabled = super::POINTER_HUD_ACTIVATION.load(Ordering::Relaxed);
-                    let held = super::MODIFIER_ACTIVE.load(Ordering::Relaxed);
+                    // PROBLEM 261 — BOTH witnesses. A fallback hold ticks at
+                    // the held cadence too: it has a ring on screen and a
+                    // cursor to follow, so polling it at the idle 40 ms rate
+                    // would make aiming inside the dashboard visibly coarser
+                    // than aiming anywhere else.
+                    let held = super::any_hold_latched();
                     let tick_ms = if !enabled {
                         250
                     } else if held {
@@ -950,11 +960,35 @@ pub fn start_pointer_watcher() {
                         tracker.cancel_arm();
                     }
 
+                    // PROBLEM 261 — and the FALLBACK's reaper, immediately
+                    // beside it and above the same `enabled` bail-out, for
+                    // exactly the reason written above: what it repairs is a
+                    // ring stranded on screen, which happens whether or not
+                    // the user has pointer activation switched on.
+                    //
+                    // The two are separate functions on purpose. This one's
+                    // liveness signal is the FOREGROUND, because guard 1
+                    // admitted the hold on that condition and it is observable
+                    // from outside the page; `reap_stale_hold`'s is the
+                    // keyboard hook's auto-repeat, which a fallback hold
+                    // produces none of. Merging them would mean one of the two
+                    // shapes losing its evidence.
+                    let now = super::tick_count();
+                    let probe_fg = now.saturating_sub(last_fg_probe)
+                        >= super::OWN_HOLD_FG_CHECK_MS;
+                    if probe_fg {
+                        last_fg_probe = now;
+                    }
+                    if super::reap_own_window_hold(probe_fg) {
+                        tracker.cancel_arm();
+                    }
+
                     if !enabled && tracker.armed.is_none() {
                         continue;
                     }
 
-                    let hold_ts = super::SPACE_DOWN_TS.load(Ordering::Relaxed);
+                    // PROBLEM 261 — the hold's identity across both witnesses.
+                    let hold_ts = super::current_hold_ts();
                     if hold_ts != seen_hold {
                         seen_hold = hold_ts;
                         // Guard 2's reference point. A failing/panicking
@@ -1008,7 +1042,15 @@ pub fn start_pointer_watcher() {
 
                     let input = TickIn {
                         enabled,
-                        modifier_active: super::MODIFIER_ACTIVE.load(Ordering::Relaxed),
+                        // PROBLEM 261 — `live` in `HoldTracker::tick` is
+                        // `enabled && modifier_active && hud_visible &&
+                        // !blocked`. Reading `MODIFIER_ACTIVE` alone here is
+                        // the third of the three gates that shut pointer
+                        // activation out of a fallback hold; the field keeps
+                        // its name because its MEANING is unchanged — "a Space
+                        // is held right now" — only the set of witnesses that
+                        // can say so has grown.
+                        modifier_active: super::any_hold_latched(),
                         // Guard 1 AND guard 5: `HUD_VISIBLE` is published even
                         // when OVERLAY_DISABLED (click-through failed at
                         // startup and the window is never shown), and a page

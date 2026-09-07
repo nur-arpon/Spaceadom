@@ -65,6 +65,17 @@ this app works at all.
   and on Windows 10 1709 and later it is capped at 1000ms regardless.
 - Microsoft's own prescription: run the hook on a dedicated thread that hands
   work to a worker and returns immediately.
+- **`CallNextHookEx` is synchronous, so a hook's timeout budget includes every
+  hook below it.** Position in the chain is therefore part of a hook's cost, not
+  just its body. `SetWindowsHookEx` inserts at the HEAD, so the hook installed
+  LAST is called FIRST and carries everything after it on its own clock.
+  Consequence for the common "install a second do-nothing hook as a liveness
+  witness" pattern: install the witness **first**, so it lands at the tail. A
+  witness installed last sits in front of the real hook, measures its own body
+  plus the whole chain, and is the first thing Windows evicts — the instrument
+  dies before the subject, and its silence then reads as health.
+  **This is not hypothetical: it happened in Spaceadom (PROBLEM 230, 514 false
+  watchdog teardowns in 3.8 hours) — full story at `docs/IF-SHORTCUTS-DIE-AGAIN.md`.**
 
 This produces a symptom that is almost always misdiagnosed: **the keyboard stops
 responding after a while, and restarting the app fixes it.** That reads like a

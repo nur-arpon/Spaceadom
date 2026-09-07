@@ -81,6 +81,19 @@ body.nocturne #halo {
               rgba(60, 85, 160, .10) 45%, transparent 70%);
 }
 
+/* PROBLEM 230 — the three ambient layers `is-blurred` did not cover.
+   `main.ts`'s wireAmbientPause has parked the sky (themes.css) and the whole
+   night scene (starry-sky.css) since PROBLEM 134, but these three were never
+   in either selector, so they kept running in every theme with the window
+   minimised. `#halo` is the expensive one: 980x460 at `filter: blur(30px)`,
+   re-rasterised every frame, and this dashboard composites in SOFTWARE on the
+   owner's machine. Measured with both windows minimised: the app's WebView2
+   tree held ~1.0 core continuously against a budget of ~0%.
+   Nothing is on screen while `is-blurred` is set, so this is invisible. */
+body.is-blurred #aura-a,
+body.is-blurred #aura-b,
+body.is-blurred #halo { animation-play-state: paused; }
+
 /* Cursor-follow glow — position driven by RAF lerp in main.ts */
 #cursor-glow {
   left: 0; top: 0;
@@ -183,6 +196,15 @@ body.nocturne #halo {
   font-size: 12px;
   font-weight: 800;
 }
+/* 1.0.96 — the active profile's emoji in place of its initial. The disc, its
+   ring and its size are UNCHANGED: only the glyph inside differs, so a profile
+   with an emoji and one without sit at exactly the same place in the topbar.
+   Nothing here applies until profile-editor.ts adds the class. */
+#profile-pill-initial.has-emoji {
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1;
+}
 #profile-pill-chev {
   margin-right: 6px;
   font-size: 10px;
@@ -279,18 +301,229 @@ body.nocturne #halo {
 #new-profile-row[hidden] { display: none; }
 #new-profile-input {
   flex: 1; min-width: 0;
-  height: 34px; padding: 0 14px;
+  /* PROBLEM 256 — 36px, not 34: matches `.btn`'s own base height
+     (design-system.css) so this row and its own "Add" button read as the same
+     control height as everything else in the popover, not a size that only
+     existed here. */
+  height: 36px; padding: 0 14px;
   border: 1.5px solid var(--st-accent-brd);
   font-size: 12.5px;
 }
-#new-profile-add { height: 34px; padding: 0 14px; }
+#new-profile-add { height: 36px; padding: 0 14px; }
 
+/* --------------------------------------------------------------------------
+   Profile popover — EDIT MODE (1.0.96)
+
+   Everything in this block is inert until `#profile-popover.editing` is set by
+   profile-editor.ts. The normal popover above is deliberately untouched: the
+   rule for this feature is that a profile list you are not editing looks and
+   behaves exactly as it did in 1.0.95.
+   -------------------------------------------------------------------------- */
+#profile-pop-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 6px 4px 10px;
+}
+#profile-pop-title {
+  flex: 1;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--st-text-dim);
+}
+/* PROBLEM 256 — was 26px/0 12px, the shortest control in the whole popover and
+   noticeably squat next to the 36px rows below it once this file's other
+   sizing fixes landed. Brought up to the same 36-40px band the owner asked
+   for across this popover (see `.dashed-btn`, `#new-profile-add`); padding
+   widened to match. */
+.profile-editmode {
+  height: 36px;
+  padding: 0 14px;
+  border-radius: var(--radius-full);
+  border: 1.5px solid var(--st-border);
+  background: transparent;
+  color: var(--st-text-dim);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.profile-editmode:hover {
+  border-color: var(--st-accent-brd);
+  color: var(--st-accent-deep);
+}
+/* Done is the EXIT, so it is the one filled control in the popover — the user
+   should never have to hunt for the way out of a mode. */
+.profile-editmode.done {
+  background: var(--st-accent);
+  border-color: var(--st-accent);
+  color: #fff;
+}
+
+/* The handle. `cursor: grab` is the whole affordance — there are no up/down
+   arrows by the owner's explicit decision, so the grip has to read as
+   draggable on sight. */
+.profile-row-grip {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--st-text-dim);
+  cursor: grab;
+  user-select: none;
+}
+.profile-row-grip:active { cursor: grabbing; }
+#profile-popover.editing .profile-row { cursor: default; }
+/* The row being dragged. No transform — the browser is already painting a
+   drag image, and a second moving copy reads as a glitch. */
+.profile-row.dragging { opacity: .4; }
+
+/* The emoji disc, and the tiny ✕ that sits on its corner. The wrapper exists
+   only to give the ✕ something to be positioned against. */
+.profile-row-disc-wrap { position: relative; flex-shrink: 0; display: flex; }
+.profile-row-icon.has-emoji {
+  /* An emoji is a picture, not a letter: it needs the room the 800-weight
+     initial did not, and none of the letter's typographic treatment. */
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1;
+}
+.profile-row-icon.editable { cursor: pointer; }
+.profile-row-icon.editable:hover {
+  border-color: var(--st-accent-brd);
+  background: var(--st-accent-tint);
+}
+.profile-row-emoji-clear {
+  position: absolute;
+  top: -3px; right: -3px;
+  width: 14px; height: 14px;
+  padding: 0;
+  border-radius: var(--radius-full);
+  border: 1.5px solid rgba(var(--srf-rgb), 1);
+  background: var(--st-danger);
+  color: #fff;
+  font-size: 8px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: transform var(--transition-fast);
+}
+.profile-row-emoji-clear:hover { transform: scale(1.15); }
+
+/* The emoji input. Sized to the disc it replaces, so the row does not jump
+   when the slot opens — a reflow at the exact moment the emoji panel appears
+   would make the two look causally linked when they are not. */
+.profile-emoji-input {
+  flex-shrink: 0;
+  width: 30px; height: 30px;
+  padding: 0;
+  text-align: center;
+  font-size: 15px;
+  border-radius: var(--radius-full);
+  border: 1.5px solid var(--st-accent-brd);
+  background: var(--st-accent-tint);
+  color: var(--st-text);
+  font-family: inherit;
+}
+.profile-emoji-input:focus { outline: none; border-color: var(--st-accent); }
+
+/* PROBLEM 256 — horizontal padding matched to the rest of the popover's
+   14px left inset (was 10px), so this line's text starts at the same x as a
+   profile row's name and the undo row's text instead of sitting slightly
+   left of everything around it. */
+.profile-emoji-help {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px 8px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--st-text-dim);
+  animation: st-pop-in 320ms var(--ease-spring) both;
+}
+.profile-emoji-help .btn { flex-shrink: 0; }
+
+/* Export / duplicate. Same 22px footprint and same reveal-on-hover as the ✕
+   they sit beside, so the three read as one group rather than three decisions. */
+.profile-row-act {
+  flex-shrink: 0;
+  width: 22px; height: 22px;
+  padding: 0;
+  border: none; background: transparent;
+  border-radius: var(--radius-full);
+  color: var(--st-text-dim);
+  font-size: 12px; cursor: pointer;
+  opacity: 0;
+  transition: all var(--transition-fast);
+}
+.profile-row:hover .profile-row-act,
+.profile-row:focus-within .profile-row-act { opacity: 1; }
+.profile-row-act:hover { background: var(--st-accent-tint); color: var(--st-accent-deep); }
+/* In edit mode the icons are the point of the row, so they do not hide. */
+#profile-popover.editing .profile-row-act,
+#profile-popover.editing .profile-row-del { opacity: 1; }
+
+/* PROBLEM 256 — Import used to stretch to the popover's full width exactly
+   like "+ New profile" above it, so the footer showed TWO full-width pills
+   with no way to tell which one was the primary action. "+ New profile" is
+   the single primary action here (it is also the only button visible outside
+   edit mode); Import is secondary and edit-mode-only, so it is sized to its
+   own content instead — `align-self: flex-start` overrides the flex column's
+   default stretch (`#profile-popover`'s children stretch to fill its width
+   unless told otherwise). */
+.profile-import { margin-top: 2px; align-self: flex-start; }
+
+/* The delete Undo, standing where the row was. Bordered rather than filled:
+   it is an offer, not a warning, and the row it replaces was never filled.
+   PROBLEM 256 — height pinned to the popover's 36px row band (was
+   content-driven, ~44px with a btn-sm inside plus this padding); vertical
+   padding dropped to 0 since `align-items: center` already centres the
+   button and the text against the fixed height. */
+.profile-undo-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 8px 0 14px;
+  border-radius: var(--radius-full);
+  border: 1.5px dashed var(--st-border);
+  animation: st-pop-in 380ms var(--ease-spring) both;
+}
+.profile-undo-text {
+  flex: 1; min-width: 0;
+  font-size: 12px;
+  color: var(--st-text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Reduced motion — final states, no entrances. Same contract as
+   design-system.css's `.reduced-motion` block, and the reason it is a
+   `:root.reduced-motion` class and not only a media query is PROBLEM 47: a
+   tester's OS said "no animation" and the app looked broken, so the app owns
+   an override. */
+:root.reduced-motion .profile-emoji-help,
+:root.reduced-motion .profile-undo-row { animation: none; }
+:root.reduced-motion .profile-row-emoji-clear:hover { transform: none; }
+
+/* PROBLEM 256 — 36px (was 34) to match `.btn`'s own base height and the rest
+   of this popover's rows. Explicit horizontal padding is NEW: this class used
+   to rely entirely on being stretched full-width by its flex-column parent
+   plus `justify-content: center`, which gave it no defined size at all once
+   `.profile-import` stopped stretching (see above) — a content-sized dashed
+   button with no padding hugs its label with no breathing room. */
 .dashed-btn {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  height: 34px;
+  height: 36px;
+  padding: 0 16px;
   border-radius: var(--radius-full);
   border: 1.5px dashed var(--st-accent-brd);
   background: transparent;
@@ -446,6 +679,16 @@ body.nocturne .key:hover { box-shadow: 0 14px 26px rgba(0, 0, 0, .45); }
   transition: opacity 280ms var(--ease-out);
 }
 #editor-backdrop.shown { opacity: 1; }
+/* REGRESSION SWEEP 2026-09-07 — the FADING-OUT backdrop must not eat clicks.
+   `closePanel()` removes `.shown` immediately but only sets `hidden` 280ms
+   later, so for those 280ms an invisible full-stage layer at z-index 8 still
+   took every pointer event: closing the editor with ✕ and then clicking
+   another key did nothing at all, and the user had to click twice. Measured in
+   the harness. The class is the same signal the opacity uses, so a backdrop
+   that is not `.shown` is never interactive — including the single frame
+   between `hidden = false` and the rAF that adds `.shown`, where it must not
+   be interactive either. */
+#editor-backdrop:not(.shown) { pointer-events: none; }
 #editor-backdrop[hidden] { display: none; }
 body.nocturne #editor-backdrop { background: rgba(0, 0, 0, .42); }
 
@@ -1048,17 +1291,27 @@ body.nocturne .bp-host { max-width: 230px; }
    HEIGHT: 32px pill, `align-self: center`, in a row still held at 36px by
    #ed-assign. Nothing is added below the row and the panel does not grow.
 
-   THE 4b DISC AND THE PILL ARE NEVER BOTH UP, and that falls out rather than
-   being enforced: the disc's job is "the link you are TYPING will open in X",
-   so it keys off `#ed-path`'s contents (syncPathDisc). Behind a pill that field
-   is empty, so the disc is down; click the pill to edit and the field holds the
-   URL again, so the disc comes straight back with its 90ms padding tween
-   intact. That is also the right answer semantically: once a URL is COMMITTED
-   the browser question belongs to the `.ed-bp-row` chip above, which is drawn
-   for exactly this binding — two controls for one choice, 300px apart, could
-   only ever disagree.
+   THE 4b DISC AND THE PILL CAN BOTH BE UP (changed 2026-09-04 — see below).
+   The disc's job is "the link you are TYPING will open in X", so it keys off
+   `#ed-path`'s contents (syncPathDisc) regardless of whether a pill sits
+   beside it: pasting a NEW url over an existing binding raises the disc same
+   as it always did on an empty key, while the pill keeps showing what is
+   still saved until Replace is actually pressed. They were never-both-up
+   ONLY because the field used to be hidden behind the pill, not because the
+   two disagree — see the next comment.
+
+   THE GATE THAT USED TO HIDE `#ed-path` BEHIND THIS PILL IS GONE (OWNER'S
+   FATHER TEST, 2026-09-04). He could assign an app to an EMPTY key, but on a
+   key that already had a link bound he could not see how to put a NEW one
+   in — only the pill and its ✕ were there to find, and the ✕ clears rather
+   than replaces. `paintPathPill()` in key-detail-panel.ts no longer sets
+   `input.hidden = true`; the field stays visible and usable right next to
+   the pill, and what used to be an unguarded overwrite is now guarded by one
+   inline confirm instead (`#ed-replace-confirm`, styled below). `#ed-path`
+   is therefore never hidden by anything in this file any more — no
+   `#ed-path[hidden]` rule is needed, and one is not kept here as dead
+   weight.
    -------------------------------------------------------------------------- */
-#ed-path[hidden] { display: none; }        /* an ID rule in this row => its own [hidden] companion */
 .ed-val-host {
   position: relative;                      /* the ✕'s positioning context, as .bp-host is for the chip */
   display: inline-flex; align-items: center;
@@ -1066,6 +1319,13 @@ body.nocturne .bp-host { max-width: 230px; }
   min-width: 0; max-width: 100%;
 }
 .ed-val-host[hidden] { display: none; }    /* inline-flex above would otherwise beat [hidden] */
+/* Sits beside a LIVE #ed-path now, not alone — capped so a long "Browser —
+   Profile" pill cannot squeeze the paste field down to nothing. #ed-path's
+   own `flex: 1` (above) takes whatever this leaves; DOM order keeps the
+   input first (left) and the pill second (right), which is also why the 4b
+   disc's `left: 5px` anchor (relative to `.ed-path-wrap`) still lands on the
+   INPUT's own leading edge rather than getting covered by the pill. */
+.ed-path-wrap .ed-val-host { flex: 0 1 150px; max-width: 150px; }
 .ed-val-chip {
   max-width: 100%;
   animation: st-pop-in 260ms var(--ease-spring) both;
@@ -1091,6 +1351,42 @@ body.nocturne .bp-host { max-width: 230px; }
 
 #ed-assign { height: 36px; padding: 0 16px; }
 #ed-assign:disabled { background: var(--st-border); border-color: var(--st-border); cursor: default; }
+
+/* --------------------------------------------------------------------------
+   The replace confirm + its Undo (2026-09-04) — OWNER'S FATHER TEST.
+
+   ONE box, filled by TWO different functions in sequence (key-detail-panel.ts):
+   `confirmReplace` puts "Replace 'X' with this? Replace · Keep" here the
+   instant a paste or an app-grid pick would overwrite an existing binding,
+   and once Replace is pressed `offerReplaceUndo` reuses the same box for
+   "Replaced 'X' · Undo" for 10s. Deliberately NOT `.warning-banner`'s amber —
+   this is an ordinary confirm, not an alert, so it takes the same accent tint
+   the browser-profile chip and the assigned-value pill already use rather
+   than introducing a second tone for the same panel.
+   -------------------------------------------------------------------------- */
+#ed-replace-confirm[hidden] { display: none; }
+#ed-replace-confirm { margin: 10px 2px 0; }
+.ed-replace-box {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 10px 14px;
+  background: var(--st-accent-tint);
+  border: 1px solid var(--st-accent-brd);
+  border-radius: var(--radius-lg);
+  animation: fade-in var(--dur-standard) var(--ease-out);
+}
+.ed-replace-text {
+  flex: 1;
+  min-width: 120px;
+  font-size: 12px;
+  color: var(--st-text);
+}
+.ed-replace-btns { display: flex; gap: 8px; flex-shrink: 0; }
+/* The Undo row reads quieter than the confirm — nothing left to decide, just
+   a way back — so it drops the confirm's two-button row for one. */
+.ed-replace-undo-row .ed-replace-btns { gap: 0; }
 
 .ed-foot { display: flex; gap: 8px; margin-top: 14px; justify-content: flex-end; }
 #ed-remove { height: 34px; padding: 0 14px; }
@@ -1118,8 +1414,14 @@ body.nocturne .bp-host { max-width: 230px; }
    the panel never collides with the gear it grows out of. Works at the window's
    520px minHeight (leaves ~410px of panel). */
 #settings-panel {
+  /* The padding is a PAIR OF CUSTOM PROPERTIES, not two literals, because two
+     other rules have to know it: the sticky Engine row cancels it with
+     negative margins to go full-bleed and pins itself at `top: -pad-y`, and
+     the expanded state changes it. Three places, one number each. */
+  --set-pad-x: 16px;
+  --set-pad-y: 16px;
   width: 280px;
-  padding: 16px;
+  padding: var(--set-pad-y) var(--set-pad-x);
   max-height: calc(100vh - 110px);
   overflow-y: auto;
   overscroll-behavior: contain; /* don't scroll the stage behind it */
@@ -1159,12 +1461,354 @@ body.nocturne .bp-host { max-width: 230px; }
 }
 .set-title { font-family: var(--st-font-heading); font-size: 16px; margin-bottom: 12px; }
 .set-rows { display: flex; flex-direction: column; gap: 11px; }
+
+/* ==========================================================================
+   SETTINGS PANEL — the 2026-09-01 redesign (owner's screenshots)
+   header + "What do these do?" + expand · search · sticky Engine row ·
+   four grouped sections with small icon headings.
+   ========================================================================== */
+
+/* --- Header ------------------------------------------------------------- */
+.set-head { display: flex; align-items: center; gap: 10px; margin-bottom: 11px; }
+/* The name keeps its own type scale; `margin-right:auto` is what pushes the
+   link and the expand icon to the far edge without a spacer element. */
+.set-head .set-title { margin-bottom: 0; margin-right: auto; }
+
+/* "What do these do?" — the header link that inherited the removed "Show me
+   around" row's behaviour. There is NO global button reset in this app (see
+   the note by .set-row-label), so every one of these declarations is doing
+   work. */
+.set-head-link {
+  border: 0;
+  background: none;
+  padding: 0;
+  font-family: var(--st-font-body);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .01em;
+  color: var(--st-text-dim);
+  cursor: pointer;
+  transition: color var(--transition-fast);
+}
+.set-head-link:hover,
+.set-head-link[aria-pressed="true"] { color: var(--st-accent-deep); }
+.set-head-link:focus-visible {
+  outline: 2px solid var(--st-accent-brd);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+/* PROBLEM 242 — the header gained a SECOND entry, "Show me the walkthrough",
+   and the compact popover cannot hold both on one line: measured 2026-09-04,
+   the head has 206px of room and the two labels want 95 + 133 + a 10px gap.
+   Without this they both broke mid-phrase into two lines each and the header
+   grew to three ragged rows. So in the popover the new entry takes a row of
+   its own (`flex: 0 0 100%`, which is deterministic — not a width guess that
+   a longer translation or a bigger font would silently invalidate), and the
+   `order` values keep "Settings … What do these do? ⤢" on the first row in
+   the same reading order the markup has.
+
+   The EXPANDED panel is deliberately untouched: it has the width for one
+   line, and it already reads correctly. */
+#settings-panel:not(.expanded) .set-head { flex-wrap: wrap; row-gap: 4px; }
+#settings-panel:not(.expanded) .set-head-link { white-space: nowrap; }
+#settings-panel:not(.expanded) .set-head .set-title { order: 1; }
+#settings-panel:not(.expanded) #set-help-descs      { order: 2; }
+#settings-panel:not(.expanded) .set-expand          { order: 3; }
+#settings-panel:not(.expanded) #set-help-tour       { order: 4; flex: 0 0 100%; text-align: left; }
+
+/* The expand icon. Radius 999 like everything else interactive. */
+.set-expand {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--st-border);
+  border-radius: var(--radius-full);
+  background: var(--st-card);
+  color: var(--st-text-dim);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast),
+              transform var(--transition-fast);
+}
+.set-expand:hover,
+.set-expand[aria-pressed="true"] {
+  background: var(--st-accent-tint);
+  color: var(--st-accent-deep);
+}
+.set-expand:active { transform: scale(.92); }
+.set-expand:focus-visible { outline: 2px solid var(--st-accent-brd); outline-offset: 2px; }
+:root.reduced-motion .set-expand { transition: none; }
+
+/* --- Search ------------------------------------------------------------- */
+/* `.input` is 38px tall, which is right for a name field and too tall for a
+   filter that sits above a list of 11px rows. Same class, one size down. */
+.set-search { height: 32px; padding: 0 14px; font-size: 12px; margin-bottom: 12px; }
+
+/* --- The sticky Engine row ---------------------------------------------- */
+/* It has to survive scrolling, and the panel's own padding is what makes that
+   awkward: `top: 0` would pin the row 16px down, leaving a strip of scrolling
+   content visible above it, and the 16px side padding would let rows show
+   through the gutters beside it. So the row cancels the padding with negative
+   horizontal margins (full-bleed to the panel's border box, still clipped by
+   the panel's own border-radius because #settings-panel scrolls) and pins at
+   minus the vertical padding, which puts its top edge exactly on the panel's
+   top edge. Opaque background, or the rows sliding under it would show. */
+.set-engine {
+  position: sticky;
+  top: calc(var(--set-pad-y, 16px) * -1);
+  z-index: 4;
+  margin: 0 calc(var(--set-pad-x, 16px) * -1) 12px;
+  padding: 9px var(--set-pad-x, 16px) 10px;
+  background: rgba(var(--srf-rgb), .97);
+  border-bottom: 1px solid var(--st-border);
+}
+/* NOT `.sma-note`: every other piece of teaching prose here hides until the
+   user asks for it, which is right for a preference and wrong for the switch
+   that turns the whole app off. */
+.set-engine-note {
+  margin-top: 3px;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--st-text-dim);
+}
+
+/* --- Groups ------------------------------------------------------------- */
+.set-group { display: flex; flex-direction: column; }
+.set-group + .set-group { margin-top: 16px; }
+#set-groups > .set-group + .set-group { margin-top: 16px; }
+.set-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 9px;
+  font-family: var(--st-font-heading);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--st-text-dim);
+}
+.set-group-icon { flex-shrink: 0; opacity: .85; }
+
+/* --- Search filtering --------------------------------------------------- */
+/* THE `[hidden]` COMPANIONS, and they are not optional. A class rule that
+   sets `display` beats the UA stylesheet's `[hidden] { display: none }`
+   outright — the same trap this file already records for #profile-popover and
+   #specials-tray — so `.set-item { display:flex }` would leave every filtered
+   row on screen while `element.hidden` reported true. Whole classes of "the
+   filter does nothing" live in this one rule. */
+.set-item[hidden],
+.set-row[hidden],
+.set-group[hidden],
+.set-section[hidden] { display: none; }
+
+/* --- The ring tool in the Conflicts area -------------------------------- */
+/* Quiet on purpose: a dashed hairline instead of a card, no colour, no badge.
+   It is a tool, not an alarm — see renderRingFixRow in settings-panel.ts. */
+.ring-fix {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--st-border);
+}
+.ring-fix .set-row { gap: 8px; align-items: center; }
+.ring-fix .set-row-label { margin-right: auto; }
+.ring-fix .btn { flex-shrink: 0; }
+
+/* --- The full-screen expand --------------------------------------------- */
+/* THE SKY-MODE PATTERN, NOT ITS CODE PATH (see setPanelExpanded in
+   controls.ts for why reusing applySkyMode would have closed the very panel
+   it was asked to enlarge). #settings-panel keeps its identity, so main.ts's
+   click plumbing (PROBLEM 98) keeps working with no change there.
+
+   `position: fixed` resolves against the viewport here: nothing between this
+   element and <html> sets transform, filter, perspective or contain — checked,
+   because any one of them would silently turn this into a 280px box pinned to
+   the gear dock. */
+/* THE SCROLLER WRAPPER, and its base rule is `display: contents`. In the
+   280px popover it is NOT in the layout: no box, no margins, no scroll
+   context — the panel scrolls exactly as it did before this element existed,
+   and every measurement in the compact state is unchanged. It only becomes a
+   real box under .expanded, below. */
+.set-scroll { display: contents; }
+
+#settings-panel.expanded {
+  --set-pad-x: clamp(20px, 6vw, 90px);
+  --set-pad-y: 26px;
+  /* THE READING COLUMN. Three groups at ~376px each plus the 36px gutters:
+     3 × 376 + 2 × 36 = 1200. 376px of 13px body text is roughly 60 characters
+     per line, inside the 45-75 measure the type scale asks for — which is the
+     rule this number comes from, not a round figure picked to look tidy. The
+     old 1120 gave 349px columns and, with no centring, left ~700px of empty
+     cream down the right-hand side of a 1920 window. */
+  --set-measure: 1200px;
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  width: auto;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+  background: rgba(var(--srf-rgb), .985);
+  box-shadow: none;
+  /* Re-runs .popover's entrance on the new shape. There is deliberately no
+     matching exit: absolute→fixed is not an animatable pair, and a fake fade
+     that ends in a jump reads worse than an honest instant collapse. */
+  animation: st-pop-in 320ms var(--ease-spring) both;
+
+  /* THE 1.0.96 DEFECT, and why the fix is a layout change and not an offset.
+     The owner: "the sticky Engine bar covers the first row of columns 2 and 3
+     — Run at startup and Point to launch are hidden under it".
+     They were. `.set-engine` is `position: sticky` inside the panel, and the
+     panel is the scroller, so the instant anything scrolls the bar pins to the
+     top and the grid runs UNDER it. That is not a z-index accident; it is what
+     sticky is for. No `top` offset fixes it, because the overlap grows with
+     the scroll.
+     So the top of the panel stops being part of the scroll. The panel becomes
+     a flex column, the head and the Engine bar are fixed-height bands, and one
+     child — .set-scroll — is the only thing that scrolls. The bar now RESERVES
+     its height above the grid, which is exactly what was asked for, and there
+     is no scroll position at which any heading or row can hide behind it. */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;            /* the panel is no longer the scroller */
+  padding-bottom: 0;           /* the scroller carries the bottom padding */
+}
+:root.reduced-motion #settings-panel.expanded { animation: none; }
+
+#settings-panel.expanded > .set-head,
+#settings-panel.expanded > .set-engine { flex: 0 0 auto; }
+/* `width: 100%` IS REQUIRED, and it is the same trap as the Engine bar's
+   `display: block` below. `.set-head` is a flex item of the panel now, and an
+   auto margin in a flex item's CROSS axis switches off the default stretch —
+   so `margin-inline: auto` (which is what centres it) left the header
+   shrink-to-fit and floating in the middle of the window at 201px wide,
+   measured. A definite width makes the auto margins resolve as centring
+   instead. */
+#settings-panel.expanded > .set-head { width: 100%; }
+/* Nothing left to stick to — and leaving it sticky would keep a stale
+   containing-block and a z-index this layout no longer needs. */
+#settings-panel.expanded > .set-engine { position: static; margin-bottom: 0; }
+
+#settings-panel.expanded > .set-scroll {
+  display: block;
+  flex: 1 1 auto;
+  min-height: 0;               /* or a flex item refuses to shrink and scroll */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* FULL-BLEED, then re-padded inside. The panel's own 90px side padding
+     would otherwise push the scrollbar 90px in from the window edge, which
+     reads as a bug. Cancel it, and pay it back as padding on the scroller so
+     the content keeps the same gutters. */
+  margin: 0 calc(var(--set-pad-x) * -1);
+  padding: 14px var(--set-pad-x) var(--set-pad-y);
+}
+/* The panel's slim scrollbar follows the scrolling to its new owner. */
+#settings-panel.expanded > .set-scroll::-webkit-scrollbar { width: 4px; }
+#settings-panel.expanded > .set-scroll::-webkit-scrollbar-track {
+  background: transparent;
+  margin: 14px 0;
+}
+#settings-panel.expanded > .set-scroll::-webkit-scrollbar-thumb {
+  background: var(--st-border);
+  border-radius: 999px;
+}
+#settings-panel.expanded > .set-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--st-accent-brd);
+}
+
+/* Roomier, which is the whole point of the state. The three top groups lay
+   out side by side wherever the window can hold 280px columns; below that it
+   is a single column again and the expand is simply a bigger panel. */
+#settings-panel.expanded #set-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 20px 36px;
+  align-items: start;
+}
+#settings-panel.expanded #set-groups > .set-group + .set-group { margin-top: 0; }
+
+/* CAPPED AND CENTRED (owner's decision, 2026-09-04, over a preview column).
+   `margin-inline: auto` is the half that was missing before: the cap existed,
+   so the columns already stopped at 1120, but everything hugged the left edge
+   and a full-screen window was two thirds content and one third nothing.
+   Written as a shorthand-free pair so it cannot clobber the vertical margins
+   these elements already carry (.set-search's 12px bottom, .set-group's 16px
+   top). */
+#settings-panel.expanded .set-head,
+#settings-panel.expanded .set-search,
+#settings-panel.expanded .set-section,
+#settings-panel.expanded .set-scroll > .set-group,
+#settings-panel.expanded #set-groups,
+#settings-panel.expanded #set-search-empty {
+  max-width: var(--set-measure);
+  margin-inline: auto;
+}
+/* The search box is an `<input>`, so it is `inline-block` — and auto margins
+   do not centre an inline-level box. Measured: it stayed at the left padding
+   edge (x=90) while every other capped element sat at x=360. */
+#settings-panel.expanded .set-search { display: block; }
+/* THE ENGINE BAR STAYS FULL-BLEED, and that is the deliberate half of the
+   choice. It is the app's master switch, not a preference: a band that spans
+   the whole window reads as chrome — a title bar, a status strip — and so
+   separates itself from the capped column of settings underneath instead of
+   looking like one more card that happens to be wider. Capping the bar to
+   1200 too would have drawn a second vertical edge in the same place as the
+   content's, and two coincident edges read as one mistake rather than two
+   decisions. Its CONTENTS are capped and centred, so the switch and its note
+   sit on the same left edge as every heading below them. */
+/* `display: block` is what makes the cap below WORK, and it is not cosmetic.
+   `.set-item` is a flex column, so its children are flex ITEMS — and a flex
+   item is shrink-to-fit, so `max-width` never binds and `margin-inline: auto`
+   centres a 125px-wide row in the middle of a 1920px band instead of aligning
+   it to the reading column. Measured in the harness at 1366: the switch sat at
+   x=630 while every heading below it sat at x=82. As a block container the row
+   fills to the cap and the auto margins land it on the same left edge. */
+#settings-panel.expanded > .set-engine { display: block; }
+#settings-panel.expanded > .set-engine > * {
+  max-width: var(--set-measure);
+  margin-inline: auto;
+}
+/* The gear that opened it would otherwise sit ON TOP of the panel it opened.
+   The dock is also un-dimmed and re-stacked here, because in sky mode it
+   carries `opacity: .28` and a z-index of 7 — an expanded panel inherits both,
+   and a 28%-opaque full-screen settings panel is not a state anyone chose. */
+body.settings-expanded #gear-btn { opacity: 0; pointer-events: none; }
+body.settings-expanded #gear-dock { opacity: 1; z-index: 60; }
 .set-row {
   display: flex;
   align-items: center;
   gap: 10px;
   cursor: pointer;
 }
+
+/* A SWITCH MUST CARRY ITS OWN SIZE. Measured in the harness, 2026-09-01.
+   `.toggle-switch` is a <span> — display:inline — and width/height DO NOT
+   APPLY to a non-replaced inline box. It has only ever had a size because
+   `.set-row` is a flexbox and flex items are blockified; the 36x20 in
+   design-system.css was being honoured by accident of its parent.
+
+   Put one inside a plain <span> and it collapses to 0x0. `.toggle-track` is
+   `position:absolute; inset:0`, so the track collapses with it and the only
+   thing left painting is the 15px thumb, floating with no track under it.
+   That is exactly what "Show special keys" has been doing since the inert
+   treatment gave it a wrapper for `paintInert` to grey — the wrapper is what
+   made the switch stop being a flex item.
+
+   Blockify it at the source instead of styling the wrapper: a wrapper rule
+   fixes the one wrapper that exists today and leaves the next one broken in
+   the same invisible way. `inline-flex` is safe in BOTH positions — a flex
+   item's display is blockified to `flex` regardless, so the direct-child rows
+   are byte-identical (verified: 30.6x17 before and after, in both places).
+
+   Declared here rather than in design-system.css because that file is shared
+   with the overlay; this is the fix stated where the settings rows are. */
+.toggle-switch { display: inline-flex; }
+
 /* The entrance wave plays ONLY while the panel carries .pop — set for the
    first render after opening, removed after it. render() re-runs on every
    toggle, and without this gate the whole panel replayed its cascade each
@@ -1234,18 +1878,59 @@ body.theme-xfade .toggle-track {
     fill 450ms linear !important;
 }
 
-/* The conflict ROW is a button now (PROBLEM 157) — pressing a program raises
-   the offer at the top of the screen rather than parking two buttons under
-   every conflict forever. */
-.conflict-row { cursor: pointer; transition: background-color 160ms var(--ease-out); }
-.conflict-row:hover { background: var(--st-accent-tint); }
-.conflict-row:focus-visible { outline: 2px solid var(--st-accent-brd); outline-offset: 2px; }
-.conflict-row-cta {
-  grid-column: 2 / -1;
-  font-size: 10.5px;
+/* PROBLEM 239 follow-up — the conflict row went back to being a CONTAINER,
+   not the control (PROBLEM 157 made the whole row the click target; the
+   owner's 1.0.10x review called the result an "extended pill, still not made
+   proper shaped" and asked for the App-exceptions tiles' own "rows, not
+   pills, and rows are not buttons" language here too). No cursor/hover/
+   focus-visible on `.conflict-row` any more — that moved onto the one real
+   control inside it, `.conflict-row-close`, below. */
+.conflict-row-close {
+  /* Second follow-up — row 3 of the card, spanning its full width so
+     `justify-self: end` aligns to the card's own right edge rather than to
+     the name/chip columns beside a since-removed icon-row span. */
+  grid-row: 3;
+  grid-column: 1 / -1;
+  justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 31px;                 /* 30-32px asked for; .conflict-prompt-row's
+                                    own buttons sit at 29px, close enough to
+                                    read as the same family without matching
+                                    exactly (that row is a compact 420px
+                                    banner, this is a full settings row).
+                                    No margin-top here — `.conflict-row`'s own
+                                    2px row-gap already separates row 3 from
+                                    the description; a second gap on top of
+                                    that is what pushed the card past 116px. */
+  padding: 0 14px;
+  border-radius: 13px;          /* same stated exception as .set-act-inline —
+                                    a list of cards, not a scatter of pills */
+  font-family: var(--st-font-body);
+  font-size: 11px;
   font-weight: 700;
-  color: var(--st-accent-deep);
-  margin-top: 4px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 160ms var(--ease-out), border-color 160ms var(--ease-out);
+  /* WARNING tint, not accent or danger — the SAME measured color-mix formula
+     as PROBLEM 239's Danger Zone buttons (9%/66%/20% warning mixed with
+     --st-card/transparent), reused rather than re-measured because the maths
+     is identical: this asks for a second thought ("close another program"),
+     it is not the irreversible action itself — that is still the two-step
+     confirm in conflict-prompt.ts, untouched — so full alarm red would say
+     "this is happening now," which is not true yet. */
+  border: 1px solid color-mix(in srgb, var(--st-warning) 66%, transparent);
+  background: color-mix(in srgb, var(--st-warning) 9%, var(--st-card));
+  color: var(--st-text);
+}
+.conflict-row-close:hover {
+  border-color: var(--st-warning);
+  background: color-mix(in srgb, var(--st-warning) 20%, var(--st-card));
+}
+.conflict-row-close:focus-visible {
+  outline: 2px solid var(--st-accent-brd);
+  outline-offset: 2px;
 }
 
 /* The offer itself — top centre, where every other transient message in this
@@ -1301,8 +1986,107 @@ body.theme-xfade .toggle-track {
   color: var(--st-text-dim);
   margin-top: 2px;
 }
-.set-actions { display: flex; gap: 7px; margin-top: 13px; }
-.set-actions .btn { flex: 1; justify-content: center; height: 34px; font-size: 12px; }
+/* --- The action buttons, 1.0.97 ----------------------------------------- */
+/* `.set-actions` (a flex row with `flex: 1` on every child) and the two
+   `width:100%` pills below it are GONE. The owner, on the 1.0.96 full-screen
+   review: "unnaturally long pills, stretched for no reason". They were — a
+   1200px window drew a 1100px "Open log folder", and "Clear all" carried the
+   same visual weight as "Re-check now" while doing something you cannot undo.
+
+   Two groups, each with the same small uppercase heading the settings groups
+   use, and inside each a grid of buttons sized to their own text.
+
+   THE TRACK FUNCTION IS `minmax(220px, max-content)`, and both halves are
+   load-bearing. `max-content` is what "sized to content" means here: a track
+   is exactly as wide as its longest label, never stretched to fill the row.
+   The 220px floor is what stops a two-word button from becoming a stub next
+   to a five-word one, and it is what `auto-fit` counts with — so the column
+   count falls to 2, then 1, as the panel narrows, with no media query. (An
+   auto-repeat needs a FIXED minimum; a flexible or intrinsic one is invalid
+   there. 220 is fixed, so this is legal — measured in the harness, not
+   assumed.) `justify-content: start` packs the tracks left instead of
+   spreading them, which is the difference between a group of buttons and a
+   toolbar. */
+.set-act-group + .set-act-group { margin-top: 16px; }
+.set-act-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, max-content));
+  justify-content: start;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+/* In the 280px popover only one 220px track ever fits, and holding it at
+   max-content left a 22px ledge of dead space down the right of every button
+   (measured: 220 in a 242 column). One column, filled — which is what every
+   other row in the narrow panel does. This is not the stretch the owner
+   objected to: that was a 1100px "Open log folder" in a full-screen window. */
+#settings-panel:not(.expanded) .set-act-grid { grid-template-columns: minmax(0, 1fr); }
+.set-act-grid .btn,
+.btn.set-act-inline {
+  justify-content: center;
+  height: 34px;
+  padding: 0 16px;
+  font-size: 12px;
+  /* 13, not 999. The owner chose it for these buttons specifically, and it
+     is the one place in this app where an interactive control is not a pill:
+     a grid of seven pills reads as a scatter of unrelated lozenges, and 13
+     is the radius the keys and cards already use — so the group reads as a
+     block of related actions. Every OTHER interactive control in the app is
+     still 999 (CLAUDE.md's radius rule); this is a stated exception, not a
+     drift. */
+  border-radius: 13px;
+}
+/* Sized to content in the conflicts area too — same class, so the two
+   conditional buttons that stayed there (the ring tool's "Restart now", the
+   hook-timeout button) cannot go back to being full-width pills. */
+.btn.set-act-inline { width: auto; }
+
+/* DANGER ZONE. Tinted with the theme's WARNING token, not the danger one:
+   these are actions that deserve a second thought, and all three of them
+   already ASK for it — "Reset this profile" and "Clear all" arm on the first
+   press and fire on the second (`_armed` in settings-panel.ts, untouched),
+   and "Restore preset profiles" is additive and never overwrites. Painting
+   them the full alarm red would say "this is happening now", which is the one
+   thing that is not true of any of them.
+   `--st-warning` is defined in all four palettes (design-system.css light and
+   Nocturne, themes.css Warcry and Starry), so this needs no per-theme rule. */
+/* THE HEADING IS NOT RAW `--st-warning`, AND THAT IS A CONTRAST FIX, NOT A
+   PREFERENCE. Measured in the harness: #d9a13d on the cream panel is 2.14:1,
+   and this heading is 10px — small text, which needs 4.5:1. Mixed halfway
+   toward `--st-text` it reads 5.48:1 in Earthy and stays amber; because
+   `--st-text` inverts with the palette, the SAME mix lightens in the three
+   dark themes instead of darkening. One declaration, four palettes, measured
+   in each. (The other group headings sit at 4.94:1 on `--st-text-dim`, so
+   this lands beside them rather than shouting over them.) */
+.set-act-group.is-danger .set-group-head {
+  color: color-mix(in srgb, var(--st-warning) 50%, var(--st-text));
+}
+.set-act-group.is-danger .set-group-head .set-group-icon { color: var(--st-warning); }
+.set-act-group.is-danger .set-act-grid .btn {
+  border-color: color-mix(in srgb, var(--st-warning) 66%, transparent);
+  background: color-mix(in srgb, var(--st-warning) 9%, var(--st-card));
+  color: var(--st-text);
+}
+.set-act-group.is-danger .set-act-grid .btn:hover {
+  border-color: var(--st-warning);
+  background: color-mix(in srgb, var(--st-warning) 20%, var(--st-card));
+}
+/* THE ARMED STATE ESCALATES, which is what keeps the warning tint honest.
+   The first press only arms; the SECOND is the irreversible one, and that
+   one is worth the full danger colour. `.is-armed` is written by render()
+   from the same `_armed` flag that swaps the label to "Confirm" — one source
+   of truth for the word and the colour, so they cannot disagree. */
+.set-act-group.is-danger .set-act-grid .btn.is-armed,
+.set-act-group.is-danger .set-act-grid .btn.is-armed:hover {
+  border-color: var(--st-danger);
+  background: var(--st-danger);
+  color: #fff;
+}
+#set-reset:focus-visible, #set-clear:focus-visible,
+#set-presets:focus-visible, #set-recheck:focus-visible, #set-logs:focus-visible {
+  outline: 2px solid var(--st-accent-brd);
+  outline-offset: 2px;
+}
 
 #gear-btn {
   width: 40px; height: 40px;
@@ -1469,27 +2253,74 @@ body.nocturne #conflict-banner {
 .exc-tile-x:hover { background: var(--st-danger-tint, var(--st-accent-tint)); color: var(--st-text); }
 .exc-tile-x:focus-visible { outline: 2px solid var(--st-accent-brd); outline-offset: 2px; }
 
+/* "Add an app" — PROBLEM 239 follow-up. Content-sized secondary button, the
+   same 13px-radius language as `.set-act-inline` below, in place of the old
+   `btn btn-sm` stretched with an inline `width:100%` (the owner's exact
+   complaint: still a full-width pill after everything else in Settings was
+   compacted). `.btn`'s own bordered/card-coloured look already IS the
+   "secondary style" this asks for — nothing here overrides colour, only
+   size — and plain block flow left-aligns it under the note or tile grid
+   with no centring rule to fight. */
+.exc-add-btn {
+  height: 36px;
+  padding: 0 16px;
+  margin-top: 8px;
+  border-radius: 13px;
+  font-size: 12px;
+}
+
+/* PROBLEM 239 second follow-up (2026-09-07) — the owner's complaint repeated
+   because the first follow-up (padding/disc/CTA, immediately below) never
+   touched the LAYOUT: each conflict was still a full-panel-width bar, one per
+   line — "extended... could have been two boxes side by side instead of
+   taking up the whole space." This wrapper is the fix: a responsive grid of
+   compact cards, the same `repeat(auto-fit, minmax(...))` vocabulary
+   `.set-act-grid` above already uses for the Maintenance/Danger Zone action
+   grid, so two (or more) conflicts sit side by side in the expanded panel and
+   stack one-per-row in the 280px popover with nothing clipped. */
+.conflict-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+  margin-bottom: 6px;
+}
 .conflict-row {
   display: grid;
   grid-template-columns: auto 1fr auto;
-  align-items: center;
+  align-items: start;
   gap: 2px 8px;
-  padding: 8px 10px;
-  margin-bottom: 6px;
+  /* PROBLEM 239 follow-up — was `8px 10px`. The owner's 1.0.10x review called
+     these an "extended pill" beside the settings action grid's 13px-radius
+     cards; this is the same "12-14px padding" language PROBLEM 239 already
+     applied to that grid, and PROBLEM 256 applied to the profile popover. */
+  padding: 12px 14px;
+  margin-bottom: 0;   /* the `.conflict-grid` gap does this now — was 6px */
   border-radius: var(--radius-md);
   border: 1px solid var(--st-border);
   background: var(--st-card);
+  /* A grid item's default min-width is `auto` (its content's intrinsic
+     width), which fights every ellipsis/clamp rule below it — without this
+     a long product name or exe path can force the CARD wider than its
+     240px `.conflict-grid` track instead of truncating inside it. */
+  min-width: 0;
 }
 /* The conflicting program's icon (PROBLEM: "show the app icon of the
-   conflicting app as well") — spans both text rows so it sits centred
-   beside the name+detail block rather than only the top line. */
+   conflicting app as well"). Pinned to row 1 alongside the name/chip line
+   now that the row is a compact 3-row card rather than a 2-row bar.
+   Second follow-up: 28px → 24px (still inside the requested 24-28px band) —
+   at 28px + the 12px/12px vertical padding + the 2-line clamped description
+   + the close button, the card measured 119px, 3px past the requested
+   96-116px band; the 4px this saves is what brings it in. Still close enough
+   to `.exc-tile-disc`'s 30px that the two sections read as the same family
+   of app-identity discs. */
 .conflict-row-disc {
-  grid-row: 1 / 3;
+  grid-row: 1;
+  grid-column: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   border-radius: var(--radius-full);
   background: var(--st-accent-tint);
   font-size: 10px;
@@ -1498,19 +2329,67 @@ body.nocturne #conflict-banner {
   overflow: hidden;
   flex-shrink: 0;
 }
-.conflict-row-disc img { width: 22px; height: 22px; border-radius: var(--radius-full); object-fit: contain; }
-.conflict-row-name { font-size: 12.5px; font-weight: 700; }
-.conflict-row-proc {
-  font-family: ui-monospace, Menlo, Consolas, monospace;
-  font-size: 10.5px;
-  color: var(--st-text-dim);
-  text-align: right;
+.conflict-row-disc img { width: 24px; height: 24px; border-radius: var(--radius-full); object-fit: contain; }
+.conflict-row-name {
+  grid-row: 1;
+  grid-column: 2;
+  align-self: center;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+/* PROBLEM 239 follow-up — the exe name as a small muted mono CHIP, not bare
+   right-aligned text: a visible boundary reads as metadata (what's actually
+   running) rather than a second line of prose racing `.conflict-row-why`.
+   COLOUR IS A MEASURED CONTRAST FIX, not `--st-text-dim` as-is: composited
+   against this chip's own `--st-accent-tint` backdrop (rather than the
+   card's plain background `--st-text-dim` is normally read against), plain
+   `--st-text-dim` measured 4.22:1 in Earthy — just under the 4.5:1 a 10px
+   chip needs. Mixed 40% toward `--st-text` (same color-mix technique as
+   PROBLEM 239's Danger Zone heading) it reads 6.74:1 in Earthy and higher
+   still in the three dark palettes, because `--st-text` inverts with them,
+   while staying visibly softer than the full-strength name/description text
+   beside it.
+   `max-width` (second follow-up) caps the chip so it can never push the name
+   out of a 240px card — it ellipsises instead, with the full exe name in its
+   `title`. */
+.conflict-row-proc {
+  grid-row: 1;
+  grid-column: 3;
+  align-self: center;
+  justify-self: end;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  color: color-mix(in srgb, var(--st-text-dim) 60%, var(--st-text) 40%);
+  background: var(--st-accent-tint);
+  border: 1px solid var(--st-border);
+  border-radius: var(--radius-full);
+  padding: 3px 9px;
+  line-height: 1.3;
+  max-width: 84px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Clamped to 2 lines (second follow-up) — a compact card can't be forced
+   tall by a long description any more; `why.title` (settings-panel.ts)
+   carries the full text past the clamp. Spans the full card width, not just
+   the columns beside the icon, so a 240px card gets the most room possible
+   for the two lines. */
 .conflict-row-why {
-  grid-column: 2 / -1;
+  grid-row: 2;
+  grid-column: 1 / -1;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
   font-size: 11px;
   color: var(--st-text-dim);
-  line-height: 1.4;
+  line-height: 1.35;
 }
 
 /* --------------------------------------------------------------------------
@@ -1772,8 +2651,13 @@ body.nocturne .confirm-box {
 
 .theme-seg {
   position: relative;
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  display: flex;
+  /* PROBLEM 255 follow-up — equal `1fr` grid columns is what let "Starry
+     night" (the widest label, since Auto joined the pill) crowd its neighbours:
+     four equal fractions of 280px give every segment the SAME box regardless
+     of what it has to say. Segments now size to their own content instead —
+     `.theme-seg-opt` below is `flex: 1 1 auto`, content-basis with a grow so
+     short labels still share leftover room, not a fixed fraction. */
   gap: 0;
   padding: 3px;
   border-radius: var(--radius-full);
@@ -1781,20 +2665,30 @@ body.nocturne .confirm-box {
   border: 1px solid var(--st-border);
 }
 
-/* One element moves. translateX of a third of the track is a single transform,
-   which is the whole reason the indicator is a sibling rather than three
-   backgrounds taking turns. */
+/* One element moves, but it no longer moves by ARITHMETIC — `--seg-i * 100%`
+   only lands correctly when every segment is the same width, which stopped
+   being true the moment segments started sizing to content. Positioning is
+   now MEASURED: `positionSegIndicator` (controls.ts) reads the active
+   `.theme-seg-opt`'s real `offsetLeft`/`offsetWidth` and writes them here as
+   `--ind-x`/`--ind-w`, on selection, on container resize (the 280px popover
+   vs the expanded panel) and once fonts finish loading — so the indicator's
+   rect always equals the active label's rect, never a fraction of the total. */
 .theme-seg-ind {
   position: absolute;
   top: 3px;
   bottom: 3px;
-  left: 3px;
-  width: calc((100% - 6px) / 3);
+  left: 0;
+  width: var(--ind-w, calc((100% - 6px) / 3));
   border-radius: var(--radius-full);
-  transform: translateX(calc(var(--seg-i, 0) * 100%));
-  transition: transform 480ms cubic-bezier(.34, 1.45, .36, 1);
+  transform: translateX(var(--ind-x, 3px));
+  transition: transform 480ms cubic-bezier(.34, 1.45, .36, 1),
+              width 480ms cubic-bezier(.34, 1.45, .36, 1);
   box-shadow: var(--shadow-sm);
 }
+/* "Auto" (feature 2) — half day, half night, the one segment whose colour is
+   meant to look like it belongs to neither fixed look on its own: it is
+   never the RESULT, only ever the instruction "match Windows". */
+.theme-seg-ind[data-seg="auto"]   { background: linear-gradient(135deg, #e8a13f 0 50%, #2e3560 50% 100%); }
 .theme-seg-ind[data-seg="earthy"] { background: radial-gradient(circle at 32% 28%, #ffdf9e, #e8a13f 55%, #c67139); }
 .theme-seg-ind[data-seg="warcry"] { background: linear-gradient(135deg, #a63a2c, #521712); }
 .theme-seg-ind[data-seg="starry"] { background: linear-gradient(135deg, #2e3560, #131832); }
@@ -1802,24 +2696,43 @@ body.nocturne .confirm-box {
 .theme-seg-opt {
   position: relative;
   z-index: 1;
+  /* Content-basis, not `1fr` — a short label (Auto) no longer inherits the
+     box a long one (Starry night) needs. `flex-grow: 1` still lets short
+     labels share any leftover room so the pill keeps reading as one evenly
+     lit track rather than four buttons jammed to the left. */
+  flex: 1 1 auto;
   border: 0;
   background: none;
   font-family: inherit;
   font-size: 11.5px;
   font-weight: 700;
   letter-spacing: .01em;
-  padding: 6px 4px;
+  padding: 6px 8px;
   border-radius: var(--radius-full);
   color: var(--st-text-dim);
   cursor: pointer;
   white-space: nowrap;
+  text-align: center;
   transition: color .2s var(--ease-out);
 }
 .theme-seg-opt.is-on { color: #fff; }
 .theme-seg-opt:focus-visible { outline: 2px solid var(--st-accent-brd); outline-offset: 2px; }
 
+/* PROBLEM 255 follow-up — the compact 280px popover is the one place four
+   content-sized segments (Auto/Earthy/Warcry/Starry night) can still run out
+   of room; `#settings-panel.expanded` never needs this. One font-size step
+   down plus tighter horizontal padding is enough for "Starry night" to clear
+   without wrapping or clipping — measured in the browser pane, see
+   V14_FIXES_AND_CODE.md §PROBLEM 255 follow-up. Content-sizing (above) is
+   still what does the positional work; this only buys back the last few
+   pixels in the narrowest state. */
+#settings-panel:not(.expanded) .theme-seg-opt {
+  font-size: 10.5px;
+  padding: 6px 5px;
+}
+
 /* Fun off = no overshoot anywhere, per the master gate. */
-body[data-fun="off"] .theme-seg-ind { transition: transform 200ms var(--ease-out); }
+body[data-fun="off"] .theme-seg-ind { transition: transform 200ms var(--ease-out), width 200ms var(--ease-out); }
 @media (prefers-reduced-motion: reduce) { .theme-seg-ind { transition: none; } }
 
 /* --------------------------------------------------------------------------
@@ -1885,3 +2798,309 @@ body.sky-mode #gear-btn:focus-visible {
   outline-offset: 3px;
 }
 :root.reduced-motion body.sky-mode #gear-dock { transition: none; }
+
+/* ===========================================================================
+   PROBLEM 242 — the first-run "Guided first bind" tour (components/tour.ts).
+
+   A DASHBOARD-PAGE LAYER ONLY. The overlay window loads overlay.html and never
+   sees any of this; nothing here may ever be reused there.
+
+   z-index 8800: above every dashboard surface (the highest was 90) and
+   deliberately BELOW the .confirm-back layer at 9000, so a destructive
+   confirmation is never buried under a walkthrough card.
+
+   pointer-events: none on the layer, auto on the two things that are actually
+   controls. The tour must never intercept a click meant for the keyboard or
+   the editor — the whole point of step 1 is that the user CAN click a letter
+   while the card is on screen.
+
+   No blur, no backdrop-filter anywhere (PROBLEM 37/80): the dimming below is
+   plain opacity on the stage's own children.
+   =========================================================================== */
+
+#tour-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 8800;
+  pointer-events: none;
+}
+#tour-layer.tour-leaving { animation: tour-layer-out 200ms var(--ease-in) both; }
+
+/* Dimming. Two variants because the two steps protect different things: step 1
+   keeps the BOARD lit, step 2 keeps the EDITOR lit. #toast-container is exempt
+   from both — a save confirmation the user cannot read is worse than no dim.
+
+   STEP 2b (the browser-profile picker, 2026-09-06) REUSES `tour-dim-editor`
+   and needs no rule of its own. `.bp-page` is `position:absolute; inset:0` on
+   an opaque background INSIDE #key-detail-panel, so while page 2 is up "keep
+   the editor lit" and "keep the picker lit" select the same pixels. A third
+   class with an identical selector would be a second thing to keep in step
+   with this one, for no visual difference — if the picker ever moves out of
+   the panel, add it then and not before. */
+body.tour-dim-board  #stage > *:not(#keyboard-outer):not(#toast-container),
+body.tour-dim-editor #stage > *:not(#key-detail-panel):not(#editor-backdrop):not(#toast-container) {
+  opacity: .24;
+  transition: opacity var(--dur-standard) var(--ease-out);
+}
+:root.reduced-motion body.tour-dim-board  #stage > *,
+:root.reduced-motion body.tour-dim-editor #stage > * { transition: none; }
+
+/* ---- the card ---- */
+.tour-card {
+  pointer-events: auto;
+  position: absolute;
+  left: 50%;
+  /* 64px, not 22: #specials-dock is bottom-CENTRE (bottom:16, ~36px tall), not
+     bottom-right, so a card at 22 sits straight on top of "Special keys". The
+     board never reaches this far down either — #keyboard-outer's bottom inset
+     is 84 and the fixed-height board is centred inside it. Measured, not
+     guessed (1280x720 harness, 2026-09-04). */
+  bottom: 64px;
+  transform: translateX(-50%);
+  width: min(520px, calc(100vw - 220px));
+  padding: 15px 18px 14px;
+  border-radius: var(--radius-lg);          /* 16 — it is a container */
+  background: var(--st-card);
+  border: 1px solid var(--st-border);
+  box-shadow: var(--shadow-lg);
+  animation: tour-card-in var(--dur-standard) var(--ease-spring) both;
+}
+/* The entry card and the closing card are heroes: centred, wider, quieter. */
+.tour-card.tour-hero {
+  top: 50%;
+  bottom: auto;
+  transform: translate(-50%, -50%);
+  width: min(560px, calc(100vw - 64px));
+  padding: 22px 24px 18px;
+  text-align: center;
+  animation: tour-hero-in var(--dur-hero) var(--ease-spring) both;
+}
+:root.reduced-motion .tour-card { animation: none; }
+
+.tour-line {
+  /* pre-wrap, deliberately: the entry copy carries a double space that plain
+     HTML would collapse, and the copy is a specification. */
+  white-space: pre-wrap;
+  font-family: var(--st-font-body);
+  font-size: var(--font-size-lg);
+  line-height: 1.45;
+  color: var(--st-text);
+}
+.tour-card.tour-hero .tour-line { font-size: var(--font-size-xl); }
+.tour-card.tour-hero .tour-line + .tour-line { margin-top: 7px; }
+
+.tour-note {
+  margin-top: 7px;
+  font-size: var(--font-size-sm);
+  color: var(--st-text-dim);
+  white-space: pre-wrap;
+}
+
+/* ---- the Space+X glyph (step 3) ---- */
+.tour-combo {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  vertical-align: baseline;
+  margin: 0 2px;
+}
+.tour-cap {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--st-accent-tint);
+  border: 1.5px solid var(--st-accent-brd);
+  box-shadow: var(--shadow-sm);
+  font-size: var(--font-size-sm);
+  font-weight: 800;
+  letter-spacing: .02em;
+  color: var(--st-accent-deep);
+}
+.tour-plus { font-size: var(--font-size-sm); font-weight: 800; color: var(--st-text-dim); }
+
+/* ---- buttons: pills, like every other interactive thing here ---- */
+.tour-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+.tour-btn {
+  /* There is no global button reset in this app, so every line here works. */
+  height: 34px;
+  padding: 0 18px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--st-border);
+  background: var(--st-surface);
+  color: var(--st-text);
+  font-family: var(--st-font-body);
+  font-size: var(--font-size-sm);
+  font-weight: 700;
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast),
+              transform var(--transition-fast);
+}
+.tour-btn:hover { background: var(--bg-card-hover); border-color: var(--st-accent-brd); }
+.tour-btn:active { transform: scale(.96); }
+.tour-btn-primary {
+  background: var(--st-accent);
+  border-color: var(--st-accent);
+  color: #fff;
+}
+.tour-btn-primary:hover { background: var(--accent-bright); border-color: var(--accent-bright); }
+.tour-btn:focus-visible { outline: 2px solid var(--st-accent-brd); outline-offset: 3px; }
+:root.reduced-motion .tour-btn { transition: none; }
+
+/* ---- the always-there Skip pill ----
+   62px down, not 16: the profile pill owns the top-right of #topbar, and in
+   step 3 the topbar is fully lit again. This sits under it and above the
+   board, which starts no higher than 93px even on the 520px minimum height. */
+.tour-skip {
+  pointer-events: auto;
+  position: absolute;
+  top: 62px;
+  right: 24px;
+  height: 28px;
+  padding: 0 14px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--st-border);
+  background: rgba(var(--srf-rgb), .94);
+  color: var(--st-text-dim);
+  font-family: var(--st-font-body);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+  animation: tour-card-in var(--dur-micro) var(--ease-out) both;
+}
+.tour-skip:hover { color: var(--st-text); border-color: var(--st-accent-brd); }
+.tour-skip:focus-visible { outline: 2px solid var(--st-accent-brd); outline-offset: 3px; }
+.tour-skip[hidden] { display: none; }
+:root.reduced-motion .tour-skip { transition: none; animation: none; }
+
+/* ---- the highlight rings ----
+   Free-floating and measured, never a class on the thing they point at: the
+   editor rebuilds its innerHTML on every render and updateMatrix re-skins every
+   key, so a parked class would be swept away without a sound. */
+.tour-rings { position: absolute; inset: 0; pointer-events: none; }
+.tour-ring {
+  position: absolute;
+  left: 0; top: 0; width: 0; height: 0;
+  border: 2px solid var(--st-accent);
+  box-shadow: 0 0 0 4px var(--st-accent-tint), 0 6px 18px rgba(90, 60, 30, .18);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-micro) var(--ease-out);
+}
+body.nocturne .tour-ring {
+  box-shadow: 0 0 0 4px var(--st-accent-tint), 0 6px 18px rgba(0, 0, 0, .48);
+}
+.tour-ring.on { opacity: 1; }
+.tour-ring.pulse { animation: tour-ring-pulse 1900ms var(--ease-out) infinite; }
+/* Reduced motion keeps the ring, loses the breath — a static ring still says
+   "here", which is the whole job. */
+:root.reduced-motion .tour-ring { transition: none; }
+:root.reduced-motion .tour-ring.pulse { animation: none; }
+
+@keyframes tour-ring-pulse {
+  0%, 100% { box-shadow: 0 0 0 4px var(--st-accent-tint), 0 6px 18px rgba(90, 60, 30, .18); }
+  50%      { box-shadow: 0 0 0 9px rgba(var(--st-glow-rgb), .16), 0 6px 18px rgba(90, 60, 30, .18); }
+}
+@keyframes tour-card-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(10px) scale(.96); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+}
+@keyframes tour-hero-in {
+  0%   { opacity: 0; transform: translate(-50%, -50%) scale(.90); }
+  62%  { opacity: 1; transform: translate(-50%, -50%) scale(1.02); }
+  100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+/* Exits run at ~65% of the entrance, per the design rules. */
+@keyframes tour-layer-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
+/* ============================================================================
+   ABOUT (feature 1) — app name/version, install kind, update check, links,
+   the third-party list. Reuses `.set-act-grid` / `.btn.set-act-inline` (the
+   Maintenance/Danger-zone button grid above) rather than inventing a second
+   button language for one more group of buttons.
+   ============================================================================ */
+.set-about-id { display: flex; flex-direction: column; }
+
+/* Third-party list — collapsed by default, lazily filled on first expand
+   (see wireAboutSection in settings-panel.ts). A plain scrolling box: several
+   hundred packages is reference material, not a surface worth decorating. */
+.set-about-tp-wrap { margin-top: 10px; }
+.set-about-tp-list {
+  margin-top: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--st-surface);
+  border: 1px solid var(--st-border);
+}
+.set-about-tp-group + .set-about-tp-group { margin-top: 10px; }
+.set-about-tp-license {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: .03em;
+  color: var(--st-text-dim);
+  text-transform: uppercase;
+}
+.set-about-tp-count { font-weight: 700; opacity: .75; text-transform: none; letter-spacing: 0; }
+.set-about-tp-items { list-style: none; margin: 4px 0 0; padding: 0; }
+.set-about-tp-items li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 11.5px;
+  color: var(--st-text-soft);
+}
+.set-about-tp-items a {
+  color: var(--st-accent-deep);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.set-about-tp-items a:hover { text-decoration: underline; }
+.set-about-tp-items a:focus-visible { outline: 2px solid var(--st-accent-brd); outline-offset: 2px; border-radius: 2px; }
+.set-about-tp-ver { flex-shrink: 0; font-family: ui-monospace, Consolas, monospace; font-size: 10.5px; color: var(--st-text-dim); }
+
+/* ============================================================================
+   ACCESSIBILITY PASS (feature 3) — visible focus rings for every control in
+   this panel that did not already carry one, all using the theme accent per
+   CLAUDE.md's design rules. Scoped to #settings-panel so a change here cannot
+   ripple into the rest of the app (the overlay has no switches or pills).
+   ============================================================================ */
+
+/* The toggle switch. The real `<input type="checkbox">` is visually a 0x0,
+   opacity:0 box (design-system.css) sitting UNDER `.toggle-track`, so a plain
+   `input:focus-visible` outline would draw around nothing visible — it has to
+   land on the track, the sibling that is actually on screen. Keyboard Tab and
+   Space already worked here (a native checkbox needs no JS for either); this
+   is the one thing that was missing. */
+#settings-panel .toggle-switch input:focus-visible + .toggle-track {
+  outline: 2px solid var(--st-accent-brd);
+  outline-offset: 2px;
+}
+
+/* Every button this panel draws from the shared `.btn` class — Maintenance,
+   Danger zone, and the new About links/update button — inherited NO focus
+   style at all from design-system.css (it neither sets one nor suppresses the
+   browser default), so this is additive, not a replacement of a suppressed
+   ring. */
+#settings-panel .btn:focus-visible {
+  outline: 2px solid var(--st-accent-brd);
+  outline-offset: 2px;
+}
+
+/* The About row's plain-text controls (version line, third-party toggle) sit
+   outside `.set-row-label`'s usual context but share the class — already
+   covered by the existing `.set-row-label:focus-visible` rule above, listed
+   here only as the note that ties the two together for a future reader. */

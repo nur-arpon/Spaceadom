@@ -282,6 +282,55 @@ body.nocturne[data-theme="warcry"] {
   letter-spacing: .22em; color: #fff;
   animation: st-space-pop 560ms cubic-bezier(.34,1.3,.4,1) both; }
 
+/* ===========================================================================
+   THE ACTIVE PROFILE'S EMOJI ON THE SPACE PILL. 1.0.96.
+
+   ABSOLUTE, NOT A FLEX ITEM, and that is the whole design decision. "SPACE" is
+   the pill's wordmark: 800 weight, .22em tracking, and dead centre in a 230px
+   capsule. A sibling flex item would push it off-centre by half a glyph plus a
+   gap — about 13px on a pill whose centring is the visual anchor of the entire
+   radial HUD. Pinned to the left inner edge instead, the wordmark does not move
+   by one pixel whether the emoji is there or not.
+
+   `left: 16px` matches the pill's own optical inset (the 999px radius means the
+   capsule's flat run starts at 30px, so 16 sits the glyph inside the curve
+   without crowding it). `translateY(-50%)` centres it against the 60px height
+   independently of the pill's own centring transform — the two never interact,
+   which is why the reduced-motion override on `.space` below can force its
+   transform without disturbing this one.
+
+   QUIET BY CONSTRUCTION: 16px against a 14px wordmark, so it reads as a mark
+   rather than a second headline, and `opacity: .95` takes the last of the
+   competition out of it without making it look faded.
+
+   NO PLATE, NO DISC, NO PER-THEME RULE. An emoji carries its own colour, so it
+   needs no contrast treatment and it looks identical in earthy, nocturne,
+   warcry and starry. A disc behind it would need four palette values, would
+   fight the pill's own fill, and — since `backdrop-filter` and `blur()` are
+   banned on this window (PROBLEM 37/80) — could only be a flat shape that
+   reads as a second button. `pointer-events: none` because the overlay is
+   click-through and nothing inside it may ever become a target.
+
+   ABSENT = ABSENT. `toast.ts` appends no element at all when the profile has no
+   emoji, so none of this applies and the pill is byte-identical to 1.0.95.
+   =========================================================================== */
+#st-hud .space .st-space-emoji {
+  position: absolute; left: 16px; top: 50%;
+  transform: translateY(-50%);
+  font-size: 16px; line-height: 1; letter-spacing: 0;
+  opacity: .95; pointer-events: none;
+  /* The pill's pop is 560ms; this lands just after it settles so the glyph
+     arrives ON the finished pill rather than riding its overshoot. Exit is not
+     animated here — the emoji leaves with the pill it lives inside, and
+     `#st-hud.collapsing`'s own exit already runs at the design language's ~65%
+     of entrance. */
+  animation: st-space-emoji-in 300ms cubic-bezier(.34,1.3,.4,1) 200ms both;
+}
+@keyframes st-space-emoji-in {
+  0%   { opacity: 0; transform: translateY(-50%) scale(.6); }
+  100% { opacity: .95; transform: translateY(-50%) scale(1); }
+}
+
 .st-chip { position: absolute; transform: translate(-50%, -50%);
   display: flex; align-items: center; gap: 8px; border-radius: 110px;
   box-shadow: var(--st-shadow); }
@@ -810,6 +859,16 @@ body.nocturne[data-theme="warcry"] {
 }
 /* .space is centred by transform, so it must keep it when the animation goes. */
 :root.reduced-motion #st-hud .space { transform: translate(-50%, -50%) !important; }
+/* Same rule, same reason, for the profile emoji inside it: its `translateY`
+   is what centres it against the pill's 60px, so removing the animation must
+   not remove the transform (PROBLEM 40's class — a transform that only exists
+   in keyframes is lost the moment the animation is). The final state is the
+   rendered state, which is what reduced motion means here. */
+:root.reduced-motion #st-hud .space .st-space-emoji {
+  animation: none !important;
+  transform: translateY(-50%) !important;
+  opacity: .95 !important;
+}
 :root.reduced-motion .st-chip > i { transform: none !important; opacity: 1 !important; }
 
 /* Toasts still appear and still leave — just without the spring tween. Their

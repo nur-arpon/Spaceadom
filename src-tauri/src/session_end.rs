@@ -440,6 +440,27 @@ fn teardown() {
     // (PROBLEM 82) does not read the hook thread's exit as a fault and restart
     // it while the process is winding down.
     crate::hook::stop_hook();
+
+    // PROBLEM 253 — THIS EXIT IS NOT A CRASH, and something has to say so.
+    //
+    // `safe_mode` counts a launch as failed unless the app either stays alive
+    // thirty seconds or exits deliberately, and everything about the path this
+    // function is on is deliberate: Windows is signing the user out, shutting
+    // down, or letting an installer close us so it can replace the exe. Every
+    // one of those routinely happens inside the first thirty seconds — a logon
+    // autostarts the app and an update arrives; a user signs in and straight
+    // back out — and three of them in a row would put a perfectly healthy app
+    // into safe mode and tell its owner it had crashed three times.
+    //
+    // It is HERE and not in `lib.rs`'s `RunEvent` handler because that handler
+    // never runs on this path: the whole point of this module is that we
+    // `std::process::exit(0)` from inside the `WM_ENDSESSION` handler, ahead of
+    // tao, so no Tauri exit event is ever produced.
+    //
+    // Bounded, as rule 1 in this module's header requires: two atomic loads and
+    // at most one write of a ~60-byte JSON file.
+    crate::safe_mode::note_clean_exit();
+
     log::info!("session: PiP windows restored and the keyboard hook told to stop");
 }
 

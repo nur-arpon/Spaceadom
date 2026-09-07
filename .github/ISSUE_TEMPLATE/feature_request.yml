@@ -1,0 +1,35 @@
+name: Feature request
+description: Suggest something Spaceadom doesn't do yet.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before requesting a feature, it's worth skimming `CORE_AIM.md` in the
+        repo — it's the non-negotiable feature contract this app is built
+        against — and `FUTURE_IDEAS.md`, in case it's already noted there.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: What are you trying to do that Spaceadom doesn't currently let you do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+      description: Describe the feature or behaviour you have in mind.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered
+      description: Any workaround you're currently using, or other tools that do this.
+    validations:
+      required: false

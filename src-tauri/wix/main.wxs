@@ -12,7 +12,24 @@
 <?endif?>
 
 <!-- SPACEADOM: forked from tauri-bundler 2.9.4's stock main.wxs.
-     Exactly ONE change, marked SPACEADOM below: util:CloseApplication.
+     Exactly FOUR changes, all marked SPACEADOM below:
+       1. util:CloseApplication is ADDED      (PROBLEM 127), and since
+          REVIEW FIXES 2026-09-05 (H2) it sends WM_ENDSESSION rather than
+          WM_CLOSE - see the comment on the element itself.
+       2. <Property Id="INSTALLDIR"> with its two RegistrySearch elements is
+          DELETED                              (PROBLEM 244)
+       3. the "Keep your settings?" uninstall question and the two
+          util:RemoveFolderEx rows it gates are ADDED  (PROBLEM 252; the
+          MSI half of PROBLEM 247's NSIS installer-hooks.nsh). It is one
+          feature in FOUR places - properties + SetProperty, a Dialog and
+          two Publish/Show rows in the UI, a Component, and its
+          ComponentRef - each marked "SPACEADOM CHANGE 3".
+       4. MajorUpgrade Schedule is CHANGED from the stock
+          "afterInstallInitialize" to "afterInstallExecute"
+          (REVIEW FIXES 2026-09-05, H2): the stock order removed the old
+          product at sequence 1501, 2,498 numbers before anything closed
+          the running app, which queues a delete-on-REBOOT against the exe
+          path and then deletes the NEW exe at the next restart.
      Everything else is stock - keep it that way so a bundler upgrade can
      be diffed against the new original rather than re-derived.
      The install stays PER-MACHINE, as every .msi up to 1.0.40 was. A
@@ -46,7 +63,7 @@
         <!-- Property to forward cli args to the launched app to not lose those of the pre-update instance -->
         <Property Id="LAUNCHAPPARGS" Secure="yes" />
 
-        <!-- SPACEADOM: close a RUNNING Spaceadom before replacing its files.
+        <!-- SPACEADOM CHANGE 1: close a RUNNING Spaceadom before replacing its files.
              PROBLEM 127: this app starts with Windows, so it is ALWAYS running
              during its own update, and a running process holds its .exe open.
              Interactively Windows shows "Files in Use"; silently (/qn) it
@@ -56,23 +73,116 @@
              - and that is what made him judge a scaling fix as "no change"
              while running a build that never contained it.
              The NSIS installer solves this with a PREINSTALL taskkill hook.
-             This is the WiX equivalent: it runs during CostFinalize, before any
-             file is touched. The bundler auto-loads WixUtilExtension because it
-             scans this file for "http://schemas.microsoft.com/wix/(\w+)".
+             This is the WiX equivalent. WixUtilExtension schedules the
+             WixCloseApplications custom action Before InstallFiles, i.e. at
+             sequence 3999, immediately ahead of InstallFiles at 4000. The
+             bundler auto-loads WixUtilExtension because it scans this file for
+             "http://schemas.microsoft.com/wix/(\w+)".
              TerminateProcess because config.json is written on every change and
-             never held open, so force-closing loses nothing. -->
+             never held open, so force-closing loses nothing.
+
+             REVIEW FIXES 2026-09-05 (H2) - WM_CLOSE IS THE WRONG MESSAGE FOR
+             THIS APP, and it always was.
+
+             CloseMessage="yes" sends WM_CLOSE. Spaceadom answers WM_CLOSE by
+             HIDING TO THE TRAY - that is the dashboard's documented behaviour
+             and it is not going to change - so the process is still there five
+             seconds later and TerminateProcess="1" kills it. Every MSI update
+             therefore ended in a hard kill of a healthy app: no
+             session_end::teardown, no safe_mode::note_clean_exit(), so the
+             launch was recorded as a startup crash (the counter half of that
+             is H5's fix in updater.rs; this is the other half).
+
+             EndSessionMessage="yes" sends WM_QUERYENDSESSION followed by
+             WM_ENDSESSION, which is exactly what session_end.rs (PROBLEM 224)
+             was written to own: it exits from inside the handler, cleanly,
+             flagging the exit as deliberate. That is the same path a sign-out
+             or a shutdown takes, and an installer closing us to replace the exe
+             is the same event.
+
+             CloseMessage is set explicitly to "no" rather than deleted so this
+             file keeps saying which message it sends and why. TerminateProcess
+             stays as the backstop for an app that has wedged and cannot answer
+             either message - the case where a hard kill genuinely is right. -->
         <util:CloseApplication Id="CloseSpaceadom"
                                Target="spaceadom.exe"
-                               CloseMessage="yes"
+                               CloseMessage="no"
+                               EndSessionMessage="yes"
                                Timeout="5"
                                RebootPrompt="no"
                                TerminateProcess="1"
                                PromptToContinue="no" />
 
+        <!-- SPACEADOM CHANGE 4 (REVIEW FIXES 2026-09-05, H2): the upgrade is
+             scheduled afterInstallExecute, not afterInstallInitialize.
+
+             THE BUG. afterInstallInitialize puts RemoveExistingProducts at
+             sequence 1501. WixCloseApplications (above) sits at 3999. So the
+             OLD product was uninstalled 2,498 sequence numbers BEFORE anything
+             closed the running app - and the old product's files, in a
+             per-machine install, ARE C:\Program Files\Spaceadom\spaceadom.exe,
+             which the running app holds open. Windows Installer cannot delete
+             an in-use file, so it does the only thing it can: it queues a
+             delete-on-reboot through MoveFileEx/PendingFileRenameOperations.
+             InstallFiles at 4000 then writes the NEW exe to that same path, and
+             the queued operation is a PATH, not a file handle. At the next
+             reboot Windows deletes whatever is standing there - the new exe.
+             The app disappears, days after a "successful" silent update, with
+             nothing in any log connecting the two events.
+
+             This is not theoretical for this app specifically: the self-updater
+             runs "msiexec /i ... /passive" (PROBLEM 246) from inside the
+             running app, so the app is ALWAYS running during its own MSI
+             upgrade, exactly as PROBLEM 127 established for file replacement.
+
+             THE FIX, and it is Microsoft's documented recommendation for an
+             in-place upgrade: schedule RemoveExistingProducts AFTER
+             InstallExecute. The new files go in first, at InstallFiles 4000,
+             with the app already terminated by WixCloseApplications at 3999.
+             The old product is then removed at ~6550, and component reference
+             counting sees that the new product owns the same key paths, so the
+             shared files are kept rather than deleted and re-copied. There is
+             no longer any window in which the old product is being removed
+             while the new files are not yet on disk.
+
+             THE ALTERNATIVE THAT WAS EVALUATED AND NOT TAKEN: leave
+             RemoveExistingProducts at 1501 and instead re-schedule
+             WixCloseApplications before it (WixUtilExtension marks that row
+             Overridable="yes", so it is expressible). Three reasons against:
+
+               1. It keeps the remove-then-reinstall shape. Every single update
+                  would delete every file and copy an identical set back, and
+                  between 1501 and 4000 the machine has NO Spaceadom installed.
+                  A failure anywhere in that window leaves the user with
+                  nothing. afterInstallExecute inverts the failure mode: a
+                  failure leaves the OLD version in place, which is the half a
+                  user can live with.
+               2. It only closes OUR handle. Anything else holding the exe open
+                  at 1501 - an on-access antivirus scan, a shell extension, the
+                  thumbnail cache - reproduces the identical pending-rename
+                  hazard, and we cannot close those. Moving the removal past
+                  InstallFiles removes the hazard rather than one cause of it.
+               3. It makes this template depend on WixUtilExtension continuing
+                  to mark its scheduling row overridable - an implicit contract
+                  with a third-party extension, which is precisely the kind of
+                  thing the header of this file says not to take on.
+
+             The known cost of afterInstallExecute, stated rather than hidden:
+             if the install fails midway, rollback is more involved and both
+             products can briefly be registered. REINSTALLMODE is "amus" and
+             Product Id is "*", so every upgrade is a fresh product installing
+             a full file set - which is the case this scheduling is documented
+             to suit.
+
+             VERIFIED by reading the built package's InstallExecuteSequence back
+             through the WindowsInstaller COM API from OUTSIDE the agent
+             container (PROBLEM 143); the measured order is quoted in
+             V14_FIXES_AND_CODE.md. NOT verified by an install: no .msi may be
+             installed on this machine (PROBLEM 244). -->
         {{#if allow_downgrades}}
-            <MajorUpgrade Schedule="afterInstallInitialize" AllowDowngrades="yes" />
+            <MajorUpgrade Schedule="afterInstallExecute" AllowDowngrades="yes" />
         {{else}}
-            <MajorUpgrade Schedule="afterInstallInitialize" DowngradeErrorMessage="!(loc.DowngradeErrorMessage)" AllowSameVersionUpgrades="yes" />
+            <MajorUpgrade Schedule="afterInstallExecute" DowngradeErrorMessage="!(loc.DowngradeErrorMessage)" AllowSameVersionUpgrades="yes" />
         {{/if}}
 
         <InstallExecuteSequence>
@@ -102,17 +212,180 @@
         <Property Id="ARPURLUPDATEINFO" Value="{{homepage}}"/>
         {{/if}}
 
-        <!-- NOTE: The order of RegistrySearch elements below matters. In WIX, when multiple
-             RegistrySearch elements are listed under a single Property, the LAST successful
-             match wins. We list the NSIS default-key search first and the MSI InstallDir
-             search second so that the MSI-specific path takes priority when both keys exist. -->
-        <Property Id="INSTALLDIR">
-          <!-- First attempt: Search for the default key value (this is how the nsis installer stores the path) -->
-          <RegistrySearch Id="PrevInstallDirNoName" Root="HKCU" Key="Software\\{{manufacturer}}\\{{product_name}}" Type="raw" />
+        <!-- SPACEADOM CHANGE 2 (PROBLEM 244): the stock template's
+             <Property Id="INSTALLDIR"> with two RegistrySearch elements has
+             been DELETED. It read HKCU\Software\{{manufacturer}}\{{product_name}}
+             to pre-seed INSTALLDIR, and the NSIS installer writes THAT KEY's
+             default value with its own per-user directory. So on any machine
+             that already had the setup.exe copy, a double-clicked .msi silently
+             installed itself INTO %LOCALAPPDATA%\Spaceadom, registered the
+             NSIS-written files as its own components, and stamped ARP
+             InstallLocation with the same path. A later `msiexec /X` of that
+             product then deleted the RUNNING per-user app - measured on the
+             owner's machine 2026-09-04 19:45, "Removal ... status: 0" while
+             the Restart Manager had already logged that it could not close
+             pid 25760. That is PROBLEM 244 end to end, and this element is its
+             root cause.
 
-          <!-- Second attempt: Search for "InstallDir" which takes priority if found (this is how the msi installer stores the path) -->
-          <RegistrySearch Id="PrevInstallDirWithName" Root="HKCU" Key="Software\\{{manufacturer}}\\{{product_name}}" Name="InstallDir" Type="raw" />
-        </Property>
+             With the Property gone, INSTALLDIR has no source but the
+             <Directory Id="INSTALLDIR"> below, so the .msi ALWAYS resolves to
+             [ProgramFiles64Folder]\{{product_name}} and can never adopt a
+             folder some other installer owns. MSI-to-MSI upgrades still land
+             in place because both the old and the new package resolve the same
+             constant path, and MajorUpgrade (below) matches on the fixed
+             UpgradeCode from tauri.conf.json rather than on a directory.
+             WixUI_InstallDir still lets an interactive installer browse to a
+             different folder; only the automatic registry adoption is gone. -->
+
+        <!-- ================================================================
+             SPACEADOM CHANGE 3, part 1 of 4 (PROBLEM 252) - the answer, and
+             the two paths it governs.
+
+             An INTERACTIVE uninstall asks "Keep your settings? (profiles, key
+             bindings, backups)". Answering No removes exactly two folders, the
+             only two this app writes outside its install directory:
+
+               %APPDATA%\Spaceadom              config.json, debug.log(.0/.1),
+                                                 picker-cache.json,
+                                                 last-run-version.txt
+                                                 (startup::data_dir())
+               %LOCALAPPDATA%\SpaceadomBackups  the rolling config backups
+                                                 (PROBLEM 94, config::backup_dir())
+
+             Both names are HARDCODED here rather than derived from
+             {{product_name}} or {{bundle_id}}, because they are the app's own
+             constants: config::backup_dir() deliberately does NOT live under
+             the product name or the bundle id, and a rename of either must not
+             silently re-point a recursive delete at some other folder.
+
+             This is the MSI half of PROBLEM 247, which shipped the NSIS half in
+             src-tauri/installer-hooks.nsh. Same question, same wording, same
+             default (Keep), same two folders. What differs is only the machinery:
+             NSIS has $UpdateMode and IfSilent, WiX has to read REMOVE,
+             UPGRADINGPRODUCTCODE and UILevel.
+
+             ST_KEEPDATA has NO default value on purpose. "Keep" is the ABSENCE
+             of an answer, so every path that cannot ask keeps by construction
+             and no future edit can turn a missing answer into a delete:
+               - /qn and /passive never run the InstallUISequence at all
+                 (Windows Installer runs it only at UILevel 4 and 5), so the
+                 dialog cannot appear and ST_KEEPDATA stays empty;
+               - a major upgrade's RemoveExistingProducts uninstalls the OLD
+                 package without any UI sequence, and with UPGRADINGPRODUCTCODE
+                 set;
+               - Esc / Alt+F4 / the title-bar X activate the Cancel control,
+                 which is the Yes button, exactly like the NSIS MessageBox's
+                 IDYES default.
+             Only the exact string "0" deletes anything.
+
+             Secure="yes" so an ATTENDED, scripted removal can pre-answer it -
+             msiexec /x {ProductCode} ST_KEEPDATA=0 - and skip the dialog (both
+             the Show row and the Publish row below ask only when ST_KEEPDATA is
+             still empty). Without Secure the value would be dropped on the
+             client-to-service hop of this per-machine package, the same reason
+             the stock AUTOLAUNCHAPP / LAUNCHAPPARGS above are Secure. Note that
+             ST_KEEPDATA=0 still cannot delete anything under /qn or /passive:
+             the UILevel = 5 test below is a separate, independent gate. -->
+        <Property Id="ST_KEEPDATA" Secure="yes" />
+
+        <!-- The two folders, nominated only when the answer was No.
+
+             These are PRIVATE properties (mixed case) and that is deliberate,
+             not a style choice. util:RemoveFolderEx recursively deletes
+             whatever path its property holds, and a PUBLIC property can be set
+             on the msiexec command line by anybody - "msiexec /x {ProductCode}
+             ST_APPDATA_DIR=C:\Users\me\Documents" would hand a stranger's
+             command line a recursive delete running under the uninstall.
+             Private properties cannot be set from a command line at all, so the
+             only writer of these two values is the SetProperty pair below.
+
+             [AppDataFolder] and [LocalAppDataFolder] resolve to the INSTALLING
+             USER's profile, not SYSTEM's, even though this package is
+             per-machine and the install runs elevated. Two independent reasons:
+               1. These are immediate actions, and Windows Installer runs the
+                  immediate half of the InstallExecuteSequence - everything
+                  before InstallInitialize, which is everything here (sequence
+                  51/52, and WixRemoveFoldersEx before CostInitialize at 800) -
+                  in the CLIENT msiexec.exe process, which is the user's own
+                  non-elevated process. Only the deferred script between
+                  InstallInitialize and InstallFinalize runs in the service as
+                  LocalSystem, and by then RemoveFiles is executing literal
+                  absolute paths that were already resolved client-side.
+               2. The delete is gated on UILevel = 5, i.e. a real interactive
+                  user is present. The one realistic way [AppDataFolder] could
+                  ever mean SYSTEM's profile is an msiexec launched BY SYSTEM
+                  (SCCM / Intune / a scheduled task), and such a removal is
+                  silent by definition - UILevel 2 or 3 - so it is excluded
+                  before the question of whose profile it is can arise.
+
+             The "AppDataFolder <> """ guard mirrors installer-hooks.nsh's
+             ${If} $APPDATA != "" and is load-bearing: if the folder property
+             were ever empty, "[AppDataFolder]Spaceadom" would collapse to the
+             RELATIVE path "Spaceadom" and util:RemoveFolderEx would recurse it
+             against whatever the current directory happens to be. An empty
+             folder property means keep, and nothing is nominated.
+
+             Scheduled After AppSearch, so both land immediately after it, well
+             before WixRemoveFoldersEx, which WixUtilExtension schedules Before
+             CostInitialize (800). That is the only ordering that works: the CA
+             reads the property, so setting it at CostFinalize would be too
+             late.
+
+             REVIEW FIXES 2026-09-05 (H2): this comment used to say "After
+             AppSearch (50) so both land at 51/52". AppSearch's standard
+             sequence number is 400, not 50 - the standard immediate sequence
+             runs LaunchConditions 100, FindRelatedProducts 200, AppSearch 400,
+             CCPSearch 500, RMCCPSearch 600, ValidateProductID 700,
+             CostInitialize 800 - so these two land at 401/402. The ORDERING the
+             comment was justifying is unaffected and was always correct: 401
+             and 402 are still comfortably before 800. Only the numbers were
+             wrong, and a wrong number in a comment about sequencing is the kind
+             of thing a later reader reasons FROM. -->
+        <SetProperty Id="StRemoveAppDataDir"
+                     Value="[AppDataFolder]Spaceadom"
+                     After="AppSearch"
+                     Sequence="execute">
+            <![CDATA[ST_KEEPDATA = "0" AND REMOVE = "ALL" AND UILevel = 5 AND NOT PATCH AND NOT UPGRADINGPRODUCTCODE AND NOT WIX_UPGRADE_DETECTED AND AppDataFolder <> "" AND LocalAppDataFolder <> ""]]>
+        </SetProperty>
+        <SetProperty Id="StRemoveBackupsDir"
+                     Value="[LocalAppDataFolder]SpaceadomBackups"
+                     After="AppSearch"
+                     Sequence="execute">
+            <![CDATA[ST_KEEPDATA = "0" AND REMOVE = "ALL" AND UILevel = 5 AND NOT PATCH AND NOT UPGRADINGPRODUCTCODE AND NOT WIX_UPGRADE_DETECTED AND AppDataFolder <> "" AND LocalAppDataFolder <> ""]]>
+        </SetProperty>
+        <!-- Both conditions are identical ON PURPOSE and must stay that way.
+             WixRemoveFoldersEx aborts its whole loop on the first row whose
+             property is empty, so "one set, one empty" would silently drop
+             whichever row the table happens to order second. One answer, two
+             folders, one condition, copied - not shared through a third
+             property that a later edit could gate differently.
+
+             Reading the condition, term by term:
+               ST_KEEPDATA = "0"          the owner typed No, or an attended
+                                          script pre-answered No.
+               REMOVE = "ALL"             this run is removing the whole
+                                          product, not repairing or changing it.
+               UILevel = 5                full UI. /qn is 2 and /passive is 3,
+                                          including the self-updater's
+                                          "msiexec /i ... /passive" path
+                                          (PROBLEM 246) and the
+                                          RemoveExistingProducts it triggers,
+                                          which inherits the parent's UI level.
+               NOT UPGRADINGPRODUCTCODE   this is not the OLD product being
+                                          removed by a newer package's
+                                          RemoveExistingProducts. This is the
+                                          term that stops an upgrade from
+                                          eating the settings it is about to
+                                          hand to the new version, and it
+                                          subsumes "NOT (Installed AND
+                                          UPGRADINGPRODUCTCODE)".
+               NOT WIX_UPGRADE_DETECTED   belt and braces for the other side of
+                                          the same event: a package that has
+                                          found an older product to replace is
+                                          upgrading, not uninstalling.
+               NOT PATCH                  a patch is not a removal.
+               AppDataFolder <> "" etc.   see above - never build a relative
+                                          path for a recursive delete. -->
 
         <!-- launch app checkbox -->
         <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="!(loc.LaunchApp)" />
@@ -138,7 +411,111 @@
                      Value="WelcomeDlg"
                      Order="2">1</Publish>
             {{/unless}}
+
+            <!-- ============================================================
+                 SPACEADOM CHANGE 3, part 2 of 4 (PROBLEM 252) - the question.
+
+                 A small modal dialog, deliberately NOT a wizard page: it has to
+                 work on a path where no wizard page is shown at all (see the
+                 Show row below), so it is shaped like WixUI's own CancelDlg -
+                 one line of text, two buttons, EndDialog Return - rather than
+                 like InstallDirDlg.
+
+                 The wording is PROBLEM 247's, character for character, so the
+                 two installers ask the same question. The only difference is
+                 that MSI's Formatted syntax expands [AppDataFolder] and
+                 [LocalAppDataFolder] here at display time, in the interactive
+                 user's own session, so the person answering can see exactly
+                 which profile is about to be cleaned - the NSIS half's
+                 $APPDATA / $LOCALAPPDATA do the same thing.
+
+                 Yes carries BOTH Default="yes" and Cancel="yes", copying
+                 CancelDlg's No button: Default makes Keep the button that
+                 Enter presses, Cancel makes Keep what Esc, Alt+F4 and the
+                 title-bar X do. There is no way to dismiss this dialog into a
+                 delete. Each button sets ST_KEEPDATA first (Order 1) and ends
+                 the dialog second (Order 2); a ControlEvent that ends a dialog
+                 must be last or the events after it never run. -->
+            <Dialog Id="SpaceadomKeepDataDlg" Width="330" Height="135"
+                    Title="[ProductName] Setup" NoMinimize="yes">
+                <Control Id="Text" Type="Text" X="15" Y="15" Width="300" Height="72"
+                         Text="Keep your settings? (profiles, key bindings, backups)&#13;&#10;&#13;&#10;Choose No to also delete [AppDataFolder]Spaceadom and [LocalAppDataFolder]SpaceadomBackups from this PC." />
+                <Control Id="Yes" Type="PushButton" X="197" Y="103" Width="56" Height="17"
+                         Default="yes" Cancel="yes" Text="!(loc.WixUIYes)">
+                    <Publish Property="ST_KEEPDATA" Value="1" Order="1">1</Publish>
+                    <Publish Event="EndDialog" Value="Return" Order="2">1</Publish>
+                </Control>
+                <Control Id="No" Type="PushButton" X="259" Y="103" Width="56" Height="17"
+                         Text="!(loc.WixUINo)">
+                    <Publish Property="ST_KEEPDATA" Value="0" Order="1">1</Publish>
+                    <Publish Event="EndDialog" Value="Return" Order="2">1</Publish>
+                </Control>
+            </Dialog>
+
+            <!-- SPACEADOM CHANGE 3, part 3a of 4 (PROBLEM 252) - the wizard
+                 entry point.
+
+                 Double-clicking the .msi while it is installed runs the
+                 maintenance wizard: MaintenanceWelcomeDlg -> MaintenanceTypeDlg
+                 -> (Remove) -> VerifyReadyDlg. REMOVE is not set until
+                 VerifyReadyDlg's own Remove event fires, so on this path the
+                 question cannot be asked from the sequence; it is spawned by
+                 the button that chooses removal, which is also the moment it
+                 makes sense to ask.
+
+                 Order="0" puts it ahead of the stock NewDialog and
+                 [WixUI_InstallMode] events on the same button (both Ordering 1),
+                 so the modal question is answered before the wizard moves on.
+                 The condition asks only when nobody has answered yet, and
+                 REMOVE <> "ALL" keeps it from double-asking on a run where the
+                 Show row below has already asked (msiexec /x on a package that
+                 also shows the maintenance wizard). -->
+            <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton"
+                     Event="SpawnDialog" Value="SpaceadomKeepDataDlg" Order="0">
+                <![CDATA[ST_KEEPDATA = "" AND REMOVE <> "ALL" AND UILevel = 5 AND NOT UPGRADINGPRODUCTCODE]]>
+            </Publish>
         </UI>
+
+        <!-- SPACEADOM CHANGE 3, part 3b of 4 (PROBLEM 252) - the Add/Remove
+             Programs entry point, which is the one that matters.
+
+             Settings -> Apps -> Spaceadom -> Uninstall runs the ARP
+             UninstallString, "MsiExec.exe /X{ProductCode}", and that sets
+             REMOVE=ALL on the command line. Read out of the 1.0.100 package's
+             own InstallUISequence, the stock WixUI_InstallDir rows are:
+
+               MaintenanceWelcomeDlg  1296  Installed AND NOT RESUME AND NOT Preselected AND NOT PATCH
+               ResumeDlg              1297  Installed AND (RESUME OR Preselected)
+               WelcomeDlg             1298  NOT Installed OR PATCH
+               ProgressDlg            1299
+               ExecuteAction          1300
+
+             A command line that sets feature states also sets Preselected, so
+             on the ARP path MaintenanceWelcomeDlg is skipped, MaintenanceTypeDlg
+             is never reached, and VerifyReadyDlg is never shown either - its
+             only route in is MaintenanceTypeDlg's RemoveButton (ControlEvent
+             "MaintenanceTypeDlg | RemoveButton | NewDialog | VerifyReadyDlg").
+             So hanging the question off any wizard button alone would have
+             missed the single path almost every uninstall actually takes. A
+             Show row does not care which dialogs run.
+
+             Placed After MigrateFeatureStates (1200) rather than next to the
+             welcome dialogs because 1296-1300 is a contiguous block with no
+             free sequence number in it. The question therefore comes before the
+             stock dialogs rather than after them; nothing is deleted until
+             ExecuteAction runs, so cancelling the wizard afterwards still keeps
+             everything.
+
+             The InstallUISequence itself is the outermost guard: Windows
+             Installer does not run it at all at UILevel 2 (/qn) or 3
+             (/passive), so a silent removal and the self-updater's /passive
+             upgrade can never reach this dialog no matter what the condition
+             says. -->
+        <InstallUISequence>
+            <Show Dialog="SpaceadomKeepDataDlg" After="MigrateFeatureStates">
+                <![CDATA[Installed AND REMOVE = "ALL" AND ST_KEEPDATA = "" AND UILevel = 5 AND NOT PATCH AND NOT UPGRADINGPRODUCTCODE AND NOT WIX_UPGRADE_DETECTED]]>
+            </Show>
+        </InstallUISequence>
 
         <UIRef Id="WixUI_InstallDir" />
 
@@ -159,6 +536,73 @@
         </Directory>
 
         <DirectoryRef Id="INSTALLDIR">
+            <!-- ============================================================
+                 SPACEADOM CHANGE 3, part 4 of 4 (PROBLEM 252) - the removal.
+
+                 util:RemoveFolderEx, not a shell-out. WixUtilExtension's
+                 WixRemoveFoldersEx custom action walks the nominated path and
+                 adds temporary RemoveFile rows against this component, which
+                 the STANDARD RemoveFiles action (sequence 3500) then executes.
+                 So the delete is ordinary Windows Installer file removal -
+                 logged, sequenced and rolled back like every other file this
+                 package touches - instead of a "cmd /c rd /s /q" whose only
+                 safety is the string handed to it. After PROBLEM 244, where an
+                 installer deleted the running app, a recursive delete driven by
+                 an interpolated string is not something to hand-roll.
+
+                 Three behaviours of that custom action, read from WiX 3.14's
+                 own source (src/ext/ca/wixca/dll/RemoveFoldersEx.cpp) rather
+                 than assumed, because all three are load-bearing here:
+
+                   - A path that does NOT EXIST is a no-op, not an error:
+                     FindFirstFileW returns ERROR_PATH_NOT_FOUND, the CA logs
+                     "Search path not found" and returns S_FALSE, adding no
+                     rows. So uninstalling on a machine that never wrote a
+                     config is silent and clean.
+                   - An EMPTY property is refused, on purpose: "fail early if
+                     the property isn't set as you probably don't want your
+                     installers trying to delete SystemFolder". It returns
+                     E_INVALIDARG and logs "Missing folder property". This is
+                     what makes "no answer" safe rather than catastrophic.
+                   - That refusal is HARMLESS to the uninstall, because
+                     UtilExtension schedules the action as
+                     Return="ignore" (UtilExtension_Platform.wxi). The failure
+                     is logged, the sequence continues, the product uninstalls
+                     normally, and nothing is deleted.
+
+                 The consequence, stated plainly so nobody later "fixes" it:
+                 EVERY run of this package that is not an interactive
+                 uninstall-and-answer-No leaves both properties empty, so a
+                 verbose (/L*v) log of an ordinary install or an ordinary
+                 keep-my-settings uninstall CONTAINS a WixRemoveFoldersEx
+                 failure line - "Error 0x80070057: Missing folder property" and
+                 a returned error code. That line is the feature working, not
+                 the feature broken. It is the price of having "no answer" mean
+                 "delete nothing" rather than pointing the deleter at a decoy
+                 path to keep the log tidy.
+
+                 The component needs a key path and owns no file, so it takes a
+                 registry value, exactly like the stock RegistryEntries and
+                 shortcut components beside it. HKLM rather than their HKCU
+                 because this package is per-machine: an HKCU key path makes the
+                 component "not installed" for any user other than the one who
+                 installed it, and the whole point of this component is that its
+                 removal fires for whoever is doing the uninstalling. It writes
+                 under the same Software\{{manufacturer}}\{{product_name}} key
+                 the app already owns; nothing reads it (rival_install::detect()
+                 scans the ARP Uninstall keys, never this one) - it exists only
+                 to be a key path. -->
+            <Component Id="SpaceadomUserDataCleanup" Guid="*" Win64="$(var.Win64)">
+                <RegistryValue Root="HKLM"
+                               Key="Software\\{{manufacturer}}\\{{product_name}}"
+                               Name="UserDataCleanup"
+                               Type="integer"
+                               Value="1"
+                               KeyPath="yes" />
+                <util:RemoveFolderEx Id="StRemoveAppDataFolder" On="uninstall" Property="StRemoveAppDataDir" />
+                <util:RemoveFolderEx Id="StRemoveBackupsFolder" On="uninstall" Property="StRemoveBackupsDir" />
+            </Component>
+
             <Component Id="RegistryEntries" Guid="*">
                 <RegistryKey Root="HKCU" Key="Software\\{{manufacturer}}\\{{product_name}}">
                     <RegistryValue Name="InstallDir" Type="string" Value="[INSTALLDIR]" KeyPath="yes" />
@@ -262,6 +706,12 @@
                 Absent="disallow">
 
             <ComponentRef Id="RegistryEntries"/>
+
+            <!-- SPACEADOM CHANGE 3, part 4 of 4 continued (PROBLEM 252):
+                 in MainProgram, which is Level="1" Absent="disallow", so the
+                 component carrying the two util:RemoveFolderEx rows is always
+                 installed and therefore always present to be removed. -->
+            <ComponentRef Id="SpaceadomUserDataCleanup"/>
 
             {{#each resource_file_ids as |resource_file_id| ~}}
                 <ComponentRef Id="{{ resource_file_id }}"/>

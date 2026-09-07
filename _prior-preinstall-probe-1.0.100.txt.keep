@@ -1,0 +1,28 @@
+=== preinstall-probe (baseline BEFORE 1.0.98) ===
+when: Fri 09/04/2026 22:01:31.92
+probe ran at: 2026-09-04 22:01:32
+LOCALAPPDATA as seen out here: C:\Users\beamu\AppData\Local
+exe path: C:\Users\beamu\AppData\Local\Spaceadom\spaceadom.exe
+PRE version: 1.0.98
+PRE written: 09/04/2026 21:01:26
+PRE size: 19825152
+PRE marker 'rival install': True
+PRE marker 'start_menu_scan:': True
+PRE marker 'hud-band-count-changed': True
+PRE marker 'restored to TRUE FULLSCREEN': True
+PRE marker 'picker_worker: st-picker-scan started (os thread ': True
+PRE marker 'rival install: REFUSING the elevated removal for ': True
+PRE marker 'rival install: REGISTRY-ONLY removal (PROBLEM 244) - deleting the leftover': True
+PRE marker 'rival install: REFUSING msiexec /X for this product (PROBLEM 244) - its': True
+PRE marker 'updater: install kind decided': False
+PRE marker ' for a release newer than ': False
+PRE marker 'escape hatch, PROBLEM 245)': False
+PRE marker 'installing SILENTLY now (setup.exe /S /UPDATE /R /ARGS': False
+PRE Run key: "C:\Users\beamu\AppData\Local\Spaceadom\spaceadom.exe" --autostart
+PRE running: pid=30104 path=C:\Users\beamu\AppData\Local\Spaceadom\spaceadom.exe started=9/4/2026 9:23:17 PM
+PRE debug.log size: 4512051  lastWrite: 09/04/2026 21:41:17
+PRE config.json size: 77889  lastWrite: 09/04/2026 21:23:43
+PRE config.json SHA256: CD0C7CC0888EBD91032250535AC7719AAFA4C3790D42B72083ECA6C05F341552
+PRE config copied out to: D:\Claude-Projects\SpaceToggle-V14\_config-live-copy-1.0.98-pre.json
+PRE profiles: 5  [Gamers, Professionals, Founders, sexy_tumar_mexy, cxvb]
+=== probe done ===

@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
+
+PackageIdentifier: NurArpon.Spaceadom
+PackageVersion: 1.0.100
+MinimumOSVersion: 10.0.17763.0
+InstallerType: nullsoft
+Scope: user
+InstallModes:
+  - silent
+  - silentWithProgress
+InstallerSwitches:
+  Silent: "/S"
+  SilentWithProgress: "/S"
+UpgradeBehavior: install
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/nur-arpon/Spaceadom/releases/download/v1.0.100/Spaceadom_1.0.100_x64-setup.exe
+    # Filled in by scripts/winget-manifest.mjs from the real release asset —
+    # this placeholder is not a valid sha256 and MUST be replaced before
+    # this manifest is submitted anywhere.
+    InstallerSha256: "0000000000000000000000000000000000000000000000000000000000000000"
+ManifestType: installer
+ManifestVersion: 1.9.0

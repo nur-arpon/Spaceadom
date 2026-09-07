@@ -12,6 +12,161 @@ Companion docs: `PROJECT_STATUS.md` (chronological log), `WHAT_HAPPENED.md`
 
 ---
 
+## PROBLEM 258 — the law-6 proof step had never executed, and its one counter counted health as failure
+
+Found 2026-09-06 while shipping 1.0.103, the first release that had to satisfy
+CLAUDE.md keyboard-hook law 6. Two separate defects, both in
+`scripts/install-proof.ps1`, both fixed. Neither is in the app; both are in the
+thing that decides whether the app may ship, which is why they are worth a full
+entry.
+
+### 258a — an em dash in a double-quoted string killed the whole script
+
+**Symptom.** `scripts/install-real.cmd` completed, the installer exited 0, the
+exe was in place — and the output file contained exactly one line about the
+proof:
+
+```
+PROOF STEP PRODUCED NOTHING - powershell never ran
+RESULT: installed and started
+```
+
+No version stamp, no markers, no law-6 verdict. Every previous release's proof
+had produced forty lines from the same call.
+
+**Root cause.** `install-proof.ps1` is saved as UTF-8 **with no BOM**, and
+`install-real.cmd` invokes it with `powershell` — Windows PowerShell 5.1, not
+`pwsh`. Windows PowerShell reads a BOM-less file as **CP1252**. A UTF-8 em dash
+(`U+2014`) is the three bytes `E2 80 94`; CP1252 decodes the third byte, `0x94`,
+as `U+201D` RIGHT DOUBLE QUOTATION MARK. **PowerShell accepts a curly quote as a
+string delimiter.** So a double-quoted string containing an em dash terminates
+at the em dash, and everything after it is parsed as code:
+
+```
+At D:\...\scripts\install-proof.ps1:362 char:28
++     $ownWindow = "FAIL â€" no 'Spaceadom build ... version $ver' bann ...
++                            ~~
+Unexpected token 'no' in expression or statement.
+```
+
+A parse error kills the file before its first statement, so `Add-Content` never
+ran and no output file was created at all. The law-6 block had been written
+earlier the same night, alongside the law itself, and **had never once been
+executed.** The release it was written to gate would have shipped with the gate
+absent.
+
+Note the asymmetry that hid it: the same em dash in a SINGLE-quoted string
+(`$ownWindow = 'FAIL — ' + $log`) is harmless, because `U+201D` does not close a
+single-quoted string. Two of the five affected lines were single-quoted and
+looked identical to a reader.
+
+**Exact file.** `scripts/install-proof.ps1`, the five `$ownWindow = ...`
+assignments in the REQUIRED MANUAL STEP block.
+
+**The code.** Before (line 362, and four siblings):
+
+```powershell
+$ownWindow = "FAIL — no 'Spaceadom build ... version $ver' banner in debug.log: ..."
+```
+
+After:
+
+```powershell
+$ownWindow = "FAIL - no 'Spaceadom build ... version $ver' banner in debug.log: ..."
+```
+
+Applied to every one of them, single- and double-quoted alike, so the file has
+no non-ASCII character in any executable line. A comment block above the
+assignments records why.
+
+**How it was verified.** Ran the script directly under `powershell` (5.1) with
+`-Exe` pointed at `target\release\spaceadom.exe` and watched it parse-fail; that
+is the measurement that identified the cause. After the fix, the same 5.1
+invocation through `explorer.exe` produced the full 42-line proof including
+`own-window ring proof (law 6, REQUIRED MANUAL STEP): FAIL - ...`, which is the
+block reporting for the first time in its life.
+
+**GENERALISE.** The marker lists in this same file already insist every marker
+be pure ASCII, because the exe scan decodes as ASCII. **The rule applies to the
+script itself.** A non-ASCII character in a BOM-less `.ps1` is a parse hazard
+under Windows PowerShell 5.1, and the failure is total and silent. Related and
+worse: **a proof step whose only failure signal is one line of `.cmd` output
+reads as a plumbing hiccup rather than "the proof does not exist."** If a check
+can fail to run, its non-execution has to be as loud as a FAIL.
+
+### 258b — the deaf-line counter rose with health
+
+**Symptom.** With 258a fixed, the first real run reported:
+
+```
+... (PROBLEM 257; 'KEYBOARD DEAF, PROVEN' lines since the banner: 18).
+```
+
+Eighteen proven-deaf events in the two minutes after a fresh install would have
+been a catastrophic result, and it was reported on a run where the hook was
+working perfectly.
+
+**Root cause.** The counter matched the bare phrase:
+
+```powershell
+$deaf = @($lines[$banner..($lines.Count - 1)] |
+          Where-Object { $_ -match 'KEYBOARD DEAF, PROVEN' }).Count
+```
+
+That phrase appears in two different log lines. One is the WARN it means. The
+other is `engine/mod.rs`'s per-hold line, which ends with instructions to the
+reader:
+
+```
+hold start (hold #4): the primary keyboard hook saw this Space-down and
+delivered it over claude.exe (PROBLEM 257). ... if a hold you made has NO line
+like this one, the hook never saw the Space — grep 'KEYBOARD DEAF, PROVEN'.
+```
+
+So the counter was counting **successful holds**. The real count of
+`hook: KEYBOARD DEAF, PROVEN` lines in that window was **0**, against 18 hold
+starts. The metric was not merely wrong, it was **inverted**: every additional
+hold the hook handled correctly added one to the "deaf" total.
+
+**Exact file.** `scripts/install-proof.ps1`, the `$deaf` assignment in the
+law-6 block.
+
+**The code.** After:
+
+```powershell
+$deaf = @($lines[$banner..($lines.Count - 1)] |
+          Where-Object { $_ -match 'hook: KEYBOARD DEAF, PROVEN' }).Count
+```
+
+`hook: ` is the WARN's own module prefix. The advice text inside the engine line
+quotes the phrase alone and cannot contain it.
+
+**How it was verified.** Counted both forms in
+`%APPDATA%\Spaceadom\debug.log` from the 1.0.103 banner (line 1059) onward:
+`hook: KEYBOARD DEAF, PROVEN` → **0**; `hold start (hold #` → **18**. The 18
+matched the script's claimed deaf count exactly, which is what identified the
+self-match.
+
+**GENERALISE.** **A log line that tells the reader what to grep for becomes a
+hit for that grep.** Any diagnostic that quotes another diagnostic's search
+string is a self-match waiting to be counted. Two habits follow: anchor a
+counter on the emitting line's own prefix rather than on the memorable phrase,
+and treat *a counter that goes up when things go right* as a defect in the
+counter before it is treated as news about the system. Same family as
+CLAUDE.md's "a check that cannot produce a negative result is not a check" —
+here it produced a positive it had no right to.
+
+### What both cost, and what they did not
+
+Nothing shipped wrong. 1.0.103's markers, version stamp, frontend chain,
+config identity and MsiInstaller window all proved out normally once the script
+ran. What was at risk was the law itself: law 6 exists because 1.0.101 and
+1.0.102 both shipped "proved" while the own-window hold was invisible to the
+hook, and on 2026-09-06 the block written to stop that happening a third time
+was, in practice, absent.
+
+---
+
 ## FEATURE 185 — App exceptions: Spaceadom stands down inside chosen apps
 
 **Symptom.** Hold-Space canvas panning does nothing in Photoshop / Figma /
@@ -8235,6 +8390,65 @@ animations through the Web Animations API rather than by eye:
 | board key Backspace (tray index 2) | `sky-unfurlIn` = index 5 — the +3 rule |
 
 ---
+
+### Measurement trap (2026-09-04) — an ENCODING made a log scan report 0 against 2,312 matching lines
+
+**Symptom.** Shipping 1.0.97, the one number the release is judged by is "how
+many `WATCHDOG — ` alarms fired this boot". The check I wrote for
+`scripts/postinstall-probe.ps1` reported **0 alarms in the whole file, every boot
+included** — while `grep -c "WATCHDOG"` on the same file from a bash shell
+returned **2,312**. A clean boot and a broken scan are indistinguishable at that
+point, and the wrong one was about to be written down as proof.
+
+**Root cause.** The pattern was `'WATCHDOG . user active'`, with `.` standing in
+for the em-dash in `WATCHDOG — user active`. `scripts/postinstall-probe.cmd`
+invokes `powershell` — Windows PowerShell **5.1**, not pwsh 7 — and 5.1's
+`Get-Content` decodes a UTF-8 file without a BOM as **ANSI**. The em-dash (3 UTF-8
+bytes, `E2 80 94`) therefore arrives in the string as the **three** characters
+`â€"`, and a one-character wildcard cannot span three characters. The pattern can
+never match, on any input, so the check had no negative branch at all.
+
+**Exact file.** `scripts/postinstall-probe.ps1`, the "1.0.97 ADDITION — THE
+FIRST-RUN CHECKS" block, section B.
+
+**The actual code.**
+
+Before:
+
+```powershell
+$alarms = @($since | Select-String -Pattern 'WATCHDOG . the KEYBOARD hook alone was evicted|WATCHDOG . user active')
+Add-Content $Out ("WATCHDOG total alarm lines this boot: " + $alarms.Count)
+```
+
+After — and BOTH halves are required, because either alone still fails silently:
+
+```powershell
+# 1. match only stretches of the alarm sentences that contain NO non-ASCII
+#    character, so the decoding cannot matter either way.
+$ALARM_RE = 'the KEYBOARD hook alone was evicted|but NEITHER hook saw anything'
+$alarms    = @($since | Select-String -Pattern $ALARM_RE)
+# 2. run the SAME pattern over the WHOLE file, every boot, as a CONTROL. The
+#    previous boot is still in this log and is known to contain alarms, so a
+#    non-zero control beside a zero this-boot count is what makes the zero
+#    evidence.
+$allAlarms = @($lines  | Select-String -Pattern $ALARM_RE)
+Add-Content $Out ("WATCHDOG CONTROL alarm lines in the WHOLE log, all boots: " + $allAlarms.Count +
+                  "  (must be > 0 for a 0 below to mean anything)")
+Add-Content $Out ("WATCHDOG total alarm lines this boot: " + $alarms.Count)
+```
+
+**How it was verified.** With the fix, the same run printed control **1,885** and
+this-boot **0**; and the previous boot's slice (the installed 1.0.96, 16:28:47 to
+19:02) counted **27** alarms plus 7 cooldown hold-offs. The scan can now
+demonstrably find an alarm, so the 0 is a reading rather than an artifact.
+
+**Generalise this.** *An encoding is part of a check.* Same family as the
+`st-hud-pointer` short-literal trap and the MSIX `%LOCALAPPDATA%` shadow: **a
+check that cannot produce a truthful negative is not a check**, and the cheapest
+way to prove one can is to run it against a known-positive input in the same
+breath. Two concrete rules fall out of this instance: never put a wildcard where
+a non-ASCII character lives if the reader's encoding is not pinned, and never
+report a zero from a log scan without a control count beside it.
 
 ### Measurement trap (2026-08-20) — the ASCII-marker check no longer sees the frontend
 
@@ -19735,3 +19949,13299 @@ piece of I/O this field exists to avoid. Re-picking the profile rewrites it in
 one press, and the chip is unaffected in the meantime because it prefers the
 LIVE profile and only falls back to the stored string for an uninstalled
 browser.
+
+---
+
+## PROBLEM 230 — the deafness instrument was installed in FRONT of the hook it measures, so Windows evicted the witness first and 22 hours of silence read as health
+
+*(Numbering note: 230 is the next free number; 229 is the last filed entry and
+221 remains claimed by the `build.rs` lane. Append-only files never renumber.)*
+
+### Symptom
+
+The owner reports, and has reported since around v1.0.30, that **shortcuts do
+not work while Spaceadom's own dashboard window is focused.** A first-run tour
+that must fire shortcuts inside the app is blocked on it.
+
+The brief for this pass carried a hypothesis and three pieces of supporting
+evidence, all read from `debug.log` under 1.0.95:
+
+1. `hook focus exposure … held the foreground for 27 of the last 60 one-second
+   samples, and 4 of the 5 watchdog alarms …` — deafness concentrating while
+   our own window is foreground.
+2. Every `hook: saw N key event(s) … 0 of them while the Spaceadom window
+   itself had focus` — *zero, always*.
+3. 219 `DEAF` lines in the current log.
+
+The hypothesis to test: the animated night-sky dashboard, composited in
+SOFTWARE on this machine (`--disable-gpu`), starves the hook thread past
+`LowLevelHooksTimeout` and Windows evicts the hook.
+
+**All three pieces of evidence are wrong, and the log says so.** Measured
+first, as PROBLEM 182 requires.
+
+**(1) is a misquote of two adjacent lines.** The 08:36:43 line reads
+`0 of the 5`, not `4 of the 5`; the `4 of 5` belongs to 08:37:43:
+
+```
+2026-09-01 08:36:43.649 … held the foreground for 27 of the last 60 one-second
+                           samples, and 0 of the 5 watchdog alarm(s) …
+2026-09-01 08:37:43.655 … held the foreground for 23 of the last 60 one-second
+                           samples, and 4 of the 5 watchdog alarm(s) …
+```
+
+Taken together — which is the only honest way to take a rate — exposure is
+**50 of 120 samples (42%)** and alarms-while-focused are **4 of 10 (40%)**.
+By the test PROBLEM 218 wrote into that very log line (*"if they track, it is
+not"*), **focus-specificity is disproved, not proved.**
+
+**(2) is false.** `grep -v ", 0 of them while"` over the log returns 15
+counterexamples, two of them overwhelming — and one is under 1.0.95, from the
+morning the brief was written:
+
+```
+2026-08-31 08:34:09.435 … saw 557 key event(s) in the last 60s, 557 of them
+                           while the Spaceadom window itself had focus
+2026-09-01 08:08:43.651 … saw 114 key event(s) in the last 60s, 110 of them
+                           while the Spaceadom window itself had focus
+```
+
+**110 of 114 keystrokes, delivered to the primary hook, while the dashboard
+held the foreground.** The hook is not deaf in our own window. Whatever the
+owner is experiencing, "the hook does not receive the keys" is not it.
+
+**(3) is an artefact of the instrument PROBLEM 228 already retired.** All 219
+`DEAF` lines use the OLD template (`the reference hook fired Nms ago (keys ARE
+reaching the chain)`); the honest 1.0.95 template (`was genuinely CALLED N
+time(s)`) appears **zero** times:
+
+```
+grep -c "genuinely CALLED"                              → 0
+grep -c "keys ARE reaching the chain) but the primary"  → 219
+last DEAF line: 2026-08-31 11:10:39
+1.0.95 installed:  2026-08-31 ~11:22   (dist2/install-check.txt timestamps)
+```
+
+The last DEAF line predates the fixed build by twelve minutes. **Since the
+instrument became honest, it has not fired once in 22 hours.**
+
+And that silence is the actual bug, because in the same period the watchdog
+raised **514 alarms in one 3.8-hour session** and re-hooked on most of them.
+
+### Root cause
+
+Two independent defects, both in the arithmetic of
+`classify_hook_window(primary_seen, genuine_ref_events)` — which is a
+**subtraction between two counters**, and is therefore a measurement only while
+both sides count the same events and both sides are alive.
+
+**A. THE REFERENCE HOOK WAS INSTALLED IN FRONT OF THE PRIMARY.**
+
+`SetWindowsHookExW` puts a new hook at the HEAD of the chain, so the hook
+installed LAST is called FIRST. `install_hooks()` installed the primary, then
+the mouse hook, then the reference — putting the reference at the head.
+
+`CallNextHookEx` is **synchronous**. A hook's measured duration therefore
+includes every hook below it. At the head, the reference's
+`LowLevelHooksTimeout` clock read
+
+    one relaxed add + the ENTIRE primary callback + everything downstream
+
+— the **largest** number in the chain, not the smallest. The hook documented as
+*"it cannot be evicted for being slow"* was by construction the first one
+Windows drops, and its own comment (`hook/mod.rs`, *"Its entire value is that it
+cannot be evicted for being slow"*) was true of the function body and false of
+the hook.
+
+Measured on the owner's machine, 1.0.95, 2026-09-01 — the counter frozen across
+three re-hooks:
+
+```
+09:50:40  hook: WATCHDOG … the reference hook last genuinely fired 238843ms ago (2237 total)
+09:52:42  hook: WATCHDOG … the reference hook last genuinely fired 360859ms ago (2237 total)
+09:52:47  hook: WATCHDOG … the reference hook last genuinely fired 365859ms ago (2237 total)
+09:52:56  hook: WATCHDOG … the reference hook last genuinely fired 374859ms ago (2237 total)
+```
+
+**6¼ minutes with the reference dead** — while the primary hook logged
+`saw 49 key event(s)` and `saw 13 key event(s)` for windows inside that same
+span. The instrument was dead and the thing it measures was alive: the exact
+inversion of its purpose. An evicted reference makes `genuine_ref_events` zero,
+so every such window classifies **Quiet**. The alarm cannot fire. Absence of
+`DEAF` was never evidence of health.
+
+Its install result was also **never checked and never logged** — `kb`'s failure
+has been logged since PROBLEM 66, this one was not — so "failed to install" and
+"installed and then went quiet" have opposite meanings and were the same line
+in the log: no line at all.
+
+**B. THE TWO COUNTERS COUNTED DIFFERENT POPULATIONS.**
+
+`ref_kb_hook_proc` counts on `n_code >= 0`, with no `dwExtraInfo` test.
+`kb_hook_proc`'s `KB_EVENTS_SEEN.fetch_add` sat ~50 lines lower, **below** the
+`dwExtraInfo == MAGIC_INJECTED` early return. So this app's own injected keys
+(`inject_space`, `force_foreground`'s synthetic tap — both reachable from a
+tray click or a dashboard button with nobody touching the keyboard) were
+counted by the reference and not by the primary.
+
+A 60-second window whose only keyboard traffic was Spaceadom injecting to
+itself arrived at `classify_hook_window` as `(0, n)` — **`Deaf`, at WARN, with
+a Sentry event, describing a hook that was working perfectly.** The static's own
+doc comment has claimed since PROBLEM 104 that it is *"incremented on entry,
+before any branch"*. It was not.
+
+### Exact files and the actual code
+
+| File | What changed |
+|---|---|
+| `D:\Claude-Projects\SpaceToggle-V14\src-tauri\src\hook\mod.rs` | reference hook installed FIRST (tail of chain) + its install result logged; `KB_EVENTS_SEEN` add moved above the injected-cookie test; 5 tests |
+| `D:\Claude-Projects\SpaceToggle-V14\src\main.ts` | the cursor-glow rAF loop can now be stopped, and is stopped while `is-blurred` |
+| `D:\Claude-Projects\SpaceToggle-V14\src\styles.css` | `#aura-a`, `#aura-b`, `#halo` join the `is-blurred` pause |
+
+`src-tauri\src\hook\mod.rs`, `install_hooks()`:
+
+```rust
+// BEFORE — reference installed LAST, i.e. at the HEAD of the chain
+let kb = SetWindowsHookExW(WINDOWS_HOOK_ID(WH_KEYBOARD_LL), Some(kb_hook_proc), None, 0)
+    .unwrap_or_default();
+let ms = SetWindowsHookExW(WINDOWS_HOOK_ID(WH_MOUSE_LL), Some(ms_hook_proc), None, 0)
+    .unwrap_or_default();
+let old_ref = REF_KB_HOOK.swap(0, Ordering::SeqCst);
+if old_ref != 0 { /* unhook */ }
+let rf = SetWindowsHookExW(WINDOWS_HOOK_ID(WH_KEYBOARD_LL), Some(ref_kb_hook_proc), None, 0)
+    .unwrap_or_default();
+REF_KB_HOOK.store(rf.0 as isize as u64, Ordering::SeqCst);
+// (no check of `rf` — a failed install was invisible)
+
+// AFTER — reference installed FIRST, i.e. at the TAIL, behind the primary
+let old_ref = REF_KB_HOOK.swap(0, Ordering::SeqCst);
+if old_ref != 0 { /* unhook */ }
+let rf = SetWindowsHookExW(WINDOWS_HOOK_ID(WH_KEYBOARD_LL), Some(ref_kb_hook_proc), None, 0)
+    .unwrap_or_default();
+REF_KB_HOOK.store(rf.0 as isize as u64, Ordering::SeqCst);
+if rf.is_invalid() {
+    log::warn!(
+        "hook: the REFERENCE keyboard hook failed to install — every 'DEAF' and \
+         'keys ARE reaching the chain' verdict from here on is uninformed, because \
+         the counter they read can no longer move. The primary hook is unaffected."
+    );
+}
+let kb = SetWindowsHookExW(WINDOWS_HOOK_ID(WH_KEYBOARD_LL), Some(kb_hook_proc), None, 0)
+    .unwrap_or_default();
+let ms = SetWindowsHookExW(WINDOWS_HOOK_ID(WH_MOUSE_LL), Some(ms_hook_proc), None, 0)
+    .unwrap_or_default();
+```
+
+**Why the tail costs nothing.** At the tail the reference cannot see a key the
+primary SUPPRESSED. That price is zero because of *when* its count is read:
+`classify_hook_window` consults it only on the `primary_seen == 0` branch, and
+`kb_only_dead` has the same premise — **a primary that saw nothing suppressed
+nothing**, so the whole stream reached the tail. An EVICTED primary is skipped
+by the system, so the tail still fires. The only case the tail undercounts is
+the case where the app is provably working, which no consumer asks about.
+
+`src-tauri\src\hook\mod.rs`, `kb_hook_proc()` — the add moved above the cookie
+test, so both counters count the same population:
+
+```rust
+// AFTER — at the top of the callback, immediately after the liveness stamps
+LAST_KB_CALLBACK.store(now, Ordering::Relaxed);
+KB_EVENTS_SEEN.fetch_add(1, Ordering::Relaxed);   // was ~50 lines below
+
+const MAGIC_INJECTED: usize = 0x7A7A7A7A;
+if ks.dwExtraInfo == MAGIC_INJECTED {
+    return CallNextHookEx(None, n_code, w_param, l_param);
+}
+```
+
+`src\main.ts` — `is-blurred` is a CSS class and could never stop a JS loop:
+
+```ts
+// BEFORE — schedules itself forever, from first paint, regardless of
+// focus or visibility
+const loop = () => {
+  gx += (tx - gx) * 0.09;
+  gy += (ty - gy) * 0.09;
+  glow.style.transform = `translate(${gx - 190}px, ${gy - 190}px)`;
+  requestAnimationFrame(loop);
+};
+requestAnimationFrame(loop);
+
+// AFTER — hoisted so wireAmbientPause can cancel it; re-armed only through
+// startCursorGlow, so a stop landing between two frames cannot be undone by a
+// frame already in flight
+let _glowRaf = 0;
+let _glowFrame: (() => void) | null = null;
+function startCursorGlow(): void {
+  if (_glowRaf || !_glowFrame) return;
+  _glowRaf = requestAnimationFrame(_glowFrame);
+}
+function stopCursorGlow(): void {
+  if (!_glowRaf) return;
+  cancelAnimationFrame(_glowRaf);
+  _glowRaf = 0;
+}
+// and in wireAmbientPause's setter:
+if (blurred) stopCursorGlow(); else startCursorGlow();
+```
+
+### What the CPU-starvation hypothesis actually measures
+
+Measured live, 2026-09-01, 1.0.95 running (pid 12952), **both** Spaceadom
+windows minimised, nothing on screen:
+
+| | |
+|---|---|
+| Machine | AMD Ryzen 7 8745HX, 8 cores / **16 logical**, 23.3 GB |
+| Machine-wide CPU | 13.4 – 19.6% across five 1s samples |
+| `spaceadom.exe` | 0.2% of one core |
+| WebView2 **gpu-process** (software compositor) | **59.5% of one core** |
+| WebView2 renderer (dashboard) | **36.4% of one core** |
+| WebView2 renderer (overlay) + browser | 6.6% of one core |
+| **Spaceadom tree total** | **≈ 1.0 core = 6.3% of the machine** |
+
+And the hook thread itself, read from the live process:
+
+```
+process BasePriority 8 (Normal), 34 threads
+tid 32524  basePri=9  curPri=11  state=Wait  wait=UserRequest  cpu=4.094s
+```
+
+`basePri = 9` on a `Normal` process is `THREAD_PRIORITY_ABOVE_NORMAL` — the
+PROBLEM 134 call **is** in force on the real machine, the thread is parked in
+`GetMessage` (`Wait`/`UserRequest`), and it is being boosted to 11 when it runs.
+
+**Verdict: the starvation hypothesis is not supported.** A priority-9 thread on
+a 16-logical-core machine at 13–20% total load does not wait 1000 ms for a
+slice. There is no starvation signature to find.
+
+There is a second, structural reason it cannot be the mechanism: **the
+reference hook lives on the same thread as the primary** (PROBLEM 181, by
+design). If that thread were starved, both hooks would miss the deadline
+together and the window would classify `Quiet`. A `Deaf` verdict requires the
+thread to have been scheduled and dispatching. Thread starvation cannot produce
+the DEAF signature at all.
+
+**What the measurement DID find is a real fault of a different kind:** ~1.0 core
+burned continuously with both windows minimised, against this project's own
+budget of ~0% for a backgrounded tray utility and "investigate" above 1%
+(`references/performance-budget.md`). That is a battery and fan bug, and it is
+worth fixing on its own merits — which is what the `main.ts` and `styles.css`
+changes above do. **It is not the hook fix, and it must not be reported as
+one.**
+
+### What was deliberately NOT done, and why
+
+- **(a) `THREAD_PRIORITY_TIME_CRITICAL` / MMCSS "Pro Audio": NOT DONE.** The
+  brief conditioned it on the measurement supporting starvation. It does not.
+  The thread already runs at ABOVE_NORMAL and is not waiting for CPU. Raising a
+  thread that also runs the MOUSE hook callback and the watchdog's `OpenProcess`
+  round-trip to TIME_CRITICAL is a real risk taken against a fault that does not
+  exist.
+- **(c) `BELOW_NORMAL` on the WebView2 children: NOT DONE.** Chromium already
+  sets its own classes — the measurement found our gpu-process at `AboveNormal`
+  and renderers at `Normal`/`BelowNormal`/`Idle` by role. Demoting the renderer
+  that draws the owner's UI, to relieve a contention that measures at 6.3% of a
+  16-thread machine, buys nothing and makes the app feel worse.
+- **(d) hook in a separate process: NOT BUILT**, as instructed.
+- **The "yield" event on re-hook: NOT BUILT.** It was proposed for the case
+  where the watchdog re-hooks into a render storm of our own making. There is no
+  render storm at the hook thread's priority, so a yield event would signal the
+  frontend to degrade itself in response to a cause that does not exist —
+  new machinery, a new failure mode, and a worse-looking app, to treat a
+  measurement that came back negative. Reconsider only if a future measurement
+  shows the hook thread genuinely waiting on CPU.
+- **The watchdog's alarm condition: NOT CHANGED**, and the 514-alarm storm is
+  left open. The obvious guard — "do not re-hook while `LAST_KB_CALLBACK`
+  proves the primary is alive" — is a **no-op**, and that is worth writing down
+  so nobody spends a session rediscovering it: `LAST_KB_EVENT` is written by the
+  callback *and* by `install_hooks()` *and* by the idle re-stamp, so it is
+  always at least as fresh as the single-writer clock. `kb_silence > BLIND_MS`
+  already implies `genuine_kb_silence > BLIND_MS`. The alarm condition is
+  conservative; the storm has another cause. PROBLEM 228's scope fence stands:
+  changing how often the app re-hooks is a behaviour question, and it now has a
+  working instrument to answer it with.
+
+### The v1.0.30 question — NOT answered, and not to be written up as if it were
+
+The brief asked for "why v1.0.30 worked (lighter dashboard)" to be recorded as
+the historical explanation. **It is not supported by anything measured here and
+is not recorded as fact.** PROBLEM 134's own STATUS CORRECTION (2026-08-17
+22:30) already reframed this as *a regression, not a limitation*, said *"Do not
+close this. Do not treat PROBLEM 134 as its fix"*, and named the next step:
+**bisect by installing old builds.** That step has still not been taken. Writing
+"the dashboard got heavier" into the record would put a signpost in the
+document pointing at a cause this pass measured and did not find — the exact
+failure mode PROBLEM 132 names ("a log that asserts a cause the code already
+excluded is worse than one that says nothing").
+
+What can be said: under 1.0.95 the primary hook demonstrably delivers keystrokes
+while the dashboard has focus (110 of 114 on 2026-09-01 08:08), and during the
+two minutes the owner actually used the dashboard that morning — foreground for
+79/89 and 43/60 samples — the watchdog raised **zero** alarms.
+
+### How it was verified
+
+- `cargo test --lib` → **329 passed, 0 failed**, 4 ignored (**324 before this
+  work; +5**). All five new tests are in
+  `hook::deaf_instrument_population_tests`.
+- `cargo check --lib` → clean, **0 warnings**.
+- `npx tsc --noEmit` → **exit 0**, clean.
+- **Both instruments were validated against a known-bad case rather than
+  believed on an all-clear** — the rule from PROBLEM 143 and
+  `references/debugging.md`. Mid-pass, the same two commands produced genuine
+  failures from a CONCURRENT lane's uncommitted work, which is what proves they
+  can still say no:
+  - `config::profile_file_tests::a_profile_name_can_never_escape_the_backup_folder`
+    (`left: ".._.._windows_system32"`, `right: "________windows_system32"`), and
+  - `src/preview.ts(24,24): error TS2305: Module './components/controls' has no
+    exported member 'ROWS_INERT_NOTE'`.
+
+  Neither was ours; `git diff` put both entirely in that lane's working copy,
+  and `src/preview.ts` was unmodified from HEAD. That lane cleared both while
+  this pass ran. **One note for whoever owns it:** the sanitiser test was made
+  to pass by relaxing the ASSERTION to `".._.._windows_system32"`, not by
+  hardening `sanitise_for_filename`. `..` now survives into the filename. It is
+  not exploitable as written — the separators are still replaced, so a single
+  path component cannot traverse — but the test's name still promises that a
+  profile name "can never escape the backup folder", and it no longer tests
+  that. Worth a second look before it is trusted as a security test.
+- **NOT verified against the concurrent lane's final state.** Those files moved
+  under this pass; the green run above is the tree as of the end of it.
+- **NOT verified on the real machine.** Nothing was built, no version was
+  bumped, nothing was installed — per instruction. The chain-order change is
+  the kind that can only be confirmed by running it; see the owner's steps
+  below.
+
+### What the owner has to do, because a hook cannot be tested from this shell
+
+`SetForegroundWindow` is blocked for the agent and synthetic input from a
+containerised shell never reaches the hook (Testing laws). These four steps are
+the confirmation, and they need his hands:
+
+1. Build and install the next version, then **focus the dashboard** and type
+   **Space + a bound letter, repeatedly, for one minute.**
+2. `grep "saw .* key event" debug.log | tail -5` — the second number must be
+   **non-zero**, i.e. `N of them while the Spaceadom window itself had focus`.
+   That is the direct test of the reported symptom.
+3. `grep "genuinely fired" debug.log | tail -20` — the `(N total)` counter must
+   now **keep climbing**. If it freezes for minutes again while `saw N key
+   event(s)` lines continue, the chain-order fix did not take and the reference
+   is being evicted from the tail as well, which would mean a third hook on this
+   machine sits between ours.
+4. `grep -c "WATCHDOG — " debug.log` over a comparable session. 514 alarms in
+   3.8 hours is the number to beat; each one tears down and rebuilds a working
+   hook and calls `hide_guide_hud()`, so if he is holding Space at that instant
+   the hold dies. **That is the most plausible remaining explanation for
+   "shortcuts don't work", and it is not focus-specific.**
+
+Also worth his eye: with both windows minimised, Task Manager should now show
+Spaceadom's `msedgewebview2.exe` entries near idle instead of ~1 core.
+
+### Generalise this
+
+- **An instrument installed in front of the thing it measures is measuring
+  itself plus the subject.** PROBLEM 228 fixed "the repair may not write the
+  instrument". This is the same law one layer out: **the instrument must not be
+  able to fail before the subject does.** Ask, for every witness: what makes
+  this one die first?
+- **A subtraction between two counters is only a measurement while both sides
+  count the same events.** Two counters that differ by one early return differ
+  by a whole population, and the difference then reads as signal.
+- **Absence of an alarm is not evidence of health until you have proved the
+  alarm can still fire.** Twenty-two hours of no `DEAF` lines looked like the
+  1.0.95 fix working. It was the witness being dead.
+- **Re-derive quoted evidence from the source before building on it.** All three
+  facts in this pass's brief were checkable in one `grep` each, and all three
+  were wrong — a misquote across two adjacent lines, a universal claim with 15
+  counterexamples, and 219 log lines from an instrument that had already been
+  retired. The cost of checking was four minutes.
+- **A hypothesis that the architecture forbids is not worth instrumenting.**
+  The reference hook shares a thread with the primary by design, so thread
+  starvation cannot produce "reference alive, primary dead". Reading the
+  structure ruled out the CPU hypothesis before any measurement — the
+  measurement then confirmed it independently.
+- **`CallNextHookEx` is synchronous, so every hook's timeout budget includes
+  every hook below it.** A "does nothing" hook is only cheap if it is at the
+  tail. This belongs in `references/win32-keyboard-hook.md` beside the timeout
+  rule.
+- **Fixing a real fault you found while looking for another one is fine;
+  reporting it as the fix for the one you were sent to find is not.** The
+  ~1-core idle burn is genuine, worth fixing, and not the hook bug.
+
+
+---
+
+## PROBLEM 231 — the profile popover could switch, rename and delete, and nothing else: no order, no copy, no undo in reach, no way to move a profile between machines, and no way to tell two profiles apart at a glance
+
+**Feature work for 1.0.96, built to the owner's artboards.** Not a bug report,
+but it is written here in the same shape because two genuine defects were found
+while verifying it, and because the next person to open the popover needs the
+decisions, not just the diff.
+
+### Symptom
+
+The owner's screenshots showed a row with five things on it — a drag handle, an
+emoji disc with a tiny ✕ over its corner, the name with an "N keys" subtitle, a
+duplicate icon, and a delete ✕ — plus a Done button, a dashed "＋ New profile"
+row, and a helper line reading *"Windows' emoji panel is open — pick anything
+from it. Enter saves, Esc cancels. [Clear]"*. The shipping popover had the name,
+the subtitle and the ✕. Everything else was missing, and three of the missing
+things were not decoration:
+
+* **Order.** `AppConfig::profiles` is the order RAlt cycles in. There was no way
+  to change it, so the cycle order was whatever order the profiles happened to
+  have been created in, permanently.
+* **Undo.** `delete_profile` already stashed an undo in Rust (PROBLEM 99/106).
+  Nothing in the popover ever offered it. The one destructive control that
+  destroys bindings and icon overrides had a working undo nobody could reach.
+* **Portability.** A profile could not leave the machine it was made on.
+
+### Root cause
+
+None — this was never built. The one thing worth recording is why it was not
+built earlier for the popover specifically, because that reason was a real
+blocker and it had to be removed first: **`profile-editor.ts` statically
+imported `offerUndo` from `main.ts`**, which made it a non-LEAF module, which
+under PROBLEM 148's rule barred it from `preview.html`. So the one surface in
+this app with a drag gesture, a rename flow and a destructive control was also
+the one surface that could never be driven in a browser. That is backwards, and
+it is why the import is now dynamic:
+
+```ts
+// src/components/profile-editor.ts
+async function offerUndoBanner(): Promise<void> {
+  try {
+    const m = await import("../main");
+    m.offerUndo();
+  } catch (e) {
+    console.info("profile-editor: no undo banner in this context", e);
+  }
+}
+```
+
+In the shipping app this costs nothing: `main.ts` is the entry, it has already
+imported this file, so the module is resolved long before any delete happens
+and the promise settles on the existing instance.
+
+### Exact files
+
+| File | What changed |
+| --- | --- |
+| `src/components/profile-editor.ts` | Edit mode, drag reorder, duplicate, emoji slot, export/import, the in-place delete Undo |
+| `src/styles.css` (profile popover section) | The row chrome for all of the above; `:root.reduced-motion` guards |
+| `src-tauri/src/commands.rs` | `reorder_profiles`, `duplicate_profile`, `set_profile_emoji`, `open_emoji_panel`, `export_profile`, `import_profile` + `profile_editor_tests` |
+| `src-tauri/src/config/schema.rs` | `Profile::emoji`, `cluster_count`, `emoji_is_valid`, the export envelope |
+| `src-tauri/src/config/mod.rs` | `profile_export_json` / `parse_profile_export`, `sanitise_for_filename`, the pre-delete backup |
+| `src-tauri/src/engine/mod.rs` + `guide_hud/mod_impl.rs` | `GuideHudPayload::profile_emoji`, built by `profile_emoji_for` |
+| `src/types.ts` | `Profile.emoji`, optional, documented as "null is the normal state" |
+| `src/preview.ts` | The real component on a real in-memory stub backend |
+| `src-tauri/src/lib.rs` | The six new commands in `invoke_handler` |
+
+### The decisions, and why each one is not arbitrary
+
+**1. Edit mode exists so that a click can mean two different things.** Outside
+it, a row is a BUTTON and one click switches profile — that path is byte-
+identical to 1.0.95. Inside it, a row is an OBJECT and one click renames. Every
+other control on the row is 22px, and a mis-aimed click lands on the row; in
+normal mode that switches profile, which is harmless, but in edit mode the user
+is rearranging things they mean to keep and silently changing the ACTIVE profile
+mid-edit is a side effect they never asked for. Done is the only exit, and
+closing the popover leaves the mode (`exitEditMode`), because a mode that
+outlives the surface it belongs to is a mode the user cannot see.
+
+**No up/down arrows.** The owner removed them from the artboard. The grip is
+the whole affordance, so it has to read as draggable on sight — `cursor: grab`,
+`⠿`, and a tooltip that says what the order *does*.
+
+**2. The reorder is validated in Rust as a SET, not trusted as a list.** The
+frontend builds the new order by reading the DOM after a drag, and the DOM can
+be stale in ways that side cannot detect — a `config-updated` event landing
+mid-drag, an undo restoring a profile while the popover is open. A permissive
+reorder that "did its best" would silently delete whatever it did not find and
+duplicate whatever appeared twice, and `config::save` runs immediately after.
+**A cosmetic gesture would have become data loss.**
+
+```rust
+// src-tauri/src/commands.rs
+fn apply_profile_reorder(cfg: &mut AppConfig, names: &[String]) -> Result<(), String> {
+    if names.len() != cfg.profiles.len() {
+        return Err(format!(
+            "The profile order does not match: {} name(s) sent, {} profile(s) exist. \
+             Nothing was reordered.",
+            names.len(), cfg.profiles.len()
+        ));
+    }
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for n in names {
+        if !seen.insert(n.as_str()) {
+            return Err(format!("'{n}' appears twice in the new order. Nothing was reordered."));
+        }
+        if !cfg.profiles.iter().any(|p| &p.name == n) {
+            return Err(format!("There is no profile called '{n}'. Nothing was reordered."));
+        }
+    }
+    // Drain and re-place: ownership moves once, nothing is cloned.
+    let mut old: Vec<Profile> = cfg.profiles.drain(..).collect();
+    let mut ordered: Vec<Profile> = Vec::with_capacity(names.len());
+    for n in names {
+        let i = old.iter().position(|p| &p.name == n)
+            .expect("validated above: every name exists exactly once");
+        ordered.push(old.remove(i));
+    }
+    cfg.profiles = ordered;
+    Ok(())
+}
+```
+
+On refusal the frontend re-renders from `_config` and the drag visibly undoes
+itself, which is the honest outcome.
+
+**3. Duplicate names the copy in RUST and returns the name.** The frontend must
+not guess it, or the toast and the row disagree the first time the rule meets an
+edge case. Two details a naive `format!("{base} 2")` gets wrong: copying "Work 2"
+must give "Work 3", not "Work 2 2"; and the result must still pass the 24-CHARACTER
+name check, so the stem is truncated to make room for the suffix rather than the
+name being rejected for something the user never typed. The copy lands directly
+AFTER the original, because the vec order is the RAlt cycle order and a copy
+appended to the end would sit somewhere unrelated to the thing it came from.
+
+**4. The delete Undo is NOT a toast, and this is the second time this codebase
+has had to write that down** (key-detail-panel's pin-clear Undo is the first).
+`#toast-container` is `pointer-events: none` — set in `toast.ts`'s `toastLayer`
+via CSSOM, because the same component renders into the transparent CLICK-THROUGH
+overlay window where a button is unreachable by definition. **An Undo the user
+cannot click is not an Undo.** So it stands where the deleted row was, for ~10s:
+
+```ts
+// src/components/profile-editor.ts — renderProfileList()
+_config.profiles.forEach((profile, i) => {
+  // The undo offer stands IN PLACE of the row that was deleted, so the row
+  // comes back where it was.
+  if (_pendingUndo && _pendingUndo.index === i) list.appendChild(undoRow());
+  …
+});
+// A delete of the LAST row leaves an index past the end.
+if (_pendingUndo && _pendingUndo.index >= _config.profiles.length) list.appendChild(undoRow());
+```
+
+That placement is also the promise being made visible: the offer occupies the
+position the row will come back to. Three things back it, none redundant —
+Rust's undo stack (10/20/30s by profile type, PROBLEM 106), the banner in
+`main.ts` (which survives the popover closing), and a timestamped
+`profile-<name>-<stamp>.json` written into `%LOCALAPPDATA%\SpaceadomBackups`
+BEFORE anything is destroyed, logged at info, for the user who notices next week.
+
+**5. Export/import used the dialog plugin that was ALREADY a Rust dependency.**
+The import-before-implement check found `tauri-plugin-dialog = "2"` in
+`Cargo.toml`, already driving `pick_file`. The JS side is not installed
+(`package.json` has only `@tauri-apps/api` and `plugin-opener`) and
+`capabilities/default.json` grants `dialog:allow-open`/`allow-ask` but no
+`allow-save`. Adding an npm dependency AND widening the webview's capability set
+to reach the same plugin would have been the more expensive of two identical
+outcomes, so both dialogs are opened from Rust. **Nothing was added to
+`capabilities/default.json`** — a webview that cannot open a save dialog is a
+webview that cannot be talked into opening one.
+
+The export envelope carries a marker, and it is load-bearing rather than
+decorative: the backups folder already holds whole-config files and
+`config::newest_valid_backup_in` walks every `*.json` in there trying to parse
+each as an `AppConfig`. `spaceadom_profile` plus a required `bindings` map is
+what makes "profile or config?" a decision instead of a guess.
+
+**6. Emoji is one GRAPHEME CLUSTER, which is not one `char` and not a byte
+budget.** The obvious first version — `chars().count() == 1` — rejects almost
+every emoji a person would actually pick: 👨‍👩‍👧 is five code points, 👍🏽 is
+two, ❤️ is two, 🇧🇩 is two. So `schema::cluster_count` counts a new cluster for
+every code point EXCEPT the ones that by definition attach to the one before
+(ZWJ and its follower, variation selectors, skin-tone modifiers, tag characters,
+the keycap mark, the combining-mark blocks, and the second regional indicator of
+a flag pair). It is a deliberate approximation of UAX #29 — no
+`unicode-segmentation` dependency for one config field — and where it differs
+from the real algorithm it errs toward ACCEPTING, which is the right direction
+for a field whose only consequence is a glyph in a disc. A `EMOJI_MAX_CHARS = 16`
+cap sits beside it because a pathological string can be one cluster and thousands
+of code points (combining marks stack without limit).
+
+The frontend input therefore has **no `maxLength`**. `maxLength = 1` or `2` would
+truncate 👨‍👩‍👧 (`.length === 8`) into a lone man and a stray joiner.
+
+**7. The emoji panel is opened by INJECTING Win+period, and the order matters.**
+Windows exposes no API for "show the emoji panel"; the gesture is the only route,
+so the app performs the gesture the user would. One `SendInput` batch (Win↓ .↓ .↑
+Win↑ — `SendInput` then `CallNextHookEx` does not preserve order, and a Win-down
+arriving after the period is Start-menu-opens), cookie-tagged `0x7A7A7A7A` via
+`hook::send_keys_checked` so our own hook passes it through, nothing left held,
+and engine-side rather than in a hook callback. The frontend focuses the input
+BEFORE calling it, because the panel inserts into whatever has keyboard focus at
+the moment it opens; focusing afterwards would race a slow open and drop the
+first emoji into nothing. A failed injection is not a dead end — the error says
+so and the box is already focused.
+
+### The two defects the verification found
+
+Both were found by driving `preview.html` in a browser, and neither would have
+been found by reading the code.
+
+**(a) The preview stub shared its config object with the component it was
+stubbing.** `const stubState = { config, undo: null }` — the same object handed
+to `initProfileEditor(config, …)`. Clicking Duplicate produced **two** rows
+called "Professionals 2": the stub spliced the copy in, then `duplicateProfile()`
+spliced its own copy into what it believed was a separate local config.
+
+```ts
+// src/preview.ts — BEFORE
+const stubState = { config, undo: null as AppConfig | null };
+const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
+
+// AFTER (clone must be declared first — TDZ)
+const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
+const stubState = { config: clone(config), undo: null as AppConfig | null };
+```
+
+The false positive is the cheap half. **The expensive half is the negative it
+could not produce**: with one shared object, a frontend that forgot to update its
+local copy at all would still render a correct list, because the stub had already
+done it. Every other stubbed command happened to be idempotent under sharing
+(rename sets the same name twice, delete filters an already-filtered array), so
+`duplicate` was the only one that showed it — which is exactly how this survives
+review.
+
+The same pass also fixed the stub's copy NAME (`` `${name} 2` `` → a mirror of
+`unique_copy_name`), because a second click made two rows share a name, and
+`data-profile-name` is how a row is identified — the duplicate then broke
+reorder's uniqueness check and made delete ambiguous. **A harness that invents
+states the backend cannot produce reports bugs the app does not have.**
+
+**(b) A toast led with the user's emoji, and `toast.ts` splits the leading glyph
+by CODE POINT.** `Array.from(message)[0]` takes one code point, so
+`👨‍👩‍👧 Emoji set for Gamers` rendered a lone 👨 in the icon disc and
+`‍👩‍👧 Emoji set for Gamers` — leading ZWJ — as the text. Fixed on this side,
+in `saveEmoji`, by moving the user's data into the sentence:
+
+```ts
+showToast(emoji ? `✅ ${name} now shows ${emoji}` : `✅ Emoji removed from ${name}`);
+```
+
+**The leading position in a toast is a vocabulary this app owns (⚡ ⚠️ ❌ ↩ ✅),
+not a place to splice user data.** The same code-point split affects the app's
+own two-code-point glyphs — `⚠️` and `🗑️` leave a stray U+FE0F at the head of
+the text today — which is invisible in practice and lives in `toast.ts`, another
+lane's file this pass did not touch. Recorded here so it is not re-diagnosed.
+
+### How it was verified
+
+* **`cargo test --lib` — 329 passed, 0 failed, 0 warnings.** Eight of them are
+  new `commands::profile_editor_tests` (a valid reorder keeps bindings; a short
+  list reorders nothing; a duplicated or unknown name is refused and changes
+  nothing; same order is a no-op not an error; "Name 2" then "Name 3"; a copy of
+  a copy advances instead of stacking; the 24-char cap; an emoji name counted the
+  way `regex_lite` counts it) plus `config::schema::profile_emoji_tests` (the ZWJ
+  family, skin tones, variation selectors, a regional-indicator flag, a tag
+  flag, a keycap; and the refusals: two glyphs, two emoji, two flags, empty, a
+  trailing space, a control character, and a stacked-combining-mark string that
+  only the length cap refuses).
+* **Both first-install tests carry the new field.** `Default` must produce
+  profiles with `emoji: None` (a shipped emoji nobody chose is the same failure
+  class as fun_mode being on), and the field-removal test now walks INTO the
+  profiles array — `emoji` is the only nested optional in this config, and a
+  nested `Option` without `#[serde(default)]` fails the whole parse rather than
+  defaulting, i.e. the config would not load at all on the first run of 1.0.96.
+* **`tsc` clean, `npm run build` clean.**
+* **Driven in the browser pane against `preview.html?profiles`**, both palettes.
+  Measured, not assumed: edit mode shows grips/⤒/⧉ and the Import footer and
+  Done hides them again; a single click in edit mode opens the inline rename
+  focused and selected and does NOT switch profile (the pill stayed "Founders");
+  Enter saved ("Renamed → Gamers Renamed"), Escape discarded; Duplicate produced
+  exactly one "Professionals 2", then "Professionals 3", and duplicating
+  "Professionals 3" gave "Professionals 4" rather than "Professionals 3 2";
+  a drag committed and the STUB BACKEND's `get_config` came back in the new
+  order; a deliberately stale DOM (one row removed) was refused with
+  *"The profile order does not match. Nothing was reordered."* and the list
+  snapped back; the two-step delete armed to "Delete?" then deleted, the Undo
+  row appeared at the deleted row's exact index, and Undo restored the profile
+  to that same index; the emoji slot opened focused, called `open_emoji_panel`,
+  accepted 👨‍👩‍👧, showed it on the disc and on the top-right pill, and Clear
+  reverted the pill to "F" and removed the tiny ✕ with it; outside edit mode a
+  single click switched profile, closed the popover and moved the backend's
+  `active_profile`. Console: no errors. `:root.reduced-motion` resolves the
+  entrance animations to `none`, discs are 999px, and nothing in the popover
+  computes a `backdrop-filter`.
+
+**NOT verified — and it cannot be from here:** the Win+period injection. A
+containerised agent shell cannot prove `SendInput` reached the shell (the
+testing laws in CLAUDE.md say so explicitly, and the positive control is not
+available), and `preview.html` is a browser with no emoji panel to open. The
+command logs `open_emoji_panel: injected Win+period (inserted={ok})` and returns
+a plain-spoken error telling the user to press Windows + . themselves when the
+insert is refused. **Hand-test it on the real machine before calling it done.**
+
+### Generalise this
+
+- **A stub that shares state with the component under test can only agree with
+  it.** Same family as "a check that cannot produce a negative result is not a
+  check", one layer up: the harness must be a separate store, or it is not a
+  harness. Ask of every fake: what would it do if the code under test did
+  nothing at all?
+- **When a rule is enforced in Rust and mirrored in the harness, mirror the
+  RULE, not a plausible shorthand.** `` `${name} 2` `` looked like a stub detail
+  and was a state generator — it produced duplicate names the backend can never
+  produce, which then broke two unrelated features inside the harness.
+- **The leading character of a message is a slot with a parser behind it.**
+  Anywhere a display splits "icon" from "text", user data in the icon position
+  is data being parsed as a control character. Put it in the sentence.
+- **A non-LEAF module is a module that cannot be tested.** PROBLEM 148 stated
+  the rule for the harness; this is the cost of not applying it — the surface
+  with the most gestures in it was the one that could never be driven, for three
+  versions, because of one static import that a `await import()` fixed.
+- **Order that a feature reads is not presentation.** `profiles` is the RAlt
+  cycle order, so "let the user drag the rows" is a behaviour change, and the
+  command that commits it must validate like one.
+
+## PROBLEM 232 — you could not see a HUD layout before choosing it, the "compact" ring had a hole in the middle at 16 apps, and the SPACE pill never said which profile you were in
+
+Three things in the Guide HUD, done in one pass because they share one file and
+one geometry (`src/components/toast.ts`). Lane B of the 1.0.96 split.
+
+### Symptom
+
+1. **The layout setting was a name, not a picture.** Settings offers Compact /
+   Wide / Double. Choosing between them meant applying one, dismissing Settings,
+   holding Space, looking, and going back — with the owner's real twenty-six
+   labels, which is the only data that answers "does this fit".
+2. **The compact ring had a hollow middle**, worst with the specials ring
+   switched off. Measured on the owner's own labels before the fix:
+
+   ```
+   apps    4     8    12    14    16    18    26
+   hollow  16    20    51    75   101    34    32     (px)
+   ```
+
+   101px of nothing at 16 apps. The owner: *"make sure the compact actually
+   shows always compact and there's not too much hollow space."*
+3. **The SPACE pill never named the active profile.** Lane C had just given a
+   profile an emoji; the HUD did not show it.
+
+### Root cause
+
+**(2) is the interesting one, and it was invisible because nothing measured it.**
+The ladder's acceptance test is `overlaps === 0` plus a minimum clearance
+between chips — and **a ring flung far away from the pill passes that test
+perfectly**. Every chip is legal; the middle is empty. The layout was being
+judged on chip-vs-chip collisions only, so the one number describing the
+complaint was never computed.
+
+Underneath it, `fitRx` saturates silently: asked for a radius whose rim holds
+`need` and given a ceiling that cannot, it returns the ceiling and says nothing.
+`packBands` then hands back a band carrying more content than it has rim for.
+Usually that shows up as an overlap and the ladder catches it. At 16 labels it
+did not — 1734px of content on a 1711px rim missed by 23px, no pair intersected,
+`clear` measured 19px — and `auto` accepted a single ring pinned to the ceiling
+with a 101px hole in the middle.
+
+### Exact files
+
+- `src/components/toast.ts` — `hollowOf`, `bandOverflow`, the `HudFit` fields,
+  both `fit` construction sites, `previewOverride`, `paintSpacePill`,
+  `publishHudChips`'s preview gate.
+- `src/styles/overlay-earthy.css` — `.st-space-emoji` + its reduced-motion guard.
+- `src-tauri/src/engine/mod.rs` — `PreviewLayout`, `preview_payload`,
+  `profile_emoji_for`.
+- `src-tauri/src/commands.rs` — `preview_hud_layout` (one new command).
+- `src-tauri/src/guide_hud/mod_impl.rs` — `show_preview_hud`, `hide_preview_hud`,
+  `show_hud_payload`'s preview branch.
+
+### The actual code
+
+**Measure the thing being complained about.** Same "apart on EITHER axis"
+convention as `minClearance`; the pill is centred, hence `|x|`/`|y|`:
+
+```ts
+function hollowOf(boxes: ChipBox[]): number {
+  let m = Infinity;
+  for (const b of boxes) {
+    const g = Math.max(
+      Math.abs(b.x) - (b.w + SPACE_W) / 2,
+      Math.abs(b.y) - (b.h + SPACE_H) / 2,
+    );
+    if (g < m) m = g;
+  }
+  return m;
+}
+```
+
+**Make "one band does not fit" measured instead of inferred from a collision
+that may or may not happen** — this is what kills the 101px spike, by letting
+`auto` step to two bands at 16 apps:
+
+```ts
+function bandOverflow(bands: Band[], gap: number): number {
+  let over = 0;
+  for (const b of bands) {
+    const need = b.items.reduce((s, it) => s + it.w + gap, 0);
+    if (need > b.cap) over += need - b.cap;
+  }
+  return over;
+}
+```
+
+**The preview is a projection, not a hold.** The override rides in the payload
+and is read exactly where the saved settings are read, so every rung of the
+ladder sees one consistent answer, and nothing is written or cached:
+
+```ts
+const preview = previewOverride(payload);
+const mode     = preview ? preview.mode  : hudLayoutMode();
+const bandMode = preview ? preview.bands : getBandCount();
+```
+
+**Two independent locks make a preview unarmable, and neither is in
+`hook/mod.rs`.** Page side — one early return rather than a new mode threaded
+through the aiming code:
+
+```ts
+export function publishHudChips(): void {
+  if (!_isOverlay || !_hudEl) return;
+  if (previewOverride(_lastPayload)) return;   // a preview publishes NOTHING
+  ...
+```
+
+Rust side — cleared rather than merely skipped, so a snapshot left over from the
+previous real hold cannot survive into the preview:
+
+```rust
+if payload.preview.is_none() {
+    crate::hook::pointer::publish_keys(&payload.apps);
+} else {
+    crate::hook::pointer::clear_chips();
+}
+```
+
+Both counts (`CHIP_GEOM_COUNT`, `CHIP_KEY_COUNT`) then stay at zero and
+`sector_pick` is never reached — no armed chip, no beam, nothing a release or a
+click could fire.
+
+**Epoch discipline is PROBLEM 177's, reused rather than reinvented.** The
+preview is stamped with `begin_hold()` like any other show; a real Space-down or
+release moves the counter past it, and the auto-hide then refuses:
+
+```rust
+pub fn hide_preview_hud(epoch: u64) {
+    let current = HOLD_EPOCH.load(Ordering::SeqCst);
+    if current != epoch { /* superseded — NOT hiding */ return; }
+    hide_guide_hud_pending(false);
+}
+```
+
+There is no second timer to cancel and no flag that can be left set.
+
+**The emoji is absolute, not a flex item** — that is the whole design decision.
+"SPACE" is the pill's wordmark, dead centre in a 230px capsule; a sibling flex
+item would push it off-centre by ~13px on the visual anchor of the entire radial
+HUD. Absent emoji appends no element at all, so the pill is byte-identical to
+1.0.95:
+
+```ts
+const text = typeof emoji === "string" ? emoji.trim() : "";
+if (!text) return;                       // the byte-identical branch
+```
+
+### How it was verified
+
+Vite harness (`_harness/`, since deleted, port 5199) driving the **shipped**
+`initToastListener` with the **shipped** payload shape and both real
+stylesheets — every chip width is a font measurement, so the real Outfit face
+had to be loaded before measuring. Monitor pinned to the owner's panel
+(1707x1067 logical). Deleted after the run.
+
+**The hollow, magnetic/auto, specials OFF — before (documented above) vs after:**
+
+```
+apps      4     8    12    14    16     18    22    26
+before    16    20    51    75   101     34     -    32
+after     16  19.5  50.5    75  33.5   33.5  30.5  20.5
+```
+
+The 101px spike at 16 apps is gone (to 33.5), and 26 apps improved 32 to 20.5.
+**12 and 14 apps are UNCHANGED at 50.5/75px — see "what is NOT fixed" below.**
+With specials ON the hollow is a flat 21px at every count from 4 to 26 (the
+inner ring occupies the middle, which is the point).
+
+**Acceptance held everywhere:** 0 overlaps in all 32 measured scenarios, minimum
+chip clearance 11.5px (>= 10px required).
+
+**The pointer contract is truthful**: `hollow` reported on `HudFit` matched an
+INDEPENDENT DOM re-measurement (`offsetLeft`/`offsetWidth`, read by the harness,
+not by the code under test) in all 16 batch rows — 22/22, 21/21, 19.5/20,
+5/5, 20.5/21, 230.5/231.
+
+**Preview locks, measured at the front door**: every preview scenario recorded
+`publish_hud_chips` calls = **0** and chips published = **null**; every real hold
+recorded **1** call with 8 or 26 chips. That is the suppression demonstrated,
+not asserted.
+
+**Emoji states**: the glyph renders when set; `null` and `""` (blank) both render
+no element at all; `spaceText` measured `"SPACE"` in all 16 rows, so the wordmark
+never moves. Geometrically the glyph occupies x=16..32 and the centred wordmark
+x is about 82..148 — they cannot collide.
+
+Baselines protected: **331 cargo tests, 0 failed; cargo check 0 warnings; tsc
+clean; `npm run build` clean.**
+
+### What is NOT fixed, deliberately
+
+**At 12 and 14 apps with specials OFF the hollow is still 50.5px / 75px.** Those
+counts stay on ONE band because one band genuinely fits (`overflow` is 0), and
+a single ring big enough in RIM to hold 12-14 chips necessarily sits that far
+out. Pulling it in means making `auto` prefer two bands on a *hollow* threshold
+rather than on "does it fit" — which directly contradicts the owner's own stated
+rule, *"auto should prefer one band unless it doesn't fit"*. **That is a
+behaviour decision and it is his, not the implementer's.** Reported, not
+silently changed.
+
+**At 26 apps / specials off, `overflow` reports 158px** across 2 bands (inner
+band oversubscribed, outer band with slack). It passes acceptance — 0 overlaps,
+13px clearance — and it is pre-existing packing behaviour that is merely
+VISIBLE now that the field exists. Not introduced by this pass.
+
+### A measurement trap this pass walked into and out of
+
+`overflow` was briefly "corrected" to compare each band's need against a
+**scaled** cap (`b.cap * scale`), on the reasoning that it should read in the
+same units as `outerRim` printed beside it. The evidence for the change was a
+`getComputedStyle(#st-hud).transform` of `matrix(0.93, ...)` — read **while the
+entrance animation was still running**, on a HUD still carrying the `hidden`
+class. That 0.93 was an animation frame, not the layout scale.
+
+The units were wrong too: `b.cap` derives from `b.rx` and `it.w` is a chip's
+`offsetWidth`, and **a CSS transform does not affect `offsetWidth`** — both are
+already pre-scale, so multiplying one side by `scale` mixes spaces and inflates
+the number into fiction.
+
+The field now reports the ladder's own `t.overflow` — the value actually decided
+on, in one consistent space, which can never drift from the decision.
+
+**Generalise, twice over:**
+- **A transform sampled during an animation is not the element's resting
+  geometry.** Read it after the animation settles, or read the value the layout
+  code computed rather than the value the compositor is mid-way through.
+- **An acceptance test constrains only what it measures.** "0 overlaps + minimum
+  clearance" is entirely satisfied by a ring pushed far away from its own
+  centre. The complaint that went unfixed for three versions was never a bug in
+  the arithmetic — it was a quantity that no test computed. When a user
+  describes something the code passes, the first move is to add the number, not
+  to adjust the geometry.
+
+## PROBLEM 233 — the Settings panel was one undifferentiated column of switches, and three of its controls asked the user to hold an opinion the app was better placed to have
+
+**Symptom.** The owner's screenshots of what he wanted, set against what shipped
+in 1.0.95, name five separate faults in one surface:
+
+1. **No structure.** Twelve switches, two pills and two sliders in a single flat
+   column, in the order they happened to be added. Nothing said which of them
+   were about *looks* and which changed *behaviour*, so finding one meant
+   reading all of them.
+2. **No way to find anything.** The panel scrolls. The only search was the
+   user's eyes.
+3. **No room.** A 280px popover for sixteen controls, on a 2560×1600 panel with
+   the rest of the screen empty.
+4. **"Show me around" was a switch pretending to be a preference.** It sat in
+   the list of things you configure, but it does not configure anything — it
+   opens every description at once. A verb wearing a noun's clothes.
+5. **"Software overlay" asked the wrong question of the wrong person.** It is a
+   switch labelled with a rendering-pipeline term, and what the user actually
+   has when they need it is a *symptom*: the ring is not showing. Worse, it was
+   the only way back from a verdict the app writes itself — and three shipped
+   builds wrote that verdict wrongly (see the occlusion bug in PROBLEM 171).
+6. **The ring's shape needed two controls and had a dead state.** "New ring
+   layout" (a switch) gated "Shortcut rows" (a 3-way pill), so turning the
+   switch off left the pill live-looking and meaningless, and the pill's own
+   "1 row" was indistinguishable from "Auto" on every machine where the labels
+   fit.
+
+**Root cause.** Each of the six is the same mistake in a different costume: a
+control's SHAPE did not match what the thing behind it actually is.
+
+* A *group* of related settings had no grouping, so the panel's structure lived
+  only in the reader's head.
+* An *action* ("open all the descriptions") was drawn as a *switch*.
+* A *measurement* (`overlay_compositing`, which the app writes from a pixel
+  self-test) was drawn as a *preference*, so a wrong measurement became the
+  user's problem to hold an opinion about.
+* One *choice among three shapes* was drawn as a *boolean plus a second
+  three-way choice*, which is four expressible states for three real ones — and
+  the fourth is the dead one.
+
+**Exact files.**
+
+| File | What changed |
+| --- | --- |
+| `src/components/settings-panel.ts` | The rebuild: header, sticky Engine row, search, four groups, the Compact/Wide/Double pill, the Conflicts-area ring tool |
+| `src/components/controls.ts` | The new leaf helpers, all PURE and all shared with the harness: `RING_OPTS`, `ringLayoutFor`, `ringConfigFor`, `groupHeadingHtml`, `filterSettings`, `setPanelExpanded`, `paintInert`, `SPECIALS_INERT_NOTE` |
+| `src/styles.css` | The 2026-09-01 redesign block: header, search, group headings, sticky row, the full-screen expanded state |
+| `src/preview.ts` | The harness, rebuilt to the same four groups **through the same functions** |
+| `src-tauri/src/commands.rs` | `run_overlay_fix`, `retest_software_overlay_once`, `restart_app` |
+| `src-tauri/src/lib.rs` | One line to call the one-shot re-test; three command registrations |
+| `src-tauri/src/tray.rs` | Pause/Resume, with its label kept honest from all three writers |
+
+---
+
+### The three-shape pill, and why the mapping is a pure function in a leaf module
+
+`Compact · Wide · Double` is ONE control over the two config fields that already
+existed. No schema change:
+
+```ts
+// src/components/controls.ts
+export function ringLayoutFor(magnetic: unknown, band: unknown): RingLayout {
+  if (magnetic === false) return "wide";
+  return band === "two" ? "double" : "compact";
+}
+
+export function ringConfigFor(
+  layout: RingLayout,
+): { magnetic: boolean; band: "auto" | "two" | null } {
+  if (layout === "wide")   return { magnetic: false, band: null };
+  if (layout === "double") return { magnetic: true,  band: "two" };
+  return { magnetic: true, band: "auto" };
+}
+```
+
+**`band: null` for Wide is the load-bearing detail.** Wide has no opinion about
+how many rows the apps use, so it writes `hud_magnetic_layout` and *leaves
+`hud_band_count` alone*. That is what makes a detour Double → Wide → Double
+return the user to Double rather than to Compact. Writing `"auto"` there would
+have been the obvious, tidy, wrong choice: it destroys a preference on a
+control the user pressed for an unrelated reason.
+
+**Forced-`"one"` is RETIRED, not migrated.** The UI never writes it again. A
+config that still holds it (anyone who picked "1 row" between 1.0.89 and 1.0.95)
+shows **Compact**, and the next press of the pill normalises it to `"auto"`. It
+is not rewritten on load, deliberately: a settings panel that edits your config
+just for being opened is a worse bargain than a value that is indistinguishable
+from `"auto"` on every machine where the labels fit.
+
+Rust has to agree with this table value-for-value — the ring check draws the
+shape the user actually has — and nothing in either language can check the
+other, so the agreement is asserted in a test:
+
+```rust
+// src-tauri/src/commands.rs — ring_layout_name_tests
+assert_eq!(case(true,  "auto"), "compact", "the shipped default");
+assert_eq!(case(true,  "one"),  "compact", "the RETIRED forced-one value …");
+assert_eq!(case(true,  "two"),  "double");
+assert_eq!(case(false, "auto"), "wide");
+assert_eq!(case(false, "two"),  "wide");
+```
+
+The remaining dependency — under Double both rings belong to apps, so "Show
+special keys" has nothing to do — is **presentation only**. `hud_show_specials`
+is never written by the greying, so returning to Compact restores what the user
+picked. The reason is visible from the control it explains:
+
+> Two rings of apps use all the room — pick Compact or Wide and they come back.
+
+---
+
+### `run_overlay_fix` — a measurement gets a tool, not a switch
+
+The switch is gone; the escape hatch is not. A quiet row lives in the Conflicts
+area **always**, because it is a tool rather than an alarm:
+
+> The ring isn't showing?   [ Check the ring ]
+
+It re-runs the pixel self-test, writes `overlay_compositing` per the verdict in
+**both** directions, and returns the sentence to show. The frontend decides
+whether to offer a restart by **re-reading the config**, never by parsing that
+sentence:
+
+```ts
+const before: "auto" | "software" = appConfig?.overlay_compositing ?? "auto";
+const msg = await invoke<string>("run_overlay_fix");
+const fresh = await invoke<{ overlay_compositing?: string }>("get_config");
+const after = fresh?.overlay_compositing === "software" ? "software" : "auto";
+out.textContent = msg;
+if (after !== before) { restart.hidden = false; /* … */ }
+```
+
+Parsing the message for a keyword would be a second source of truth that breaks
+the first time somebody edits the copy.
+
+**The one-shot migration.** Users flipped to software rendering by the
+pre-PROBLEM-171 occlusion bug are still in it, permanently — and the switch that
+was their way back has just been removed. So on the first launch of this
+version, if the config says `"software"`, the measurement is re-run once:
+
+```rust
+// lib.rs — create_app_windows, at the end, where the overlay is known to exist
+#[cfg(windows)]
+commands::retest_software_overlay_once(&app_handle);
+```
+
+Everything else is in `commands.rs`. Three details that are not incidental:
+
+* **The marker is written BEFORE the test runs.** If the app dies mid-check the
+  re-test does not fire again at every launch forever. The button is always
+  there as the way back.
+* **If the marker cannot be written, the check is SKIPPED, not run.** Drawing a
+  ring on screen at every launch is a worse fault than the one being fixed.
+* **8 seconds on a background thread.** The overlay *window* exists at that
+  point but its *page* has not loaded, and a ring drawn into an empty document
+  paints nothing — which would score a false "dead" and flip a healthy machine
+  into software rendering. A Space-hold during the wait simply supersedes the
+  check, which is correct: the user's own ring is not something a background
+  test may take away.
+
+---
+
+### `restart_app` — why `AppHandle::restart()` is the wrong call in THIS app
+
+The "Restart now" button invoked `restart_app`, and the command did not exist.
+The obvious fix is one line — `app.restart()` — and it would have shipped a
+button that kills the app and does not bring it back. From `tauri-2.11.5`,
+`src/process.rs`:
+
+```rust
+pub fn restart(env: &Env) -> ! {
+  if let Ok(path) = current_binary(env) {
+    if let Err(e) = Command::new(path).args(env.args_os.iter().skip(1)).spawn() {
+      log::error!("failed to restart app: {e}");
+    }
+  }
+  exit(0);                       // ← the spawn happens BEFORE the exit
+}
+```
+
+This app runs `tauri-plugin-single-instance`. The new process starts while the
+old one still holds the instance mutex, forwards its arguments to the dying
+instance and exits; a moment later the old process exits too. Nothing is left
+running, and nothing in the log says why.
+
+So the order is inverted — a detached waiter starts the app *after* this process
+is gone:
+
+```rust
+let line = format!("timeout /t 2 /nobreak >nul & start \"\" \"{exe}\"");
+std::process::Command::new("cmd")
+    .args(["/C", &line])
+    .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+    .spawn()
+    .map_err(|e| { log::error!("restart: … ({e}) — NOT exiting"); /* … */ })?;
+crate::hook::stop_hook();
+app.exit(0);
+```
+
+* `start ""` — the empty `""` is the window TITLE argument. Without it `start`
+  reads a quoted path *as* the title and opens nothing: the classic silent
+  failure of this idiom.
+* `DETACHED_PROCESS` as well as `CREATE_NO_WINDOW` — the latter alone leaves the
+  helper in our console group, where it dies with us.
+* **No arguments passed to the new instance**, unlike Tauri's version. For an
+  autostart launch `args_os` contains `--autostart`, and this app's
+  single-instance handler returns *silently* for that flag (PROBLEM 64) — so a
+  restart from an autostarted session would come back invisible.
+* If the waiter cannot be spawned we log loudly and **do not exit**. An app that
+  quietly stays shut is the one outcome worse than a failed restart.
+
+---
+
+### The tray's Pause/Resume, and the label that must never lie
+
+A tray item reading "Pause Spaceadom" while the engine is already paused is
+worse than no item: the one place a user looks to learn whether the app is on
+would be telling them the opposite. Three writers can flip the engine — this
+menu, the Settings row, and Space+Backslash — and they all already meet at the
+`bypass-toggled` event, so the tray joins that path rather than inventing a
+second one:
+
+```rust
+static ENGINE_ITEM: OnceLock<MenuItem<tauri::Wry>> = OnceLock::new();
+fn engine_item_label(paused: bool) -> &'static str {
+    if paused { "Resume Spaceadom" } else { "Pause Spaceadom" }
+}
+app.listen("bypass-toggled", |event| {
+    let paused = match serde_json::from_str::<bool>(event.payload()) { /* … */ };
+    set_engine_item_label(paused);
+});
+```
+
+The starting label is read from the live atomic rather than assumed to be "not
+paused" — the tray is built inside `setup()`, and the engine's state is already
+whatever this process has made it. The payload is **parsed, not string-matched**,
+so a future payload change breaks loudly instead of leaving the label stuck.
+
+`toggle_engine` clears `MODIFIER_ACTIVE` when pausing. That is not tidiness: the
+hook skips the SPACE_UP event while bypassed, so pausing during a held Space
+would leave the modifier latched forever and every subsequent keystroke would
+read as a command.
+
+> **KNOWN GAP, recorded rather than fixed here.** `commands::toggle_bypass` —
+> the path the *Settings row* uses — does **not** clear `MODIFIER_ACTIVE`.
+> `engine::handle_bypass_toggle` (Space+Backslash) always has, and the tray now
+> does. Pausing from the Settings row *while Space is physically held* can
+> therefore latch the modifier. It was left alone because `toggle_bypass`
+> belongs to another lane in this session; it is a two-line fix in the same
+> shape as the tray's.
+
+---
+
+### The three-line rule the harness now obeys
+
+`preview.ts` renders the same four groups, the same sticky row, the same search
+and the same ring pill as the app — **through the app's own functions**, not
+through a copy of them. `groupHeadingHtml`, `filterSettings`, `setPanelExpanded`,
+`paintInert`, `RING_OPTS`, `ringLayoutFor` all live in `controls.ts`, which is a
+leaf module the harness may import.
+
+This matters because the harness showed a "Dark mode" switch for three versions
+after the theme pill replaced it. A harness that *imitates* the panel drifts from
+it; one that *uses its parts* cannot.
+
+Two smaller things the rebuild fixed on the way, both found by measuring in that
+harness:
+
+* **`.toggle-switch` had only ever had a size by accident of its parent.** It is
+  a `<span>` — `display: inline` — and width/height do not apply to a
+  non-replaced inline box. It rendered at 36×20 solely because `.set-row` is a
+  flexbox and flex items are blockified. Put one inside a plain wrapper `<span>`
+  — which is exactly what `paintInert` needed — and it collapses to 0×0, taking
+  the absolutely-positioned track with it and leaving the 15px thumb floating
+  over nothing. Fixed at the source (`.toggle-switch { display: inline-flex }`),
+  not on the wrapper: a wrapper rule fixes today's wrapper and leaves the next
+  one broken in the same invisible way.
+* **The search haystack is `textContent`, so hidden text is still searchable
+  text.** The inert note was originally emitted on every switch with
+  `display:none`. Harmless-looking, and it would have made "compact" and "wide"
+  match twelve unrelated rows. Only the specials row carries it now.
+
+---
+
+**How it was verified.** `preview.html?gear` driven in the browser pane, with
+the real components, measured rather than eyeballed (a hidden Browser pane
+reports `innerWidth: 0` and every geometry read collapses — two runs were
+discarded for that before the numbers below were trusted):
+
+| Claim | Measurement |
+| --- | --- |
+| Four groups, right order, each with an icon | `["Appearance","Behaviour","The Space ring","Privacy"]`, every group has a `.set-group-icon` |
+| Search filters in place | `"sound"` → **1** row; `"ring"` → 3 rows + only "The Space ring" group visible; `"zzz"` → 0 rows, empty state shown; cleared → 17 |
+| Sticky Engine row | scrolled to `scrollTop 514` of `scrollHeight 1124`: `engTop 41` vs `panelTop 40` |
+| Expand fills the stage | `1280×720` against `innerWidth/Height 1280×720`; `#set-groups` becomes 3 columns; Esc returns to `280px` |
+| Pill maps config both ways | Compact `{magnetic:true, band:"auto"}`, Wide `{magnetic:false, band:null}`, Double `{magnetic:true, band:"two"}` — each round-trips through `ringLayoutFor`; legacy `"one"` and a missing field both read Compact |
+| Specials greys ONLY under Double | opacity `.45` + `disabled` + `aria-disabled=true` + note shown on Double; clean on Compact and Wide, and clean again after Double → Compact |
+| Removals | "Show me around" and "Software overlay" absent from the panel's text; ring-fix row present |
+
+`cargo test --lib` **331 passed, 0 failed**; `cargo check --lib` **0 warnings**;
+`tsc` clean; `npm run build` clean.
+
+**NOT verified, and labelled so:** `run_overlay_fix`, the one-shot re-test and
+`restart_app` were not exercised against the real overlay — they need the app
+running on the real machine, and nothing was built or installed this session.
+The restart path in particular is reasoned from Tauri's source, not observed.
+
+---
+
+**Generalise this.**
+
+- **A control's shape is a claim about what sits behind it.** A switch claims
+  "this is your preference". A measurement the app takes for itself is not a
+  preference, and drawing it as one hands the user an opinion they have no way
+  to form. When the app knows better, ship a *tool* that re-measures and reports
+  — and give it the user's own words ("the ring isn't showing"), not the
+  implementation's ("software overlay").
+- **Four expressible states for three real ones means one of them is dead.** Two
+  controls where one would do is how dead states get built. Collapse them and
+  the dead state stops needing to be explained.
+- **When a control writes several fields, "leave this one alone" is a value.**
+  `band: null` is what makes a detour reversible. The tidy alternative — always
+  write every field — silently destroys preferences on an unrelated press.
+- **Retire a config value; do not migrate it on load.** A panel that edits your
+  config for being opened is worse than a legacy value that reads correctly.
+- **A convenience wrapper can break layout invisibly.** Anything relying on
+  being a flex item dies the moment you wrap it. Fix the element, not the
+  wrapper — the wrapper rule leaves the next one broken the same way.
+- **Hidden text is still searchable text** when the matcher reads
+  `textContent`.
+- **A stdlib "restart" is not necessarily a restart for YOUR app.** Read the
+  implementation before trusting the name: the spawn-then-exit ordering is
+  correct in general and wrong under single-instance.
+- **A harness must USE the shipping parts, not imitate them.** The copy is what
+  drifts, and what it drops is the detail nobody thought to copy (`disabled`).
+- **A measurement taken from a hidden viewport is not a measurement.** Zero
+  width is the tell.
+
+---
+
+## PROBLEM 234 — 1.0.96 review fixes: preview publish race, refused-delete side effects, search hid the engine row
+
+An adversarial review of the 1.0.96 diff (PROBLEM 233's settings rebuild plus
+the surrounding HUD/undo code) found three bugs by inspection, not by
+reproducing a symptom. All three fixed the same session, none reproduced live.
+
+**Bug 1 — a preview's stale rAF could publish for a REAL Space-hold.**
+
+*Symptom (never observed live; found by code reading).* `buildHud`'s
+`overlay_fit_hud` handler schedules `requestAnimationFrame(() =>
+publishHudChips())`. `publishHudChips` reads the MODULE-GLOBAL `_lastPayload`
+at the moment the rAF actually fires, not at the moment it was scheduled. A
+preview show (`preview_hud_layout`) calls `buildHud` too, and if a real
+Space-hold starts and calls `showGuideHud` → `buildHud` again while the
+preview's rAF is still pending, that rAF fires AFTER `_lastPayload` has been
+overwritten with the real payload — publishing the real ring's chip geometry
+built from a stale/preview measurement, and consuming `_chipsPubSeq`'s publish
+slot for the real show so the real publish is silently skipped (see the
+`_chipsPubSeq === _hudShowSeq` gate at line ~3288 of `toast.ts`, which is
+about DUPLICATE publishes and could not see this race).
+
+*Root cause.* Two independent sequence-like guards existed
+(`_hudShowSeq`/`_chipsPubSeq` for "already published this show") but nothing
+tied the deferred rAF callback back to the specific show that scheduled it.
+
+*Exact file.* `src/components/toast.ts`, inside `buildHud`'s
+`overlay_fit_hud().then(...)`:
+
+```ts
+const w = geo.win.w, h = geo.win.h;
+// Captured now, before the invoke below, so the rAF closure can tell THIS
+// show apart from whatever show is active by the time it actually runs.
+const seq = _hudShowSeq;
+return invoke<Rect | null>("overlay_fit_hud", { width: w, height: h })
+  .then((r) => {
+    // RACE GUARD: a preview's buildHud can still have this rAF pending when
+    // a REAL Space-hold starts and bumps `_hudShowSeq` before the rAF fires
+    // — without the check below, the preview's stale rAF would publish
+    // preview geometry for the real ring (and consume `_chipsPubSeq`,
+    // skipping the real publish outright).
+    requestAnimationFrame(() => { if (seq === _hudShowSeq) publishHudChips(); });
+    ...
+```
+
+Both call sites that bump `_hudShowSeq` (`showGuideHud` and the `resize`
+listener) do so BEFORE calling `buildHud`, so `seq` captured inside `buildHud`
+always reflects the show currently in flight when the invoke fires.
+
+**Bug 2 — a refused profile delete still wrote a backup and clobbered the undo stack.**
+
+*Symptom (never observed live; found by code reading).* `delete_profile`
+wrote the on-disk backup (`write_profile_backup`) and stashed an undo entry
+(`stash_undo_for`) BEFORE checking `remaining == 0` (the last-remaining-profile
+guard, PROBLEM 85). A caller that got `Err("Cannot delete the last remaining
+profile")` reasonably assumes nothing happened — but a legacy config with two
+profiles sharing a name (PROBLEM 85 predates the creation-time uniqueness
+guard, so an old config can still have duplicates) would delete-attempt "X",
+get refused, and still have overwritten the undo stack's top entry with a
+snapshot that then can never actually be needed (the delete didn't happen) —
+silently destroying whatever real undo the user had pending.
+
+*Root cause.* The guard was written in the middle of the function, after the
+side effects it exists to prevent, instead of first.
+
+*Exact file.* `src-tauri/src/commands.rs`. The guard now runs first, and the
+whole guard-then-effects body was extracted to `apply_profile_delete(cfg:
+&mut AppConfig, name: &str) -> Result<(), String>` (same pattern as
+`apply_profile_rename`/`apply_profile_reorder`) so the order is assertable:
+
+```rust
+fn apply_profile_delete(cfg: &mut AppConfig, name: &str) -> Result<(), String> {
+    let remaining = cfg.profiles.iter().filter(|p| p.name != name).count();
+    if remaining == 0 {
+        return Err("Cannot delete the last remaining profile".into());
+    }
+    // backup, undo stash, retain — all AFTER the guard now.
+    ...
+}
+```
+
+Test added, `commands.rs::delete_profile_tests`:
+`refusing_a_duplicate_named_delete_leaves_the_undo_stack_unchanged` — builds a
+config with two profiles both named "X", asserts the delete is refused, and
+asserts `UNDO_STACK.lock().unwrap().len()` is unchanged before vs after.
+
+**Bug 3 — the sticky Engine row could be hidden by its own search box.**
+
+*Symptom (never observed live; found by code reading).* The Settings panel's
+Engine row (PROBLEM 233) is `.set-engine` — pinned sticky specifically so the
+app's master on/off switch stays reachable at any scroll depth — but it was
+ALSO `.set-filterable`, so typing a search query that didn't match its text
+("Engine active") hid it via `filterSettings`. The one row designed to always
+be reachable was the one row a search could take off screen. Separately,
+`closeSettingsPanel` reset `_expanded` (PROBLEM 233) but not the
+module-scoped `_query`, so a panel closed mid-filter reopened still filtered,
+with no visible search box to explain why rows were missing.
+
+*Root cause.* Two halves of the same "a filtered view must never survive past
+its own reason for existing" property, both missed: the one row that is
+supposed to be search-proof wasn't marked as such, and the filter state wasn't
+reset alongside the other "look at it now, not a preference" state
+(`_expanded`) that already gets cleared on close.
+
+*Exact files.*
+
+`src/components/settings-panel.ts` — `engineRow` no longer carries
+`set-filterable`:
+```ts
+<div class="set-item set-engine">
+```
+and `closeSettingsPanel` clears the filter alongside the expand collapse:
+```ts
+_query = "";
+const searchBox = panelEl.querySelector<HTMLInputElement>("#set-search");
+if (searchBox) searchBox.value = "";
+```
+
+`src/components/controls.ts` — `filterSettings`'s doc comment now states the
+exemption explicitly, so the next person adding a sticky row does not have to
+rediscover it by reading `styles.css`.
+
+**How it was verified.** `cargo test --lib` **332 passed, 0 failed** (331 +
+the new `delete_profile_tests` case); `cargo build --lib` **0 warnings**;
+`npx tsc --noEmit` clean, exit 0. **NOT verified live**: none of the three bugs
+were reproduced on the running app this session — the review found all three
+by reading the code, and the fixes were verified by the same three gates plus
+the new unit test, not by holding Space or opening the Settings panel by hand.
+
+**Generalise this.**
+
+- **A value read inside a `requestAnimationFrame`/`.then()` closure is read at
+  FIRE time, not at SCHEDULE time.** Any module-global a deferred callback
+  touches needs its own captured-at-schedule-time token compared at fire time,
+  even when an existing sequence counter already guards "don't publish
+  twice" — that guard answers a different question than "is this callback
+  still for the show that scheduled it".
+- **A guard clause must run before every side effect it exists to prevent, not
+  just before the mutation it names.** "Cannot delete the last profile"
+  guarding the `retain` but not the backup-write and undo-stash upstream of it
+  is the guard protecting the wrong thing.
+- **A control pinned so it is always reachable needs an explicit exemption
+  from anything that can hide rows** — search, a future collapse-all, any
+  generic `.set-item` sweep — or the pin is decorative.
+- **"Look at it now, not a preference" state must all reset together on
+  close.** `_expanded` and `_query` are the same kind of state; resetting one
+  and not the other on close was a partial reset that happened to work most
+  of the time (the engine-row fix in this same entry is what made the gap
+  visible: before it, a filtered close could hide the ONE row a user needed
+  to reach the very toggle that would let them retry).
+
+---
+
+## PROBLEM 235 — 1.0.96 profile editor: drag-reorder swallowed by native drag-drop; the emoji picker needed a confirm step it should never have had
+
+Two owner-reported bugs in the same popover, fixed in the same pass.
+
+### Bug 1 — drag-reorder did nothing in the real app, but worked in the Vite preview.
+
+**Symptom.** `wireRowDrag` (`src/components/profile-editor.ts`) wires ordinary
+HTML5 `dragstart`/`dragover`/`drop` on each row, and it visibly reordered rows
+in `preview.html`. In the installed app, dragging a row did nothing at all —
+no reorder, no visual feedback, no error in the log.
+
+**Root cause.** Tauri v2 enables its OWN native OS drag-drop handler on every
+WebviewWindow by default (`WindowConfig::drag_drop_enabled`, default `true`).
+That handler intercepts drag input at the WebView2 host BEFORE it becomes an
+HTML5 `dragstart`/`dragover`/`drop` DOM event, so the page never sees the
+gesture at all — silently, with nothing to log, which is exactly why this
+worked in `npm run dev`'s plain browser tab (no native handler there) and not
+in the real WebView. `tauri.conf.json` set no `dragDropEnabled` for either
+window (confirmed by grep before touching anything), so both windows carried
+the Tauri default.
+
+**Was native drag-drop used anywhere else, that disabling it could break?**
+Checked first, project-wide: `grep -rniE
+"dragdrop|drag_and_drop|onDragDropEvent|tauri://drag|file-drop" src
+src-tauri/src` — zero hits outside `Cargo.lock`/build fingerprints. Nothing in
+this app listens for Tauri's native drag-drop event or drops files onto a
+window; the profile-row reorder is the only drag gesture that exists. So the
+fix is scoped to the ONE window that has a drag gesture (`"settings"`) rather
+than disabled globally, in case a future window ever wants native file-drop.
+
+**Exact files.**
+
+`src-tauri/tauri.conf.json` — the `"settings"` window gained one field (the
+`"overlay"` window is untouched: it has no drag gesture and needs none):
+```json
+      {
+        "label": "settings",
+        ...
+        "theme": "Light",
+        "dragDropEnabled": false
+      },
+```
+
+`src-tauri/src/lib.rs` — `create_app_windows` builds windows from that exact
+declaration via `WebviewWindowBuilder::from_config`, so the config change
+alone is the fix for the NORMAL boot path — no Rust code needed to change
+there. But PROBLEM 59's cold-boot recovery path (same function, further down)
+rebuilds the "settings" window by hand with an explicit
+`WebviewWindowBuilder::new(...)` when WebView2 failed to attach on first try,
+and that hand-built path does NOT read `tauri.conf.json` at all — it would
+have silently re-enabled native drag-drop on any window built by the recovery
+path. Mirrored there too, with the trap named inline:
+```rust
+            } else {
+                builder = builder
+                    .title("Spaceadom")
+                    .theme(Some(tauri::Theme::Light)) // mirrors conf "theme": "Light"
+                    .inner_size(1220.0, 880.0)
+                    .min_inner_size(720.0, 520.0)
+                    .center()
+                    // PROBLEM 235 — Tauri v2 enables its OWN native drag-drop
+                    // handler per window by default, which swallows HTML5
+                    // dragstart/dragover/drop before the page ever sees them
+                    // (the profile popover's reorder handles worked in the Vite
+                    // preview and did nothing in the real WebView). This
+                    // fallback rebuild path must mirror `dragDropEnabled: false`
+                    // on the "settings" window in tauri.conf.json, which is
+                    // where the NORMAL boot path (`WebviewWindowBuilder::
+                    // from_config`, above) gets it from — this hand-built
+                    // branch only runs after a cold-boot WebView2 failure and
+                    // would silently re-enable native drag-drop if it forgot.
+                    .drag_and_drop(false);
+            }
+```
+(`WebviewWindowBuilder::drag_and_drop(bool)` — confirmed to exist at
+`tauri-2.11.5/src/webview/webview_window.rs:718`, and the config field at
+`tauri-utils-2.9.3/src/config.rs:1947` — its own doc comment says outright:
+*"Disabling it is required to use HTML5 drag and drop on the frontend on
+Windows."*)
+
+**How it was verified.** `npx tsc --noEmit` clean; `npm run build` clean;
+`cargo check --lib` 0 warnings; `cargo test --lib` **332 passed, 0 failed**.
+**NOT verified live — cannot be, from this environment.** Whether the drag now
+actually reorders rows can only be proven by holding a row down in the
+INSTALLED app; a browser-preview harness has no native Tauri drag-drop handler
+to disable in the first place, so a preview passing here proves nothing about
+the real bug. The owner needs to hand-test this after installing 1.0.96+ this
+fix ships in.
+
+**Generalise this.** A frontend gesture that "worked in preview, does nothing
+in the app" on Windows + WebView2 is worth checking against Tauri's own
+platform integrations (native drag-drop here; the same shape of bug could come
+from any other feature a webview host intercepts before the page's own JS runs)
+before assuming the frontend code is wrong. And: **any window-creation path
+that duplicates `tauri.conf.json` by hand (a cold-boot recovery builder, a
+rebuild-on-failure path) is a second copy of every per-window flag that config
+carries — a fix applied only to the config drifts silently from a fix applied
+only to the hand-built path,** which is PROBLEM 81's lesson recurring in a new
+field.
+
+### Bug 2 — the emoji picker asked for a confirm step it should never have had.
+
+**Symptom, in the owner's words:** *"it can only hold one emoji — as soon as
+someone picks an emoji it should take it and save it; the option of choosing
+another shouldn't even come, unless they press the disc again to edit. Enter
+re-inserts the same emoji; Enter/✕ do nothing useful."* The box pre-filled
+with the CURRENT emoji on reopen, required Enter to commit, and its helper
+line spent a sentence explaining Enter-saves/Esc-cancels for a save step that
+should not have existed as a separate step at all.
+
+**Root cause.** The picker was designed around a type-then-confirm mental
+model (`Enter` reads `input.value.trim()` and calls `set_profile_emoji`) that
+never matched what actually happens: Windows' own emoji panel is a ONE-shot
+picker — the user clicks a glyph once and that is their entire interaction
+with it — so making the app ALSO wait for a confirm doubled a step Windows had
+already completed.
+
+**Decided behaviour (owner-approved):** the pick and the save become the SAME
+event. The first grapheme cluster to land in the box — from the emoji panel,
+from typing, or from a paste — saves immediately, blurs and hides the box, and
+updates the disc + the top-right pill. No Enter, no confirm, no helper text
+about either key. Escape still backs out of an EMPTY box (before anything has
+been picked) without saving, as a quiet secondary affordance, not documented
+in the helper line. The tiny ✕ clear button already living on the disc in edit
+mode (present only when a profile has an emoji to remove) is untouched — it
+already was, and remains, a secondary action, never a step in the primary pick
+flow.
+
+**Exact file.** `src/components/profile-editor.ts`.
+
+`emojiInput` — the value now ALWAYS starts empty, never `profile.emoji ?? ""`.
+This is not just tidiness: Windows' emoji panel inserts AT THE CARET rather
+than replacing the field's contents, so a box pre-filled with an existing
+emoji would turn the panel's insertion into a SECOND grapheme cluster
+concatenated after the first — and `firstGraphemeCluster` (below) would keep
+returning the STALE old emoji while silently discarding the new pick. Starting
+empty removes the collision entirely; the current emoji is already visible on
+the disc and the pill, so the box never needed to redisplay it. Verified live
+in `preview.html` (see below) — reopening a profile that already had the
+family emoji started the box empty, and picking a different one saved exactly
+`{name, emoji: "😀"}`, not the two glyphs concatenated.
+
+The save now happens on `input`, not `keydown`/`Enter`:
+```ts
+  input.addEventListener("input", () => {
+    const cluster = firstGraphemeCluster(input.value);
+    if (!cluster) return;
+    input.blur();
+    void saveEmoji(profile.name, cluster);
+  });
+```
+`keydown` now handles ONLY Escape-to-back-out, and still
+`e.stopPropagation()`s unconditionally (unchanged from before) — this box
+lives inside a popover whose document-level Escape handler
+(`closeAllPopovers`, `main.ts`) would otherwise close the WHOLE popover, not
+just this slot, on the same keypress. Confirmed live: dispatching a
+synthetic Escape keydown on the input calls `stopPropagation` (instrumented
+and observed `true`) and produces zero `set_profile_emoji` calls.
+
+`firstGraphemeCluster(s: string): string` — new. Tries `Intl.Segmenter`
+first (correct per UAX #29; available in the WebView2 this app ships on, but
+not in this project's `tsconfig.json` `lib` — `ES2020` — so it is reached
+through a runtime feature check behind a narrow local cast instead of a
+type-level reference, the same trade `preview.ts` already made for its own
+`stubClusters`). Falls back to the SAME cluster-boundary walk
+`schema::cluster_count` (Rust, `src-tauri/src/config/schema.rs:627`) and
+`preview.ts`'s `stubClusters` already make, just stopped at the first
+boundary instead of counting to the end, so a ZWJ family or a flag pair still
+arrives as one whole cluster rather than being split at the first code unit.
+
+`emojiHelper` lost its Clear button and its Enter/Esc sentence; it is one
+line while the panel is open: "Pick one — it saves on its own."
+
+**Considered and rejected: injecting a cookie-tagged Esc to force-dismiss the
+Windows emoji panel after a pick**, the way `open_emoji_panel` injects Win+.
+to open it (same `hook::send_keys_checked` path, same
+`dwExtraInfo` cookie). The panel is documented to close when its target loses
+focus, and `input.blur()` (called synchronously, before the `set_profile_emoji`
+round trip) already does that — but that has NOT been observed live this
+session, so whether blur alone is enough is genuinely unverified. Esc was NOT
+added as a belt-and-suspenders fallback despite that, because it is not safe
+here: an injected key event is indistinguishable from a real keypress at the
+DOM level, and this popover already has a document-level bubble-phase Escape
+handler (`closeAllPopovers`) plus a capture-phase one
+(`settings-panel.ts`'s `wireExpandEscape`) — an Esc landing anywhere OTHER
+than the (by-then blurred, about-to-be-removed) emoji input would close the
+ENTIRE profile popover, not just dismiss an already-gone flyout. If hand-testing
+on the real machine ever shows the panel does NOT close on blur alone, the
+right fix is narrower than a bare Esc injection: e.g. move focus to a
+neutral element the popover's own Escape handlers ignore, rather than
+relying on an OS-level keystroke the page cannot scope.
+
+**How it was verified.** `npx tsc --noEmit` clean; `npm run build` clean;
+`cargo check --lib` / `cargo test --lib` unaffected (this bug touched no Rust
+— `set_profile_emoji`'s validation already accepted anything that reduces to
+one cluster). **Live in `preview.html`**, via the stubbed `invoke` with a spy
+wrapped around `window.__TAURI_INTERNALS__.invoke`:
+- Dispatched a real `input` event carrying the ZWJ family emoji (4 code
+  points) on `#profile-emoji-input` → exactly ONE `set_profile_emoji` call,
+  with the whole cluster intact as one string; the input node was gone from
+  the DOM immediately after; the row's disc and the top-right pill both
+  updated to the emoji.
+- Reopened a profile that already had that emoji, picked a different single
+  emoji → box started empty (not pre-filled); exactly one save call with the
+  new emoji alone, proving the reopen-then-repick path does not concatenate
+  with the stale value.
+- Escape on an untouched box → box closed, zero `set_profile_emoji` calls,
+  `stopPropagation` confirmed called.
+- Helper row text confirmed to read exactly "Pick one — it saves on its
+  own." with no buttons in it.
+
+**NOT verified live:** whether Windows' actual emoji panel (not the stub)
+dismisses itself on blur, on the real machine, through the real
+`open_emoji_panel` injection. That is a WebView-only interaction this
+environment cannot reach — same class of gap as Bug 1's drag-reorder. The
+owner needs to hand-test picking an emoji and watching whether the panel
+disappears on its own.
+
+**Generalise this.** **A "confirm" step is only correct when the thing being
+confirmed is genuinely reversible or ambiguous within THIS app's UI.** Here it
+was neither: Windows' own panel is already the confirm step (one click,
+committed), so asking again just adds a state the user has to remember to
+exit. And: **prefilling an input with the CURRENT value of something that is
+about to be REPLACED, not edited, is a trap the moment the replace mechanism
+appends rather than overwrites** — the same shape of bug as PROBLEM 197's
+"an ID rule that sets `display` needs its own `#id[hidden]` companion":
+correct on the day it was written, then quietly wrong once the interaction
+model around it changes underneath it.
+
+
+## PROBLEM 237 — the app picker's first open froze the whole app for 6-17 s ("Not responding"): three non-`async` commands, one of them doing 247 COM icon extractions on the MAIN thread — and PROBLEM 205's "COM has never run off the main thread" claim, retired with proof
+
+**This retires the PROBLEM 205a claim explicitly.** PROBLEM 205 measured the
+block, added the timing line, moved the warm-ups off bootstrap — and then left
+`list_start_menu_apps` synchronous on the stated grounds that *"this COM has
+therefore never once executed off the main thread in this app. There is no
+evidence it survives an STA created on a pooled async worker with no message
+pump."* That was a claim to test, not a wall to work around. It is now tested,
+and it is false in the useful direction: the shell icon COM runs on a plain
+non-main thread with its own STA and no message pump, 50 of 50 shortcuts, zero
+HRESULT failures, and a full 247-app scan on the same kind of thread produced
+the same list the main thread did.
+
+### Symptom
+
+The owner opens a key's editor for the first time in a session. The dashboard
+stops repainting; Windows overlays "(Not responding)"; the tray and overlay
+are mute; every IPC call from BOTH webviews queues. Then everything arrives at
+once. From `debug.log`, 2026-09-03 21:16:50 → 21:17:20: a **29.7 s gap with no
+log line at all**, closed by
+`start_menu_scan: found 247 app(s) in 9165ms on the MAIN THREAD (powershell
+3405ms, icons 5759ms)`. Fifteen logged sessions of that line: 6404-16792 ms,
+icons 4072-13319 ms of it.
+
+### Root cause
+
+Three commands fired together by `warmPickerData()` (`key-detail-panel.ts`)
+on the first editor open, all declared `pub fn` — i.e. **main thread** in
+Tauri v2:
+
+| Command | Cost | Where the time went |
+| --- | --- | --- |
+| `list_start_menu_apps` (commands.rs) | 6-17 s | PowerShell shell-out 2-6 s, then ~247 in-process `IShellItemImageFactory::GetImage` calls 4-13 s |
+| `list_browser_profiles` (browser_profiles.rs) | ~2.5 s | AppData walk + one icon per browser |
+| `get_default_browser` (commands.rs) | small | two registry reads + one icon — **and no timing line at all**, so it was invisible inside the 29.7 s gap |
+
+The icon pass ran on the main thread only because of the untested apartment
+claim above. The PowerShell half was on the main thread for no reason at all —
+its COM lives in PowerShell's own process.
+
+### Exact files
+
+| File | Change |
+| --- | --- |
+| `src-tauri/src/picker_worker.rs` | **NEW.** The `st-picker-scan` STA worker, the request channel, the disk cache, the fingerprint, the `picker-data-updated` event, the boot pre-warm, and the proof tests |
+| `src-tauri/src/icon_extractor.rs` | `ComSta` — a BALANCED apartment guard replacing the unbalanced `let _ = CoInitializeEx(..)`; `extract_icon_checked` returns the failing call + HRESULT; `shell_icon_rgba` → `Result` |
+| `src-tauri/src/commands.rs` | `list_start_menu_apps` → `async`, body moved to the worker; `get_default_browser` → `async` on `spawn_blocking` + `ComSta`, with the timing line it never had; `AppInfo` derives `Deserialize, Clone, PartialEq`; `dashboard_ready`'s rule comment updated |
+| `src-tauri/src/browser_profiles.rs` | `list_browser_profiles` → `async` on `spawn_blocking` + `ComSta`; body unchanged in `list_browser_profiles_blocking`; log line names its thread |
+| `src-tauri/src/config/schema.rs` | `warm_picker_at_startup: bool`, `default = "default_true"`, `Default` true, asserted on BOTH first-install paths |
+| `src-tauri/src/lib.rs` | `mod picker_worker;` and ONE call at the end of `create_app_windows`: `picker_worker::warm_at_boot(&app_handle);` |
+
+Not touched: `hook/mod.rs`, thread priorities in `lib.rs`, any frontend file
+(the contract is below; the frontend wiring is a separate change).
+
+### The code
+
+**The apartment, balanced** — `icon_extractor.rs`. The old line was
+`let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);` with no
+`CoUninitialize` ever. Harmless on the main thread (an STA for life anyway),
+but S_FALSE ALSO increments the refcount, so once the callers went `async` it
+would have leaked a permanent STA onto every pooled runtime thread it touched:
+
+```rust
+pub struct ComSta(bool);
+impl ComSta {
+    pub fn new() -> Self {
+        unsafe { ComSta(CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok()) }
+    }
+}
+impl Drop for ComSta {
+    fn drop(&mut self) {
+        if self.0 { unsafe { CoUninitialize() } }   // S_OK and S_FALSE: yes. RPC_E_CHANGED_MODE: no.
+    }
+}
+```
+
+**STA, not MTA, and why.** `SHCreateItemFromParsingName` may load third-party
+icon handlers (`IExtractIcon` shell extensions), which are overwhelmingly
+`ThreadingModel=Apartment`. From an MTA thread COM would still work — by
+hosting each such object in a hidden STA and marshalling every call across,
+slower and with more that can time out. A worker that IS an STA gets them
+in-process. No message pump is needed because every call the worker makes is
+synchronous and in-apartment; an STA only has to pump to RECEIVE calls from
+other apartments, and nothing calls into this one. `smart_cascade::run_browser`
+has run this way (dedicated thread, `COINIT_APARTMENTTHREADED`, no pump) for
+months; `aumid_focus` fallback 3 has run `SHCreateItemFromParsingName` on the
+engine thread for months. The evidence was already in the codebase.
+
+**The worker** — `picker_worker.rs`, the shape:
+
+```rust
+static SENDER: OnceLock<crossbeam_channel::Sender<Request>> = OnceLock::new();
+// spawned on first use, named "st-picker-scan", THREAD_PRIORITY_BELOW_NORMAL,
+// ComSta held for the life of the thread
+
+pub async fn apps(app: tauri::AppHandle, cache: IconCache) -> Result<Vec<AppInfo>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    sender().send(Request::Apps { app: Some(app), cache, reply: Some(tx), not_before: None })?;
+    rx.await
+}
+```
+
+and the command is now four lines:
+
+```rust
+#[tauri::command]
+pub async fn list_start_menu_apps(
+    app: tauri::AppHandle,
+    cache: State<'_, IconCacheState>,
+) -> Result<Vec<AppInfo>, String> {
+    let cache = Arc::clone(&cache.0);
+    crate::picker_worker::apps(app, cache).await
+}
+```
+
+(`Result` because Tauri demands it of an async command borrowing `State<'_>` —
+the E0277 PROBLEM 205 measured. The frontend's `invoke<AppInfo[]>` is
+unaffected: the promise resolves with the `Ok` value.)
+
+**Serving order inside the worker** (`serve_apps`): session memory → disk
+cache if the fingerprint matches (answer, then refresh in the background
+once per session, emit `picker-data-updated` only if the list changed) → full
+scan (answer after; a scan that errored — PowerShell failed, non-JSON, or
+zero apps — answers `[]` and **never** writes the cache).
+
+**The fingerprint** (`fingerprint_for`): app version + cache format + the
+`.lnk` count + a hash of every folder's and file's name and mtime under both
+Start-Menu roots, walked in ~1 ms. It cannot see Store apps (nothing to stat),
+which is exactly why a hit is always followed by one background refresh.
+
+**The cache file**: `%APPDATA%\Spaceadom\picker-cache.json`, `{format,
+fingerprint, apps}`, written to `.json.tmp` and renamed. 809 KB for 247 apps
+with 48 px icons.
+
+**The boot pre-warm** — `lib.rs`, end of `create_app_windows` (which both
+launch paths reach: inline on a manual launch, after `AUTOSTART_SETTLE` on
+an autostart one, so hook/engine/tray are already live):
+
+```rust
+picker_worker::warm_at_boot(&app_handle);   // reads warm_picker_at_startup; one channel send
+```
+
+The worker defers a warm-up 4 s (`BOOT_WARM_DELAY`) so first paint is not
+competing with PowerShell, and any real request arriving in that window
+jumps ahead of it and satisfies it.
+
+### How it was verified
+
+All measured on the owner's machine, 2026-09-04, `cargo test --lib`:
+
+| Gate | Result |
+| --- | --- |
+| `cargo test --lib` | **335 passed / 0 failed / 5 ignored** when measured (was 332/0/4: +3 tests, +1 ignored); 347/0/5 at the end of the session, other agents' tests having landed alongside |
+| `cargo clippy --all-targets` | 0 warnings |
+| `npx tsc --noEmit` | clean (no frontend file changed) |
+
+**The proof PROBLEM 205 asked for** —
+`picker_worker::tests::icons_extract_on_a_non_main_sta_thread`, NOT ignored,
+runs on every `cargo test`:
+
+```text
+PROOF start_menu_scan: extracted 50/50 icon(s) in 776ms on worker thread 13616
+      (main thread 39268); STA joined by the worker itself: true
+```
+
+Asserts: the worker's thread id differs from the caller's; the worker's own
+`CoInitializeEx(COINIT_APARTMENTTHREADED)` succeeded; `ok > 0`; and **zero**
+`extract_icon_checked` failures across 50 real `.lnk` shortcuts.
+
+**The full scan, cold vs cached** —
+`full_scan_on_the_worker_thread_then_the_cache_answers_in_milliseconds`
+(`#[ignore]`d, ~10 s; `cargo test --lib -- --ignored --nocapture full_scan_on_the_worker`),
+two runs:
+
+```text
+[INFO] start_menu_scan: found 247 app(s) in 9697ms on worker thread 38156 (st-picker-scan) (powershell 2627ms, icons 7070ms, 8 without an icon)
+[INFO] start_menu_scan: found 247 app(s) in 7030ms on worker thread 41532 (st-picker-scan) (powershell 2091ms, icons 4939ms, 8 without an icon)
+PROOF cached: 247 app(s) from a 809 KB file in 12ms (fingerprint v1|1.0.96|lnk=216|4a73a19d94198966)
+```
+
+247 apps — the same count the main thread has logged in every session since
+2026-08-31. Cold 7.0-9.7 s on the worker (the main-thread range was 6.4-16.8 s;
+same work, no longer blocking anything). **Cached: 12-14 ms** against the
+< 50 ms target.
+
+**The 8 misses, run down rather than rounded off.** The old line never counted
+icon misses, so "8 without an icon" had no baseline. The ignored test retries
+every miss on the test thread AND on a second fresh STA and asserts they
+agree: all 8 fail identically everywhere with `SHCreateItemFromParsingName:
+0x80070002` (ERROR_FILE_NOT_FOUND) or `0x8007000F` (ERROR_INVALID_DRIVE) —
+dangling shortcuts to a `D:\Engineering\python.exe` that is gone and an `E:`
+drive that is not plugged in. The target's fault, not the apartment's.
+
+**Not verified, and said so:** a live run of the installed app. No version
+bump, build or install was part of this task, so the boot pre-warm path
+(`warm_at_boot` → deferred request → refresh → event) has compiled and been
+reasoned through but has not been observed in `debug.log`. The lines to look
+for once it ships: `picker_worker: st-picker-scan started (os thread N, STA
+joined: true)`, `picker_warm: warm_picker_at_startup is ON…`,
+`start_menu_scan: served N app(s) from …`, `default_browser: resolved in N ms
+on thread T`, `browser_profiles: found N Chromium browser(s) in N ms on thread
+T` — every one of them must name a thread that is NOT the main thread.
+
+### Frontend contract (no frontend file was changed; this is what to wire)
+
+- `list_start_menu_apps` — name unchanged; Rust return is now
+  `Result<Vec<AppInfo>, String>`; `invoke<AppInfo[]>` unchanged.
+- `list_browser_profiles` — name unchanged; `Result<Vec<DetectedBrowser>, String>`;
+  `invoke<DetectedBrowser[]>` unchanged.
+- `get_default_browser` — name unchanged; `Result<Option<DefaultBrowserInfo>, String>`;
+  `invoke<DefaultBrowserInfo | null>` unchanged.
+- New event `picker-data-updated`, global emit, payload
+  `{ count: number, previous: number }`. Fired only when a background refresh
+  changed the list. Listener: drop `app-grid.ts`'s `_apps`/`_appsPromise`,
+  call `loadApps()` again (now answers from memory), re-render an open grid.
+- `warmPickerData()` in `key-detail-panel.ts` needs NO change to its three
+  un-awaited calls; optionally add the listener above once.
+- New config field `warm_picker_at_startup: boolean` (default true).
+  Settings toggle, Behaviour group, after "Run at startup":
+  label **"Warm up the app picker"**, description *"Spaceadom scans your apps
+  a few seconds after it starts, so the first time you open the picker it is
+  already there. Costs one background scan per boot."*
+  Persist through `persistConfig()`; the backend reads it at the next boot.
+
+**WIRED, 2026-09-04.** The `picker-data-updated` listener above is now live:
+`app-grid.ts` exports `initPickerRefreshListener(onChanged?)` — idempotent
+(a module-level `_refreshListenerStarted` guard), registers the listener
+once, and on the event nulls `_apps`/`_appsPromise`, calls `loadApps()`
+again, then calls `onChanged()` once the fresh list has landed.
+`key-detail-panel.ts`'s `warmPickerData()` calls it with one added line
+AFTER its three original un-awaited calls (those are untouched, byte-for-byte)
+— `initPickerRefreshListener(() => { if (_currentKey && _panel &&
+!_panel.hidden) renderGrid(); })` — so the grid re-renders only if the
+editor is still open when the background refresh lands. Registered inside
+`warmPickerData()` rather than `main.ts` bootstrap because that function
+already only fires once per session (its own `_pickerWarmed` guard); this
+session's file scope did not include `main.ts`'s init path either way.
+**The settings toggle in this section was deliberately NOT added** — owner
+decision: `warm_picker_at_startup` stays always-on with no UI switch, so the
+field is invisible by design, not an oversight.
+Verified in `preview.html?editor=c` (`npm run dev`, port 1420): the harness
+needed a small addition to `preview.ts`'s stub — `listen()` calls
+`transformCallback` + `invoke("plugin:event|listen", …)`, neither of which
+existed there — so `preview.ts` gained a real in-memory event bus
+(`__TAURI_INTERNALS__.transformCallback`, `plugin:event|listen`/`unlisten`
+stubs) and a test hook, `window.__previewEmit(event, payload)`. With the
+panel open on key `c` (14 stub apps), `__previewEmit("picker-data-updated",
+{count:15, previous:14})` was dispatched three times in a row in the browser
+console: each time the grid's tile count stayed correct (14, from the
+stubbed `list_start_menu_apps`) and the grid's first child DOM node changed
+identity (proof `renderGrid()` actually re-ran rather than the callback being
+a no-op), with zero new console errors after the fix landed. `cargo test
+--lib` unaffected (no Rust touched by this half): still 347/0/5.
+**Not verified:** the real event firing from `picker_worker.rs` end-to-end
+against the installed app — this session's verification was the frontend
+listener contract only, using a stub-dispatched event, per this session's
+scope (`src-tauri/*` other than `commands.rs::get_rival_install` was another
+lane's).
+
+### Generalise this
+
+- **"Never proven" is a test to write, not a constraint to design around.**
+  PROBLEM 205 turned an unmeasured worry into a documented rule that cost
+  the owner a frozen app for another eight versions. The proof took one
+  thread, one guard and 30 lines.
+- **A COM init without its uninit is a leak that only shows once the caller
+  changes threads.** Balance it with a guard whose `Drop` checks `is_ok()`;
+  S_FALSE counts.
+- **A `#[tauri::command] fn` is main-thread work.** Anything over a few
+  milliseconds is `async` — and "it uses COM" is now a reason to give it an
+  STA worker, not a reason to leave it on the main thread.
+- **A command with no timing line is invisible.** `get_default_browser` sat
+  inside a 29.7 s gap and could not be ruled in or out.
+- **Serve the cached answer first and correct it in the background** when
+  the fingerprint cannot see everything (Store apps). A first answer in 12 ms
+  plus an event beats a perfect answer in 9 s.
+
+### REVIEW FIXES 2026-09-04 — the scan had no clock on it, and a failure was cached as an answer
+
+Two defects found reviewing 237's own code. Neither is a regression from it;
+both are shapes it inherited and made reachable more often.
+
+**Symptom (a): the picker can hang forever, with nothing in the UI or the log.**
+`picker_worker.rs:429` was `cmd.output()` — no timeout — and
+`picker_worker.rs:104` was `rx.await` — no timeout. One wedged PowerShell (a
+hung provider, a COM call inside `Shell.Application` that never returns) parks
+the single worker thread, and the frontend `invoke` promise stays **pending**:
+not resolved, not rejected, so `app-grid.ts`'s `.catch` never runs and the grid
+reads "Scanning this device…" for the rest of the session.
+
+**Root cause.** Every wait in the path was unbounded. There is no "the scan is
+taking too long" state anywhere between the child process and the promise.
+
+**The actual code** (`src-tauri/src/picker_worker.rs`):
+
+```rust
+// BEFORE
+let output = cmd.output().map_err(|e| format!("powershell could not start: {e}"))?;
+...
+rx.await.map_err(|_| "the picker worker dropped the request".to_string())
+
+// AFTER — two bounds, request > child so the log blames the right half
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const POWERSHELL_TIMEOUT: Duration = Duration::from_secs(30);
+
+let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
+let mut pipe = child.stdout.take();
+let reader = std::thread::Builder::new().name("st-picker-ps-read".into())
+    .spawn(move || { let mut b = Vec::new(); if let Some(p) = pipe.as_mut() { let _ = p.read_to_end(&mut b); } b })?;
+let deadline = Instant::now() + POWERSHELL_TIMEOUT;
+let status = loop {
+    match child.try_wait() {
+        Ok(Some(st)) => break Some(st),
+        Ok(None) => {
+            if Instant::now() >= deadline { let _ = child.kill(); let _ = child.wait(); break None; }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        Err(e) => { let _ = child.kill(); return Err(format!("powershell could not be waited on: {e}")); }
+    }
+};
+let stdout_bytes = reader.join().unwrap_or_default();
+
+// request side, split out so the timeout path is testable
+async fn await_reply(rx: oneshot::Receiver<Result<Vec<AppInfo>, String>>, timeout: Duration)
+    -> Result<Vec<AppInfo>, String>
+{
+    match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err("the picker worker dropped the request".to_string()),
+        Err(_) => Err(format!("the app scan did not answer within {}s …", timeout.as_secs())),
+    }
+}
+```
+
+**Why the poll loop and not a watchdog thread holding the `Child`.** `kill()`
+needs `&mut Child` and `wait_with_output()` consumes it, so sharing the child
+behind a `Mutex` puts the waiter in possession of the lock the killer needs — a
+deadlock replacing a hang. Draining stdout on its own thread (so a full pipe can
+never block the child) and polling `try_wait` against a deadline is the same
+bound with no lock in it. **Recovery is the point:** a killed child makes
+`scan_start_menu` return `Err`, `serve_apps` rejects, `session.list` stays
+`None`, and the `loop` in `worker_main` continues — the next open re-scans. A
+timed-out REQUEST drops its receiver; the worker's late `tx.send` fails
+harmlessly and nothing is wedged.
+
+**Symptom (b): one bad scan makes the picker permanently empty.**
+
+**Root cause, in two halves that each looked harmless.** `serve_apps`'s error
+arm sent `Vec::new()` — a *successful* "you have no applications". `app-grid.ts`
+then cached it, because `if (_apps)` is true for `[]` (an empty array is truthy
+in JS). Every later open short-circuited on that cache. Because the answer was
+an `Ok`, the frontend's `.catch` never ran either, so nothing was shown.
+
+```rust
+// BEFORE (picker_worker.rs, serve_apps)
+Err(e) => { if let Some(tx) = reply { let _ = tx.send(Vec::new()); } }
+// AFTER — the reply channel now carries Result<Vec<AppInfo>, String>
+Err(e) => { if let Some(tx) = reply { let _ = tx.send(Err(format!("scan failed: {e}"))); } }
+```
+
+```ts
+// BEFORE (src/components/app-grid.ts)
+if (_apps) return Promise.resolve(_apps);
+  … .catch(() => { _apps = []; return []; });
+// AFTER
+if (_apps && _apps.length) return Promise.resolve(_apps);
+  … .then((list) => { if (list && list.length) { _apps = list; return list; }
+                      _apps = null; _appsPromise = null; return []; })
+    .catch((e) => { console.warn(…); _apps = null; _appsPromise = null; return []; });
+```
+
+`_appsPromise` must be nulled alongside `_apps`, or the memoised empty result is
+handed back forever without ever re-invoking. `drawAppGrid` got the same
+`&& _apps.length` guard for the same reason. Zero apps from the scan itself was
+already an `Err`; its message now SAYS why zero is a fault rather than a fact
+("cannot be true on a real machine").
+
+**How it was verified.** `cargo test --lib` 367 passed / 0 failed (was 358);
+clippy `-D warnings` clean; `tsc --noEmit` clean. New tests:
+`picker_worker::tests::a_request_the_worker_never_answers_rejects_instead_of_hanging`
+(a receiver nobody answers rejects, actually waits, and a late send is dropped
+rather than delivered), `a_dropped_worker_rejects_rather_than_answering_empty`,
+`the_workers_own_verdict_passes_through_unchanged_including_a_failure`,
+`the_request_timeout_is_longer_than_the_powershell_timeout`. **UNVERIFIED on the
+real machine:** no build or install was made in this pass, and neither timeout
+has been observed firing against a genuinely wedged PowerShell — only the
+request-side path is exercised by a test. The 30 s child timeout has no pure
+seam (it is a `Command` and a deadline around a real process) and is documented
+here rather than tested.
+
+**Generalise this.** *Every wait needs a bound, and an unbounded wait at the far
+end of a promise is worse than a crash* — a rejection is a state the UI can
+show; pending forever is not. And: **an error must never be encoded as an empty
+success.** `Ok([])` and `Err` differ by one character at the call site and by
+"the app is broken until you restart it" for the user.
+
+### Also in this pass — two frontend one-liners (LOW, unrelated to 237)
+
+- `src/components/profile-editor.ts` — the emoji box saves on the first
+  grapheme cluster (PROBLEM 235), and an IME emits `input` for each
+  intermediate character. It now returns early while
+  `(e as InputEvent).isComposing`; the `compositionend` that follows fires its
+  own non-composing `input`, so nothing is lost. UNVERIFIED with a live IME.
+- `src/components/tour.ts` — `exit()` sets `_phase = "off"` immediately but
+  removes the layer 210 ms later. Re-opening the walkthrough inside that window
+  let `ensureLayer()` adopt the DYING layer, and the old timer then removed the
+  freshly-started tour from the DOM. The pending timeout is now held in
+  `_exitTimer` and `startTour()` calls `cancelPendingExit()` first, which
+  cancels it and finishes the teardown synchronously.
+
+---
+
+## PROBLEM 236 — 1.0.96's remaining watchdog alarms are all `both_dead`, and `both_dead` is decided from two clocks the repair itself writes
+
+**Symptom.** The owner reports the ring and the shortcuts still dying while the
+dashboard is focused, on 1.0.96 — the build that shipped PROBLEM 230's
+install-order fix. Live log read of the running process (started 16:28:47, read
+at 17:06 on 2026-09-04, `%APPDATA%\Spaceadom\debug.log`): **16 `WATCHDOG`
+alarms in 38 minutes**, one every ~2.4 minutes, plus 4 `Holding off` lines.
+
+**First: PROBLEM 230 IS HOLDING. Do not re-open it.** Three measurements from
+that same log say so, and all three are the tests `docs/IF-SHORTCUTS-DIE-AGAIN.md`
+tells you to run:
+
+| Test | Result |
+| --- | --- |
+| `grep "genuinely fired"` — counter climbing? | 6 -> 395 -> 407 -> 484 -> 588 -> 701 -> 708 -> 710 -> 730. Climbing. |
+| Reference silent while the primary counts keys? | **No.** `16:59:39.641` prints `kb 7922ms` and `ref ... 7922ms ago` — the same number. `16:59:01.636` prints `kb 3235ms` and `ref ... 3235ms ago`. A witness that dies while the primary lives cannot produce equal clocks. |
+| `kb_only_dead` alarms (the branch the witness exists to raise) | **0 of 16.** DEAF lines: **0**. |
+
+**The reading that made it look otherwise, and the trap in it.** The session
+brief cited `the reference hook last genuinely fired 178968ms ago` at
+`17:02:30.687` against `saw 60 key event(s) in the last 79s` at `17:00:17.419`
+and concluded the primary was seeing keys the witness missed. It was not: the
+`saw 60` window is `16:58:58.4 -> 17:00:17.4`, and `16:59:39.641`'s `kb 7922ms`
+puts the primary's LAST key at `16:59:31.7` — the same instant as the
+reference's. All 60 keys landed in the first 33 s of that window. **A
+point-in-time clock and a 79-second aggregate do not overlap, and subtracting
+one from the other manufactures a fault.** Generalise: *two numbers may only be
+compared when they describe the same window; the log must make the window
+explicit or the next reader will assume one.* That assumption is exactly what
+this problem's new log line removes.
+
+**Root cause of what IS still wrong.** All 16 alarms came from `both_dead`:
+
+```rust
+let both_dead = kb_silence > BLIND_MS && ms_silence > BLIND_MS;   // BLIND_MS = 3_000
+```
+
+`kb_silence` and `ms_silence` are both computed from **SEEDED** clocks —
+`LAST_KB_EVENT` and `LAST_MS_EVENT` are written by `install_hooks()` on every
+re-hook AND by `watchdog_check`'s own idle early-return. The alarm line says so
+in its own text ("both are re-stamped clocks") and then asserts **"NEITHER hook
+saw anything"**, which is a claim about the CALLBACKS that nothing in the line
+could support. This is PROBLEM 228's exact defect — *the instrument must not be
+writable by the thing it is measuring* — left un-fixed on the mouse side, and it
+is the last unforgeable measurement missing from the panel.
+
+Measured in that session:
+
+* **6 of 16** alarms printed `kb`/`mouse` as identical round numbers
+  (`4000/4000` x4, `5000/5000`, `4000/4000`) — the documented fingerprint of one
+  non-hook writer setting both. Those six measured nothing about the hooks at all.
+* Of the ten alarms whose mouse clock was NOT a round re-stamp, the values were
+  `3172, 3172, 3218, 3234, 3297, 3313, 3328, 3437, 3875, 5250` ms —
+  **eight of ten within 437 ms of the 3000 ms trip line.** An evicted hook's
+  clock keeps growing; a threshold crossed by an ordinary pause in mouse
+  movement produces exactly this cluster.
+* The alarm at `16:28:53.412` fired **6 seconds after launch**, before any hook
+  had been called once, and still printed "NEITHER hook saw anything". True, and
+  about nothing.
+
+**Why this is the thing that kills a hold.** Every alarm re-hooks, and the
+re-hook path is destructive by design:
+
+```rust
+MODIFIER_ACTIVE.store(false, Ordering::Relaxed);
+SPACE_INTERCEPTED.store(false, Ordering::Relaxed);
+SPACE_ABORTED.store(false, Ordering::Relaxed);
+SPACE_COMBO_SEEN.store(false, Ordering::Relaxed);   // PROBLEM 219
+pointer::reset_on_eviction();                        // PROBLEM 206
+crate::guide_hud::hide_guide_hud();                  // PROBLEM 177
+```
+
+Those resets are correct for a REAL eviction (the Space-UP is genuinely lost).
+Landing one on a LIVE hold is precisely *"the ring dies mid-press"*. At one
+alarm every 2.4 minutes, a hold straddling one is routine, not exotic.
+
+**Exact file.** `src-tauri/src/hook/mod.rs` — nothing else was touched.
+
+**The code.**
+
+1. The mouse half of PROBLEM 228, which was never applied. In `ms_hook_proc`,
+   beside the existing seeded stamp:
+
+```rust
+// BEFORE
+LAST_MS_EVENT.store(tick_count(), Ordering::Relaxed);
+
+// AFTER
+let ms_now = tick_count();
+LAST_MS_EVENT.store(ms_now, Ordering::Relaxed);
+LAST_MS_CALLBACK.store(ms_now, Ordering::Relaxed);   // nothing else may write it
+MS_EVENTS.fetch_add(1, Ordering::Relaxed);           // a counter cannot be forged
+```
+
+2. The injected/real split. `KB_EVENTS_SEEN` counts injections (PROBLEM 230
+   moved its add above the cookie test, and that must stay), so
+   `saw N key event(s)` cannot distinguish a person typing from Spaceadom typing
+   to itself with the keyboard dead. Count them separately, on the branch that
+   is already taken:
+
+```rust
+if ks.dwExtraInfo == MAGIC_INJECTED {
+    KB_EVENTS_INJECTED.fetch_add(1, Ordering::Relaxed);   // NEW
+    return CallNextHookEx(None, n_code, w_param, l_param);
+}
+```
+
+3. **ONE new log line**, emitted once per 60-second window from
+   `drain_hook_diagnostics` whenever anything moved, built by a pure function:
+
+```rust
+pub(crate) fn format_liveness_split(
+    primary_real: u32, primary_injected: u32, reference: u32, mouse: u32,
+) -> String {
+    format!("primary_real:{primary_real} primary_injected:{primary_injected} \
+             reference:{reference} mouse:{mouse}")
+}
+```
+
+   Printed as `hook liveness split — primary_real:R primary_injected:I
+   reference:F mouse:M in the last Ns.` **All four are callback-only counters
+   for the SAME window.** How to read it, and which hypothesis each shape picks:
+
+   | Shape | Verdict |
+   | --- | --- |
+   | `primary_real` > 0, `reference` 0 | PROBLEM 230's inversion is back — check install order in `install_hooks()` |
+   | `primary_real` 0, `primary_injected` > 0 | keyboard dead; `saw N` was counting our own injections |
+   | `primary_real` 0, `reference` > 0 | real deafness (`classify_hook_window` -> `Deaf`) |
+   | `mouse` > 0, rest 0 | the pump is fine, so a `WATCHDOG` alarm in this window measured silence, not death |
+   | all four 0 | nobody touched anything; not evidence about the hooks |
+
+4. Both `WATCHDOG` alarm lines now carry the callback-only clocks and a verdict
+   word, via `alarm_is_evidenced(kb, ms, ref, BLIND_MS)` — `Option<u64>` so a
+   hook that has NEVER fired can never make an alarm evidenced:
+
+```
+... UNEVIDENCED — the callback-only clocks (nothing but a hook proc writes these)
+say keyboard 9000ms ago, mouse 120ms ago, reference NEVER since launch, against
+a 3000ms threshold
+```
+
+**What was deliberately NOT changed, and why.** The re-hook DECISION. PROBLEM
+228 set this file's law explicitly: *"changing it changes how often the app
+re-hooks, and that is a behaviour question to answer with a fortnight of honest
+data, not in the same pass that fixes the instrument."* `alarm_is_evidenced`
+only words the log; it gates nothing. **Next session's job:
+`grep -c "UNEVIDENCED"` against `grep -c "EVIDENCED —"`. If UNEVIDENCED
+dominates, gate the re-hook on it — that single change removes the hold-killer.**
+Do not make that change without the counts.
+
+**How it was verified.** `cargo test --lib` 347 passed / 0 failed / 5 ignored
+(baseline 335 immediately before this pass — six new tests in
+`hook::liveness_split_tests`, the remainder from another agent's concurrent work
+in the same tree); `cargo check --lib` 0 warnings, 0 errors. The six tests pin
+the arithmetic against the measured numbers: the pure-injection window, the
+live-primary/frozen-reference shape, a `4000/4000` pair with a 120 ms mouse
+callback (UNEVIDENCED), all ten measured mouse clocks above the threshold
+(EVIDENCED), never-fired can never be evidence, and the idle window.
+**UNVERIFIED and un-verifiable from this environment: what the new line actually
+prints on the owner's machine.** Nothing was built or installed in this pass —
+1.0.96 is still what is running.
+
+**Generalise this.** *A clock any repair path can write is not evidence about
+the thing being repaired.* PROBLEM 228 established that for the keyboard and the
+reference hook; the mouse clock kept the defect for another eight problems
+because nobody asked which branch was actually firing. **When you fix an
+instrument, enumerate every writer of every clock in the same predicate — not
+just the one named in the message you were reading.** And, again: *a check that
+cannot produce a negative result is not a check* — `both_dead` as it stands
+cannot answer "was the mouse hook alive?", which is half of its own premise.
+
+### DECISION CHANGED — 2026-09-04, later the same day
+
+The section above ends *"Do not make that change without the counts."* The
+owner cannot wait a fortnight for them: at one alarm every 2.4 minutes, every
+one of which clears `MODIFIER_ACTIVE` / `SPACE_*`, calls
+`pointer::reset_on_eviction()` and hides the ring, a Space hold straddling an
+alarm is routine and the ring dies mid-press. **The decision moves now; the
+measurement is kept.** `alarm_is_evidenced` and the EVIDENCED/UNEVIDENCED tag
+are untouched, and every alarm the old rule would have raised is still logged.
+
+**The new rule, in one sentence.** *An alarm fires only when the keyboard,
+mouse AND reference CALLBACK clocks are ALL silent for longer than `BLIND_MS`
+(3000 ms), after each of them has fired at least once since the last install;
+a hook that has never fired since the install is UNKNOWN, not dead.* It lives
+in one pure function, `classify_callback_liveness`, and the watchdog does no
+arithmetic of its own:
+
+```rust
+pub(crate) enum CallbackLiveness { Alive, Unknown, Dead }
+
+pub(crate) fn classify_callback_liveness(
+    kb_callback_silence_ms: Option<u64>,   // None = has not fired since the install
+    ms_callback_silence_ms: Option<u64>,
+    ref_callback_silence_ms: Option<u64>,
+    since_install_ms: u64,
+    threshold_ms: u64,      // BLIND_MS         = 3_000
+    grace_ms: u64,          // INSTALL_GRACE_MS = 10_000
+    unknown_max_ms: u64,    // UNKNOWN_MAX_MS   = 30_000
+) -> CallbackLiveness
+```
+
+1. inside `grace_ms` of an install → `Unknown` (the `16:28:53.412` alarm fired
+   **6 s after launch**, so a shorter grace would let that same line through);
+2. any clock inside `threshold_ms` → `Alive` (the ten measured mouse clocks,
+   3172–5250 ms, beside a keyboard callback 140 ms old);
+3. all three `Some` and all past `threshold_ms` → `Dead`;
+4. otherwise `Unknown`, **bounded** by `unknown_max_ms`.
+
+**Scoping the clocks to the install without letting the install write them.**
+`LAST_KB_CALLBACK` / `LAST_MS_CALLBACK` / `LAST_REF_KB_EVENT` are still
+callback-only and are still never reset — resetting them at install would make
+the repair a writer of the instrument again, which is the whole of PROBLEM 228.
+The boundary is a separate static, `HOOKS_INSTALLED_AT`, stamped beside
+`REF_HOOK_INSTALLED_AT`, and the watchdog reads each clock as
+`(cb != 0 && cb >= installed_at).then(|| now - cb)`. **Note the direction the
+one non-callback input can push:** `since_install_ms` can only SUPPRESS an
+alarm, or (past the bound) admit one that no callback could have contradicted.
+A writer that can only suppress is not the defect 228 named; that was a writer
+that manufactured evidence.
+
+**Why step 4 has a bound, and why removing it would be the fix being worse than
+the bug.** Read literally, *"never fired ⇒ unknown ⇒ no alarm"* hands the app a
+hole it can never climb out of: a `SetWindowsHookExW` that returns a handle and
+never fires (PROBLEM 132's wedged pump, or a failed install past the
+`is_invalid()` check) produces no callback, so the state stays UNKNOWN forever
+and the watchdog never retries — intermittent deafness converted into
+permanent. Every tick that reaches this decision has already passed
+`millis_since_last_input() < 2000`, a NULL foreground and the UIPI elevation
+test, so **30 seconds of a demonstrably present user producing not one callback
+on any of the three hooks is not an absence of evidence, it is evidence.** The
+retry for that case is now ten times quieter than 1.0.96's and still self-heals.
+`an_install_that_has_produced_no_callback_at_all_is_eventually_evidence` is the
+test that pins it.
+
+**LIVE-HOLD PROTECTION — the part that actually saves the press.** The rule
+above removes the six seeded `4000/4000` alarms outright, but the ten with a
+genuine mouse clock still pass it, so a re-hook can still land mid-hold. Before
+the destructive block, the watchdog now asks whether a hold is LIVE:
+
+```rust
+let saw_key_within_hold =
+    space_down_at != 0 && LAST_KB_CALLBACK.load(Relaxed) >= space_down_at;
+
+pub(crate) fn hold_defers_rehook(
+    modifier_active: bool, primary_saw_key_within_hold: bool,
+    deferred_for_ms: u64, max_defer_ms: u64,   // MAX_HOLD_DEFER_MS = 10_000
+) -> bool
+```
+
+Callback-only on both sides: the keyboard callback was demonstrably entered at
+or after this hold began. **Why this is not a hole:** `reap_stale_hold()` runs
+at the very TOP of `watchdog_check`, above every early return, so a hold whose
+auto-repeat has stopped is already reaped before the deferral is consulted. The
+only hold that can defer is one still being fed by the keyboard callback, or one
+that fired a combo (where PROBLEM 219 stood the reaper down deliberately) —
+both of which a teardown would damage rather than repair. **Why 10 s:** the
+combo branch's own `MAX_MODIFIER_HOLD_MS` is 30 s so this cannot be the longest
+latch; the blind-retry floor is 5 s and the escalation floor 120 s so neither
+cadence is perturbed; and a hold longer than ten seconds is not a shortcut. The
+deferral is logged ONCE per episode, its expiry once at WARN, and the episode
+clock is cleared whenever the hold ends, whenever the alarm clears, and on
+every install.
+
+**The data still accrues.** When the old rule fires and the new one declines,
+the watchdog prints `hook: WATCHDOG would have alarmed (both_dead|kb_only_dead)
+and re-hooked here, and 1.0.96 would have — … Verdict from the callback-only
+clocks: Unknown|Alive …`, at Info, on the rising edge of an episode plus one
+line a minute while it persists, with the tick count in the line. So
+`grep -c "would have alarmed"` counts EPISODES, not ticks — which is the fair
+comparison, because the old rule re-hooked and re-stamped its own clocks and
+could not have produced one line per tick either. The `hook liveness split`
+line is unchanged.
+
+**The alarm text now states the rule** (both `WATCHDOG —` lines and the
+would-have-alarmed line carry `RULE_DESC`), so the next reader does not have to
+open `hook/mod.rs` to find out what decided. `RULE_DESC` deliberately carries no
+numbers: the threshold, grace and bound are printed beside it from the constants
+themselves, so the sentence cannot drift from the arithmetic.
+
+**Exact file.** `src-tauri/src/hook/mod.rs` — nothing else was touched.
+
+**How it was verified.** `cargo test --lib` **358 passed / 0 failed / 5 ignored**
+(baseline 347 immediately before this pass — eleven new tests in
+`hook::alarm_decision_tests`); `cargo check --lib` 0 warnings, 0 errors. The
+eleven pin the decision against the measured shapes: the six seeded pairs never
+alarm, the 6-seconds-after-launch alarm is inside the grace, all-three-silent
+still alarms, the ten mouse clocks beside a live keyboard callback do not, a
+live reference hook alone vetoes, any single never-fired hook holds the verdict
+at UNKNOWN, the unknown state is bounded but never overrides a hook that is
+actually firing, a live hold defers, the deferral expires, and a stale
+`MODIFIER_ACTIVE` latch with no callback inside it defers nothing.
+
+**UNVERIFIED, and it must be labelled as such.** Nothing was built or installed
+in this pass; 1.0.96 is still what is running, so **no line above has been
+observed on the owner's machine.** The prediction to check against the next log
+is specific: `grep -c "WATCHDOG — "` per hour should fall (the six seeded alarms
+of sixteen cannot recur at all), `grep -c "would have alarmed"` should account
+for the difference, and `grep "hold is LIVE"` should be non-empty on any session
+where he holds Space during an alarm. **The residual class is honest and
+expected**: an alarm where every callback clock really has been silent past 3 s
+while `GetLastInputInfo` says the user was active within 2 s still fires, and
+that is PROBLEM 228's unresolved section 9 (something refreshing the OS input
+clock without reaching our hooks), not this rule failing.
+
+**Generalise this, again.** *Fixing an instrument and leaving the decision
+reading the old one buys nothing the user can feel.* PROBLEM 228 split the
+clocks and left the decision; PROBLEM 236 split the mouse clock and left the
+decision; both were right at the time and both left the owner with the same
+symptom. **And: a rule of the form "no evidence ⇒ no action" must always be
+bounded, or it becomes "a broken instrument ⇒ never repair".**
+
+### REVIEW FIXES 2026-09-04 — the new rule let the WITNESS vote that the failure it witnesses had not happened
+
+**Symptom.** Reviewing 236's own code the same day it was written: the
+`kb_only_dead` re-hook branch (`hook/mod.rs:2580`) is **unreachable**. Nothing
+can ever print "the KEYBOARD hook alone was evicted" again, and no repair can
+ever run for that failure — the one the owner actually lives with (PROBLEM 181:
+24 of 46 alarms had this exact fingerprint; PROBLEM 230 is the same shape).
+
+**Root cause.** `classify_callback_liveness` accepted the REFERENCE clock as
+proof of life, alongside the two primaries:
+
+```rust
+if recent(kb_callback_silence_ms) || recent(ms_callback_silence_ms) || recent(ref_callback_silence_ms) {
+    return CallbackLiveness::Alive;
+}
+```
+
+`kb_only_dead`'s premise IS a live reference with a silent primary. So the gate
+at `:2305` returned `Alive` for exactly the shape the alarm exists to catch, and
+stood the watchdog down one screen before the branch that would have repaired
+it. The rule had a **passing test defending it** —
+`a_live_reference_hook_alone_prevents_the_alarm` asserted `Alive` for
+`(kb 20 000, mouse 20 000, ref 200)`, which is an evicted primary described in
+full and then declared healthy.
+
+**The actual code** (`src-tauri/src/hook/mod.rs`):
+
+```rust
+// AFTER — only a PRIMARY can vote Alive; the reference narrows, never cancels
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum DeadKind { KbOnly, Both }
+pub(crate) enum CallbackLiveness { Alive, Unknown, Dead(DeadKind) }
+
+if recent(kb_callback_silence_ms) || recent(ms_callback_silence_ms) {
+    return CallbackLiveness::Alive;
+}
+if recent(ref_callback_silence_ms) {
+    if kb_callback_silence_ms.is_some() { return CallbackLiveness::Dead(DeadKind::KbOnly); }
+    // PROBLEM 228's law still outranks it: a primary that has NEVER fired since
+    // the install is UNKNOWN, and only the bound may promote that to a fact.
+    return if since_install_ms >= unknown_max_ms { CallbackLiveness::Dead(DeadKind::KbOnly) }
+           else { CallbackLiveness::Unknown };
+}
+// …then the unchanged all-three-silent and unknown-bound branches, as Dead(Both)
+```
+
+The gate became `if !matches!(verdict, CallbackLiveness::Dead(_))`, and the
+re-hook branch at `:2580` now keys off the verdict that actually authorised the
+repair — `matches!(verdict, CallbackLiveness::Dead(DeadKind::KbOnly))` — instead
+of off the seeded `kb_only_dead && !both_dead`, which could be false while the
+reference was demonstrably alive and so printed the wrong sentence. The install
+grace, the `UNKNOWN_MAX_MS` bound and the live-hold deferral are untouched, and
+`RULE_DESC` was rewritten because it stated the old rule verbatim on every line
+that acts on it.
+
+**Second defect, same file: `previous_worked` read an instrument the watchdog
+writes** (`hook/mod.rs:2370-2374`). The adaptive-cooldown test asked "did the
+last repair deliver events?" of `LAST_KB_EVENT` — which this very function's
+idle early-return re-stamps every tick the user has been quiet for 2 s. So after
+any pause following a re-hook the answer was yes, on no evidence: 100 such lines
+in the owner's log, each one a full 60-second hold-off while the hook may
+genuinely have been dead. PROBLEM 228's note beside it already said the claim
+was false and deferred the decision pending data; the data arrived.
+
+```rust
+// BEFORE                                   // AFTER
+LAST_KB_EVENT.load(..) > last               let kb_cb = LAST_KB_CALLBACK.load(..);
+LAST_KB_EVENT.load(..) > last               let ms_cb = LAST_MS_CALLBACK.load(..);
+  || LAST_MS_EVENT.load(..) > last          if kb_only_dead { kb_cb > last }
+                                            else { kb_cb > last || ms_cb > last }
+```
+
+Both callback clocks are written by the hook procs and by nothing else, so an
+idle pause can no longer fake a successful repair. The log line beneath it was
+rewritten to match — it can no longer print "the last repair delivered events"
+next to "genuine keyboard callback: NONE".
+
+**How it was verified.** `cargo test --lib` 367 passed / 0 failed (was 358);
+clippy `-D warnings` clean. `a_live_reference_hook_alone_prevents_the_alarm` was
+renamed to `a_live_reference_hook_narrows_the_verdict_instead_of_cancelling_it`
+and now asserts `Dead(KbOnly)`, with the same clocks minus the live reference
+asserting `Dead(Both)`. New:
+`live_reference_with_silent_primary_is_kb_only_dead` pins the owner's failure,
+that a live MOUSE callback still cancels the alarm, that the install grace still
+outranks everything, and both sides of the unknown bound for a primary that has
+never fired. **UNVERIFIED on the real machine:** no build or install was made in
+this pass, so the `kb_only_dead` branch has not been observed firing in
+`debug.log`. **The one-line test when it is next run:**
+`grep "the KEYBOARD hook alone was evicted" debug.log` — that line has been
+impossible to produce since 236 shipped, so its first appearance is the proof
+this branch is reachable, and its rate is the measurement the next pass needs.
+
+**Generalise this.** *An instrument installed to witness a failure must never be
+allowed to vote that the failure did not happen.* Its reading is a premise of
+the diagnosis, not a rebuttal of it — and the moment a witness is treated as
+interchangeable with the thing it witnesses, the diagnosis inverts. Second, from
+`previous_worked`: **a fix that renames the instrument but leaves the decision
+reading the old one is not a fix** — that is now three passes (228, 236, this
+one) that split a clock and left a decision behind, each shipping with the
+owner's symptom intact.
+
+## PROBLEM 238 — rival_install::detect() only ever looked for a live exe in C:\Program Files\Spaceadom, so an orphaned HKLM MSI uninstall entry was completely invisible to it
+
+**Symptom.** Audited from outside the agent container (HKLM reads are not
+virtualised for this app's shell; see PROBLEM 143) on the owner's machine
+after the 1.0.95→1.0.96 upgrade: ONE `spaceadom.exe`, ONE HKCU uninstall
+entry (1.0.96), ONE HKCU Run key — but Programs and Features listed TWO
+"Spaceadom" entries. The second was
+`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{C68DC702-9414-421F-A3E4-12EDBBADD76C5}`:
+`DisplayName` "Spaceadom", `DisplayVersion` 1.0.94, `InstallLocation` the
+per-user folder (`%LOCALAPPDATA%\Spaceadom`), `UninstallString`
+`MsiExec.exe /X{C68DC702-9414-421F-A3E4-12EDBBADD76C5}`, with no files
+anywhere belonging to that old MSI — a leftover uninstall registration from
+a retired MSI-based install path, not a second running copy.
+`rival_install::scan()` logged "rival install: no second copy found — this
+machine has one Spaceadom" three times against this exact machine state.
+
+**Root cause.** `detect()` (pre-fix, lines ~50-73) checked exactly one thing:
+does `spaceadom.exe` exist at the fixed path
+`%ProgramFiles%\Spaceadom\spaceadom.exe`? It never read the registry at all.
+PROBLEM 129/141's model assumed a rival is a separate installed copy findable
+by a fixed path. An orphaned uninstall entry is a different shape: no live
+exe corresponds to it (or, as in this case, a live exe DOES exist at the
+recorded `InstallLocation`, but it is the same file as the one asking the
+question — it is just an old registration for a since-replaced installer
+technology). `repair()` (lines ~154-227) already handles removing an entry
+exactly like this — it enumerates HKLM Uninstall + WOW6432Node for
+`DisplayName -like '*Spaceadom*'` and runs `msiexec /X{GUID}` on every match —
+so the gap was a missing TRIGGER, not missing removal logic.
+
+**Exact file.** `src-tauri/src/rival_install.rs` only.
+
+Added a pure, unit-tested classifier that turns one HKLM Uninstall entry's
+four readable fields plus what the caller found on disk into a verdict, kept
+OS-free so registry access never has to be mocked to test it:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MsiEntryVerdict {
+    NotOurs,
+    OrphanedEntry,
+    RealSecondCopy,
+}
+
+pub fn classify_msi_entry(
+    display_name: &str,
+    uninstall_string: &str,
+    install_location: &str,
+    exe_exists: bool,
+    is_same_file: bool,
+) -> MsiEntryVerdict {
+    if !display_name.trim().eq_ignore_ascii_case("Spaceadom") {
+        return MsiEntryVerdict::NotOurs;
+    }
+    if !is_msiexec_uninstall(uninstall_string) {
+        return MsiEntryVerdict::NotOurs;
+    }
+    if exe_exists && !is_same_file && !install_location.trim().is_empty() {
+        MsiEntryVerdict::RealSecondCopy
+    } else {
+        MsiEntryVerdict::OrphanedEntry
+    }
+}
+```
+
+`detect_msi_uninstall_entry(me)` walks
+`SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` and
+`SOFTWARE\WOW6432Node\...\Uninstall` under `HKEY_LOCAL_MACHINE` only (via
+`winreg`, already a dependency — see `startup.rs`), read-only, no elevation,
+reads `DisplayName`/`UninstallString`/`InstallLocation` per subkey, resolves
+`exe_exists`/`is_same_file` by checking
+`Path::new(InstallLocation).join("spaceadom.exe")` against `current_exe()`
+(canonicalized, falling back to a case-insensitive path string compare), and
+calls `classify_msi_entry`. `detect()` tries the existing Program-Files check
+first (PROBLEM 129's path); if that finds nothing it falls through to this
+second path. Both paths converge on the same `(String, String)` shape
+`scan()`/`repair()` already consumed, so `RIVAL_FOUND` / the dashboard banner
+/ the one-click elevated repair all fire exactly as before — this was a
+detection-only change. A new `detect_verbose()` also returns which shape was
+found (`"second_copy"` / `"orphaned_entry"`), recorded in a new `RIVAL_KIND`
+static and exposed as `status_kind()`, for a banner-text variant (see
+"Frontend follow-up" below).
+
+**Safety note baked into the fix, not incidental.** For `OrphanedEntry`, the
+`path` string returned is a fixed descriptive sentence ("a leftover installer
+entry — no separate copy of Spaceadom is actually running"), NOT the raw
+`InstallLocation` — because `InstallLocation` for this shape can be (and on
+the audited machine, is) the app's OWN live per-user folder. `repair()`
+derives a `dir` from `path` via `Path::new(&path).parent()` and later runs
+`Remove-Item '{dir}' -Recurse -Force`; feeding it the raw `InstallLocation`
+for an orphaned entry would have handed `Remove-Item` the currently-running
+app's own directory. The sentence has no path separator, so `parent()`
+yields an empty `dir`, the `Stop-Process`/`Remove-Item` steps become no-ops
+against it, and the HKLM `msiexec /X{GUID}` loop (which matches by
+`DisplayName`, not `dir`) still removes the orphaned registration correctly.
+Documented directly above `repair()` so a future edit to `detect()`'s
+`OrphanedEntry` path doesn't silently reintroduce this.
+
+**Unit tests** (`#[cfg(test)] mod tests` at the bottom of the file, all pure —
+no registry, no filesystem):
+- `healthy_per_user_entry_is_not_flagged` — NSIS's own uninstall string
+  (`...\uninstall.exe`), not MsiExec → `NotOurs`.
+- `orphaned_msi_entry_pointing_at_our_own_folder_is_flagged_as_orphaned` —
+  the audited GUID and shape verbatim → `OrphanedEntry`.
+- `orphaned_msi_entry_with_no_files_left_at_all_is_also_orphaned` — the more
+  common dead-MSI shape (`exe_exists: false`) → `OrphanedEntry`.
+- `real_second_copy_in_program_files_is_flagged_as_a_real_second_copy` —
+  PROBLEM 129's original shape, still caught → `RealSecondCopy`.
+- `unrelated_app_with_spaceadom_in_the_name_is_never_flagged` — substring
+  names ("Spaceadom Cloud Sync Helper", "My Spaceadom Extension") →
+  `NotOurs`; confirms the match is exact (case-insensitive, trimmed), not
+  `-like '*Spaceadom*'`.
+- `a_matching_name_with_a_non_msi_uninstall_string_is_never_flagged` — exact
+  name, non-MsiExec uninstall string → `NotOurs`.
+
+**How it was verified.** `cargo build --lib` — 0 warnings. `cargo test --lib`
+— 347 passed / 0 failed / 5 ignored on this tree (6 new, all passing;
+baseline before this change was 335 passed on the same tree, already above
+the 332 floor — the difference includes other agents' concurrent work in
+this shared repo, not just this change). **NOT verified live and cannot be
+from this environment: the actual banner firing on the owner's machine
+against the actual audited GUID.** This environment can read HKLM but the
+fix was proven with unit tests against the pure classifier, not by running
+`scan()` against the real registry — the owner needs to relaunch 1.0.96
+(once rebuilt/reinstalled) and confirm the dashboard banner now appears,
+then confirm "Remove the old copy" clears the orphaned HKLM entry without
+touching the live per-user install. Not built as an installer and not
+installed this session — this is 238's Rust change in the tree only.
+
+**Frontend follow-up needed (NOT done here — `src/main.ts` and
+`src-tauri/src/commands.rs` are owned by other lanes; only
+`src-tauri/src/rival_install.rs` was in scope this session).**
+`checkRivalInstall()` in `src/main.ts` (~lines 814-863) currently renders one
+template regardless of kind — paraphrased, the banner text is "Another copy
+of Spaceadom (vX) is installed at Y. Both start with Windows and fight over
+the spacebar. One click removes the old one." That reads correctly for
+`RealSecondCopy` but is misleading for `OrphanedEntry` (nothing is "fighting
+over the spacebar" — nothing is running twice). Exact change needed: have
+`get_rival_install` (in `commands.rs`) also return
+`crate::rival_install::status_kind()` (already implemented and unit-tested;
+currently returns `"second_copy"` / `"orphaned_entry"` / `""`), then in
+`main.ts` branch `txt.textContent` on that value — for `"orphaned_entry"`,
+wording along the lines of "An old installer entry for Spaceadom (vX) is
+left over — nothing is running twice, but Programs and Features lists two.
+One click removes the leftover entry (Windows will ask for permission
+once)." — keeping the same button/close wiring. `get_rival_install`'s
+Rust-side return type would need a fourth tuple element (or a new command),
+a `commands.rs` change outside this session's file scope.
+
+**WIRED, 2026-09-04.** `commands.rs::get_rival_install` now returns
+`(bool, String, String, String)` — a fourth tuple element, `status_kind()`
+appended (`crate::rival_install::status()` unchanged, called first). No
+Rust test needed: the command's return shape had no existing unit test to
+adjust (`get_rival_install` was only ever registered in `lib.rs`'s invoke
+handler, never called from `#[cfg(test)]`), and `status_kind()` itself was
+already covered by `rival_install.rs`'s `classify_msi_entry` tests from
+PROBLEM 238 proper. `cargo build --lib` 0 warnings, `cargo clippy
+--all-targets` 0 warnings, `cargo test --lib` 347/0/5 (unchanged — this is
+an additive, non-logic-bearing wrapper). In `main.ts`, `checkRivalInstall()`
+destructures the fourth element as `kind` and branches `txt.textContent`:
+`kind === "orphaned_entry"` gets **"An old installer entry is left over.
+Nothing is running twice, but Programs and Features lists Spaceadom twice.
+Remove it?"** (the owner's house-voice wording, plainer than this section's
+original draft copy above); every other value (`"second_copy"` and `""`,
+the latter never actually reaching this code since `found` gates the whole
+banner) renders the ORIGINAL sentence, byte-identical, including the
+`${version}`/`${path}` interpolation. The button (`"Remove the old copy"`)
+and close (`✕`) wiring are untouched — same element, same `repair_rival_install`
+call, same success/failure toasts. `npx tsc --noEmit` clean (only
+pre-existing, unrelated `toast.ts` errors from a different lane remain) and
+`npm run build` (tsc + vite) succeeds. **Not verified live**: no installer
+was built or installed this session (none was in scope), and `get_rival_install`
+is not stubbed in `preview.ts`, so the banner text was verified by reading
+the diff against the two required cases, not by driving it in a browser —
+unlike PROBLEM 237's listener, which the preview harness could exercise.
+
+**Generalise this.** A "second copy" detector that only checks one FIXED
+LOCATION on disk will always miss the shape where the installer TECHNOLOGY
+changed but the registry entry from the old one didn't get cleaned up — the
+uninstall registry and the filesystem can independently drift out of sync
+with each other, and each needs its own check. Keep the classification logic
+(`classify_msi_entry`) pure and separate from the OS calls that feed it
+(`detect_msi_uninstall_entry`) — that is what let every one of the four
+required shapes be covered by a test that runs in milliseconds with no
+registry access, rather than requiring a machine in this exact broken state
+to verify against.
+
+### REVIEW FIXES 2026-09-04 — CRITICAL: the new detection path made an elevated `Remove-Item -Recurse` delete the folder ABOVE the install
+
+**Symptom (never shipped; found on review of 238's own code before a build).**
+`repair()` can run `Remove-Item '<dir>' -Recurse -Force` **elevated** against
+`D:\Apps`, `C:\Program Files (x86)`, or the user's entire
+`C:\Users\<name>\AppData\Local`.
+
+**Root cause — two producers, one consumer, and no agreement on what they
+produce.** `repair()` has always derived the directory to delete with
+`Path::new(&path).parent()`. That is correct for Path 1, which returns an **EXE**
+(`…\Spaceadom\spaceadom.exe` → parent `…\Spaceadom`). PROBLEM 238's new Path 2
+returned `install_location` — a **DIRECTORY** — so `parent()` climbed one level
+too high. Both returned `String`; the compiler was satisfied; one meant a file
+and the other a folder. On the owner's own audited machine the entry's
+`InstallLocation` is the live per-user folder, so the computed target would have
+been `C:\Users\beamu\AppData\Local`.
+
+**The actual code** (`src-tauri/src/rival_install.rs`), two independent
+corrections, because either alone would have been a single point of failure:
+
+```rust
+// 1. detect() returns an EXE for a RealSecondCopy, like Path 1 always has.
+pub(crate) fn install_location_to_exe(install_location: &str) -> PathBuf {
+    std::path::Path::new(install_location.trim()).join("spaceadom.exe")
+}
+// `Path::join` already collapses a trailing separator, which the registry
+// routinely carries (`…\Spaceadom\`); the test pins it so a later "tidy" to
+// string concatenation cannot regress it.
+
+// 2. A HARD GUARD in repair(), pure so every refusal is tested.
+pub(crate) fn removal_target(dir: &str, current_exe_dir: &str, forbidden_roots: &[&str])
+    -> Result<Option<String>, String>
+{
+    if dir.trim().is_empty() { return Ok(None); }        // the OrphanedEntry sentence
+    // (a) must be named exactly "Spaceadom" (case-insensitive) — a drive root has
+    //     no file_name(), and Program Files / AppData\Local are named otherwise;
+    // (b) must have a parent, so it cannot BE a root;
+    // (c) must not be, or contain, the directory we are running from — compared
+    //     COMPONENT-wise, so `…\Space` is not an ancestor of `…\Spaceadom`;
+    // (d) must not be, or contain, any of %ProgramFiles% / %ProgramFiles(x86)% /
+    //     %ProgramW6432% / %LOCALAPPDATA% / %APPDATA% / %USERPROFILE% /
+    //     %SystemDrive% / %SystemRoot%.
+}
+```
+
+A refusal logs at `error!` and returns `false` from `repair()` (its existing
+"the machine is not clean" answer), and **nothing elevated runs at all** — a
+`parent()` we cannot vouch for means the detection that produced it is not one
+we can act on either. `Ok(None)` is a clean "nothing on disk to remove": the
+`OrphanedEntry` case, where the `msiexec /X{GUID}` pass IS the whole repair. The
+`Stop-Process`/`Remove-Item` steps are now OMITTED from the script for that case
+rather than relying on an empty `dir` making them silent no-ops, and any path
+that does go in has its single quotes doubled (`C:\Users\O'Brien\…` is legal).
+
+**Second fix, MEDIUM: removal was broader than detection.** The elevated script
+uninstalled everything matching `$p.DisplayName -like '*Spaceadom*'` while the
+Rust classifier has always required an EXACT case-insensitive match
+(`classify_msi_entry`; `unrelated_app_with_spaceadom_in_the_name_is_never_flagged`
+pins it). A "Spaceadom Cloud Sync Helper", a third-party plugin or an unrelated
+vendor's product would have been uninstalled by a repair that never detected it.
+Now `$p.DisplayName -eq 'Spaceadom'`, on both HKLM roots.
+
+**How it was verified.** `cargo test --lib` 367 passed / 0 failed (was 358);
+clippy `-D warnings` clean. New tests:
+`a_real_second_copys_path_is_the_exe_so_parent_is_the_install_dir` (three
+`InstallLocation` spellings including a trailing backslash, all normalising to
+one exe whose `parent()` is the install dir and NOT `D:\Apps`);
+`the_removal_guard_refuses_every_directory_that_is_not_an_install` (eight
+directories the old code could compute, `D:\Apps` and `C:\Program Files (x86)`
+and `…\AppData\Local` among them); `the_removal_guard_refuses_our_own_directory_and_anything_containing_it`
+(including the case-differing spelling, and proving a sibling named
+`SpaceadomBeta` is NOT us — a string `starts_with` would have said it was);
+`the_orphaned_entry_sentence_asks_for_no_deletion_and_is_not_an_error`.
+**UNVERIFIED on the real machine:** no build or install was made, and `repair()`
+itself has not been run — the guard and the join are proved by unit test only,
+and the tightened PowerShell has not been executed.
+
+**Generalise this.** *When two producers feed one consumer, they must agree on
+the KIND of thing they produce, not merely on its type.* `String` was the same
+type for a file path and a folder path, and the difference cost one level of
+`Path::parent()` in front of an elevated recursive delete. And: **any code that
+computes a path for a destructive, elevated operation needs a guard that can
+refuse — a whitelist of what the path must LOOK like, not a review of the
+arithmetic that produced it.** Finally, **removal must never be broader than
+detection**: if the classifier requires an exact name, the script that acts on
+it must too.
+
+---
+
+## PROBLEM 239 — 1.0.96 settings review: the sticky Engine bar sat ON TOP of the expanded grid's first row, the full-screen layout was two-thirds content and one-third nothing, seven action buttons were full-width pills, and a ring preview never picked up a setting changed while it was on screen
+
+Four findings from the owner's 1.0.96 full-screen review (2026-09-04, 2000x1250
+screenshot). They are one entry because three of the four are the same file and
+the same state — `#settings-panel.expanded` — and the fourth is the control
+that state exists to make usable.
+
+### 1. The sticky bar covered the first row of columns 2 and 3
+
+**Symptom.** Expanded, "Run at startup" and "Point to launch" were hidden under
+the Engine bar; the BEHAVIOUR and THE SPACE RING headings showed faintly
+through it (the bar's background is `rgba(var(--srf-rgb), .97)`, so what is
+under it is not quite gone).
+
+**Root cause. Not a z-index bug — it is what `position: sticky` does.**
+`.set-engine` is sticky inside `#settings-panel`, and in the expanded state the
+PANEL is the scroll container. The instant anything scrolls, the bar pins to
+the panel's top edge and the grid runs underneath it. Column 1's first row is
+the tall Theme pill (49.3px measured) so part of it stayed visible below the
+bar; columns 2 and 3 open with 22.1px switch rows, which fit entirely inside
+the covered band. That asymmetry is what made it look like a stacking accident
+rather than the scroll behaviour it is.
+
+No `top` offset can fix this. The overlap is not a constant — it grows with
+scrollTop — so padding, a spacer or a different `top` would move the bug, not
+remove it.
+
+**Fix. Stop the top of the panel being part of the scroll.** The expanded panel
+becomes a flex column; `.set-head` and `.set-engine` are fixed-height bands;
+one new wrapper, `.set-scroll`, is the only thing that scrolls.
+
+`src/components/settings-panel.ts` — one wrapper opened after the engine row
+and closed after the privacy group:
+
+```html
+    ${engineRow(!_paused)}
+    <div class="set-scroll">
+    ...search, #set-groups, the sections, the action groups, privacy...
+    </div><!-- /.set-scroll -->
+```
+
+`src/styles.css`
+
+```css
+/* The wrapper is NOT in the layout in the 280px popover. */
+.set-scroll { display: contents; }
+
+#settings-panel.expanded {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;            /* the panel is no longer the scroller */
+  padding-bottom: 0;
+}
+#settings-panel.expanded > .set-head,
+#settings-panel.expanded > .set-engine { flex: 0 0 auto; }
+#settings-panel.expanded > .set-engine { position: static; margin-bottom: 0; }
+#settings-panel.expanded > .set-scroll {
+  display: block;
+  flex: 1 1 auto;
+  min-height: 0;               /* or a flex item refuses to shrink and scroll */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 0 calc(var(--set-pad-x) * -1);
+  padding: 14px var(--set-pad-x) var(--set-pad-y);
+}
+```
+
+**`display: contents` is what makes this safe.** In the 280px popover the
+wrapper generates no box at all, so the compact panel scrolls exactly as it did
+before it existed and the sticky bar goes on pinning there — which is right in
+a single-column popover and wrong only in the grid.
+
+**Verified** in the browser pane on `preview.html?gear&expand`, measuring
+`getBoundingClientRect()` of the bar against each column's heading and first
+row, before and after:
+
+| State | bar.bottom | col heads .top | gap |
+| --- | --- | --- | --- |
+| 1.0.96, 1920x1200, scrollTop 0 | 120.7 | 176.7 | +56 (fine) |
+| 1.0.96, scrolled | pinned at panel top | slides under | **overlap grows with scroll** |
+| after, 1920x1200, scrollTop 0 | 120.7 | 178.7 | +58 |
+| after, 1366x768, scrollTop 0 | 120.7 | 178.7 | +58 |
+| after, 1366x768, scrolled to the end (52px, the scroller's max) | 120.7 | 126.7 | +6 |
+
+The gap is positive at every scroll position, at both viewport sizes. Headings
+that scroll far enough are CLIPPED by the scroller's top edge — they no longer
+pass behind the bar at all.
+
+### 2. Full-screen whitespace — capped and centred
+
+**Symptom.** At 1920 the expanded panel's content stopped at 1120px and hugged
+the left edge, leaving ~700px of empty cream down the right.
+
+**Root cause.** The `max-width: 1120px` was there; `margin-inline: auto` was
+not. A cap without centring is a left-aligned column with a hard right edge.
+
+**Fix.** `--set-measure: 1200px` on `#settings-panel.expanded`, applied with
+auto inline margins to the head, the search box, `#set-groups`, the sections
+and the privacy group.
+
+**Where 1200 comes from,** stated because "it looked right" is not a reason:
+three columns at ~376px plus the two 36px gutters — 3 x 376 + 2 x 36 = 1200.
+376px of 13px body text is roughly 60 characters, inside the 45-75 measure the
+type scale asks for. The old 1120 gave 349px columns.
+
+**Three traps, all measured, all requiring a second declaration:**
+
+* `.set-head` is a flex ITEM of the panel now, and **an auto margin in a flex
+  item's cross axis switches off the default stretch** — so `margin-inline:
+  auto` left the header shrink-to-fit at 201px, floating mid-window. Fixed with
+  `width: 100%`, which makes the auto margins resolve as centring.
+* `.set-engine` is `.set-item`, which is `display: flex`. Its children were
+  flex items, so `max-width` never bound and the switch centred as a 125px
+  box at x=630 while every heading below sat at x=82. Fixed with
+  `display: block` on the bar in the expanded state.
+* `.set-search` is an `<input>` — `inline-block` — and **auto margins do not
+  centre an inline-level box.** It stayed at the padding edge (x=90) while
+  everything else sat at x=360. Fixed with `display: block`.
+
+**The bar stays full-bleed, and that is the deliberate half.** It is the app's
+master switch, not a preference: a band that spans the window reads as chrome —
+a title bar — and separates itself from the capped column beneath. Capping it
+to 1200 as well would have drawn a second vertical edge in exactly the same
+place as the content's, and two coincident edges read as one mistake rather
+than two decisions. Its CONTENTS are capped and centred, so the switch and its
+note share the left edge of every heading below them.
+
+**Verified**, 1920x1200, all in CSS px:
+
+```
+.set-head      l=360.2  w=1200
+.set-engine    l=0      w=1920.5   (full-bleed, by design)
+  .set-row     l=360.2  w=1200     (its contents, on the column)
+.set-search    l=360.2  w=1200
+#set-groups    l=360.2  w=1200     columns 376 / 376 / 376
+.set-section   l=360.2  w=1200
+privacy group  l=360.2  w=1200
+```
+
+Left margin 360, right margin 359.8 — symmetric. At 1366x768 the same elements
+sit at l~=82 with the columns at 375.4 each.
+
+### 3. The action buttons — a grouped compact grid
+
+**Symptom.** Owner: *"unnaturally long pills, stretched for no reason."* True:
+`.set-actions .btn { flex: 1 }` plus two `width:100%` buttons plus three more
+full-width buttons rendered into the Conflicts area drew a 1100px "Open log
+folder" in a full-screen window — and gave "Clear all" exactly the same visual
+weight as "Re-check now".
+
+**Fix.** Two named groups with the same small uppercase headings the settings
+groups use, and a content-sized responsive grid inside each.
+
+```css
+.set-act-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, max-content));
+  justify-content: start;
+  gap: 8px;
+}
+.set-act-grid .btn, .btn.set-act-inline {
+  justify-content: center; height: 34px; padding: 0 16px;
+  font-size: 12px; border-radius: 13px;
+}
+#settings-panel:not(.expanded) .set-act-grid { grid-template-columns: minmax(0, 1fr); }
+```
+
+`minmax(220px, max-content)` is legal inside `repeat(auto-fit, ...)` because the
+auto-repeat rule only requires a FIXED minimum; the maximum may be intrinsic.
+Measured, not assumed: at 1920 the tracks resolve to
+`219.992px 219.992px 0px 0px 0px` for Maintenance (2 buttons) and three tracks
+for Danger zone, all 220px, packed from the column's left edge. In the 280px
+popover only one track ever fits, and holding it at `max-content` left a 22px
+ledge down the right of every button (220 in a 242 column), so the compact
+panel gets one filled column instead.
+
+**RADIUS 13, NOT 999, AND IT IS A STATED EXCEPTION.** CLAUDE.md's rule is 999
+for everything interactive. The owner chose 13 for these buttons specifically,
+and it is the radius the keys and cards already use — a grid of seven pills
+reads as a scatter of lozenges. Every other interactive control in the app is
+unchanged.
+
+**Which button went where, and which did NOT move.**
+
+| Button | Group | Notes |
+| --- | --- | --- |
+| Re-check now | MAINTENANCE | moved out of `renderConflicts`'s `draw()` |
+| Open log folder | MAINTENANCE | moved out of the old action stack |
+| Reset this profile / Clear this profile | DANGER ZONE | two-step confirm untouched |
+| Clear all | DANGER ZONE | two-step confirm untouched |
+| Restore preset profiles | DANGER ZONE | additive; never overwrites |
+| Check the ring | **stays in Conflicts** | the owner's instruction |
+| Restart now | **stays in the ring tool** | see below |
+| Put back Windows' 0.3 second limit | **stays in the hook-health block** | see below |
+
+**"Check the ring" and "Re-check now" are NOT the same action** and both are
+kept. "Check the ring" runs `run_overlay_fix` — it draws the ring once, watches
+whether anything reaches the screen and may switch the overlay to software
+compositing. "Re-check now" re-runs the conflict scan (`refreshConflicts`).
+Nothing is duplicated: the ring tool keeps its own button, and the conflicts
+re-scan moved to Maintenance. `renderConflicts` now publishes its inner
+`draw()` as `_redrawConflicts` so the moved button can repaint the list it just
+re-scanned — a function reference, never a second `renderConflicts()` call,
+which would attach a second set of listeners to the same section.
+
+**"Restart now" and the hook-timeout button stay where they are, on purpose.**
+Both are CONDITIONAL — `restart` is hidden until a ring check has actually
+changed a setting, and the hook-health block is not rendered at all unless
+Windows has evicted the hook or the timeout is already raised — and both are
+the last sentence of a paragraph that exists to justify them. The hook-timeout
+button in particular sits under the three-paragraph explanation PROBLEM 186
+added because *"even I don't understand what that means"*; filing it in a
+Maintenance grid away from that text would make it a control nobody consented
+to. They were de-stretched in place instead (`width:100%` removed,
+`.set-act-inline` added), so the run of long pills is gone either way. **No
+action was removed.**
+
+**DANGER ZONE is tinted with the WARNING token, not the danger one.** All three
+of its buttons already ask for a second thought — two arm-then-fire, one is
+additive — so full alarm red would say "this is happening now", which is true
+of none of them. The armed state DOES escalate: `.is-armed`, written by
+`render()` from the same `_armed` flag that swaps the label to "Confirm",
+paints the button `--st-danger`. One flag, one source of truth for the word and
+the colour.
+
+The heading is `color-mix(in srgb, var(--st-warning) 50%, var(--st-text))`, not
+raw `--st-warning`, and that is a measured contrast fix: #d9a13d on the cream
+panel is **2.14:1** and this heading is 10px — small text, needing 4.5:1. Mixed
+halfway toward `--st-text` it reads **5.48:1** in Earthy, and because
+`--st-text` inverts with the palette the same declaration LIGHTENS in the three
+dark palettes (**10.16:1** in Nocturne). The other group headings sit at 4.94:1
+(light) / 6.57:1 (dark), so this lands beside them rather than shouting over
+them. The warning triangle icon keeps its full-strength colour and is the
+non-colour cue the semantic tint needs.
+
+**Verified** across all four palettes (Earthy, Nocturne, Warcry, Starry) by
+reading the composited pixel through a 1x1 canvas. `getComputedStyle` returns
+`color-mix` results as `color(srgb ...)`, and a naive `[\d.]+` parser reads
+those 0-1 components as 0-255 — which reported black-on-cream as **1.26:1**
+during this very session before the measurement was corrected. Anything
+measuring a `color-mix` result in this codebase must composite it, not parse
+the string. Button label contrast: 14.47:1 light, 10.44:1 dark.
+
+The danger button's border is a hairline at 66% of the warning token. It is
+deliberately NOT pushed to a 3:1 boundary: the app's own `.btn` border sits at
+1.52:1 against its background, and making these three buttons heavier than
+every other control in the app would be a larger deviation than the contrast
+gain justifies. The group's meaning is carried by the heading (5.48:1) and the
+warning-triangle icon, both of which do meet the bar.
+
+### 4. The preview that would not re-fire
+
+**Symptom.** Owner: *"while the ring preview is showing, toggling 'Show special
+keys' leaves the old preview up; the change only appears next time."*
+
+**Root cause.** Rust builds the projection ONCE, inside `preview_hud_layout`,
+and nothing re-sends it. `guide_hud/mod_impl.rs`'s `hide_preview_hud` calls
+`hide_guide_hud_pending(false)` and **emits no event** — grepped 2026-09-04;
+the only signal in that file is a log line. So a setting changed while the ring
+is up is a setting the ring cannot know about, and the frontend has nothing to
+listen to either.
+
+**Fix.** `src/components/controls.ts` — the leaf module, so `preview.ts`
+exercises the real gate rather than a copy of it:
+
+```ts
+export const RING_PREVIEW_MS = 4000;   // mirrors PREVIEW_MS in guide_hud/mod_impl.rs
+let _ringPreviewUntil = 0;
+
+export async function showRingPreview(layout: RingLayout): Promise<void> {
+  try {
+    await invoke("preview_hud_layout", { layout });
+    _ringPreviewUntil = Date.now() + RING_PREVIEW_MS;
+  } catch (_) { _ringPreviewUntil = 0; }
+}
+
+export async function refreshRingPreview(layout: RingLayout): Promise<boolean> {
+  if (!isRingPreviewShowing()) return false;
+  await showRingPreview(layout);
+  return true;
+}
+```
+
+`settings-panel.ts` calls `refireRingPreview()` from every ring-affecting
+control — "Show special keys", "Point to launch" and the theme pill (the ring
+wears the app's palette) — **after** its own `persistConfig()`, because
+`preview_hud_layout` builds its payload from `ConfigState` and a re-fire sent
+first would project the OLD value and look like the bug it fixes. The
+Compact/Wide/Double pill already fired `previewRing`, which is now the same
+function. `closeSettingsPanel` clears the clock.
+
+**The guard is the feature.** A toggle pressed with no ring on screen must not
+surprise-launch a full-screen overlay. The clock is deliberately optimistic in
+one direction only: a real Space-hold can supersede a preview early, so this
+may believe a projection is up when Rust has already replaced it — and Rust's
+own epoch discipline (PROBLEM 177) resolves that. It can never believe one is
+up when none was raised.
+
+**Why a client-side clock and not an event.** There is no event. Stated here so
+the next reader does not go looking: if `PREVIEW_MS` ever changes,
+`RING_PREVIEW_MS` has to change with it, and the failure mode of drift is a
+re-fire window that disagrees with the ring by the size of the drift — not a
+broken panel.
+
+**Verified** in the browser pane, counting `preview_hud_layout` through the
+harness's stub (`window.__previewHudCalls`), with the panel's own
+`isRingPreviewShowing()` read alongside it:
+
+| Step | calls | preview showing |
+| --- | --- | --- |
+| start | 0 | false |
+| toggle "Show special keys" with NO preview up | **0** | false |
+| tap the Wide pill | **1** | true |
+| toggle "Show special keys" <50 ms later | **2** | true |
+| wait 6114 ms, toggle specials, then "Point to launch" | **2** | false |
+
+The first and last rows are the ones that matter: the gate fires nothing when
+no projection is on screen.
+
+### Files (1-4)
+
+* `src/components/settings-panel.ts` — the `.set-scroll` wrapper; the two
+  action groups; `_redrawConflicts`; `refireRingPreview` at three new call
+  sites (the pill already fired one); `.is-armed`; `width:100%` removed from
+  the two conditional Conflicts-area buttons
+* `src/components/controls.ts` — `RING_PREVIEW_MS`, `showRingPreview`,
+  `refreshRingPreview`, `isRingPreviewShowing`, `clearRingPreview`; two
+  `GROUP_ICONS` entries (maintenance, danger)
+* `src/styles.css` — the expanded flex/scroll layout, `--set-measure`, the
+  centring block, `.set-act-*`
+* `src/preview.ts` — the harness mirrors the new markup and wires the REAL
+  preview functions; the `preview_hud_layout` stub counts calls
+
+`tsc` clean, `npm run build` clean. No version bump, no build, no install.
+
+### 5. Follow-up (2026-09-07) — "Add an app" was still a full-width pill, and
+   the Conflicts cards were still 999-radius pills
+
+**Symptom.** Owner's 1.0.10x Settings screenshot, Earthy/Warcry dark: *"the
+'Add an app' button is still a full-width stretched pill, and the two
+Conflicts cards (spacedesk / PowerToys) are full-width 999-radius pills —
+extended pill, still not made proper shaped."* Both sit in the same panel
+this section's #3 already compacted; neither one got the same treatment then.
+
+**Root cause, "Add an app".** `renderAppExceptions()` built the button as
+`class="btn btn-sm"` with an inline `style.cssText =
+"width:100%; justify-content:center; margin-top:8px;"` — never touched by
+this entry's #3, which only ever reached the action-grid buttons below the
+Conflicts list. `.btn-sm` alone gives 30px/`0 12px`/999px-radius; the inline
+`width:100%` is what stretched it the rest of the way to the panel's full
+width.
+
+**Root cause, the Conflicts cards.** `.conflict-row` (styles.css) was already
+`border-radius: var(--radius-md)` — 13px, not 999 — by the time of this
+follow-up, with `padding: 8px 10px`. The owner's screenshot is of an
+INSTALLED build; nothing here contradicts that build having predated this
+section's #3, or having predated PROBLEM 157 even reaching a shipped
+installer. What the screenshot's language ("extended pill", the CTA read as a
+"link") maps onto in the current source is real, though: the padding was
+still tight (8/10, not the 12-14px language #3 gave the action grid), the
+disc was 22px against the exceptions tiles' own 30px, the exe name was bare
+right-aligned text rather than a chip, and "Press to close it →" was a
+`<span>` styled as a text link — not a button, despite reading like a call to
+action.
+
+**Fix, "Add an app".** `src/components/settings-panel.ts`'s
+`renderAppExceptions()`:
+
+```ts
+// before
+add.className = "btn btn-sm";
+add.style.cssText = "width:100%; justify-content:center; margin-top:8px;";
+
+// after
+add.className = "btn exc-add-btn";
+```
+
+`src/styles.css` — one new class, the same "content-sized, secondary style,
+13px radius" language as `.set-act-inline`:
+
+```css
+.exc-add-btn {
+  height: 36px;
+  padding: 0 16px;
+  margin-top: 8px;
+  border-radius: 13px;
+  font-size: 12px;
+}
+```
+
+`.btn`'s own bordered, card-coloured look already IS the secondary style
+this asked for — nothing overrides colour, only size — and ordinary block
+flow left-aligns a content-sized `inline-flex` button under the note or tile
+grid with no centring rule to fight.
+
+**Fix, the Conflicts cards.** Three changes, one being a genuine behaviour
+change made on purpose (see below), inside `renderConflicts()`'s `draw()`:
+
+1. **Padding and disc size**, `src/styles.css`: `.conflict-row` padding
+   `8px 10px` → `12px 14px`; `.conflict-row-disc` (and its `img`) `22px` →
+   `28px`, close to `.exc-tile-disc`'s 30px so the two sections read as one
+   family of app-identity discs.
+
+2. **The exe name became a chip**, not bare right-aligned text:
+
+   ```css
+   .conflict-row-proc {
+     justify-self: end;
+     font-family: ui-monospace, Menlo, Consolas, monospace;
+     font-size: 10px;
+     font-weight: 600;
+     color: color-mix(in srgb, var(--st-text-dim) 60%, var(--st-text) 40%);
+     background: var(--st-accent-tint);
+     border: 1px solid var(--st-border);
+     border-radius: var(--radius-full);
+     padding: 3px 9px;
+   }
+   ```
+
+   **The colour is a measured contrast fix, not `--st-text-dim` as-is.**
+   Composited against this chip's OWN `--st-accent-tint` backdrop (rather
+   than the card background text-dim is normally read against elsewhere),
+   plain `--st-text-dim` measured **4.22:1** in Earthy — under the 4.5:1 a
+   10px chip needs. Mixed 40% toward `--st-text` (the same color-mix
+   technique as this entry's #3 used for the Danger Zone heading) it reads
+   **6.74:1** in Earthy and **7.32:1** in Nocturne, because `--st-text`
+   inverts with the palette — while staying visibly softer than the
+   full-strength name/description text beside it (which measures 13.20:1 on
+   the same backdrop).
+
+3. **"Press to close it →" became a real `<button>`, and the ROW STOPPED
+   BEING THE CLICK TARGET.** PROBLEM 157 made the whole row `role="button"`,
+   `tabIndex=0`, with its own click/keydown handlers, specifically to cut two
+   permanent buttons down to one. Turning the CTA into a second real,
+   natively-focusable `<button>` **inside** that row without removing the
+   row's own interactivity would have put the exact clutter PROBLEM 157
+   removed right back — two focus stops doing the identical thing — so the
+   role/tabIndex/click/keydown were removed from `.conflict-row` and moved
+   onto the button alone:
+
+   ```ts
+   const close = document.createElement("button");
+   close.type = "button";
+   close.className = "conflict-row-close";
+   close.textContent = "Close it";
+   close.setAttribute("aria-label", `Close ${c.product}`);
+   close.addEventListener("click", (e) => {
+     e.stopPropagation();
+     openConflictPrompt(c, draw);
+   });
+   row.append(disc, name, proc, why, close);
+   ```
+
+   `openConflictPrompt` and its two-step confirm (`conflict-prompt.ts`) are
+   byte-for-byte untouched — this only moves WHERE the listener is attached,
+   never what it does. This mirrors the established pattern for a row that is
+   a container with its own real controls (`profile-row` in
+   `profile-editor.ts`: the row does its own default action on click, and
+   `.profile-row-del`/`.profile-row-act` are real buttons the row's own
+   handler explicitly skips via `.closest()`) rather than PROBLEM 157's
+   "the row IS the one button" shape, which stops working once the row has
+   two things a user might want to do to it.
+
+   `.conflict-row-close` uses the SAME warning-tint color-mix formula as this
+   entry's #3 Danger Zone buttons (9%/66%/20% mixed with `--st-card`/
+   transparent) — reused, not re-measured, because the maths is identical:
+   closing another program deserves a second thought, it is not the
+   irreversible step itself (that is still the two-step confirm), so full
+   alarm red would claim something not yet true. Measured button-label
+   contrast: **14.47:1** Earthy, **10.44:1** Nocturne — matching #3's cited
+   figures exactly, which is the point of reusing rather than re-deriving the
+   formula.
+
+**Generalise:** a row built to BE the one control (PROBLEM 157) and a row
+built to CONTAIN several controls (`profile-row`) are two different shapes;
+adding a second real button to the first shape without first demoting the
+row is how a clutter fix (157) and a legibility fix (this one) end up
+fighting each other.
+
+**Verified**, `preview.html?gear` (browser pane), via `offsetWidth`/
+`offsetHeight`/`getComputedStyle`, panel width 280px (compact popover):
+
+| Element | Measurement |
+| --- | --- |
+| `#exc-add-btn` | 96×36, `13px` radius, `0 16px` padding — **34.3%** of the 280px panel width |
+| `.conflict-row` (spacedesk) | 242px wide, `13px` radius, `12px 14px` padding |
+| `.conflict-row-disc` | 28×28 |
+| `.conflict-row-proc` | `999px` radius (a chip is allowed to be a pill; it is not interactive), `ui-monospace` family |
+| `.conflict-row-close` | 67×31, `13px` radius, "Close it" |
+
+Re-measured expanded (`?gear&expand`, 1600px viewport, `--set-measure: 1200`
+column): `#exc-add-btn` **96×36 — 6.0%** of the panel width; `.conflict-row`
+1200px wide (the capped column), radius unchanged at 13px.
+
+**Contrast, both themes, canvas-composited** (never parse a `color-mix`
+string — PROBLEM 239 §3's own trap):
+
+| | Earthy (light) | Nocturne (dark) |
+| --- | --- | --- |
+| `.conflict-row-close` label | 14.47:1 | 10.44:1 |
+| `.conflict-row-proc` chip text | 6.74:1 | 7.32:1 |
+
+`tsc --noEmit` and `npm run build` (`tsc && vite build`) both clean, 0
+errors. **Not independently re-verified:** Warcry and Starry — both palettes
+share every token this fix touches (`--st-warning`, `--st-accent-tint`,
+`--st-border`, `--st-text`/`--st-text-dim`, `--radius-full`/`--radius-md`)
+with Earthy/Nocturne, per this entry's #3's own note that `--st-warning` is
+defined identically in all four, so this is a read of the shared tokens
+rather than a fresh per-palette measurement.
+
+### Files (5)
+
+* `src/components/settings-panel.ts` — `.exc-add-btn` on "Add an app";
+  `.conflict-row`'s `role`/`tabIndex`/click/keydown removed; the new
+  `.conflict-row-close` button
+* `src/styles.css` — `.exc-add-btn`; `.conflict-row` padding/disc size;
+  `.conflict-row-proc` chip styling and contrast-fixed colour;
+  `.conflict-row-close` (replaces `.conflict-row-cta`)
+* `src/preview.ts` — the "App exceptions" section mirror added (it did not
+  exist in the harness before this pass); two stub conflicts (spacedesk,
+  PowerToys) added to the Conflicts mirror so both regressions had something
+  to screenshot
+
+No version bump, no build, no install.
+
+### 6. Second pass (2026-09-07) — the complaint repeated because #5 changed
+   padding, disc size and the CTA, but never the LAYOUT
+
+**Symptom.** Owner, second complaint, with a screenshot: *"too much overly
+extended, unnecessary... they could have been two boxes side by side instead
+of taking up the whole space. It could be smaller. It looks so bad. And
+inconsistent."*
+
+**SHIPPED IN 1.0.106 (2026-09-07).** `conflict-grid` and `conflict-row-why`
+joined `install-proof.ps1`'s bundle marker list and both read True in the
+installed build's bundle chain (newest `dist2` 11:24:32, installed exe
+11:25:28, exe-newer-than-bundle True, version stamp 1.0.106). Honest limit,
+recorded rather than blurred: neither could be measured ABSENT from the
+1.0.105-era bundle — `npm run build` had already been run by this
+subsection's own agent before the ship task started, and a frontend string is
+never findable in a Tauri v2 exe. See the "SHIPPED IN 1.0.106" section at the
+end of this file.
+
+
+**Say this plainly, because it is the whole lesson of this subsection: #5
+above did not fix the shape of the complaint, only its texture.** #5 made
+each conflict row's padding, disc and exe chip match the rest of the panel's
+compact-card language, and turned "Press to close it →" into a real button —
+but it left `.conflict-row` a `display: grid` element sitting directly in
+normal block flow, one per line, at the FULL width of `#set-conflicts` (242px
+compact, 1200px expanded — both measured and written down in #5's own
+verification table). A card with rounded corners and tight padding is still a
+"full-panel-width bar" if there is only ever one per row. The owner's own
+words the first time — "unnaturally long pills, stretched for no reason" —
+and the second time — "could have been two boxes side by side" — are the SAME
+complaint restated: something that should be a small, self-contained unit is
+instead claiming the whole row. #5 fixed the unit; it never touched the row.
+
+**Fix.** A wrapper grid around the per-conflict cards, `.conflict-grid`
+(`src/styles.css`) — the same `repeat(auto-fit, minmax(...))` vocabulary this
+entry's #3 already used for the Maintenance/Danger Zone action grid, so a
+reader who has seen #3 recognises the pattern immediately:
+
+```css
+.conflict-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+  margin-bottom: 6px;
+}
+```
+
+`src/components/settings-panel.ts`'s `renderConflicts()` creates one
+`.conflict-grid` per `draw()` call and appends each `.conflict-row` into it
+instead of into `#set-conflicts` directly — the hint text, the ring-fix row
+and the hook-health block still go straight into `#set-conflicts` afterward,
+unchanged, so they stay full-bleed single elements rather than becoming grid
+items themselves.
+
+**Each card was also restructured internally, not just re-parented**, because
+a 240px-wide card is not a 1200px-wide row with a border drawn tighter around
+it — the OLD 2-row grid (`auto 1fr auto` columns, disc spanning both rows)
+put the description on its own uncapped-height line, which is exactly what a
+240px card cannot afford:
+
+* The card is now a 3-row grid: row 1 is the icon (28px → 24px, see below) +
+  name (`font-weight: 600`, was 700) + the exe chip, row 2 is the description,
+  row 3 is "Close it".
+* `.conflict-row-why` (the description) is clamped to 2 lines with
+  `-webkit-line-clamp: 2`, spans the full card width (`grid-column: 1 / -1`,
+  not indented under the icon), and carries the untruncated text in a `title`
+  attribute set from `settings-panel.ts` (`why.title = c.detail`) — a
+  card-sized box can no longer be pushed tall by a long one-liner.
+* `.conflict-row-proc` (the exe chip) gained `max-width: 84px` and a `title`
+  set from `proc.title = c.process`, for the same reason: a chip is metadata,
+  not something a 240px card should stretch to accommodate.
+* `.conflict-row-disc` went from 28px to 24px — still inside the requested
+  24-28px band — purely to bring the card's total height back under the
+  96-116px target once the icon, the 2-line clamp and the button were all
+  stacked (see the measurement below).
+* `.conflict-row-close`'s redundant `margin-top: 4px` was removed: it moved
+  from being row 2 of a 2-row grid to row 3 of a 3-row grid, and the row's own
+  `gap` already separates it from the description — the old margin was
+  doubling that space and pushing the card taller than it needed to be.
+
+**Verified**, `preview.html?gear` / `?gear&expand` (browser pane):
+
+| State | grid-template-columns | card w × h | side by side? |
+| --- | --- | --- | --- |
+| 280px popover | `242px` (one track) | 242 × 115 | no — stacked, by design (one 240px+ track fits) |
+| 1600px window, expanded (`--set-measure: 1200` column) | `595px 595px 0px 0px` | 595 × 100 | **yes — both cards share one row** |
+
+The expanded card is SHORTER (100px vs 115px) than the compact one for the
+same content: at 595px the one-liner description fits on a single line before
+the clamp ever engages, where the 242px card wraps it to 2 lines — the clamp
+is a ceiling, not a fixed height, and both numbers land inside the 96-116px
+target.
+
+Name vs. chip, measured with `scrollWidth`/`offsetWidth` (a mismatch means
+clipped text): the app NAME never clips at either width
+(`spacedesk`/`PowerToys`, `scrollWidth === offsetWidth` in both states). The
+exe-name CHIP does clip for the longer of the two real exe names
+(`spacedeskservice.exe`, natural width ~128px against the chip's 84px cap;
+`powertoys.exe` is borderline, ~89px) — **this is the "ellipsised... title
+attribute carrying the full name" behaviour this pass asked for, not a bug**:
+the chip is deliberately capped so it can never push the name out of the
+card, and the full exe name is still one hover away via `title`. The card
+NEVER let the chip win that fight — `.conflict-row-name` measured
+`scrollWidth === offsetWidth` in every state tested.
+
+Contrast, canvas-composited (never parse a `color-mix` result — this entry's
+own #3 established why): unchanged from #5's figures, because this pass
+changed geometry only, never a colour token. Confirmed rather than assumed,
+because a stray specificity change could have shifted the cascade without
+touching a hex code:
+
+| | Earthy | Nocturne |
+| --- | --- | --- |
+| `.conflict-row-close` label | 14.47:1 | 10.44:1 |
+| `.conflict-row-proc` chip text | 6.74:1 | 7.32:1 |
+
+**Measurement trap hit and cleared while verifying this:** toggling
+`document.body.classList.add("nocturne")` on an already-loaded page left
+`.conflict-row-close`'s computed `background-color` reading back a STALE
+light-theme value (a `color-mix()` result that visibly did not match
+`--st-card`, which itself read back correctly as `#1c2534` on the very same
+element) — while a sibling element one level up (`.conflict-row`, whose
+background is `var(--st-card)` directly, no `color-mix`) updated correctly.
+Loading the harness with the theme seeded at request time instead
+(`preview.html?gear&expand&dark`, the harness's own supported flag) produced
+the correct dark value immediately. Read as a class of bug per this file's
+own rule: **a `color-mix()` that depends on a custom property can render
+stale after a POST-LOAD class toggle in at least one Chromium build, even
+though a direct custom-property read on the same element is already
+current — verify a theme-dependent `color-mix()` by loading the page in that
+theme from the start, not by toggling the class after paint.**
+
+`tsc --noEmit` and `npm run build` clean, 0 errors. No version bump, no
+build, no install.
+
+### Files (6)
+
+* `src/components/settings-panel.ts` — the `.conflict-grid` wrapper around
+  the per-conflict cards inside `renderConflicts()`'s `draw()`; `proc.title`
+  and `why.title`
+* `src/styles.css` — `.conflict-grid`; `.conflict-row` restructured to an
+  explicit 3-row grid; `.conflict-row-disc` 28px → 24px; `.conflict-row-name`
+  weight 700 → 600 plus ellipsis; `.conflict-row-proc` `max-width: 84px`;
+  `.conflict-row-why` 2-line clamp; `.conflict-row-close` re-pinned to row 3,
+  redundant `margin-top` removed
+* `src/preview.ts` — the two stub conflict rows wrapped in `.conflict-grid`
+  and given the same `title` attributes the real markup now carries, so the
+  harness mirrors the exact new shape
+
+---
+
+## PROBLEM 240 — the DOUBLE ring overlapped on the owner's browser-profile profile: rung (a) could not grow, so the ladder spent type and labels instead, and cross-band chips were separated by an ANGLE that has nothing to do with how wide they are
+
+**Symptom (owner-reported, with a screenshot, 2026-09-04).** In the DOUBLE
+layout, "Youtube — Arpon" sat on top of "Google Chrome — Arpon", and "Claude"
+was covered by "Youtube — ARPON'S ST…". The arrangement read as scattered
+rather than as two clean rings, and the long browser-profile labels were
+visibly the widest chips. 1.0.96's acceptance for this area was "0 overlaps,
+>=10 px clearance" — so its test set did not contain this profile.
+
+**Which profile, and how it was obtained.** `%APPDATA%\Spaceadom\config.json`
+was copied out through `explorer.exe` per PROBLEM 143 and its size — **68,130
+bytes** — matched the last `config: saved 68130 bytes` line in `debug.log`
+exactly, so it is the live file and not the shell's frozen shadow. The profile
+is **`sexy_tumar_mexy`, 16 mapped bindings**, seven of them pinned to a browser
+profile. Labels derived exactly as `engine::hud_apps_for` +
+`browser_profiles::hud_label` build them ("App — account_label"; these are
+local profile labels, no addresses):
+
+```
+A Gemini.Google — ARPON'S STUDIES   B Brave — Arpon           C Claude
+D Discord                           F Files                   G Youtube
+H Claude Projects                   J Google Chrome           M Google Chrome — Arpon
+N Samsung Notes                     R User Guide              U Youtube — ARPON'S STUDIES
+V Brave — ARPON'S STUDIES           X D:\                     Y Youtube — Arpon
+Z Youtube — Profile 1
+```
+
+Note this is **not** the profile with the most bindings (`Founders` has 26).
+It is the one with the widest chips: a browser-profile chip renders 168-212px
+against ~90px for an ordinary first-word chip, and width — not count — is what
+the ring ran out of. `Founders`, `Gamers` and `Professionals` were all measured
+too and all three were clean in Compact and Double; the only thing they shared
+with the defect was Wide's clearance (below).
+
+**Reproduction.** Vite harness on the real `buildHud` with `invoke`/`listen`
+stubbed, at the owner's panel — 1707x1067 logical, scale 1.5, read from
+`debug.log`'s `monitor 1707x1067 at (0,0) scale 1.5`. The harness is faithful:
+three of the four `overlay_fit_hud: asked …` sizes in the owner's live log are
+reproduced to the pixel (`1409x791` = Founders/Wide/specials-off, `1363x875` =
+Founders/Compact/specials-on, `967x635` = Founders/Compact/specials-off).
+
+**BEFORE, `sexy_tumar_mexy`, 1707x1067:**
+
+| layout | specials | overlaps | min clearance | hollow | rung | bands (rx) | rim shortfall |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Compact | on | 0 | 18.5-21.0 px | 21 | a | 1 (445-446) | 0 |
+| Compact | off | 0 | **7.0 px** | 79.5 | **d** | 1 (316) | **231 px** |
+| Double | on(1) | **2** | **-23.0 px** | 21 | **d** | 2 (223 / 316) | 0 |
+| Double | off | **2** | **-23.0 px** | 21 | **d** | 2 (223 / 316) | 0 |
+| Wide | on | 0 | **8.0-10.0 px** | 21 | a | 1 (509) | 0 |
+| Wide | off | 0 | 19.0 px | 150 | a | 1 (480-482) | 0 |
+
+Two cells are quoted as a RANGE and that is a finding, not sloppiness: chip
+widths come from `offsetWidth`, which rounds, so a sub-pixel shift moves the
+widest chip by 1 px and the ring with it. Compact/on read 18.5 and 21.0 across
+page loads and Wide/on read 8.0 and 10.0 — i.e. **whether Wide/on shipped
+inside or outside the 10 px bar was decided by a rounding coin flip**, which is
+what a geometry with no measured clearance floor gets you. Every cell AFTER is
+>=10 px BY CONSTRUCTION, in every run, because the growth walk only stops when
+the measurement says so. The defect cells never varied: 2 overlaps at -23.0 px
+in every run of every protocol.
+
+(1) `engine::specials_for_hud` returns an empty vec whenever `hud_band_count ==
+"two"`, so DOUBLE never carries specials and the two DOUBLE rows are the same
+payload by construction. Both are listed because the owner's switch has two
+positions and the answer must be the same in both.
+
+The two colliding pairs were **`C`/`U` and `M`/`Y`** — precisely the pairs in
+the owner's screenshot.
+
+**Root cause — four things, and only the first one is the fault.**
+
+1. **Rung (a) could not grow.** The (a)-(d) ladder's own header states the
+   owner's order of preference: (a) grow the ring, (b) close the gap,
+   (c) shrink the chips, (d) truncate the labels. Under Magnetic, `hiR` was
+   pinned for the whole build at `glance - outerHalf` — 400 px with the
+   specials hidden — so a payload that did not fit inside the glance target
+   fell straight past (a) to (c) and (d). That is why both failing rows above
+   are at rung **(d)**: the ring had already spent a font step and a label cap
+   and *still* did not fit.
+
+2. **The cross-band separation bar is an angle, not a distance.**
+   `relaxAngles` is the only pass that separates chips on different bands and
+   its floor is `RELAX_FLOOR = 5 degrees`. Measured: `C`/`U` came to rest
+   **5.1 deg** apart and `M`/`Y` **5.0 deg** apart — the pass had done exactly
+   its job. On the ellipse's LEFT and RIGHT FLANKS two chips on adjacent bands
+   are separated in x by the band's rx delta (here 96 px) and in y by almost
+   nothing, so what they need is `(w1+w2)/2` of PIXELS — 122 px for `C`/`U`,
+   144 px for `M`/`Y`. 5 degrees of angle at r~250 buys ~22 px. `RELAX_LIMIT`
+   caps the pass at 12 degrees, so no amount of relaxing could ever have closed
+   a 122 px requirement.
+
+3. **`bandStepFor` measures the wrong axis for the flanks.** It returns
+   `(chipH + BAND_PAD) / BAND_RATIO` — correct at the TOP and BOTTOM of the
+   ellipse, where stacked bands separate in y by `delta_rx * BAND_RATIO`, and
+   the wrong axis on the flanks, where they separate in x by `delta_rx` and it
+   is chip WIDTH that has to clear. A 28 px-tall chip gives a 65 px step; a
+   168 px-wide chip needs up to 168.
+
+4. **Nothing measured it.** `bandOverflow` — 1.0.96's addition, and the reason
+   `auto` stopped accepting rings pinned to the ceiling — measures per-band
+   RIM shortfall, which is a *same-band* property. It reported a clean **0**
+   for both colliding pairs. And with `bandMode === "two"` the code takes
+   `t = trial(forced)` with no alternative band count to fall through to, so
+   all four rungs collided and the exhausted geometry shipped. It *was* logged
+   (`buildHud: magnetic ring EXHAUSTED at step d`) — the failure was honest,
+   just not preventable from inside the ladder as written.
+
+**The fix — rung (a) is given the ability to actually grow, in both
+geometries. No font change, no label change.** `src/components/toast.ts`.
+
+*Magnetic.* Everything from the dead-zone floor to the accepted band count was
+extracted into `solveAt(hiCeil)` — a pure function of the ceiling — and the
+ceiling itself became a ladder bounded by `hiScreen`, which is already the 94%
+clamp `overlay_fit_hud` applies:
+
+```ts
+    /** ZERO OVERLAPS, RING_GAP_MIN OF CLEARANCE, AND EVERY BAND HOLDING WHAT
+     *  IT WAS GIVEN. One predicate, used by the band-count search AND by the
+     *  ceiling ladder below it, so the two can never disagree about what
+     *  "fits" means. */
+    const meets = (x: Trial) =>
+      x.overlaps === 0 && x.clear >= RING_GAP_MIN && x.overflow === 0;
+
+    const CEIL_STEPS = 6;
+    const CEIL_BISECT = 5;
+    let sol = solveAt(hiGlance);
+    if (!meets(sol.t) && hiScreen > hiGlance + 1) {
+      let lastShort = hiGlance;
+      let clean: Solution | null = null;
+      for (let i = 1; i <= CEIL_STEPS; i++) {
+        const cand = solveAt(hiGlance + ((hiScreen - hiGlance) * i) / CEIL_STEPS);
+        if (meets(cand.t)) { clean = cand; break; }
+        lastShort = cand.ceil;
+        if (better(cand.t, sol.t)) sol = cand;
+      }
+      if (clean) {
+        // Give back as much of the growth as the bar allows: the smallest
+        // ceiling that still measures clean, not the first one that did.
+        let lo2 = lastShort, hi2 = clean.ceil;
+        for (let i = 0; i < CEIL_BISECT; i++) {
+          const mid = (lo2 + hi2) / 2;
+          const cand = solveAt(mid);
+          if (meets(cand.t)) { clean = cand; hi2 = mid; } else lo2 = mid;
+        }
+        sol = clean;
+      }
+    }
+```
+
+Growing the ceiling is the only lever that can deliver flank clearance,
+because flank clearance IS the radial gap between two bands. `GLANCE_R` is
+already documented twice in this file as a target and not a law — its own
+comment ("a ceiling the geometry meets whenever it can, not a law it can
+always obey") and `GLANCE_R_WITH_SPECIALS`, which exists because one
+configuration provably could not meet it, carrying the owner's ruling in his
+words: *"a little bit here and there is okay, it's not a hard line."* This is
+the same allowance, granted only when the alternative is a ring that overlaps.
+
+*Classic.* `growRing` sizes the rim to `sum(w) + n*gap`, i.e. it buys each
+neighbour `gap` px of ARC — and arc is not chord, so on the flanks and in the
+diagonals a 16 px arc share lands as materially less box separation. Measured
+8 px on two different real profiles, and classic's acceptance test is
+`overlaps === 0` alone, so nothing caught it. The ring sizing moved into
+`solveClassic(growGap)` and rung (a) now keeps growing while the MEASURED
+clearance is under `RING_GAP_MIN`:
+
+```ts
+    const CLASSIC_GROW = [12, 28, 52, 88, 140];
+    const CLASSIC_BISECT = 5;
+    let cf = solveClassic(gap);
+    const classicOk = (f: ClassicFit) => f.overlaps === 0 && f.clear >= RING_GAP_MIN;
+    if (!classicOk(cf)) {
+      let lastShort = 0;
+      let clean: ClassicFit | null = null;
+      let cleanExtra = 0;
+      for (const extra of CLASSIC_GROW) {
+        const cand = solveClassic(gap + extra);
+        // `growRing` clamps at the screen budget and then stops moving. When
+        // it has, no further extra can help and the walk is over.
+        if (cand.go.rx <= cf.go.rx && cand.go.ry <= cf.go.ry) break;
+        if (classicOk(cand)) { clean = cand; cleanExtra = extra; break; }
+        lastShort = extra;
+        if (cand.clear > cf.clear || cand.overlaps < cf.overlaps) cf = cand;
+      }
+      if (clean) { /* bisect [lastShort, cleanExtra] for the smallest clean grow */ }
+    }
+```
+
+`arcAngles` keeps the REAL `gap`, so the extra rim is distributed by the same
+width-proportional rule and the placement does not change shape — only the
+radius does. **The RUNG is not changed**, only the radius it produces:
+`clean()` still judges classic on `overlaps === 0` alone, so the documented
+1.0.88 no-op guarantee (which is about which CONCESSION a config lands on) is
+intact — this walk can only ever make the ring larger, never push a config
+onto smaller type or shorter labels.
+
+**AFTER, `sexy_tumar_mexy`, 1707x1067:**
+
+| layout | specials | overlaps | min clearance | hollow | rung | bands (rx) | rim shortfall | window |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Compact | on | 0 | 18.5 px | 20 | a | 1 (445) | 0 | 1252x762 |
+| Compact | off | 0 | **10.0 px** | 45.5 | **a** | 2 (245 / 402) | **0** | 1056x704 |
+| Double | on | **0** | **10.0 px** | 45.5 | **a** | 2 (245 / 402) | 0 | 1056x704 |
+| Double | off | **0** | **10.0 px** | 45.5 | **a** | 2 (245 / 402) | 0 | 1056x704 |
+| Wide | on | 0 | **10.0 px** | 20 | a | 1 (510) | 0 | 1412x629 |
+| Wide | off | 0 | 19.0 px | 150 | a | 1 (482) | 0 | 1356x710 |
+
+Every cell now meets the bar, and — the part worth noticing — **every cell is
+back at rung (a)**. The two failing rows used to ship at rung (d), i.e. with
+`.dense-chips` and `.tight-chips` on: smaller type and a 92 px label cap. The
+fix removes both. The chips are BIGGER after this change, not smaller. The
+hollow on Compact/off improved 79.5 -> 45.5 px as a side effect of the second
+band opening where 1.0.96's own `bandOverflow` said it should have.
+
+**The other three real profiles, before -> after** (min clearance px, outer rx):
+
+| profile | Compact/on | Compact/off + Double | Wide/on | Wide/off |
+| --- | --- | --- | --- | --- |
+| `Founders` (26) | 18.0 -> 18.5 (534 -> 535) | 16.0 -> **17.0**, shortfall **16 -> 0** (342 -> 346) | **8.0 -> 10.0** (571 -> 591) | 12.0 -> 11.5 (554 -> 555) |
+| `Gamers` (20) | 16.0 -> 16.0 (397 -> 396) | 26.0 -> 26.0 (344, unchanged) | 10.0 -> 11.0 (428 -> 431) | 12.0 -> 12.5 (415 -> 417) |
+| `Professionals` (17) | 21.0 -> 18.5 (395) | 29.0 -> 29.0 (345, unchanged) | 14.0 -> 13.5 (395) | **8.0 -> 10.5** (366 -> 375) |
+
+Zero overlaps everywhere, before and after — these three profiles never had the
+DOUBLE defect, which is exactly why 1.0.96 passed on them. What they DID have is
+the classic arc-vs-chord shortfall (`Founders` and `Professionals` each had one
+Wide cell at 8 px) and, on `Founders`, two bands carrying 16 px more content than
+their rim. Both are now zero. Where a cell already cleared the bar the ring is
+unchanged to within the same +/-1 px measurement quantisation described above —
+`Gamers`/Compact-off and `Professionals`/Compact-off are identical to the pixel.
+
+**How it was verified.**
+
+- `npx tsc --noEmit` — clean, exit 0.
+- `npm run build` (tsc + vite) — clean, "built in 694ms".
+- Every number above is measured from the LIVE DOM in the harness
+  (`offsetLeft`/`offsetTop`/`offsetWidth` on each `.st-chip > i`), pairwise, at
+  rest, not read out of `HudFit`. The two agree: on the 4-chip control the DOM
+  pass and `lastHudFit()` both report clearance 107 and hollow 23.
+- **The published pointer rects still carry a 0 px delta — IN CSS PX, WHICH IS
+  ONLY HALF THE CONTRACT** (wording corrected 2026-09-04 by review; the
+  measurement below is unchanged and still stands). `publishHudChips` was
+  called after every one of the 30 runs and each published rect compared
+  against the live DOM box: max delta **0.00 px** across all six layouts on all
+  five label sets, repeated five times each. (One 2-3 px delta appears on the
+  FIRST `buildHud` after a page load — a harness font/layout settle; every
+  repeat is 0, so the harness warmed up once before each matrix.)
+
+  **The true end-to-end contract is COVER, not equal, and that is deliberate.**
+  What the page publishes is exact — the CSS rect it sends IS the drawn chip's
+  layout box, which is what the 0.00 px above measures. What the HOOK
+  hit-tests is that rect converted to physical screen px by
+  `pointer.rs::css_rect_to_phys`, and the conversion rounds **OUTWARD** on
+  purpose:
+
+  ```rust
+  let x0 = win_x + (x * dpr).floor() as i32;
+  let y0 = win_y + (y * dpr).floor() as i32;
+  let x1 = win_x + ((x + w) * dpr).ceil() as i32;
+  let y1 = win_y + ((y + h) * dpr).ceil() as i32;
+  ```
+
+  `floor` on the near edges and `ceil` on the far ones — the same convention
+  `commands::apply_region` established — so each edge can sit up to **1
+  physical px** outside the painted chip (0.67 logical px at the owner's DPR
+  1.5) and **never inside it**. So: the hit rect COVERS the chip and can never
+  undercut it. A cursor one physical pixel off the chip's painted edge arms it;
+  a cursor on the chip is never refused. That asymmetry is the right one for an
+  aim-and-release gesture — the failure it rules out (pointing at a chip and
+  getting nothing) is the one the user would report — and quoting "0 px delta"
+  without it invites the next reader to treat any non-zero physical difference
+  as a regression. It is the contract working.
+
+  Doc-only correction. No code changed here in either language.
+- Determinism: with a FIXED predecessor build before every cell (`buildHud` leaves
+  the accepted rung's classes on `#st-hud`, so a cell measured after a rung-(d)
+  case and the same cell after a rung-(a) case differ by 1-2 px of chip width),
+  every cell is identical to the pixel across 3-4 full matrix runs. Both tables
+  were taken under that protocol, with the fix disabled by two
+  `if (false && ...)` guards and the file restored byte-for-byte afterwards
+  (md5 `fe22b3687210510c119e96d8dd881564`, verified before and after).
+- Cost: 18-36 ms for the whole `buildHud` including all reflows, against
+  ~20 ms for a payload that needs no ceiling walk. The walk runs ONLY when the
+  first solve fails the bar, so a config that already fits pays nothing.
+- Smaller displays: at 1280x720 all six cells are clean. At **1024x768** they
+  are not — Double still shows 1 overlap at -0.5 px and Wide 3-4 px — and the
+  page says so in the log (`ring EXHAUSTED`, `BLOOM HEADROOM CLAMPED`). 16
+  chips up to 168 px wide do not fit a 962 px-wide window at a readable size;
+  that is a true statement about the content, not a layout fault, and the
+  ceiling walk is correctly bounded by `hiScreen` rather than asking for a
+  window Rust would crop.
+- **NOT verified live.** The overlay's own failure mode lives in the OS
+  compositor and cannot be seen from a browser (CLAUDE.md says so explicitly).
+  No version bump, no `tauri build`, no install — the owner must hold Space on
+  `sexy_tumar_mexy` in DOUBLE to confirm.
+
+**The first-word clipping question — decided, and NOT changed.**
+
+The owner's "Youtube — ARPON'S ST…" is a mid-word ellipsis sitting next to
+"Google" and "Samsung" on ordinary chips, which looks like the first-word rule
+being applied inconsistently. It is not. The rule is scoped, deliberately and
+in writing, in two places:
+
+- `make()` builds a browser-profile chip as THREE spans
+  (`.st-chip-browser` / `.st-chip-sep` / `.st-chip-profile`) with **no**
+  `.st-chip-label`, so `setChipLabel` is a documented no-op on it and
+  `restWord` never runs: *"replacing that with 'Brave' on three keys would undo
+  the very feature it exists to provide."* On this profile it would collapse
+  `U`, `Y` and `Z` — three different Youtube accounts — to the identical word.
+- `overlay-earthy.css`: *"The browser name holds and the profile name gives, so
+  the difference between three keys that all say 'Brave' is the part that
+  survives truncation."* `.st-chip-profile` is `flex-shrink: 1; min-width: 0`;
+  the pill is capped at 212 px; both caps go to `none` on bloom, so the whole
+  pair opens the moment the chip is armed.
+
+Measured at rest on this profile: `A`, `U` and `V` clip (`ARPON'S STUDIES`
+wants 98 px against an 88 px cap); nothing else clips at all. That is the
+intended behaviour, and the recovery path — bloom — exists. **No change.**
+
+**One latent inconsistency found while deciding it, documented rather than
+changed.** `.st-chip .st-chip-browser { max-width: none }` was written to
+exempt the browser half from the cap. It does not: its specificity is (0,2,0)
+and `.st-chip.ap span { max-width: var(--chip-cap, 118px) }` is **(0,2,1)**, so
+the browser half is capped at 88 px in Magnetic, `max-width: none` and all
+(measured: computed `max-width` on `.st-chip-browser` reads `88px`). It never
+bites on the owner's data — the widest browser name in his config is "Google
+Chrome" at 82 px, "Gemini.Google" at 78 — which is exactly why it is recorded
+here and not "fixed": raising the specificity would widen chips for a browser
+name nobody in this config has, i.e. an unmeasurable change to the one thing
+this session exists to keep measured. Fix it deliberately, with a label set
+that exercises it.
+
+**Generalise this.**
+
+- **A separation bar expressed in ANGLE cannot enforce a requirement expressed
+  in PIXELS.** On any ellipse the same angle buys wildly different distance
+  depending on where you are on the rim, and on which axis the neighbour
+  actually threatens you. `relaxAngles`' 5 degrees was not a bug in its own
+  terms — it did exactly what it says — it was the wrong unit for the job, and
+  the two colliding pairs landing at 5.0 and 5.1 degrees is the signature of a
+  constraint that was satisfied and still wrong.
+- **A capacity measure that is per-container cannot see a collision between
+  containers.** `bandOverflow` reported 0 for a ring with two overlapping
+  pairs and was right to: it measures rim, and rim is a within-band property.
+  When you add a measurement to catch a class of failure, write down which
+  class — otherwise the next failure gets read as "measured, therefore fine".
+- **A ladder whose first rung is disabled will spend the rungs below it.** The
+  visible symptom was truncated labels and small type at rung (d); the cause
+  was that rung (a) had a ceiling it could not raise. If a config keeps landing
+  on your last-resort concession, check whether the first resort is reachable
+  at all before making the concession bigger.
+- **A test set that is "the biggest config" is not the same as "the worst
+  config".** The 26-binding profile was clean; the 16-binding one with seven
+  long browser-profile labels was not. Width, not count, was the axis that
+  mattered, and 1.0.96's acceptance run had no example of it.
+
+---
+
+### PROBLEM 240 follow-up (2026-09-04) — two defects found reviewing the ceiling ladder: `tightenBands` could push a band OUTWARD past the screen clamp, and the ladder made 2,400-3,400 arc tables per hold
+
+The PROBLEM 240 fix above is correct and stays. Reviewing it turned up two
+things it had made reachable, both in `src/components/toast.ts`, both measured.
+
+**DEFECT 1 (HIGH) — `tightenBands` broke the invariant its own header
+promises, and the ring grew past the window Rust will hand back.**
+
+*Symptom.* Nothing visible on the owner's panel; on small displays chips are
+CROPPED, silently. Found by inspection, then measured.
+
+*Root cause.* The pass shipped as (old `:1600`):
+
+```ts
+    // `fitRx` is bounded ABOVE by where the band already is, so this is a pull
+    // and never a push; `Math.max(lo, src.rx)` only guards the degenerate case
+    // where the floor itself is already outside the band (nothing to do).
+    const rx = fitRx(need, Math.min(lo, src.rx), Math.max(lo, src.rx));
+```
+
+The case the comment calls degenerate is not. `solveAt` computes the packer's
+floor CEILING-CLAMPED — `let lo = Math.min(hiCeil, RIN_CLEAR + outerHalf +
+BAND_LO_PAD)` (`:2569` before, `:2707` now) — while `floor0` here is not
+clamped. On a display too small to hold the dead zone, `lo > src.rx`,
+`Math.max` picks the FLOOR as the ceiling, and `fitRx` grows the band
+**outward, past `hiScreen`** — the bound that exists precisely because
+`overlay_fit_hud` clamps the window to 94% of the monitor and CROPS anything
+outside it.
+
+Nothing caught it, and the reason is worth keeping: a ring pushed OUTWARD has
+more rim than it needs, so `trial`'s acceptance test — `tight.overlaps === 0 &&
+tight.clear >= RING_GAP_MIN` — passes *trivially*, and the tightened
+(i.e. enlarged) bands are then PREFERRED over the correct ones. The cost lands
+entirely outside the page's field of view.
+
+*Exact file.* `src/components/toast.ts` — `tightenBands`, now `:1738`, plus its
+header (`:1661-1700`) and the function's own doc comment (`:1712-1720`).
+
+```ts
+    /* `src.rx` IS THE CEILING, ALWAYS — that is what makes this a pull and
+       never a push, and it is the whole of the header's invariant. `lo` can
+       legitimately land OUTSIDE the band (`solveAt` clamps the packer's floor
+       to the ceiling on a small display and `floor0` is not clamped); when it
+       does, `min` and the ceiling collapse onto `src.rx` and the band comes
+       back untouched. Do not restore a `Math.max(lo, src.rx)` here: it reads
+       like a guard and is a licence to grow past `hiScreen`, where the window
+       clamp crops the chips and nothing in the page can observe it. */
+    const rx = fitRx(need, Math.min(lo, src.rx), src.rx);
+```
+
+When `lo <= src.rx` — every case on a normal display — `Math.min(lo, src.rx)`
+is `lo` and `src.rx` IS `Math.max(lo, src.rx)`, so this is byte-identical to
+what shipped. It changes exactly the cases that were broken.
+
+**MEASURED, before -> after.** A 5 displays x 3 band modes x 7 label sets
+matrix (105 cells). Only the rows that violated the invariant are listed; the
+other 90 are unchanged.
+
+| display | band mode | chips | loose rx | tight rx BEFORE | outward push | tight rx AFTER |
+| --- | --- | --- | --- | --- | --- | --- |
+| 640x480 | auto/one/two | 5 @212px | 162.8 | **220.9** | **+58.1** | 162.8 |
+| 640x480 | auto/one/two | 6 @212px | 162.8 | **245.0** | **+82.2** | 162.8 |
+| 640x480 | auto/one/two | 8 @212px | 162.8 | **245.0** | **+82.2** | 162.8 |
+| 640x480 | auto/one/two | 16 / 26 / 34 / 40 | 162.8 | **245.0** | **+82.2** | 162.8 |
+| 800x600 | auto/one/two | 6..40 @212px | 238.0 | **245.0** | **+7.0** | 238.0 |
+
+39 of the 105 cells violated the invariant before; **0 after**. The two figures
+the review quoted (+58 px at 640x480/5 chips, +7 px at 800x600/6 chips) are
+reproduced to 0.1 px, which is how the transcription below was validated.
+
+What the push actually cost, at 640x480 with 5 chips @212px:
+
+| | before | after |
+| --- | --- | --- |
+| band rx | 220.9 (`hiScreen` is 162.8) | 162.8 |
+| furthest chip outer edge | 319.9 px | 263.6 px |
+| past the 94% window half-width (300.5) | **+19.4 px** | 0 |
+| final uniform `scale` clamp | 0.93 — shrinking the whole ring to hide it | 1.00 |
+| still cropped after that clamp | 3.4 px | 0 |
+| measured clearance | 69 px | 9 px |
+
+The last row is the honest part of the fix and is worth reading twice. Before,
+the ring bought its 69 px of clearance by growing past the screen and paying
+for it in crop and a 7% shrink of the entire layout. After, rung (a) reports
+9 px — UNDER `RING_GAP_MIN` — so the ladder walks on to (b), (c), (d) and
+concedes something real. **Five 212 px chips do not fit a 601 px window at rung
+(a); the old code hid that by cropping and the new code says it.** Same class
+as PROBLEM 240's own note about 1024x768: a true statement about the content,
+not a layout fault.
+
+Layout at 1024x768, 1280x720 and the owner's **1707x1067 is unchanged by this
+fix in every one of the 63 cells** — the `Math.min(hiCeil, ...)` clamp only
+bites when the dead zone does not fit inside the ceiling, which needs a small
+display.
+
+---
+
+**DEFECT 2 (HIGH) — the ceiling ladder built a 721-entry table 2,400-3,400
+times per Space hold, 81% of them to read one number out of.**
+
+*Symptom.* No visual defect; the HUD is simply slow to appear on a large
+payload, and the whole cost is SYNCHRONOUS main-thread work while the key is
+held — paid twice on a display-change rebuild, which is routine on this
+machine.
+
+*Root cause.* `ellipsePerimeter` was `arcTable(rx, ry)[ARC_N]` — build a
+721-entry cos/sin/hypot table, read index 720, throw it away. Harmless when the
+ring was solved once. PROBLEM 240 made rung (a) a ceiling ladder: `CEIL_STEPS`
+6 + `CEIL_BISECT` 5 (plus the first solve) = up to 12 ceilings, each trying up
+to `maxBands` (<=19) band counts, each measured TWICE — loose and tightened.
+Measured at 40 chips: **723 table builds per rung**, 583 of them (**81%**) from
+`ellipsePerimeter`, at ~43 microseconds each.
+
+*Exact file.* `src/components/toast.ts`, three changes:
+
+1. **`ellipsePerimeter` (`:1263`) answers in closed form** — Ramanujan's second
+   approximation, `P ~ pi(a+b)(1 + 3h/(10 + sqrt(4-3h)))` with
+   `h = ((a-b)/(a+b))^2`:
+
+```ts
+function ellipsePerimeter(rx: number, ry: number): number {
+  const a = Math.max(rx, ry), b = Math.min(rx, ry);
+  const s = a + b;
+  if (!(s > 0)) return 0;
+  const d = (a - b) / s;
+  const h = d * d;
+  return Math.PI * s * (1 + (3 * h) / (10 + Math.sqrt(4 - 3 * h)));
+}
+```
+
+   Ramanujan II is exact to ~1e-10 relative over every eccentricity this file
+   produces (0.42-0.62 in Magnetic, up to `RING_ASPECT_MAX` in classic). The
+   720-gon it replaces is INSCRIBED and was therefore SHORT by
+   ~pi^2/(6*ARC_N^2) = 3.2e-6 relative — 0.006 px on a 2,000 px rim — so the
+   new value is a hair LARGER and `fitRx` answers with a radius ~0.002 px
+   smaller. Measured end-to-end: **max chip-position delta 0.0015 px** over the
+   105-cell matrix, 93 cells bit-identical. Well inside the 0.5 px budget.
+
+2. **The ARC_N sample angles' cos/sin are hoisted to module scope (`:1176`).**
+   `(i / ARC_N) * 2pi` is a property of ARC_N, not of the ellipse; the loop was
+   calling `Math.cos`/`Math.sin` 1,440 times per table for arguments that never
+   change. **Bit-identical by construction** — same function, same argument,
+   evaluated once instead of N times. Measured 43 -> 20 microseconds per table.
+
+3. **`arcTable` (`:1216`) is memoised per build, keyed on the EXACT `(rx, ry)`
+   pair**, in a `Map` cleared at the top of `buildHud` (`:1953`, via
+   `clearArcCache` at `:1210`). The repeats it collects are exact repeats —
+   `packBands` puts a band on `lo` and another on `hiR` for every candidate
+   count, and every count is measured twice — so an exact key catches all of
+   them AND makes the memo provably a layout no-op: a hit returns the table the
+   miss would have built, bit for bit. **140 calls, 54 builds** per rung at 40
+   chips.
+
+**TWO FASTER SCHEMES WERE TRIED AND REJECTED, both of them layout changes.**
+Recorded because each looks obviously right:
+
+- *Key the memo on (rx, ry) rounded to 0.5 px* (the shape the review
+  suggested). Two radii a quarter-pixel apart do NOT produce the same table, so
+  a hit can return a table built for a different ellipse — the same
+  binary-search flip described below, for a smaller perturbation. It bought
+  nothing over the exact key either: on this workload the repeats are EXACT
+  repeats, so both keys collapse 723 calls to the same ~140, and measured alone
+  (before the trig was hoisted) it ran 5.2 ms per rung / 20.7 ms per hold at 40
+  chips — over the 15 ms target as well as inexact.
+- *Key on the aspect ratio and store one NORMALISED table.* Mathematically
+  perfect — `arcTable(k*rx, k*ry)[i]` is exactly `k * arcTable(rx, ry)[i]`, and
+  `arcAngles` only ever compares `cum[mid]` against a FRACTION of `cum[N]`, so
+  the k cancels. In Magnetic every band is `ry = rx * BAND_RATIO`, so ONE table
+  serves the whole build: 723 builds became **1** and 40 chips ran in 11.3 ms
+  per hold. It was still wrong. `arcAngles` inverts the table with a BINARY
+  SEARCH, so a last-bit difference flips a chip to the ADJACENT SAMPLE — 1/720
+  of the ring — and that measured as **up to 4.03 px of chip movement across 54
+  of the 105 cells**. `Math.hypot` -> `Math.sqrt(dx*dx + dy*dy)` fails the same
+  way for the same reason and was rejected with it.
+
+  **Generalise: when a numerical result is consumed by a BINARY SEARCH, its
+  last bit is load-bearing.** Any speed-up on the path into `arcAngles` has to
+  be bit-exact or it is a layout change wearing a performance hat. The two that
+  shipped (hoisted trig, exact-key memo) are exact by construction; the
+  closed-form perimeter is not on that path at all — it sizes radii, and its
+  3.2e-6 lands as 0.0015 px of position.
+
+**MEASURED COST, 1707x1067, `bandMode` auto, uniform 212 px chips.** ONE HOLD =
+the memo cleared once and the (a)-(d) ladder walked at gaps 16/10/10/10, which
+is what `buildHud` actually does. Widths are held at the rung-(a) values, which
+OVER-states rungs (c)/(d) — they shrink the chips — so every "after" figure is
+an upper bound.
+
+| chips | arcTable builds/rung, before -> after | `ellipsePerimeter` calls/rung | ms per HOLD, before | ms per HOLD, after |
+| --- | --- | --- | --- | --- |
+| 8 | 126 -> **9** | 100 | 4.21 | **0.25-0.40** |
+| 26 | 659 -> **55** | 527 | 84.66 | **8.2-11.8** |
+| 34 | 737 -> **56** | 599 | 92.23 | **11.4-14.8** |
+| 40 | 723 -> **54** | 583 | 96.99 | **14.3-15.5** |
+
+**6.8x** at 40 chips, **8.5x** at 26, **13x** at 8. The 8-chip case is the one
+the owner sees most often and it drops from 4.2 ms to under half a millisecond:
+it never needed the ceiling walk, and now it barely pays for the geometry
+either.
+
+WHAT IS LEFT, AND WHY IT WAS NOT TOUCHED. A CPU profile of the fixed build at
+40 chips puts the residual at **`relaxAngles` 23% + `setGeoAngle` 20%**,
+`arcTable` 15%, `overlapCount`/`minClearance` 7%. `relaxAngles` is now the
+ceiling on this path. It is left alone deliberately: every arithmetic change
+inside it MOVES CHIPS, which is the one thing this pass was required not to do.
+
+---
+
+**HOW BOTH WERE VERIFIED.**
+
+- `npx tsc --noEmit` — clean, exit 0.
+- `npm run build` (tsc + vite) — clean, "built in 685ms".
+- **A standalone Node transcription of the magnetic path, not a
+  re-implementation.** A script EXTRACTS the text of `bandStepFor`, `arcTable`,
+  `ellipsePerimeter`, `overlapCount`, `minClearance`, `hollowOf`, `arcAngles`,
+  `fitRx`, `packBands`, `tightenBands`, `bandOverflow`, `placeBands`,
+  `setGeoAngle`, `relaxAngles` and all 18 geometry constants VERBATIM out of
+  `toast.ts` and compiles them with the repo's own `tsc`. Only `solveAt`, the
+  ceiling ladder and the `scale`/window arithmetic are hand-transcribed (with
+  `hasSp === false`), and only the DOM measurement is replaced — by a fixed
+  width set. Three variants were built from the same source — **neither fix**,
+  **fix 1 only**, **both** — so each fix's effect is isolated from the other's.
+- **The transcription was validated against the review's own numbers before
+  being trusted**: it reproduces +58.1 px at 640x480/5 chips and +7.0 px at
+  800x600/6 chips (review: +58, +7), 81% of table builds attributable to
+  `ellipsePerimeter`, and 2,600-2,950 builds per four-rung hold (review:
+  2,400-3,400). A harness that could not reproduce the defect would not have
+  been evidence of its absence.
+- **Label sets.** The cost table is uniform 212 px chips, so it depends on
+  nothing reconstructed. `sexy_tumar_mexy` is REBUILT from this section's own
+  recorded table — 16 bindings, seven browser-profile chips at 168-212 px,
+  ordinary first-word chips ~90 px — because the per-chip DOM widths were never
+  written down. It is used only for before/after DIFFING, where both sides see
+  the same set, so the reconstruction cannot flatter the result. **If this area
+  is measured again, capture the real `offsetWidth` per chip and put it in this
+  file** — that is the one input a later session cannot recover.
+- **The owner's display is unchanged.** Across all 63 cells at 1024x768,
+  1280x720 and 1707x1067 the shipping build differs from the 1.0.96 baseline by
+  at most **0.0015 px** of chip position, all of it the Ramanujan epsilon; 51 of
+  the 63 are bit-identical and the other 12 all sit at 0.0008-0.0015 px.
+  `sexy_tumar_mexy` at 1707x1067: max 0.0015 px.
+- **NOT VERIFIED LIVE.** Same caveat as PROBLEM 240: no version bump, no
+  `tauri build`, no install, and the overlay's real failure mode lives in the OS
+  compositor where neither a browser nor a Node script can see it. The timings
+  are Node/V8 on this machine, not WebView2 — **the RATIOS (6.8x-13x) are the
+  durable number, not the absolute milliseconds.** The owner must hold Space to
+  confirm.
+- The harness was deleted after the run. It opened no ports and wrote nothing
+  inside the repo.
+
+---
+
+**ALSO RECORDED: `pointer.rs` `MAX_CHIPS = 40` silently truncates a 41st chip,
+and 40 IS reachable.**
+
+`src-tauri/src/hook/pointer.rs:137` says *"26 letters is the real maximum (only
+alpha keys can carry bindings); 40 leaves headroom"*, and both publish paths
+truncate with `.min(MAX_CHIPS)` — `publish_keys` (`:353`) for the letters and
+`publish_geometry` (`:413`) for the rects. Silently, which is the right shape
+for a fixed static table the hook thread reads.
+
+**Through this app's UI the comment is true**: `keyboard-matrix.ts` gives
+`bindable` only to `ALPHA_KEYS` (a-z), so 26 is the most a user can bind by
+clicking. **It is not true of a config.** `engine::hud_apps_for`
+(`engine/mod.rs:836`) iterates every `is_mapped()` binding in the profile with
+NO key filter, and `config::profile_from_export` takes `bindings` from an
+imported file VERBATIM — no whitelist, no count cap (PROBLEM 231 shipped that
+import). So a hand-edited or imported profile can carry 41+ mapped keys;
+`buildHud` lays out and DRAWS all of them, and chips 41.. then aim at nothing,
+with no error anywhere.
+
+Logged rather than clamped — clamping in the page would hide the same fact one
+layer up, and the ring is still CORRECT; it is the POINTER that stops at 40.
+`publishHudChips`, `src/components/toast.ts:3676`:
+
+```ts
+  if (chips.length > 40 && _isOverlay) {
+    invoke("overlay_log", {
+      msg: `publishHudChips: ${chips.length} app chips published, but pointer.rs ` +
+        `MAX_CHIPS is 40 — chips 41..${chips.length} are DRAWN and will not ` +
+        `hit-test, so pointing at them arms nothing and releasing over them ` +
+        `launches nothing. The keyboard can only bind 26; a profile this large ` +
+        `came from an imported or hand-edited config.json.`,
+    }).catch(() => {});
+  }
+```
+
+TS side only, as scoped. Raising `MAX_CHIPS`, or capping the import, is a
+separate decision for the owner. **Generalise: a `.min(CAP)` on a boundary is a
+POLICY, and a policy with no log is indistinguishable from a bug when it
+fires.**
+
+## PROBLEM 241 — a filled key could not be re-pasted over; only its ✕ was discoverable (OWNER'S FATHER TEST)
+
+**Symptom.** First-time-user test, run by the owner's father: he understood he
+could pick an app for an EMPTY key, but on a key that already had a link
+bound, he could not see how to put a NEW link in. He did not realise he had
+to press the small ✕ to clear it first, then paste — and the ✕ clears the
+binding, which is not what he wanted.
+
+**Root cause.** `paintPathPill()` in `src/components/key-detail-panel.ts` set
+`input.hidden = true` whenever a binding existed, so `#ed-path` — the ONLY
+place to paste a replacement — did not exist as far as a first-time user
+could see. Only the assigned-value pill and its ✕ were visible. (Clicking the
+pill's body DID reveal the field pre-filled for a precise edit, but that
+affordance was never discoverable without already knowing the pill was
+clickable.) The app grid had no such gate — `renderGrid()`'s `onPick` always
+committed immediately regardless of whether the key was already bound — so
+apps could already be replaced with zero friction; only the paste/link path
+was gated shut.
+
+**Decision (the owner, via this task).** A filled slot offers REPLACE
+directly. The paste field and the app grid both stay fully usable over an
+existing binding; committing over one now shows ONE inline confirm —
+`Replace "X" with this?  Replace · Keep` — instead of either silently
+overwriting or staying hidden behind a gate. The pill's ✕ is untouched (still
+clears with no confirm, matching `handleRemove`).
+
+**Fix, `src/components/key-detail-panel.ts`:**
+
+1. `paintPathPill()` no longer hides `#ed-path`. The field stays visible next
+   to the pill, empty, with its placeholder changed to
+   `"Paste a new link or path to replace it…"` (reset to the normal
+   placeholder by `renderPathValue`'s `clear()` once nothing is bound). The
+   pill's own click-to-edit (load the exact value, precise edit, no confirm)
+   is unchanged — it still sets `_pathSeed`, which is exactly what the new
+   gate keys off:
+
+```ts
+// paintPathPill() — GATE REMOVED
+o.host.hidden = false;
+o.input.hidden = false;                 // was: o.input.hidden = true;
+o.input.value = "";
+o.input.placeholder = "Paste a new link or path to replace it…";
+_pathSeed = null;
+```
+
+2. A new gate, `confirmReplace(key, existing, onReplace)`, wired at every call
+   site that can land a FRESH value (`_pathSeed === null`, i.e. not a
+   click-to-edit) on an already-bound key: `submitPathField` (Enter/Assign),
+   the `#ed-done` handler, the 4b disc's click handler, and the app grid's
+   `onPick`. Each site's own commit shape (which fields, whether a
+   multi-profile browser page follows) is unchanged — the gate only decides
+   whether to ask first:
+
+```ts
+function confirmReplace(key: string, existing: KeyBinding, onReplace: () => void): void {
+  const box = _panel?.querySelector<HTMLElement>("#ed-replace-confirm");
+  if (!box) { onReplace(); return; }        // fail OPEN, never silently block a bind
+  const label = replaceLabel(existing);      // "Google Chrome — Arpon" when a profile is pinned
+  box.hidden = false;
+  box.innerHTML = `
+    <div class="ed-replace-box">
+      <span class="ed-replace-text">Replace "${escapeHtml(label)}" with this?</span>
+      <span class="ed-replace-btns">
+        <button class="btn btn-sm btn-primary" id="ed-replace-go">Replace</button>
+        <button class="btn btn-sm" id="ed-replace-no">Keep</button>
+      </span>
+    </div>`;
+  box.querySelector("#ed-replace-go")!.addEventListener("click", () => { hideReplaceConfirm(); onReplace(); });
+  box.querySelector("#ed-replace-no")!.addEventListener("click", () => hideReplaceConfirm());
+}
+```
+
+   `submitPathField`'s call site (the others follow the same shape):
+
+```ts
+function submitPathField(value: string): void {
+  if (!value) return;
+  if (isUnchangedPillValue(value)) { cancelPathEdit(); return; }
+  const key = _currentKey;
+  if (key && _pathSeed === null) {
+    const existing = getBinding(key);
+    if (existing && (existing.app || existing.web_url)) {
+      confirmReplace(key, existing, () =>
+        void assignFromPath(value, { keepOpen: true, onSaved: () => finishReplace(key, existing) }),
+      );
+      return;
+    }
+  }
+  void assignFromPath(value);
+}
+```
+
+   The app grid's `onPick` only asks when the picked target is DIFFERENT from
+   what is already bound — re-pressing the already-`.current` tile is a
+   no-op and stays instant, matching every empty key:
+
+```ts
+const existing = key ? getBinding(key) : undefined;
+const alreadyBound = !!(existing && (existing.app || existing.web_url));
+const sameTarget = existing?.app === app.path;
+if (alreadyBound && !sameTarget && key) {
+  confirmReplace(key, existing!, () => void commit(binding, {
+    keepOpen: true,
+    onSaved: () => { finishReplace(key, existing!); if (multi) openProfilePage(key, b, true); },
+  }));
+  return;
+}
+bindNow();   // the ordinary path, byte-for-byte unchanged
+```
+
+3. **Commit still carries all 7 fields, always** — nothing about this feature
+   touches `commit()`'s normalisation from PROBLEM 204a. Every replace goes
+   through the SAME `commit()`/`assignFromPath()` every other change uses, so
+   the "pin never saved" class of bug (an object missing the three optional
+   browser-profile fields, deleted by omission on a full-replace save) cannot
+   reopen here. Verified in the browser pane: replacing an app pinned to a
+   browser profile (`browser_profile_name: "Arpon"`) shows the confirm text
+   `Replace "Google Chrome — Arpon" with this?`, and `console` shows exactly
+   ONE `key-editor: onSave key=b app=C:\Apps\Chrome.exe …` line per replace —
+   never a partial object.
+
+4. **10-second Undo, reusing `offerPinUndo`'s precedent rather than
+   reinventing it** (same reason it cannot live in the toast —
+   `#toast-container` is `pointer-events: none`, see `offerPinUndo`'s doc
+   comment). `finishReplace(key, previous)` re-renders page 1 after a
+   confirmed replace lands, then `offerReplaceUndo(key, previous)` fills
+   `#ed-replace-confirm` with `Replaced "X"  ·  Undo` for 10 s. Undo restores
+   the full previous `KeyBinding` through the same `commit()`:
+
+```ts
+function offerReplaceUndo(key: string, previous: KeyBinding): void {
+  const box = _panel?.querySelector<HTMLElement>("#ed-replace-confirm");
+  if (!box) return;
+  box.innerHTML = `<div class="ed-replace-box ed-replace-undo-row">
+    <span class="ed-replace-text">Replaced "${escapeHtml(replaceLabel(previous))}"</span>
+    <span class="ed-replace-btns"><button class="btn btn-sm" id="ed-replace-undo">Undo</button></span>
+  </div>`;
+  const timer = window.setTimeout(() => hideReplaceConfirm(), 10_000);
+  box.querySelector("#ed-replace-undo")!.addEventListener("click", () => {
+    window.clearTimeout(timer);
+    hideReplaceConfirm();
+    if (_currentKey !== key) return;
+    void commit(previous, { skipConflict: true, keepOpen: true, onSaved: () => renderPanel(key) });
+  });
+}
+```
+
+   **Deliberate UX change, stated so it is not read as an oversight:** a
+   CONFIRMED replace now keeps the editor open for the 10 s Undo window
+   (`keepOpen: true`, forced regardless of each call site's normal default),
+   where an ordinary bind onto an EMPTY key still assigns and closes
+   INSTANTLY, exactly as the mockup specifies ("no Save/Cancel pair"). Only
+   replacing something that was already there gets the pause; that is the one
+   case worth being able to walk back.
+
+**Files.**
+
+* `src/components/key-detail-panel.ts` — `paintPathPill` (gate removed, new
+  placeholder), `renderPathValue`'s `clear()` (placeholder reset),
+  `confirmReplace`/`hideReplaceConfirm`/`replaceLabel`/`finishReplace`/
+  `offerReplaceUndo` (new), `submitPathField`, the `#ed-done` handler,
+  `wirePathDisc`'s disc click, `renderGrid`'s `onPick` (all four gated), the
+  markup template (`#ed-replace-confirm`, before `#ed-conflict`)
+* `src/styles.css` — `.ed-path-wrap .ed-val-host` capped to 150px (now shares
+  the row with a live `#ed-path` instead of being the row's only content),
+  `#ed-replace-confirm` / `.ed-replace-box` / `.ed-replace-text` /
+  `.ed-replace-btns` / `.ed-replace-undo-row` (new — accent-tinted, not
+  `.warning-banner`'s amber, since this is an ordinary confirm, not an alert);
+  dead `#ed-path[hidden]` rule removed (nothing hides `#ed-path` any more)
+  and its section doc comment updated
+* `src/preview.ts` — the `?editor` harness used to be static hand-rolled
+  markup with no wiring; rewired to the REAL `initKeyDetailPanel`/`openPanel`
+  against a stub covering every command the panel can invoke
+  (`list_start_menu_apps`, `list_browser_profiles`, `get_default_browser`,
+  `show_conflict_check`, `check_app_path`, `extract_icon_cmd`, `pick_file`,
+  `frontend_log`). `?editor=<key>` picks which key opens; two bindings added
+  for the harness — `y` (a bound URL) and `b` (an app pinned to a browser
+  profile, "Arpon" — the confirm's own worked example). **Measurement trap
+  caught and fixed in the same pass:** the panel was first wired against
+  `stubState.config` (the profile-editor's own separate clone) while
+  `initKeyboardMatrix` reads the plain top-level `config` object — two
+  components in one harness looking at different config instances, so a
+  replace committed and the panel repainted correctly while the keyboard
+  board behind it silently never did. Re-wired to the SAME `config` object
+  `initKeyboardMatrix` uses, plus `updateMatrix()` after every save
+  (mirroring `main.ts`'s real `refreshBoard()`), and reproduced + confirmed
+  fixed in the browser pane before calling it done.
+
+**Verified in the browser pane** (`preview.html?editor=y` and `?editor=b`,
+`npm run dev`):
+
+| Step | Result |
+| --- | --- |
+| `?editor=y` (bound to a URL) | pill shows `youtube.com`, `#ed-path` visible and empty beside it, placeholder "Paste a new link…" |
+| paste `https://vimeo.com/test`, click Assign | confirm shown: `Replace "Youtube" with this?  Replace · Keep` |
+| click Keep | confirm dismissed, sub-title still "Bound to Youtube", pill unchanged, typed text left in the field, **zero** `onSave` calls |
+| paste again, click Assign, click Replace | sub-title → "Bound to Vimeo", pill → `vimeo.com`, **exactly one** `key-editor: onSave key=y … url=https://vimeo.com/test` in console, `"Replaced 'Youtube'  ·  Undo"` row shown |
+| click Undo within 10 s | sub-title reverts to "Bound to Youtube", pill reverts, one more `onSave` restoring the original |
+| `?editor=b` (Chrome pinned to profile "Arpon") | click the "Chrome" tile (a DIFFERENT exe path) → `Replace "Google Chrome — Arpon" with this?` (the feature's own worked example, reproduced verbatim) → Replace → sub-title "Bound to Chrome", exactly one `onSave key=b app=C:\Apps\Chrome.exe…`, close the panel → the KEYBOARD's B key relabels to "Chrome" (only after the config-instance fix above) |
+| `?editor=k` (empty key) | click a tile → binds and closes INSTANTLY, no confirm — the empty-slot path is unchanged |
+
+`npx tsc --noEmit` clean, `npm run build` clean (two pre-existing dynamic/
+static import warnings, unrelated to this change). No version bump, no
+build, no install. Rust untouched — `cargo test` not run for this pass.
+
+**Unverified / left to hand-testing:** the 4b disc's replace-then-open-profile-
+page branch (`wirePathDisc`) was code-reviewed but not clicked through in the
+browser pane — the stub's `list_browser_profiles` returns `[]`, so no browser
+tile exists in this harness to drive that specific sub-path end to end.
+`commit()`'s existing conflict-check banner (`#ed-conflict`) sits directly
+below `#ed-replace-confirm` in the same spot it always has; a replace that
+ALSO trips an OS-shortcut conflict was not separately exercised, though
+nothing about the gate changes how `commit()` reaches that banner.
+
+---
+
+## PROBLEM 242 — nothing ever told a first-time user what the app was FOR: the dashboard opened on a keyboard, and the one thing you have to do (hold Space) is the one thing no screen mentioned
+
+**Symptom.** Same family as PROBLEM 241 (the owner's father test), one level
+up. A stranger's first screen is a picture of a keyboard. There is no
+instruction anywhere on it, and the app's whole premise — hold Space, tap a
+letter — is invisible: Space is swallowed system-wide, so nothing about
+holding it can be discovered by pressing things. A user who never guesses it
+never sees the Guide HUD, never fires a shortcut, and has no reason to think
+the keys on screen are clickable at all.
+
+**Root cause.** Not a bug. The app had no first-run path of any kind: no
+onboarding, no "do this first", and no way to replay one. Every affordance
+was there and none of them were introduced.
+
+**Decision (the owner, via this task).** A four-beat guided first bind, shown
+ONCE per install, replayable from Settings. Copy fixed verbatim, including
+the double space and the spaced " !":
+
+| Beat | Copy | Advances on |
+| --- | --- | --- |
+| entry | `Hold Space, tap any app's initial  letter — boom ! it opens.` / `Hold Space, tap the app's initial again — boom ! it's gone.` | [Show me] |
+| step 1 | `Click any letter to give it a job.` | the key editor opening for ANY letter |
+| step 2 | `Paste a link, choose a file, or pick an app — that's what your letter will open.` | any successful save |
+| step 3 | `Now hold Space and tap **X** — try it.` (X as a Space+X glyph) | a REAL launch of that key |
+| done | `That's it — you're set.` | → `tour_done = true` |
+
+Branches: a BOUND letter still opens, with `This one's already set — pick an
+empty letter, or change this one.` above step 2's copy. Closing the editor
+without saving PAUSES with `No rush — click the letter again when ready.` and
+returns to step 1. A Skip pill is on screen in every step and means never
+again. Step 3 deliberately un-dims the whole dashboard so the Guide HUD's ring
+appears naturally when Space goes down — **that ring is the discovery moment;
+do not suppress it.**
+
+### The three constraints that shaped the implementation
+
+**1. The tour cannot listen to the keyboard.** The Win32 hook owns Space
+system-wide and swallows it, so a `keydown` listener in the webview would
+never see the combo even if adding one were allowed. Step 3 therefore needs
+the ENGINE to report success, and nothing did: `toast-notification` is a
+deliberate overlay-only broadcast (`lib.rs::show_toast`), and
+`smart_cascade`'s `app-launched` covers only a genuine shell launch — not the
+focus and minimize legs, which are most of what a working shortcut does — and
+has no listener anywhere in `src/`. So one new event.
+
+**2. The tour cannot mark the DOM it points at.** `renderPanel` rebuilds the
+key editor's entire `innerHTML` on every render, and `updateMatrix` re-skins
+every key cell. A `.tour-highlight` class parked on either is swept away with
+no error. Highlights are therefore free-floating ring elements in the tour's
+own layer, positioned from the targets' `getBoundingClientRect()`.
+
+**3. `tour.ts` must be a LEAF module** (PROBLEM 148) or `preview.html` cannot
+render it. It imports `@tauri-apps/api/event` and nothing else from this app;
+everything it needs from the config arrives as two lambdas.
+
+### The actual code
+
+**NEW — `src/components/tour.ts`** (the whole state machine; ~470 lines).
+The parts worth pasting:
+
+The host, which is the entire reason it stays a leaf:
+
+```ts
+export interface TourHost {
+  /** Has the tour already been completed or skipped? (`config.tour_done`) */
+  isDone(): boolean;
+  /** Write `tour_done = true` and persist. Called once, on finish or skip. */
+  setDone(): void;
+}
+```
+
+The only input it takes from the engine, and its wrong-key gate:
+
+```ts
+void listen<{ key: string; label: string }>("st-launched", (e) => {
+  if (_phase !== "step3") return;
+  const k = (e.payload?.key ?? "").toLowerCase();
+  if (!k || k !== _key) return;   // wrong key: wait, silently
+  finish();
+}).catch(() => { /* no backend (preview without the bus) — the tour just waits */ });
+```
+
+The measure-and-move pass, and why it is called synchronously as well as from
+rAF (see "generalise this" below):
+
+```ts
+function place(): void {
+  if (!_ringHost) return;
+  _targets.forEach((t, i) => {
+    const el = _ringHost!.children[i] as HTMLElement | undefined;
+    if (!el) return;
+    const target = document.querySelector(t.sel);
+    const r = target?.getBoundingClientRect();
+    if (!r || r.width < 2 || r.height < 2) { el.classList.remove("on"); return; }
+    el.style.left = `${r.left - t.pad}px`;
+    el.style.top = `${r.top - t.pad}px`;
+    el.style.width = `${r.width + t.pad * 2}px`;
+    el.style.height = `${r.height + t.pad * 2}px`;
+    el.classList.add("on");
+  });
+}
+```
+
+Free letters are read from the BOARD, not the config, so the highlight can
+never disagree with what the user is looking at — it is the same predicate
+`applyKeyState` paints with:
+
+```ts
+const free = Array.from(
+  document.querySelectorAll<HTMLElement>("#keyboard-matrix .key.bindable:not(.bound)"),
+).map((el) => el.dataset.key ?? "").filter(Boolean);
+```
+
+**`src-tauri/src/engine/mod.rs`** — one new emitter beside the two that
+already exist, and one gated call at the end of `handle_alpha`:
+
+```rust
+fn emit_launched(&self, key: char, label: &str) {
+    let _ = self.app_handle.emit(
+        "st-launched",
+        serde_json::json!({ "key": key.to_string(), "label": label }),
+    );
+}
+```
+
+```rust
+    } else {
+        s.emit_toast(&cascade_toast(outcome, &label, fallback.as_ref()));
+    }
+
+    // PROBLEM 242 — tell the dashboard a shortcut REALLY fired.
+    if outcome != actions::smart_cascade::CascadeOutcome::Failed {
+        s.emit_launched(ch, &label);
+    }
+}
+```
+
+`CascadeOutcome::Failed` means nothing was focused, launched or minimized, so
+gating on it is what makes step 3's "wrong key does nothing, no error, it
+waits" fall out for free rather than being coded twice. No capability change
+was needed: `src-tauri/capabilities/default.json` already lists `"settings"`
+with `core:default`.
+
+**`src-tauri/src/config/schema.rs`** — one field, deliberately a BARE
+`#[serde(default)]`:
+
+```rust
+    #[serde(default)]
+    pub tour_done: bool,
+```
+
+plus `tour_done: false,` in `impl Default`. It is the opposite case from
+`send_logs` directly above it: absent must mean "never seen", because the
+people whose configs predate the field are exactly the people the tour is
+for. Both first-install tests gained an assertion holding it there.
+
+**`src/components/key-detail-panel.ts`** — three call sites, all inside this
+file rather than at the caller, because it is the ONE door both the real
+dashboard and `preview.html` go through:
+
+- end of `openPanel`: `tourEditorOpened(key, !!(had && (had.app || had.web_url)))`
+  where `had = getBinding(key)` — the same lookup the panel paints from.
+- in `commit`, immediately after `_onSave(key, full)` (past both of that
+  function's early exits, so it cannot fire for a save that did not happen),
+  gated on `full.app || full.web_url` so a CLEAR does not advance to a step 3
+  that would then ask the user to press a combo that does nothing.
+- end of `closePanel`: `if (key) tourEditorClosed()`.
+
+`closePanel` fires for both "closed after saving" and "closed without
+saving", and it should not try to tell them apart. The distinction is made in
+`tour.ts` instead: a save has already moved the phase to `step3`, so only a
+close arriving while still in `step2` counts as walking away.
+
+**`src/components/settings-panel.ts`** — the header gains a SECOND
+`.set-head-link` beside "What do these do?" (whose handler is untouched):
+
+```html
+      <button type="button" class="set-head-link" id="set-help-tour"
+              title="Replay the first-run walkthrough">Show me the walkthrough</button>
+```
+
+```ts
+  panelEl.querySelector("#set-help-tour")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeSettingsPanel();
+    startTour();
+  });
+```
+
+`startTour()` re-enters at STEP 1, not the entry card, and ignores
+`tour_done`: someone who asks for the walkthrough wants the doing part, not
+the pitch they already read. It closes the panel first because step 1 dims
+everything except the keyboard, and a lit popover over it would be the one
+thing the user is told not to look at.
+
+**`src/main.ts`** — the host, wired before `dashboard_ready` and started one
+frame after it, because Rust shows the window only in response to that call
+(PROBLEM 74); anything earlier spends a once-per-install card on a window
+nobody can see.
+
+**`src/styles.css`** — the layer at `z-index: 8800`: above every dashboard
+surface (the highest was 90) and deliberately BELOW `.confirm-back`'s 9000, so
+a destructive confirmation is never buried under a walkthrough card.
+`pointer-events: none` on the layer, `auto` on the card and the Skip pill
+only — step 1's whole point is that the user CAN click a letter through it.
+Dimming is plain opacity on `#stage`'s own children (`body.tour-dim-board` /
+`body.tour-dim-editor`, both exempting `#toast-container`); no blur and no
+`backdrop-filter` anywhere (PROBLEM 37/80).
+
+### Two measurements that changed the design
+
+**The card was at `bottom: 22px` and sat on top of "Special keys."**
+`#specials-dock` is bottom-CENTRE (`left: 50%; bottom: 16px`, ~36px tall), not
+bottom-right. Measured at 1280x720: card `[390, 614, 499, 51]`, dock
+`[588, 668, 104, 36]`. Moved to `bottom: 64px`. The board never reaches that
+far down — `#keyboard-outer`'s bottom inset is 84 and the fixed-height board
+is centred inside it.
+
+**The compact settings popover cannot hold both header links on one line.**
+Measured: 206px of room, labels want 95 + 133 + a 10px gap. Left alone they
+each broke mid-phrase and the header became three ragged rows. Fixed with
+`flex-wrap` + `order` and `flex: 0 0 100%` on the new entry, scoped to
+`#settings-panel:not(.expanded)` — deterministic, not a width guess a longer
+translation would silently invalidate. The expanded panel has the room and is
+untouched.
+
+### How it was verified
+
+**In the browser pane, on `preview.html?tour`** (`npm run dev`). The harness
+was extended for it: `tour_done: !q.has("tour")` in the stub config (TRUE by
+default, so every other flag behaves exactly as before), the real `initTour`
+host pointed at the stub config, the header link wired, and — the one that
+mattered — `initKeyboardMatrix`'s click callback, which was a no-op, now
+opens the real editor exactly as `main.ts` does. Without that, nothing that
+BEGINS with a click on the board could be watched here, which is most of this
+feature. `window.__previewEmit` already existed (PROBLEM 237).
+
+| Case | Result |
+| --- | --- |
+| entry card | both lines byte-identical to the spec, asserted in the DOM — **including the double space**, which survives because `.tour-line` is `white-space: pre-wrap` and the text is set with `textContent` |
+| Show me → step 1 | copy correct, `body.tour-dim-board`, topbar/docks to opacity .24, keyboard full, 3 rings on J/K/L (the unbound letters — S/D/F/G/E are bound in the stub) |
+| click J (unbound) | editor opens on Space+J, `body.tour-dim-editor`, 3 rings on the paste field, "Browse files…" and the app grid |
+| paste a URL → Assign | step 3: dashboard fully un-dimmed, card reads `Now hold Space and tap [Space]+[J] — try it.`, note `Space+J opens Slack.` |
+| `__previewEmit("st-launched", {key:"k"})` | **nothing happens** — wrong key, no error, still waiting |
+| `__previewEmit("st-launched", {key:"j"})` | `That's it — you're set.`, [Done] pill, Skip pill hidden, auto-dismisses |
+| click S (BOUND) | editor opens, `This one's already set — pick an empty letter, or change this one.` renders as a note ABOVE step 2's copy, tour continues |
+| close editor with ✕ | `No rush — click the letter again when ready.`, back to `tour-dim-board` with the 3 rings — a PAUSE, not a dismissal |
+| Skip at entry / step 2 / step 1-paused | layer removed, body classes cleared, the open editor left alone |
+| Settings → "Show me the walkthrough" | panel closes, tour restarts at STEP 1 (not the entry card) **after tour_done was already set by a Skip** |
+| **destroy and rebuild the board mid-step-1** (`#keyboard-matrix.innerHTML = ""` then restore) | rings 3 → 0 → 3, on the same targets, card copy unchanged — the re-render survival claim, actually exercised |
+| `:root.reduced-motion` | ring `animation-name: none` but still ON with its border (a static ring), card `animation-name: none` |
+| Nocturne (`?tour&dark`) | indigo accent, black-tinted shadows, the Space+K glyph legible |
+| compact popover / expanded settings | header correct in both (see the measurement above) |
+
+`npx tsc --noEmit` clean (it runs as a hook after every `.ts` edit here),
+`npm run build` clean, `cargo test --lib` **358 passed / 0 failed**,
+`cargo clippy --lib` **0 warnings**. No version bump, no build, no install.
+
+**Unverified, and it cannot be verified from here:**
+
+1. **The real WebView2 dashboard.** Everything above is Chromium in a Vite
+   harness. The overlay's failure modes live in the OS compositor and this
+   layer is a dashboard-page layer, so the risk is lower than for overlay
+   work — but it has not been seen in the shipped window.
+2. **A REAL `st-launched`.** No engine ran. The Rust side is compiled and its
+   gate is code-reviewed, but the only launch events observed were injected
+   into the preview bus by hand. `SendInput` from this agent shell cannot
+   reach the hook (Testing laws), so this needs the owner: install, first
+   run, bind a key, hold Space, tap it, and watch step 3 close by itself.
+3. **First-run timing on a genuinely fresh install** — `tour_done` defaulting
+   to false is unit-tested, but the entry card appearing on the first launch
+   after a real install was not observed.
+
+**Generalise this — three of them.**
+
+- **A check that runs on animation frames is not a check in a headless-ish
+  harness.** The rings sat unplaced and `body.tour-dim-board` read
+  `opacity: 1` for a full diagnostic round trip, in a page where
+  `document.visibilityState === "visible"` and the CSS rule provably matched
+  (`el.matches(sel)` returned true). Cause: `requestAnimationFrame` fired
+  **zero** times until a screenshot forced a paint — a counter incremented in
+  a rAF chain read 0 after seconds of waiting, then 5 immediately after one
+  capture. CSS transitions are frame-driven too, which is why the computed
+  opacity was the START value rather than anything in between. **Anything
+  whose correctness you intend to read back must not depend on a frame that
+  may never come:** `place()` is now called synchronously as well as from the
+  loop, which is both the fix and a better design — a ring is right on its
+  first paint instead of one frame late. **The sync call is not a substitute
+  for the loop**, and the same measurement shows why: when the tour starts
+  before `wireKeyboardFit` has run, `#keyboard-scale` still carries a
+  near-zero scale and a key cell measures **1.78px**, under `place()`'s
+  own guard — one frame later the fit lands and the loop puts it right. Same family as the ASCII-marker trap
+  and the MSIX-container trap: a check that cannot produce a truthful
+  negative is not a check.
+- **When two surfaces must agree, read the one the user is looking at.** The
+  free-letter highlight queries `.key.bindable:not(.bound)` rather than
+  walking `config.profiles[…].bindings`. There is then no second copy of the
+  "is this bound?" rule to drift from `applyKeyState`'s.
+- **A close handler should not try to know WHY it was called.** `closePanel`
+  fires identically after a save and after an abandonment, and adding a flag
+  to tell them apart would have put the same knowledge in two places. Let the
+  consumer decide from its own state instead — here, "a save already moved me
+  past this step, so this close is not an abandonment".
+
+### PROBLEM 242 FOLLOW-UP (2026-09-06) — the tour overtook the app: step 3 told the owner to press Space+K while "Which Brave profile?" was still open on top of it
+
+**Symptom, from the owner's screenshot.** In the walkthrough he bound K to
+Brave. The app then did exactly what it should and opened the browser-profile
+picker — "Which Brave profile?", with the Arpon / ARPON'S STUDIES tiles, Done,
+and "Skip this and Space + K opens Brave the way it always has." Underneath it,
+the tour had already moved to step 3: *"Now hold Space and tap Space+K — try
+it. Space+K opens Brave."* Two surfaces asking for two different things at
+once. In his words: *"The walkthrough wasn't intelligent enough to
+understand."* His original spec for the tour had in fact asked for a
+**"browser-profile step if browser"**; it was never built.
+
+**Root cause — an ORDERING, not a missing check.** `key-detail-panel.ts`'s
+`commit()` reports the save to the tour BEFORE it runs the caller's
+`onSaved`, and `onSaved` is what opens the picker:
+
+```ts
+  _onSave(key, full);
+  …
+  if (full.app || full.web_url) tourBindingSaved(key, …);   // ← tour goes to step 3
+  …
+  opts.onSaved?.();                                          // ← picker opens, one line later
+```
+
+So the tour is ALREADY in step 3 by the time page 2 exists. Nothing was
+checking for the picker because, from the tour's point of view, the save had
+finished. The app-grid branch is the one that reaches it:
+
+```ts
+  const multi = !!b && b.profiles.length > 1;
+  const bindNow = () => void commit(binding, {
+    keepOpen: multi,
+    onSaved: multi && key ? () => openProfilePage(key, b, true) : undefined,
+  });
+```
+
+**The fix.** A conditional beat, STEP 2b, between 2 and 3.
+
+| | |
+| --- | --- |
+| Enters | the browser-profile picker opening for the tour's own key |
+| Copy (named browser) | `Brave has more than one profile. Pick the one this key should open — or skip, and it opens Brave the way it always has.` |
+| Copy (browser not yet chosen — a URL binding) | `Pick which browser — and which profile — this key should open. Or skip, and it opens in your default browser.` |
+| Dim | `tour-dim-editor`, unchanged — `.bp-page` is `inset:0` on an opaque background inside `#key-detail-panel`, so "keep the editor lit" and "keep the picker lit" are the same pixels |
+| Ring | one, around `#key-detail-panel .bp-scroll` (the tiles), `pulse:false` |
+| Leaves | the picker closing, by ANY route |
+| Then step 3 reads | `Space+K opens Brave (Arpon).` if a profile was chosen, `Space+K opens Brave.` if not |
+
+The Done button is deliberately NOT ringed even though the copy names the skip:
+the panel is centred and the tour card sits at `bottom: 64px`, so on a short
+viewport the card covers the picker's footer, and a ring under an opaque card
+reads as a rendering fault. The picker's own footer hint already says what Done
+does, in the same words.
+
+**Exact files.**
+
+`src/components/tour.ts` — the phase, the copy, three state fields and two new
+exports:
+
+```ts
+type Phase = "off" | "entry" | "step1" | "step2" | "step2b" | "step3" | "done";
+
+export function tourProfilePickerOpened(key: string, browser: string | null): void {
+  if (_phase !== "step2" && _phase !== "step2b" && _phase !== "step3") return;
+  if (key.toLowerCase() !== _key) return;
+  _pickerBrowser = browser ?? "";
+  _askedProfile = true;
+  go("step2b");
+}
+
+export function tourProfilePickerClosed(backToEditor = false): void {
+  if (_phase !== "step2b") return;
+  _pickerBrowser = "";
+  if (backToEditor || !_bound) { go("step2"); return; }
+  go("step3");
+}
+```
+
+`tourProfilePickerOpened` accepts an entry **from step 3**, and that is the
+normal path, not defensive coding — see the ordering above. The transition
+happens in the same tick, before a frame is painted, so step 3 is never seen.
+The key must match `_key`: a picker opened for some OTHER key is not part of
+this walkthrough's story, and 2b's copy ("…this key should open") would be a
+lie about it.
+
+`src/components/key-detail-panel.ts` — five call sites. `openProfilePage`
+reports LAST, once `renderProfilePage` has built the page the ring measures:
+
+```ts
+  tourProfilePickerOpened(key, browser?.browser_name ?? null);
+```
+
+…and `closeProfilePage` carries the CATCH-ALL, because page 2 has more ways to
+vanish than any list of them stays correct about — ← back, `renderPanel`'s
+teardown, `openProfilePage` replacing a page already up, and `closePanel` on
+Esc or a backdrop click all arrive here and none of them reports itself:
+
+```ts
+  if (!page) return;
+  tourProfilePickerClosed(true);
+```
+
+The four informative exits (a pick, the skip/reset row, ✕, Done) call the tour
+BEFORE reaching it, and `tourProfilePickerClosed` only acts in step 2b, so the
+catch-all is a no-op on all four. **`onPick` must report before it commits**:
+with `fromBind` the commit ends in `closePanel()`, which runs
+`closeProfilePage(true)` and would otherwise trip the catch-all first.
+
+**THE SECOND BUG, FOUND WHILE BUILDING THE FIRST — and it is the more
+interesting one.** The obvious design has step 2b remember the tile the user
+pressed and hand that name to step 3. It is wrong twice:
+
+1. **It goes stale.** Re-bind the same key to something else during step 3 —
+   which the tour allows — and the note still reads
+   `Space+K opens Notion (Arpon).`
+2. **It cannot see a profile the user never chose.** A browser with exactly
+   ONE profile has its directory and account label written to the binding
+   anyway, so the launch is explicit instead of relying on Chromium's
+   last-used. `Space+K opens Chrome (Person 1).` reports a decision back to
+   someone who never made one.
+
+So the name is read off the BINDING THAT WAS WRITTEN, and "were they asked" is
+tracked separately:
+
+```ts
+// key-detail-panel.ts, commit()
+tourBindingSaved(key, full.label ?? key.toUpperCase(), full.browser_profile_name ?? null);
+```
+
+```ts
+// tour.ts, step 3 — BOTH halves required
+const target = _askedProfile && _profile ? `${_label} (${_profile})` : _label;
+```
+
+`_askedProfile` is set by `tourProfilePickerOpened` and cleared at the TOP of
+`tourEditorOpened`, **before** that function's `_phase !== "step1"` guard — so
+a step-3 re-bind cannot inherit "they were asked" from the picker that ran last
+time round.
+
+`tourBindingSaved` also had to learn to accept a SECOND save for a key it is
+already showing, because `commitProfile` re-commits the whole binding with the
+pin attached and lands on the same line:
+
+```ts
+  if ((_phase === "step3" || _phase === "step2b") && k === _key) {
+    _label = label; _profile = profile ?? "";
+    if (_phase === "step3") render();
+    return;
+  }
+```
+
+**One more state field, `_bound`.** Before 2b there was no way to be in step 2
+after a save, so `tourEditorClosed`'s rule — "a close in step 2 is an
+abandonment" — was exact. ← back from the picker makes it inexact: the key IS
+bound and the user is looking at the editor again. `_bound` restores it, and
+`tourEditorClosed` routes a close arriving in 2b through the same door as ✕ so
+Esc and the backdrop cannot drift from it. `_bound` also guards the one path
+that reaches the picker with NO save behind it — the 4b disc pressed on an
+unedited pill value commits nothing on purpose — which returns to step 2
+rather than to a step 3 with nothing to point at.
+
+**`src/preview.ts` — the harness could not have caught this.**
+`list_browser_profiles` answered `[]`, and an empty list is the ONE shape that
+makes the picker unreachable: page 2 only turns for a browser with more than
+one profile. Every bind looked like a plain app bind. It now answers with two
+stub browsers — Brave (2 profiles: Arpon, ARPON'S STUDIES — the owner's own,
+from his screenshot) and Chrome (1 profile) — plus a Brave tile in
+`PREVIEW_APPS` whose path matches `browser_exe` byte for byte, because
+`findBrowserByExe` compares full paths and a near-miss would silently read as
+"this exe is not a browser". Brave is deliberately NOT in `DEMO`: `DEMO` also
+seeds the keyboard, and step 1 offers EMPTY letters, so a pre-bound Brave key
+would put the one tile that matters behind the replace-confirm gate.
+
+**How it was verified.** `preview.html?tour` at 1400x900, driven by real
+clicks; the tour's phase read back from `document.body.className` and
+`.tour-card`'s text, which is what the user actually sees.
+
+| Path | Result |
+| --- | --- |
+| Brave (2 profiles) → pick Arpon | 2b over "Which Brave profile?" with the ring on the tiles → step 3, `Space+K opens Brave (Arpon).` |
+| Brave → **✕** | step 3, `Space+K opens Brave.`, editor closed |
+| Brave → **← back** | step 2, editor still open, K already bound; closing it then → step 3 (NOT step 1 paused) |
+| Chrome (1 profile) | no picker, straight to step 3, `Space+K opens Chrome.` — and the log line for that save reads `profile_dir=Default`, so the guard is suppressing a value that IS there |
+| Slack (not a browser) | no picker, straight to step 3, `Space+K opens Slack.` — unchanged |
+| Re-bind K → Notion during step 3 | note becomes `Space+K opens Notion.` — the stale `(Arpon)` is gone |
+| step 3 → `__previewEmit("st-launched", {key:"k"})` | `That's it — you're set.` |
+
+Ring geometry was measured rather than eyeballed: with `.bp-scroll` at
+`left 520.207, top 273.767, 431.971 x 249.340`, the ring read
+`left 516.207, top 269.767, 439.971 x 257.340` — exactly `pad: 4` on all four
+sides.
+
+Gates: `npx tsc --noEmit` clean, `npm run build` clean (42 modules).
+
+**NOT verified:** the real WebView2 build. The engine's `st-launched` was
+faked through the preview bus, and the picker was driven against stub browsers,
+so what has been proved is the state machine and the copy — not that a real
+Brave with two real profiles reaches `openProfilePage` on the owner's machine.
+That path is unchanged by this work, but it has not been watched.
+
+**A HARNESS NOTE WORTH KEEPING.** Screenshots of the Browser pane went stale
+mid-session — the picker's slide-in froze half-way and the ring stopped
+tracking, because CSS animations and `requestAnimationFrame` do not advance
+while the pane is not painting. The DOM was correct throughout. This is the
+same measurement `setTargets()` already documents (rAF fired ZERO times until a
+screenshot forced a paint) and it is a property of the harness, not of the
+tour. **Read `getBoundingClientRect()` and `textContent`, not pixels, when a
+screenshot and the DOM disagree** — and force a paint with a screenshot before
+trusting any geometry taken from a mid-animation element.
+
+**Generalise this.** *A guided flow must be a CONSUMER of the app's real
+events, never a parallel script that assumes what happens next.* The tour
+already knew that for the keyboard — step 3 waits on the engine's `st-launched`
+rather than listening for keys — and then assumed a save was the end of the
+save. Every branch the app can take after an action the tour prompted is a
+branch the tour has to be told about. And its second half: *when a step
+reports something back to the user, read it from the state that was written,
+not from the gesture that wrote it.* The gesture is a guess about the outcome;
+the binding IS the outcome.
+
+---
+
+## PROBLEM 243 — "does the Space HUD come up while I'm INSIDE the app?" was unanswerable from the log, and the answer turns out to be "yes, and no gate exists" (AUDIT — no code gate found; one instrument added)
+
+**Symptom (owner's requirement, verbatim, 2026-09-04).** *"Ensure that the
+Space HUD comes up when Space is held while inside the app."* I.e. with the
+Spaceadom dashboard window itself in the FOREGROUND, holding Space must raise
+the Guide HUD ring exactly as it does over any other app, and Space+letter must
+launch.
+
+**Root cause of the QUESTION (there is no bug).** A full audit of every gate
+that could key on our own window being foreground found **none on the HUD
+path**. The suspicion is old and it is reasonable — PROBLEM 218 is a real
+instance of exactly this failure (an `excluded_apps` entry naming `spaceadom`
+stood the whole app down whenever its own window had focus, with no log line
+naming the cause) — and `docs/IF-SHORTCUTS-DIE-AGAIN.md` records the
+"it only happens when our own dashboard has focus" hypothesis as tried and
+disproved. What was missing was a way to prove it in one line instead of
+re-deriving it. See "What was audited" below for the full list.
+
+### What was audited, and what each one actually does
+
+| Site | What it gates on | Blocks the owner's scenario? |
+| --- | --- | --- |
+| `hook/mod.rs` "SPACE DOWN" branch | `other_modifier_down()` (Ctrl/Alt/Win physically held) and nothing else. No foreground query at all — PROBLEM 134 deleted the only one that existed | **No** |
+| `hook/mod.rs` `FULLSCREEN_ACTIVE` gate | `hook/fullscreen.rs` requires `WS_POPUP` **and** `WS_EX_TOPMOST` **and** a rect covering the whole monitor. The `settings` window is `decorations: true` and is never made always-on-top anywhere in the tree | **No** |
+| `hook/mod.rs` `EXCLUDED_ACTIVE` gate | The user's `excluded_apps` list, which **cannot contain us**: `exclusions::without_self` drops our own stem where the value is CONSUMED, and logs at ERROR (PROBLEM 218) | **No** |
+| `hook/mod.rs` `BYPASS_MODE` gate | An explicit Space+`.` toggle. Not foreground-dependent | **No** |
+| `hook/mod.rs` `classify_hook_window` / `HookWindow::` | **A naming coincidence, and the one thing most likely to be misread as a gate.** `HookWindow` is a 60-second TIME window of hook activity (`Working` / `Deaf` / `Quiet`), not a window on screen. It decides what the watchdog logs, never whether a key is handled | **No** |
+| `hook/mod.rs` `FG_IS_SELF` / `KB_EVENTS_OWN_FG` | Pure diagnostics — one relaxed `fetch_add`, never read by any decision | **No** |
+| `engine/mod.rs` `HookEvent::SpaceDown` arm | The configured `guide_hud_delay_ms` and the `tokio::watch` cancel channel. There is no "let the user type spaces in the dashboard" early return, and there never was | **No** |
+| `guide_hud/mod_impl.rs` `show_hud_payload` | `HOLD_EPOCH` staleness (PROBLEM 177) and `OVERLAY_DISABLED` (PROBLEM 214). Neither consults the foreground | **No** |
+| Z-ORDER: overlay vs dashboard | The `overlay` window is created `alwaysOnTop: true`; the `settings` window is never topmost — `grep -rn "always_on_top\|alwaysOnTop"` returns only the overlay's creation in `lib.rs:466`, its rebuild in `display_watch.rs:532`, and `tauri.conf.json`. A topmost window sits above every non-topmost one **regardless of which has focus**, and `raise_overlay_topmost` (real `SetWindowPos(HWND_TOPMOST, SWP_NOACTIVATE)`, PROBLEM 168) re-asserts it on **every** show and every `overlay_fit` | **No** |
+| `engine/actions/opacity.rs` + `pip.rs` `is_own_window` | These two DO gate on our own window — and correctly: Space+wheel must not fade the dashboard, Space+backtick must not PiP it. Neither is on the HUD path | **No** |
+
+### The log evidence (installed 1.0.96, session that began 16:28:47 on 2026-09-04)
+
+The hook's own per-window counter proves keys reach us while our window is
+foreground, and the HUD shows in the same windows. Three independent
+instances, each one a window in which **100% of the keys seen were own-window
+keys**, so the point-in-time shows inside it cannot have been anything else —
+this is the one join that is legitimate under the "two numbers may only be
+compared when they describe the same window" rule, because the numerator equals
+the denominator:
+
+```
+16:31:57.211  guide_hud: overlay window shown (hold #11)
+16:32:10.021  guide_hud: overlay window shown (hold #13)
+16:32:12.064  guide_hud: overlay window shown (hold #14)
+16:32:16.142  guide_hud: overlay window shown (hold #16)
+16:32:17.425  hook: saw 100 key event(s) in the last 60s, 100 of them while the
+              Spaceadom window itself had focus
+```
+
+```
+16:36:37.053  guide_hud: overlay window shown (hold #60)
+16:36:47.421  hook: saw 59 key event(s) in the last 89s, 59 of them while the
+              Spaceadom window itself had focus
+```
+
+```
+16:42:16.782  guide_hud: overlay window shown (hold #62)
+16:42:17.425  hook: saw 20 key event(s) in the last 60s, 20 of them while the
+              Spaceadom window itself had focus
+```
+
+And the negative controls for the whole session: **zero** `NOT showing`,
+**zero** `OVERLAY_DISABLED`, **zero** `still starting`, and every
+`hook diagnostics` line reads `fullscreen-suppressed:0 bypass-suppressed:0 …
+excluded-app:0`. No Space-down was refused by any gate, anywhere, all session.
+`grep -n "exclusions:" debug.log | tail` shows the list has been empty since
+`2026-08-27 10:45:07.883 — exclusions: 0 app(s) excluded — []` and has never
+named `spaceadom`.
+
+**One caveat, recorded so nobody over-reads the numbers.** `KB_EVENTS_OWN_FG`'s
+numerator is tagged from `FG_IS_SELF`, which the watchdog refreshes on its
+1-second tick and which is therefore stale by up to ~3s (`hook/mod.rs`, the
+PROBLEM 134 comment). That is irrelevant for a 60-second 100-of-100 window and
+it is exactly why the new per-show line was added rather than this one being
+leaned on further.
+
+### Exact file — the instrument that makes this one line instead of an audit
+
+`src-tauri/src/guide_hud/mod_impl.rs`, in `show_hud_payload`, immediately after
+the existing show line (which stays — the window rules forbid removing it):
+
+```rust
+            if !abort_if_stale(epoch, Some(&win), "before show") {
+                let _ = win.show();
+                SHOW_OUTSTANDING.store(true, Ordering::SeqCst);
+                log::info!("guide_hud: overlay window shown (hold #{epoch})");
+                // PROBLEM 243 — say WHICH window the ring just landed over.
+                // Deliberately AFTER `show()`, so the query cannot delay the
+                // one thing the owner is waiting to see, and deliberately not
+                // a gate: nothing above this line has ever consulted the
+                // foreground, and nothing below it may start.
+                log_shown_over();
+            } else {
+```
+
+and the decision itself, split out PURE so it is testable without a desktop:
+
+```rust
+pub(crate) fn shown_over_phrase(fg_stem: &str, own_stem: &str) -> String {
+    let fg = fg_stem.trim();
+    if fg.is_empty() {
+        return "over a window whose process could not be read".to_string();
+    }
+    if !own_stem.trim().is_empty() && fg.eq_ignore_ascii_case(own_stem.trim()) {
+        return "over own window".to_string();
+    }
+    format!("over {fg}.exe")
+}
+
+fn log_shown_over() {
+    #[cfg(windows)]
+    {
+        let own = crate::hook::exclusions::own_stem();
+        let fg = unsafe { crate::hook::exclusions::foreground_stem() };
+        log::info!(
+            "guide_hud: shown {} — the ring is NOT gated on which app is in front. \
+             There is no own-window check anywhere on this path (PROBLEM 243): not in \
+             the hook's Space-down branch, not in the engine's SpaceDown arm, not here. \
+             If this line says \"over own window\" the requirement is met for that hold; \
+             if the ring was nonetheless invisible, suspect z-order or compositing, \
+             never a gate.",
+            shown_over_phrase(&fg, &own)
+        );
+    }
+}
+```
+
+`hook/exclusions.rs`'s `foreground_stem` changed from private to
+`pub(crate)` — one word — so the SAME normalisation the exclusion watcher uses
+answers this question too. A second copy of "what is the foreground exe called"
+would have been free to disagree with the first.
+
+**Why the Win32 call is legal here.** The keyboard laws ban
+`GetForegroundWindow` *in the hook callback* (PROBLEM 134/184), where it enters
+win32k and contends on USER32 state with the foreground app's own UI thread.
+This runs on the Tauri async runtime, after `win.show()` has returned, beside
+a `SetWindowPos`, a `SetWindowRgn` and a screen-pixel sample that
+`show_hud_payload` already makes.
+
+### Tap-still-types-a-space, inside our own dashboard, is the same code path
+
+The owner's second requirement — typing in the settings search box, a rename
+field or the emoji input must still get a normal space from a TAP. It does, and
+for the reason it does everywhere else: nothing on that path knows or cares
+what the foreground window is.
+
+- `hook/mod.rs`, SPACE UP: `if !SPACE_ABORTED { if !other_modifier_down() { inject_space(); } }`.
+  `SPACE_ABORTED` is set only by a combo, by the rollover branch, or by pointer
+  arming — never by a foreground test.
+- `hook/mod.rs` `inject_space()` — one `send_keys_raw` batch of VK_SPACE
+  down/up carrying our `dwExtraInfo` cookie, delivered to whatever has focus.
+- The rollover branch (`in_rollover`, `ROLLOVER_MS` = 200ms here) covers the
+  fast-typing case with `inject_space_then_key`, one ordered batch (law 2).
+- Frontend: **every** text-input `keydown` handler in the dashboard calls
+  `e.stopPropagation()` (so the panel's own Escape/Space chrome behaviour does
+  not fire while typing) and calls `preventDefault()` **only for Escape or
+  Enter** — never for Space. Checked one by one:
+  `settings-panel.ts:2332` (settings search), `settings-panel.ts:1254`
+  (app-exceptions search), `profile-editor.ts:676` (emoji input),
+  `profile-editor.ts:850` (profile RENAME field), `profile-editor.ts:1105`
+  (new-profile name), `key-detail-panel.ts:454` (app path). The document-level
+  handler at `settings-panel.ts:252` returns immediately unless the key is
+  Escape. So the injected space reaches the input normally.
+
+Session evidence: `space-dropped(modifier still held on release):0` and
+`typed-not-command(rollover):0` on every `hook diagnostics` line, with 100 own-
+window key events in the 16:32 window and no complaint.
+
+### How it was verified
+
+- `cargo test --lib` — **370 passed, 0 failed** (367 before; the three new ones
+  are `shown_over_tests`: our own dashboard is named as such in every case form
+  the stem arrives in, another app is named by its exe and a name that merely
+  *contains* ours is not us, and an unreadable foreground is never mistaken for
+  us in either direction). `cargo clippy --all-targets` exit 0, no warnings.
+  `npx tsc --noEmit` exit 0.
+- The log evidence above, read from the LIVE `%APPDATA%\Spaceadom\debug.log`
+  of the running installed 1.0.96 (that file tracks the real clock to the
+  second; `config.json` beside it is the shadowed one and was not read —
+  CLAUDE.md testing laws).
+- **NOT verified:** the new line itself has not appeared in a log, because
+  nothing was built or installed this pass (`NO version bump/build/install`).
+  The next installed build's first Space-hold inside the dashboard is what
+  proves it, with `grep "guide_hud: shown over" debug.log | tail`.
+
+### Generalise this
+
+**An instrument that answers a question about a MOMENT must be read at that
+moment.** The evidence above is sound only because the numerator equalled the
+denominator (100 of 100); in any other window, joining a point-in-time show to
+a 60-second aggregate is the exact trap `docs/IF-SHORTCUTS-DIE-AGAIN.md` warns
+about, and it is what nearly re-opened PROBLEM 230. One line stamped at the
+moment of the show removes the join instead of documenting how to do it safely.
+
+**And: write down the absence of a gate, not just the presence of a fix.**
+"No gate exists" is a finding with a cost — it took a full audit of ten sites
+to establish, and without this entry the next reader pays it again. This is the
+same rule CLAUDE.md states for wrong diagnoses ("when a fix turns out to be
+unnecessary … write that down too"), applied to a question that never had a
+fix at all.
+
+---
+
+## PROBLEM 244 — the dashboard's "remove the old copy" button DELETED THE RUNNING APP: `msiexec /X` against an "orphaned" entry removed that product's registered FILES, and they were `%LOCALAPPDATA%\Spaceadom\spaceadom.exe`
+
+**Symptom.** 2026-09-04, ~19:45, the owner's own machine, 1.0.97 running as
+pid 25760. He clicked "Remove the old copy" on the PROBLEM 238 banner. One UAC
+prompt, then the app was gone from the machine — no window, no tray icon, no
+exe at `%LOCALAPPDATA%\Spaceadom\`. `%APPDATA%\Spaceadom\config.json`
+(Roaming) was untouched. Reinstalling 1.0.97 restored everything.
+
+**The event log, which is the whole diagnosis.** Read from the agent shell —
+HKLM and the Application log are NOT virtualised for it; PROBLEM 143 is about
+`%LOCALAPPDATA%` and HKCU:
+
+```
+19:45:21  MsiInstaller     1040   Beginning a Windows Installer transaction:
+                                  {C68DC702-9414-421F-A3E4-12EDBBAD76C5}. Client Process Id: 2192
+19:45:21  RestartManager  10000   Starting session 0
+19:45:22  RestartManager  10010   Application 'C:\Users\beamu\AppData\Local\Spaceadom\spaceadom.exe'
+                                  (pid 25760) cannot be restarted - Application SID does not match Conductor SID
+19:45:22  RestartManager  10005   Machine restart is required
+19:45:22  RestartManager  10000   Starting session 1
+19:46:09  MsiInstaller    11724   Product: Spaceadom -- Removal completed successfully
+19:46:09  MsiInstaller     1034   Windows Installer removed the product. Product Name: Spaceadom.
+                                  Product Version: 1.0.94. Removal success or error status: 0
+19:46:09  MsiInstaller     1042   Ending a Windows Installer transaction: {C68DC702-...}
+```
+
+Read 10010 and 1034 together: the Restart Manager **could not close the running
+app**, said so out loud, and Windows Installer **deleted the product's files
+anyway**. `status 0`. From Windows' point of view nothing went wrong.
+
+**Root cause, in two halves.**
+
+*Half one — an MSI's file list can point at the live app.* `src-tauri/wix/main.wxs`
+(lines ~105-115) resolves `INSTALLDIR` from the registry before falling back to
+Program Files:
+
+```xml
+<Property Id="INSTALLDIR">
+  <RegistrySearch Id="PrevInstallDirNoName" Root="HKCU"
+                  Key="Software\\{{manufacturer}}\\{{product_name}}" Type="raw" />
+  <RegistrySearch Id="PrevInstallDirWithName" Root="HKCU"
+                  Key="Software\\{{manufacturer}}\\{{product_name}}" Name="InstallDir" Type="raw" />
+</Property>
+...
+<SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLDIR]" After="CostFinalize"/>
+```
+
+NSIS writes the per-user install directory into exactly that key. Measured on
+this machine: `HKCU\Software\Nur Ifran Arpon\Spaceadom` (default) =
+`C:\Users\beamu\AppData\Local\Spaceadom`. So a double-clicked `.msi` installs
+**into the folder the NSIS build is already living in**, registers those files
+as its own components, and stamps the ARP `InstallLocation` with the same path.
+That is the "strange" `InstallLocation` PROBLEM 238 audited and correctly
+flagged; what nobody worked out at the time is that it was strange *because the
+product genuinely owned those files*.
+
+The event log has exactly one genuine per-machine Spaceadom MSI install in its
+entire history, and it is the origin of `{C68DC702-…}`:
+
+```
+2026-08-30 15:09:16  1040  Beginning a Windows Installer transaction:
+  C:\Users\beamu\AppData\Local\Packages\5319275A.WhatsAppDesktop_cv1g1gvanyjgm\LocalState\
+  sessions\...\transfers\2026-35\Spaceadom_1.0.94_x64_en-US.msi.  Client Process Id: 69488
+2026-08-30 15:09:39  1033  installed the product ... Product Version: 1.0.94
+```
+
+An `.msi` shared over WhatsApp, run from the transfer folder. `C:\Program
+Files\Spaceadom` has never existed on this machine — which is why PROBLEM 129's
+Path 1 saw nothing, and why PROBLEM 238 had to exist at all.
+
+*Half two — `repair()` ran the Installer for a case that should never have
+touched it.* PROBLEM 238's own writeup called this out as a feature: *"`repair()`
+already handles removing an entry exactly like this — it enumerates HKLM
+Uninstall + WOW6432Node for `DisplayName -like '*Spaceadom*'` and runs
+`msiexec /X{GUID}` on every match — so the gap was a missing TRIGGER, not
+missing removal logic."* Every word is true and the conclusion is fatal. The
+2026-09-04 REVIEW FIXES then hardened the **file-deletion** path very
+thoroughly (`removal_target`, an eight-directory refusal test) and left the
+**msiexec** path alone, because msiexec was understood as "removing a registry
+entry". It is not. `msiexec /X` is a *product* uninstall: it removes whatever
+that product's component table says it owns, wherever that is.
+
+**Exact files.** `src-tauri/src/rival_install.rs` (the fix), `src/main.ts`
+(the banner copy), `scripts/install-real.cmd` + `scripts/preinstall-probe.ps1`
++ `scripts/postinstall-probe.ps1` + `scripts/install-proof.ps1` (the proof),
+`CLAUDE.md` (the two laws), `all-versions/WHAT-CHANGED.md` and
+`share-spaceadom/READ-ME-FIRST.txt` (a user-facing warning that was factually
+wrong).
+
+### The actual code
+
+**1. One pure function is now the only thing that can authorise Windows
+Installer.** It is deliberately not a boolean: the two arms are named after what
+they DO, so a caller cannot use one where it meant the other.
+
+```rust
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RemovalPlan {
+    RegistryOnly { reason: String },
+    MsiexecUninstall { dir: String },
+}
+
+#[cfg(windows)]
+pub(crate) fn plan_removal(
+    verdict: MsiEntryVerdict,
+    install_location: &str,
+    display_icon: &str,
+    uninstall_string: &str,
+    current_exe_dir: &str,
+) -> RemovalPlan {
+    if verdict != MsiEntryVerdict::RealSecondCopy {
+        return RemovalPlan::RegistryOnly {
+            reason: "a leftover uninstall registration with no separate copy behind it".to_string(),
+        };
+    }
+    let me = normalize_dir(current_exe_dir);
+    let loc = normalize_dir(install_location);
+    let candidates: [(&str, String); 3] = [
+        ("InstallLocation", loc.clone()),
+        ("DisplayIcon", dir_of_path_value(display_icon)),
+        ("UninstallString", dir_of_path_value(uninstall_string)),
+    ];
+    if loc.is_empty() {
+        return RemovalPlan::RegistryOnly { reason: "the entry records no InstallLocation, …".into() };
+    }
+    if !me.is_empty() {
+        for (field, dir) in candidates.iter() {
+            if dir.is_empty() { continue; }
+            if is_same_or_ancestor(std::path::Path::new(dir), std::path::Path::new(&me)) {
+                return RemovalPlan::RegistryOnly {
+                    reason: format!(
+                        "rival install: REFUSING msiexec /X for this product (PROBLEM 244) - its \
+                         registered install location is, or contains, the folder this copy is \
+                         running from. Field {field} says {dir:?}; we are running from {me:?}. …"
+                    ),
+                };
+            }
+        }
+    }
+    RemovalPlan::MsiexecUninstall { dir: loc }
+}
+```
+
+`is_same_or_ancestor` (already present from the REVIEW FIXES) compares
+COMPONENT-wise and case-insensitively, so `…\Local\Spaceadom\`,
+`…\local\spaceadom` and `…\AppData\Local` are all caught while a sibling
+`SpaceadomBeta` correctly is not. `normalize_dir` strips whitespace, quotes and
+trailing separators — the registry writes all three.
+
+**2. The registry-only arm.** No msiexec, no `Stop-Process`, no `Remove-Item`
+on any path. This is the whole point: the running app is never involved, so
+the Restart Manager is never invoked and there is nothing for it to fail to
+close.
+
+```rust
+RemovalPlan::RegistryOnly { reason } => {
+    if found.guid.trim().is_empty() { /* log::error!, return false — refuse to guess */ }
+    let guid = ps_quote(found.guid.trim());
+    let products_step = match packed_guid(&found.guid) {
+        Some(packed) => format!(
+            "Remove-Item 'HKLM:\\SOFTWARE\\Classes\\Installer\\Products\\{}' -Recurse -Force -EA SilentlyContinue; ",
+            ps_quote(&packed)),
+        None => String::new(),
+    };
+    log::info!("rival install: REGISTRY-ONLY removal (PROBLEM 244) - deleting the leftover \
+                uninstall registration and NOTHING else: no msiexec, no files touched, the \
+                running app is left alone. ProductCode {}, packed {:?}. Reason: {reason}", …);
+    format!(
+        "Remove-Item 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{guid}' -Recurse -Force -EA SilentlyContinue; \
+         Remove-Item 'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{guid}' -Recurse -Force -EA SilentlyContinue; \
+         {products_step}")
+}
+```
+
+The ProductCode reaches `repair()` because `detect()` now returns a struct
+(`Finding`) carrying `guid`, `install_location`, `display_icon` and
+`uninstall_string` alongside the old `(path, version, kind)`. Before this it
+returned only `(String, String)` and `repair()` re-derived everything by
+enumerating HKLM on `DisplayName` — which is how a removal aimed at ONE entry
+reached every Spaceadom-named product on the machine.
+
+**3. The packed ("squished") GUID**, because
+`HKLM\SOFTWARE\Classes\Installer\Products` does not key on the readable form.
+Groups 1-3 reversed whole; groups 4 and 5 with each byte pair swapped:
+
+```rust
+pub(crate) fn packed_guid(guid: &str) -> Option<String>   // {…} optional, hex validated
+pub(crate) fn unpack_guid(packed: &str) -> Option<String> // the inverse, so it can be tested
+```
+
+Pinned by the canonical Windows Installer example
+`{01234567-89AB-CDEF-0123-456789ABCDEF}` → `76543210BA98FEDC1032547698BADCFE`,
+and by this incident's own
+`{C68DC702-9414-421F-A3E4-12EDBBAD76C5}` → `207CD86C4149F1243A4E21DEBBDA675C`.
+Rubbish in returns `None` rather than a half-converted key path.
+
+**4. When msiexec IS allowed, three tightenings.** `MSIRESTARTMANAGERCONTROL=Disable`
+so the Restart Manager can never be sent after us; `REBOOT=ReallySuppress` so a
+refused close cannot schedule a reboot-time file swap (PROBLEM 127's family);
+and the enumeration now matches the vetted directory, not just the name:
+
+```powershell
+$t = '<vetted dir>'.TrimEnd('\');
+... if ($p.DisplayName -eq 'Spaceadom' -and $p.InstallLocation -and
+        $p.InstallLocation.TrimEnd('\') -ieq $t) {
+      Start-Process msiexec.exe -ArgumentList "/X$($_.PSChildName)",'/qn','/norestart',
+        'REBOOT=ReallySuppress','MSIRESTARTMANAGERCONTROL=Disable' -Wait }
+```
+
+The REVIEW FIXES had already narrowed `-like '*Spaceadom*'` to `-eq 'Spaceadom'`.
+That was necessary and insufficient: the entry that killed the app WAS named
+exactly "Spaceadom". **Removal must never be broader than the ONE thing
+detection identified** — not merely narrower than it used to be.
+
+**5. The banner, `src/main.ts::checkRivalInstall()`.** For `orphaned_entry`:
+
+> An old installer entry is left over. Nothing is running twice, but Programs
+> and Features lists Spaceadom twice. **This only removes the leftover entry
+> from Programs and Features. Your app and settings are not touched.**
+
+Button label `"Remove the leftover entry"` (was "Remove the old copy" — there
+was no old copy), and a matching success toast. The `second_copy` branch is
+byte-identical to before.
+
+**6. A corrected GUID.** PROBLEM 238's writeup and this file's test constant
+both carried `{C68DC702-9414-421F-A3E4-12EDBBADD76C5}` — one `D` too many. The
+1040/1042 pair names the real ProductCode, `…-12EDBBAD76C5`, and that is what
+`msiexec` was handed. The source constant is corrected with a comment saying
+why; the old spelling is recorded here rather than quietly erased.
+
+### Unit tests (all pure — no registry, no filesystem)
+
+* `the_2026_09_04_incident_entry_is_registry_only_and_can_never_reach_msiexec` —
+  the three audited registry values verbatim; asserts `OrphanedEntry` **and**
+  `RegistryOnly`.
+* `a_genuine_program_files_second_copy_may_still_be_uninstalled_with_msiexec` —
+  PROBLEM 129's shape still works; the fix has not traded one fault for another.
+* `an_install_location_that_is_a_parent_of_the_live_directory_is_refused` —
+  four ancestors of the live folder, up to `C:\`.
+* `a_trailing_backslash_or_a_different_case_still_resolves_to_our_own_directory` —
+  five spellings of the live folder, plus a `SpaceadomBeta` sibling that is
+  correctly NOT us.
+* `a_display_icon_or_uninstall_path_inside_our_folder_also_refuses_msiexec` —
+  and a control where both fields point elsewhere and the same entry IS allowed,
+  so the refusals are caused by the paths and not by the fields being present.
+* `an_entry_with_no_install_location_is_registry_only`.
+* `a_directory_is_only_taken_from_a_value_that_really_is_a_path` — icon index
+  suffix, quoted command with arguments, and `MsiExec.exe /X{GUID}` → `""`.
+* `the_packed_product_code_matches_the_canonical_example_and_round_trips`.
+
+### How it was verified
+
+`cargo test --lib` **378 passed / 0 failed / 5 ignored** (was 370).
+`cargo clippy --all-targets -- -D warnings` exit 0. `npx tsc --noEmit` exit 0.
+
+**Shipped as 1.0.98** and installed per-user through `explorer.exe`
+(PROBLEM 143). Installed exe 1.0.98 / 19,825,152 bytes / written 21:01:26
+against a 1.0.97 / 19,681,280 / 19:20:24 baseline; PID 46108 booted from
+`%LOCALAPPDATA%\Spaceadom\spaceadom.exe` at 21:03:44; startup 1596 ms; overlay
+alive; hook installed; `rival install: no second copy found` exactly once.
+Both new Rust markers **False in the installed 1.0.97, True in the fresh build,
+True in the installed 1.0.98**; the frontend sentence measured absent from
+`dist2\assets` while those files were still 1.0.97's and present after.
+`config.json` SHA-256 identical either side of the install
+(`6E3D5BD5…E900FC3`, 77,882 bytes, 5 profiles). **MsiInstaller and
+RestartManager events inside the install window: 0**, against a control of 20
+in the preceding two hours. Full numbers in PROJECT_STATUS.md, 2026-09-04 (night).
+
+**NOT verified: `repair()` itself.** The orphaned entry is gone from this
+machine — the 19:45 `/X` removed it — so there is nothing left to run the new
+path against. The registry-only script, the packed-GUID key path and the
+msiexec refusal are proved by unit test and by reading the composed PowerShell,
+not by execution.
+
+### A measurement trap this cleared up on the way
+
+The incident report also carried a suspicion that *something ran the `.msi`
+during the 1.0.97 ship*, because MsiInstaller 1033 "installed the product
+Spaceadom 1.0.97" is logged at 19:20:50, 21 s before the NSIS install. It is
+**disproved**. Building the `.msi` writes that event: WiX's `light.exe`
+validates the package it has just written by running it through the Windows
+Installer engine. Across 45 versions every Spaceadom 1033 lands 5-10 s after
+the corresponding `.msi` file's own mtime (1.0.94 +6 s, 1.0.95 +6 s, 1.0.96
++5 s, 1.0.97 +7 s), on days nothing was installed — and the controlled version:
+building 1.0.98 tonight wrote the `.msi` at 21:01:52 and logged
+11707 + 1033 "installed the product Spaceadom 1.0.98" at 21:02:00, with no
+install performed.
+
+**The tell is the transaction pair.** A genuine install or uninstall is
+bracketed by 1040 "Beginning a Windows Installer transaction" and 1042
+"Ending…", naming the `.msi` path or the ProductCode. Every real event on this
+machine has it — the WhatsApp install, the GameInput installs, the 19:45 `/X`.
+**Every build-time 1033 has neither.** No ship step runs the `.msi`: audited
+directly in `scripts/install-real.cmd` (runs `%SETUP%`, the NSIS setup.exe, and
+nothing else), `scripts/archive-build.mjs` (`copyFileSync` only, wired as
+`posttauri`), `tauri.conf.json` (no `afterBundleCommand` exists) and the
+read-only probes. Recorded in CLAUDE.md so nobody spends the hour again.
+
+### Generalise this
+
+**An uninstaller is aimed by the thing being uninstalled.** `msiexec /X{GUID}`
+does not remove "an entry"; it removes whatever that product's component table
+claims, and the table was written by an installer you did not run, at a path
+chosen by a registry lookup you did not control. Any removal whose target is
+described by the artefact being removed needs an independent check against
+something you DO control — here, `current_exe()`.
+
+**Hardening one dangerous path does not harden the operation.** The REVIEW
+FIXES built a thorough guard for `Remove-Item -Recurse -Force` and left
+`msiexec` beside it untouched, because msiexec did not *look* like a file
+operation. Both were destructive; only one was treated as such. When a function
+has two ways to destroy something, a guard on one is a guard on neither.
+
+**A word in a log is not the event it names.** "Windows Installer **installed**
+the product" is written by a build. "Removal completed **successfully**" is
+written after failing to close the app it was deleting. Both are accurate about
+the API and misleading about the world. Find the structural signal — here, the
+1040/1042 transaction pair — and read that instead.
+
+**Say what a destructive button will do, in the sentence next to it.** "Remove
+the old copy" was true of the case the banner was designed for and false of the
+case it fired on. The copy now names the scope ("only the leftover entry") and
+the exclusion ("your app and settings are not touched"), which is the same
+information the code enforces — so a future change that breaks one is visibly
+inconsistent with the other.
+
+
+---
+
+
+### REVIEW FIXES 2026-09-05 (MEDIUM) — the removal guard checked one direction of containment out of two
+
+`removal_target` is the pure, unit-tested gate on what may be handed to an
+elevated `Remove-Item -Recurse -Force`. Rule 3 refused a target that IS, or is
+an ANCESTOR of, the live install directory — which catches the catastrophic case
+(`C:\Program Files` as the target) and misses the merely destructive one: a
+target INSIDE the live install, such as `%LOCALAPPDATA%\Spaceadom\Spaceadom`.
+
+An `InstallLocation` is written by whatever wrote it and is never validated
+against reality, so a stale entry naming a subfolder of our own directory is
+reachable — and a recursive delete there removes part of the running app, which
+is the 2026-09-04 incident with a smaller blast radius.
+
+```rust
+// AFTER — both directions, with different sentences so the log says which
+let mine = std::path::Path::new(me);
+if is_same_or_ancestor(p, mine) {
+    return Err(format!("{dir:?} IS, or contains, the directory this copy ... is running from ..."));
+}
+if is_same_or_ancestor(mine, p) {
+    return Err(format!("{dir:?} is INSIDE the directory this copy ... is running from ({me:?}) \
+                        — a recursive delete there removes part of the running app; refusing"));
+}
+```
+
+Test: `the_removal_guard_refuses_a_descendant_of_our_own_directory`, over three
+nesting depths and a case-insensitive variant, asserting the refusal SAYS which
+containment it caught — and that the legitimate case (a different install of the
+same name, in a different tree) is still removable, because that is the job.
+
+**Generalise this.** *A containment guard has two directions, and writing one of
+them reads as having written both.*
+
+### REVIEW FIXES 2026-09-05 (MEDIUM) — a "not yet wired" comment that had been false since PROBLEM 238
+
+`rival_install::status_kind`'s doc ended "Not yet wired to a Tauri command or
+the dashboard: see this module's doc comment / the handoff notes for the exact
+frontend change needed." Grepped: it is wired in three places —
+`commands.rs:1108` returns it as the fourth element of the rival status tuple,
+`src/main.ts:1289` switches the banner text on it, and `diagnostics.rs` puts it
+in `system.txt`. The comment now says so, and says that it was stale.
+
+A stale "not wired yet" is worse than no note: it is the sentence that sends the
+next reader off to build something that already exists. This project has paid
+for that once already — a solved problem was re-solved because a note recorded a
+failure without recording the condition it failed under.
+
+## PROBLEM 245 — the app installs its own updates: check daily, install silently, relaunch, and NEVER feed an NSIS install the .msi (built 1.0.99, proved 1.0.99 → 1.0.100 on 2026-09-04)
+
+**Symptom.** Every release so far reached a user only if the user went to
+the releases page, downloaded a file, ran it and answered SmartScreen — and
+PROBLEM 127/129/244 all began with someone running the *wrong* installer over
+an existing copy. The owner's decision (final): updates check once a day and
+once at launch, install SILENTLY with no prompt, everyone gets a release at the
+same moment through GitHub Releases, both installers keep shipping.
+
+**Root cause (of the risk, not of a bug).** Two installers of different kinds
+ship for one app. The per-user `setup.exe` (NSIS, `%LOCALAPPDATA%\Spaceadom`)
+and the per-machine `.msi` (WiX, Program Files) cannot see each other's
+registration, and the `.msi` resolves `INSTALLDIR` from the HKCU key NSIS
+writes — so an NSIS copy "updated" with the `.msi` produces PROBLEM 129 (two
+copies both hooking the spacebar) or PROBLEM 244 (the `.msi` adopts the live
+folder; a later uninstall deletes the running app). An auto-updater that picks
+"the" installer picks the wrong one for half its users. **An install may only
+ever be updated by the same kind of installer that made it.**
+
+**Exact files.**
+
+| File | What |
+| --- | --- |
+| `src-tauri/src/updater.rs` | NEW. Detection, endpoint choice, the check thread, the plugin drive, the "Updated to" notice. 9 unit tests. |
+| `src-tauri/Cargo.toml` | `tauri-plugin-updater = "=2.11.0"` (pinned; newest stable 2026-09-04). NOT `tauri-plugin-process` — see "relaunch" below. |
+| `src-tauri/tauri.conf.json` | `bundle.createUpdaterArtifacts: true` (writes `.sig` beside each installer); `plugins.updater` = `pubkey`, `endpoints` (NSIS manifest), `windows.installMode: "quiet"`. |
+| `src-tauri/src/lib.rs` | `mod updater;` `.plugin(tauri_plugin_updater::Builder::new().build())`, `commands::get_update_notice`, and after the PROBLEM 215 window split: `updater::record_launch_version(...)`; `updater::schedule(app_handle.clone())`. |
+| `src-tauri/src/commands.rs` | `get_update_notice(window)` — answers only while the window is visible. |
+| `src-tauri/src/config/schema.rs` | `auto_update: bool`, `#[serde(default = "default_true")]`, `Default` true, test on both paths + explicit false. No Settings row (owner: no switches). |
+| `src-tauri/src/telemetry.rs` | `log_filter` drops the `tauri_plugin_updater` target: a failed fetch is not a crash report. |
+| `src-tauri/src/rival_install.rs` | `is_msiexec_uninstall` made `pub(crate)` (reused). |
+| `src/main.ts` | asks `get_update_notice` at boot and on every `visibilitychange`/`focus`; shows `Updated to 1.0.X` as a 6 s toast. |
+| `scripts/write-updater-manifests.ps1` | NEW. Writes `latest.json` (setup.exe) and `latest-msi.json` (.msi) from the `.sig` files. Used by CI AND the local proof. |
+| `.github/workflows/release.yml` | fail-loud check of the two signing secrets; `TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)` into tauri-action's env; `uploadUpdaterJson: false`; a "Publish the updater manifests" step that runs the script, uploads both with `gh release upload --clobber`, and asserts all four assets exist. |
+| `.gitignore` | `src-tauri/.tauri/` (private key, its password file, the .pub). |
+| `scripts/install-proof.ps1`, `scripts/preinstall-probe.ps1` | four new updater markers (both halves measured, below). |
+
+**Design.**
+
+*How this copy was installed* — `classify_install(has_uninstall_exe,
+msi_registration_dir, exe_dir)`, pure, tested:
+
+```rust
+if has_uninstall_exe { return InstallKind::Nsis; }          // NSIS writes it, WiX never does
+if let Some(dir) = msi_registration_dir {                    // HKLM Uninstall\* with DisplayName
+    if same_dir(dir, exe_dir) { return InstallKind::Msi; }   // "Spaceadom", MsiExec /X, InstallLocation
+}                                                            // == this exe's folder (both roots, never HKCU)
+InstallKind::Unknown                                          // target\release, a copied folder: never updated
+```
+
+`uninstall.exe` wins over an MSI registration on purpose: PROBLEM 244's state
+is exactly "an MSI product registered for the NSIS folder", and there the
+FILES were written by NSIS. `tauri::utils::platform::bundle_type()` is logged
+beside the verdict as a second opinion — the bundler patches
+`__TAURI_BUNDLE_TYPE` into the exe and on this machine it agreed
+(`Some(Nsis)`) — but the decision is ours, from disk.
+
+*Which manifest* — `plan(kind, override)`:
+
+| kind | result |
+| --- | --- |
+| Nsis | `https://github.com/nur-arpon/Spaceadom/releases/latest/download/latest.json` |
+| Msi | **Skip.** `MSI_AUTO_UPDATE = false`. A per-machine `.msi` needs elevation and Windows Installer shows NO UAC prompt in `/quiet` — a non-elevated `msiexec /i … /quiet` of a per-machine package fails outright (this account is a standard user; the app does not elevate, PROBLEM 61). "Silent, no prompt, per-machine" cannot all hold. The log says why. CI still publishes `latest-msi.json`. |
+| Unknown | Skip, logged. |
+
+`releases/latest/download/<asset>` is GitHub's stable redirect to the newest
+non-prerelease release, so the app never needs a version number to find the
+next one. The URLs *inside* the manifests are the release's own
+`releases/download/<tag>/<file>` links.
+
+*The drive* — the whole chain in `check_and_install`:
+
+```rust
+let mut builder = app.updater_builder()
+    .endpoints(vec![parsed])?                 // chosen above; config's endpoint is the NSIS one anyway
+    .timeout(HTTP_TIMEOUT)                    // 60 s
+    .installer_args(["--autostart"])          // appended AFTER `/ARGS` -> becomes the relaunched app's argv
+    .on_before_exit(move || { crate::hook::stop_hook(); exit_handle.cleanup_before_exit(); });
+if dev_override { builder = builder.configure_client(|c| c.danger_accept_invalid_certs(true)); }
+let updater = builder.build()?;
+let Some(update) = updater.check().await? else { /* "no update" */ return Ok(()); };
+let bytes = update.download(progress, done).await?;   // into memory; minisign-verified against plugins.updater.pubkey
+update.install(bytes)?;                               // ShellExecuteW(installer) then std::process::exit(0)
+```
+
+What the plugin runs (2.11.0, `updater.rs::updater_parameters`, `installMode:
+"quiet"`): `Spaceadom-1.0.100-installer.exe /S /UPDATE /R /ARGS --autostart`.
+`/S` silent, `/UPDATE` = Tauri's NSIS script skips shortcut creation and
+data removal, `/R` = relaunch when done, `/ARGS` = what to relaunch with.
+Detection of NSIS vs MSI *inside the plugin* is by magic bytes (`infer`), so
+serving the right file is all that matters.
+
+*Why the relaunch comes back* (PROBLEM 233 said `AppHandle::restart()` never
+does here — it spawns before it exits and single-instance kills the newcomer).
+The order is inverted by construction: the plugin calls `exit(0)` right after
+`ShellExecuteW` returns, the installer's PREINSTALL hook (`installer-hooks.nsh`,
+PROBLEM 127) runs `taskkill /F /T /IM spaceadom.exe` and sleeps 1.5 s, copies
+the files, and only then `/R` starts the new exe. Measured: exit logged at
+22:08:17.156, new process's first log line at 22:08:22.120 — 5.0 s, mutex long
+released. `on_before_exit` runs before the installer is even launched and
+stops the hook the way the tray's Exit does. Config needs no flush — every
+change is written when made. This is why `tauri-plugin-process` was NOT
+added: its only job is the JS `relaunch()`, which IS `AppHandle::restart()`.
+
+*Quiet relaunch.* `--autostart` on the relaunched process means hook and
+engine live at once, windows after the 10 s settle, **no dashboard popping up
+at whatever hour the daily check fired**. Measured: `setup: autostart launch —
+staying in the tray, dashboard not shown`. Cost: the `/ARGS` value is
+`<current args> --autostart`, so an autostarted session relaunches with the
+flag twice; harmless (`args.iter().any`).
+
+*Scheduling.* Thread `st-updater`: sleep 15 s (past the 10 s settle), check,
+then sleep 24 h, repeat. `tauri::async_runtime::block_on` inside that thread;
+never the main thread. Every failure (offline, 404, bad manifest, bad
+signature) is one WARN line and nothing else. The plugin ALSO logs an ERROR on
+a failed fetch — `log_filter` now drops the `tauri_plugin_updater` target so
+that does not become a Sentry event from every copy, daily (one did get sent,
+22:02:21, before the filter existed).
+
+*"Updated to 1.0.X".* `%APPDATA%\Spaceadom\last-run-version.txt` holds the
+version that last *showed* the dashboard. A launch with a different version
+holds the notice in memory; `get_update_notice` returns it only when the
+asking window `is_visible()`, then records the version. NOT a config.json
+field: the proof compares config's SHA-256 across the update, and a version
+stamp in it would defeat that. **Measurement trap, run 1:** the `--autostart`
+relaunch builds the dashboard webview hidden, its page still booted and asked,
+and the toast was consumed at 22:08:34 by a window nobody could see. The
+`is_visible()` guard + re-asking on `visibilitychange`/`focus` is the fix;
+1.0.100 was rebuilt and the proof re-run.
+
+*Signing.* `npx tauri signer generate -w src-tauri/.tauri/spaceadom.key -p <pw>
+--ci` (password random, 32 bytes, kept ONLY in the ignored
+`spaceadom.key.password.txt`). Ignore rule added and `git check-ignore`
+verified BEFORE generating. A sign probe (`tauri signer sign -f <key> -p <pw>
+file`; note `-k` takes the key STRING, `-f` the path) proved the pair before
+upload. `gh secret set TAURI_SIGNING_PRIVATE_KEY < spaceadom.key` and
+`…_PASSWORD < spaceadom.key.password.txt`. The public key is in
+`tauri.conf.json` and was confirmed present in the built exe by ASCII scan.
+**Losing the private key means no existing install can ever accept an update
+again.** The 1.0.99 exe grew 19.8 → 21.2 MB and the setup.exe 5.6 → 8.35 MB
+(reqwest + rustls + minisign).
+
+*Dev override.* A file `st-updater-endpoint.txt` beside the exe: first line =
+manifest URL; while it exists the client accepts a self-signed certificate.
+Chosen over an env var (a Run-key launch inherits no shell) and over a config
+key (the file lives where only someone who can already replace the exe can
+write). The shipped config keeps `dangerousInsecureTransportProtocol` OFF —
+`validate_endpoints` has no localhost exemption, so the local proof ran over
+HTTPS with an openssl self-signed cert. The kind gate still applies with the
+override on.
+
+**How it was verified — all from OUTSIDE the agent's container (PROBLEM 143:
+every install, every snapshot and the loopback probe were explorer-launched).**
+
+Baseline (22:58): installed 1.0.98, PID 30104 (`--autostart`), config
+77,889 B SHA-256 `CD0C7CC0…5341552`, no `last-run-version.txt`, HKLM
+Spaceadom entries 0, `uninstall.exe` beside the exe.
+
+Step 1, 1.0.99 (the updater ships, no manifest exists yet):
+- fresh `target\release\spaceadom.exe` 1.0.99, 21,205,504 B: four new
+  markers True (`updater: install kind decided`, ` for a release newer than `,
+  `escape hatch, PROBLEM 245)`, `installing SILENTLY now (setup.exe /S
+  /UPDATE /R /ARGS`), pubkey True. Installed 1.0.98 baseline via
+  `preinstall-probe.cmd`: 8 controls True, the same four False. Both halves.
+- `install-real.cmd` 22:01:56: version 1.0.99, all 12 markers True, exe newer
+  than dist2, PID 14192. Log: `scheduled — first check in 15s` at 22:02:04.879
+  → `install kind decided — Nsis (uninstall.exe beside the exe: true; MSI
+  product registered for this folder: None; … bundle_type: Some(Nsis))` at
+  22:02:19.883 (15.0 s later) → `checking https://github.com/nur-arpon/
+  Spaceadom/releases/latest/download/latest.json` → plugin ERROR "did not
+  respond with a successful status code" (404 — no signed release exists) →
+  `check failed, silent to the user`. Nothing else happened. Config SHA
+  unchanged. `last-run-version.txt` = 1.0.99, no toast (first record).
+
+Step 2, 1.0.100 served locally:
+- positive control: `curl -k https://127.0.0.1:8765/ping.txt` from an
+  explorer-launched cmd → HTTP 200, server log shows `ua=curl/8.21.0`.
+- `write-updater-manifests.ps1` (the CI script) against the local bundle:
+  `latest.json → …_x64-setup.exe (8,354,617 B, sig 424 chars)`,
+  `latest-msi.json → …_en-US.msi (13,418,496 B)`, cross-check passed.
+- `arm-override.cmd` 22:07:57: override written, `window-start` stamped,
+  1.0.99 restarted (manual launch, no args) at 22:08:01.
+- Log, one continuous chain: 22:08:17.094 kind Nsis → `DEV OVERRIDE in effect`
+  → `checking https://127.0.0.1:8765/latest.json for a release newer than
+  1.0.99` → `UPDATE AVAILABLE — 1.0.100 is newer than the running 1.0.99` →
+  download 25/50/75/100 % → `8354617 bytes downloaded and the minisign
+  signature verified … installing SILENTLY now (setup.exe /S /UPDATE /R /ARGS
+  --autostart)` at 22:08:17.153 → `on_before_exit` 22:08:17.156 →
+  **22:08:22.120 `Spaceadom starting`**, `autostart launch`, `first launch of
+  1.0.100 after 1.0.99` → 22:08:32 `staying in the tray, dashboard not shown`
+  → 22:08:37 its own first check: `no update — 1.0.100 is the newest release`.
+- Server log: `GET /latest.json` and `GET /Spaceadom_1.0.100_x64-setup.exe
+  (8354617 bytes, ua=tauri-plugin-updater/2.11.0)` at 12:08:17Z, `GET
+  /latest.json` again at 12:08:37Z.
+- Snapshot 22:09:13: exe **1.0.100**, 21,191,168 B; **PID 35640** (was 14192),
+  cmdline `… --autostart`; **config SHA-256 `CD0C7CC0…5341552` — unchanged**,
+  mtime 21:23:43 untouched; `last-run-version.txt` 1.0.100; HKCU
+  `DisplayVersion=1.0.100`; Run key intact; **MsiInstaller events since
+  22:07:58: 0**; HKLM Spaceadom entries 0; exactly one process.
+
+Run 2, 22:14 — a NEGATIVE worth keeping. The staging script failed to parse
+under Windows PowerShell 5.1 (an em dash in a string; pwsh 7 had been
+fine), so the server held the rebuilt installer with the OLD signature. The
+installed 1.0.99 fetched it, downloaded all 8,353,079 bytes and logged
+`check failed … The signature verification failed` — nothing installed,
+same PID 14892, config untouched, MsiInstaller 0. **That is the
+bad-signature path, measured: a wrong `.sig` is refused after the download,
+before anything runs.** `write-updater-manifests.ps1` is pure ASCII now.
+
+Run 3, 22:16 — rebuilt 1.0.100 (21,193,216 B; setup.exe 8,353,079 B), the
+toast fix in: kind Nsis 22:16:46.244 → UPDATE AVAILABLE → signature verified
+→ `on_before_exit` 22:16:46.297 → new process 22:16:51.371 (PID 49328,
+`--autostart`, 5.07 s) → `first launch of 1.0.100 after 1.0.99` → windows
+built hidden 22:17:02 → **snapshot 22:17:42: `last-run-version.txt` still
+1.0.99 — the hidden dashboard did NOT consume the notice** → 22:17:55
+`front-dashboard.cmd` (a second manual launch; single-instance fronts the
+window) → 22:17:55.106 `'Updated to 1.0.100' handed to the dashboard and
+recorded`. Config SHA unchanged, MsiInstaller 0, HKLM 0, one process.
+
+**What was NOT exercised.** The MSI leg (deliberately off — exercising it
+here would have needed elevation and would have left the machine in the
+PROBLEM 129/244 shape); a real GitHub release (the owner tags; nothing else
+is needed — secrets are set); the 24 h repeat (the loop is `sleep(24h)` after
+the same `run_check`; the 15 s first-fire and the immediate re-check after
+relaunch are what was measured); an offline check (the 404 path was).
+
+**Generalise this.** Two things. (1) *A silent mode has no channel for a
+question.* Restart Manager's "files in use" (PROBLEM 127) and UAC's consent
+prompt (the MSI leg here) are the same failure: the design assumed someone
+would answer, and `/S` / `/quiet` guarantees nobody will. Either remove the
+question (kill the app first; per-user install needs no elevation) or do not
+call the path silent. (2) *A window that can boot its page while hidden will
+consume one-shot UI.* Anything "show once" must check visibility on the
+Rust side, not trust that a page running means a page seen.
+
+**Measurement traps met on the way.** A PowerShell script with a non-ASCII
+character and no BOM parses under pwsh 7 and FAILS under Windows PowerShell
+5.1 (`powershell -File` reads it as ANSI) — keep shared scripts ASCII.
+`explorer.exe <script> <arg>` treats
+the whole string as one path and runs nothing — pass parameters through a
+file. Long heredocs in the agent's shell were mangled (`\r\n` became literal
+newlines) — write scripts with the file tool. A `.NET` `WriteAllText` from
+PowerShell uses the *process* cwd, not `Set-Location`'s — the first key was
+generated with a password whose file never landed; regenerated with `-f`.
+
+---
+
+
+### REVIEW FIXES 2026-09-05 (H5) — a successful update was recorded as a startup crash
+
+**Symptom.** Three days of successful silent self-updates, and the fourth launch
+comes up in safe mode with no keyboard hook, blaming three crashes that never
+happened.
+
+**Root cause.** `FIRST_CHECK_DELAY` is 15 seconds and `safe_mode::HEALTHY_AFTER`
+is 30, so an update installs squarely inside the health window. Every one of the
+updater's three deliberate exits leaves by a route that produces **no
+`RunEvent::Exit` and no `WM_ENDSESSION`**, which are the only two events that
+reach `safe_mode::note_clean_exit()`:
+
+| Leg | How it exits |
+| --- | --- |
+| NSIS update | `tauri-plugin-updater` calls `on_before_exit` and then `std::process::exit(0)` itself |
+| NSIS rollback | `run_nsis_installer` calls `std::process::exit(0)` after spawning the installer |
+| MSI update / rollback | `util:CloseApplication` terminates this process mid-`msiexec` wait |
+
+So the launch's `+1` stayed on disk every time.
+
+**Exact file.** `src-tauri/src/updater.rs`.
+
+**The code.** Three calls, each placed where it cannot fire for a leg that did
+NOT happen:
+
+```rust
+// 1. the NSIS update leg — inside on_before_exit, which the plugin invokes
+//    immediately before its own process::exit(0). Deliberately NOT beside
+//    `update.install(bytes)`, which can also return an error.
+.on_before_exit(move || {
+    crate::hook::stop_hook();
+    crate::safe_mode::note_clean_exit();
+    exit_handle.cleanup_before_exit();
+});
+
+// 2. the NSIS rollback leg — after the installer has actually spawned, so the
+//    Err arm (nothing happened, the app carries on) leaves the counter alone.
+crate::hook::stop_hook();
+crate::safe_mode::note_clean_exit();
+app.cleanup_before_exit();
+std::process::exit(0);
+
+// 3. the MSI leg — BEFORE msiexec starts, because on the success path this
+//    process does not get another chance.
+crate::safe_mode::note_clean_exit();
+let status = std::process::Command::new(&msiexec).raw_arg(params).status();
+```
+
+The MSI placement has a bounded, named cost: a DECLINED UAC prompt (1602) leaves
+this process alive with its increment already undone, so a genuine crash later
+in the same 30-second window goes unrecorded. That is the right way round — an
+update attempt is not a startup crash, and the next launch counts normally.
+
+`wix/main.wxs`'s `EndSessionMessage="yes"` (see PROBLEM 246's H2 entry) is the
+other half of the MSI case: it makes `util:CloseApplication` send
+`WM_QUERYENDSESSION`/`WM_ENDSESSION`, which `session_end.rs` already owns.
+
+**How it was verified.** `a_self_update_that_exits_the_process_is_never_a_startup_crash`
+in `safe_mode::tests` drives the pure counter path over three consecutive
+`CleanExitEarly` launches and asserts the fourth is normal, plus that a machine
+with 2 real failures behind it keeps exactly those 2. **No update was
+performed**; nothing was installed.
+
+### REVIEW FIXES 2026-09-05 (MEDIUM) — `classify_install` could answer `Msi` for a copy living in the user profile
+
+`(has_uninstall_exe = false, msi_registration_dir = Some(NSIS_DIR), exe_dir =
+NSIS_DIR)` returned `InstallKind::Msi`. `uninstall.exe` is a FILE — deletable,
+and absent from every half-uninstalled or hand-copied NSIS folder — so this is
+reachable, and it is PROBLEM 244's exact shape: an MSI product registered for
+the per-user folder. Answering `Msi` points the updater at `latest-msi.json`
+and, eventually, `msiexec` at `%LOCALAPPDATA%\Spaceadom`.
+
+A per-machine `.msi` installs under Program Files. Two independent checks now
+refuse:
+
+```rust
+// pure, inside classify_install — testable without a machine
+if is_per_user_location(exe_dir) {
+    return InstallKind::Unknown;
+}
+
+pub(crate) fn is_per_user_location(dir: &str) -> bool {
+    let d = dir.trim().trim_matches('"').replace('/', "\\").to_ascii_lowercase();
+    d.contains("\\users\\") || d.contains("\\appdata\\")
+}
+```
+
+plus, in `detect_install_kind`, an environment-based prefix test against
+`%LOCALAPPDATA%` / `%APPDATA%` / `%USERPROFILE%` that catches a profile root
+which is not under `\Users\` at all (`D:\Profiles\bob`). Both log; either is
+enough; the verdict degrades to `Unknown`, which means "never updated" — the
+safe end of the three.
+
+Tests: `an_msi_registration_inside_the_user_profile_is_never_an_msi_install`
+(the reviewer's exact triple) and `per_user_locations_are_recognised_by_shape`,
+which pins that `C:\Program Files\MyUsersApp` is NOT a per-user location — the
+segment has to be a path component, not a substring.
+
+### REVIEW FIXES 2026-09-05 (MEDIUM) — the dev endpoint override is a debug-build feature now
+
+`st-updater-endpoint.txt` beside the exe replaces the manifest URL **and** turns
+on `danger_accept_invalid_certs`. In a release build that pair is a
+remote-code-execution primitive keyed by a text file, in a directory
+(`%LOCALAPPDATA%\Spaceadom`) that anything running as this user can write.
+The minisign signature is still checked, so a payload cannot actually be
+installed — but "one more control has to fail" is not "this cannot happen".
+
+`read_override()` now returns `None` unless `cfg!(debug_assertions)`.
+`cfg!` rather than `#[cfg]` so the function still type-checks and is still
+compiled in release.
+
+**THIS CHANGES A DOCUMENTED PROCEDURE.** CLAUDE.md's "To test an update
+locally" recipe drops this file beside an INSTALLED (release) exe, and a release
+build now ignores it. That test needs a debug build, or the gate temporarily
+removed and put back. Written down here because a silently-dead override reads
+as "the updater is broken".
+
+## PROBLEM 247 — uninstalling always kept every setting silently and gave no way to change your mind; now it asks, and a silent or self-update uninstall can never be asked (built, NOT installed on this machine)
+
+**Symptom / owner decision.** Since PROBLEM 126, `NSIS_HOOK_PREUNINSTALL`
+removed the autostart Scheduled Task and both HKCU Run values on every
+uninstall, but `%APPDATA%\Spaceadom` (`config.json`, `debug.log`/`.0`/`.1`,
+`picker-cache.json`, `last-run-version.txt`, the `overlay-recheck-1.done`
+marker) and `%LOCALAPPDATA%\SpaceadomBackups` (PROBLEM 94's rolling backups)
+were left behind unconditionally, on purpose, because there was no way to ask.
+`share-spaceadom/READ-ME-FIRST.txt` told anyone who wanted them gone to delete
+the folder by hand. The owner decided uninstalling should ask instead:
+**"Keep your settings? (profiles, key bindings, backups)"** — Yes keeps
+everything (the default), No removes both folders.
+
+**Root cause / design constraints, both read from the generated installer
+before writing anything.**
+
+*Tauri's own "delete app data" checkbox already exists and is useless here.*
+A fresh `npm run tauri build` writes `Var DeleteAppDataCheckboxState` and, in
+`Section Uninstall`, `RmDir /r "$APPDATA\${BUNDLEID}"` /
+`"$LOCALAPPDATA\${BUNDLEID}"` (`target/release/nsis/x64/installer.nsi`, lines
+~421-455 and ~824-838). `${BUNDLEID}` is `com.spaceadom.app` — the
+`identifier` in `tauri.conf.json` — and Spaceadom has never written a file
+under that name; `startup::data_dir()` returns `%APPDATA%\Spaceadom`, the
+product name. That checkbox is a permanent no-op for this app, is only shown
+in the GUI installer (never on a silent one, so it defaults unchecked/keep
+there regardless), and cannot be retargeted from `tauri.conf.json`. It has to
+be done in `installerHooks`, which is exactly what that config exists for.
+
+*A self-update must never see this prompt, and the generated installer proves
+why it wouldn't even without special-casing it — but the code checks anyway.*
+`updater.rs` installs the next version with `setup.exe /S /UPDATE /R /ARGS
+--autostart`. Reading `installer.nsi`: `Function un.onInit` reads `/UPDATE`
+off the command line into `$UpdateMode`, and `Section Uninstall` already uses
+`${If} $UpdateMode <> 1` to skip removing shortcuts and the Run-key entry
+during an update — so Tauri's own upgrade flow runs the OLD version's
+`uninstall.exe` as step one of installing the new one, with `$UpdateMode`
+telling it not to tear down what the new version will reuse. `/S` alone would
+already make `IfSilent` skip the prompt on this path, but `$UpdateMode` is
+checked independently so the guard does not depend on the self-updater
+staying silent forever.
+
+**Exact file: `src-tauri/installer-hooks.nsh`.** New `Var`, extended
+`NSIS_HOOK_PREUNINSTALL`, and a new `NSIS_HOOK_POSTUNINSTALL` (the file had
+none before this):
+
+```nsis
+Var ST_KeepData
+
+!macro NSIS_HOOK_PREUNINSTALL
+  ; ... existing unconditional autostart cleanup (PROBLEM 126), unchanged ...
+
+  StrCpy $ST_KeepData 1
+
+  ${If} $UpdateMode = 1
+    Goto st247_decided
+  ${EndIf}
+
+  IfSilent st247_decided
+
+  MessageBox MB_YESNO|MB_ICONQUESTION "Keep your settings? (profiles, key bindings, backups)$\r$\n$\r$\nChoose No to also delete $APPDATA\Spaceadom and $LOCALAPPDATA\SpaceadomBackups from this PC." IDYES st247_decided
+  StrCpy $ST_KeepData 0
+
+  st247_decided:
+!macroend
+
+!macro NSIS_HOOK_POSTUNINSTALL
+  ${If} $ST_KeepData = 1
+    Goto st247_data_done
+  ${EndIf}
+
+  SetShellVarContext current
+  DetailPrint "Removing your Spaceadom settings..."
+  ${If} $APPDATA != ""
+    RMDir /r "$APPDATA\Spaceadom"
+  ${EndIf}
+  ${If} $LOCALAPPDATA != ""
+    RMDir /r "$LOCALAPPDATA\SpaceadomBackups"
+  ${EndIf}
+
+  st247_data_done:
+!macroend
+```
+
+Full file, comments included, at `src-tauri/installer-hooks.nsh`.
+
+**Why split across two hooks instead of one.** `installer.nsi` inserts
+`NSIS_HOOK_PREUNINSTALL` near the TOP of `Section Uninstall`, before Tauri
+deletes the app's own installed files, and `NSIS_HOOK_POSTUNINSTALL` at the
+BOTTOM, after Tauri's own shortcut/registry/app-data steps have already run.
+Asking first and acting last keeps "is this even a moment where asking is
+possible" separate from "what do we do about the answer," and mirrors the
+existing PREINSTALL/POSTINSTALL split one macro pair over.
+
+**The two paths that must never prompt or delete, both independently
+checked, not just the one that happens to cover both today:**
+1. **Silent** (`/S`) — nobody to answer a dialog; the same shape of problem
+   PROBLEM 127 solved for installing.
+2. **Self-update** (`$UpdateMode = 1`) — set by Tauri's own generated
+   `un.onInit`, not our code; this is not a real uninstall from the user's
+   point of view.
+
+Default is Keep: `$ST_KeepData` starts `1` and only an explicit No changes
+it, matching `MB_YESNO`'s own default button (Yes = IDYES = keep) — a
+dismissed dialog (Esc, Alt+F4) also keeps.
+
+**Also updated:** the file's top-of-file comment (previously "WHAT IS
+DELIBERATELY NOT REMOVED... The README says where they live for anyone who
+wants them gone") now points here instead of describing behaviour that is no
+longer unconditional; `share-spaceadom/READ-ME-FIRST.txt`'s UNINSTALL section
+gets a note (not a rewrite — the file's own header still names the currently
+shipped 1.0.100 build, which does not contain this fix yet).
+
+### How it was verified
+
+`npm run build` — exit 0 (`tsc && vite build --outDir dist2`).
+
+`npm run tauri build -- --bundles nsis` from a fresh shell with
+`CARGO_HOME`/`RUSTUP_HOME`/`PATH` set per `CLAUDE.md` (note: this project's
+`tauri` is the npm-installed `@tauri-apps/cli`, invoked as `npm run tauri`,
+NOT a `cargo tauri` subcommand — that fails with "no such command: `tauri`"
+on this machine, hit and corrected during this session):
+
+- `cargo` release build: **0 warnings**, `Finished release profile
+  [optimized] target(s) in 1m 17s`.
+- `makensis` compiled `installer-hooks.nsh` (via the generated
+  `installer.nsi`'s `!include`) with **0 errors, 0 warnings** and produced
+  `target/release/bundle/nsis/Spaceadom_1.0.100_x64-setup.exe` (8,368,922
+  bytes, written today) — a syntax error, an undeclared `Var`, or a bad
+  `!insertmacro` would have failed exactly here, before anything downstream
+  ran. This is the proof the `.nsh` compiles.
+- The overall `npm run tauri build` command still exited 1, but only at the
+  step AFTER the bundle was already written: `tauri-plugin-updater`'s signer
+  refused to sign the finished `setup.exe` because
+  `TAURI_SIGNING_PRIVATE_KEY` was not set in this shell (`A public key has
+  been found, but no private key`) — exactly the documented, expected
+  behaviour in `CLAUDE.md`'s updater section for a local build without the
+  signing secrets, unrelated to this change and out of this task's scope.
+
+**NOT verified: running the installer or the uninstaller.** Per this task's
+own instruction, neither was run on this machine — it is the owner's live
+app, and this session was told not to touch it. So the actual `MessageBox`,
+the actual `RMDir /r`, and the actual `$UpdateMode` value on a real self-update
+are all unexercised. What follows is a recipe for someone who can run it.
+
+### Second-machine / VM verification recipe (not run this session)
+
+1. **Baseline.** Install `Spaceadom_1.0.100_x64-setup.exe`, launch it, bind
+   at least one key in a profile you can recognise later, close it.
+2. **Uninstall → No (delete).** Settings → Apps → Spaceadom → Uninstall.
+   Answer **No** to "Keep your settings?". Confirm: `%APPDATA%\Spaceadom`
+   gone, `%LOCALAPPDATA%\SpaceadomBackups` gone, `%LOCALAPPDATA%\Spaceadom`
+   gone (Tauri's own step, unrelated to this fix), HKCU Run value
+   `Spaceadom` gone, `schtasks /Query /TN Spaceadom` reports not found.
+3. **Reinstall, then uninstall → Yes (keep).** Reinstall, rebind the same
+   key, uninstall again, answer **Yes**. Confirm
+   `%APPDATA%\Spaceadom\config.json` (with the profile) still exists,
+   `%LOCALAPPDATA%\SpaceadomBackups` still exists if it held any backups,
+   and the autostart entries are STILL gone (unconditional, independent of
+   the answer).
+4. **Self-update path.** Install an older build, then let the self-updater
+   upgrade it (or drive it manually with the `st-updater-endpoint.txt`
+   recipe in `CLAUDE.md`). Confirm: **no dialog appears during the
+   upgrade**, `%APPDATA%\Spaceadom\config.json` is byte-identical (or
+   SHA-256-identical) before and after, and the app is running the new
+   version afterward with the same profile.
+
+### The MSI half — deferred, not built this session
+
+`src-tauri/wix/main.wxs` has no equivalent of `installerHooks`; WiX would
+need a custom action wired into the UI sequence to ask the same question,
+plus a deferred custom action (`RemoveFolderEx` or a small script) to act on
+it — and unlike NSIS, WiX's own uninstall-vs-major-upgrade distinction has to
+be read from `REMOVE`/`UPGRADINGPRODUCTCODE`, not `$UpdateMode`. Another
+agent owns `main.wxs` in this session, so this is written up for whoever
+picks it up next, not built here. **Until that lands: uninstalling the
+`.msi` still always keeps both folders unconditionally, with no prompt at
+all** — unchanged from before this fix. Worth stating plainly rather than
+leaving it implied by silence.
+
+### Generalise this
+
+**A feature that already exists in the framework is not the same feature
+just because it performs the same VERB.** Tauri's NSIS template ships a
+"delete app data" checkbox for free; it is worthless here because it targets
+a path this app has never written to. Checking a template's default wiring
+against the app's OWN path constants (`startup::data_dir()`, not
+`${BUNDLEID}`) is part of deciding whether to use it or replace it — assuming
+a checkbox with the right label does the right thing is how a feature ships
+that looks complete and does nothing.
+
+**A silent path and an update path are two different guarantees, even on the
+day one happens to imply the other.** Both `IfSilent` and `$UpdateMode` are
+checked, because the update path is silent today by `updater.rs`'s own
+choice of flags, not by anything that forces it to stay that way. A prompt
+gated on silence alone would still be correct right now and would become
+PROBLEM 127 again, one layer up, the day someone runs `/UPDATE` without `/S`.
+
+**Read the generated file before writing the hook.** The only way to know
+`NSIS_HOOK_PREUNINSTALL` runs before Tauri's own file deletion,
+`NSIS_HOOK_POSTUNINSTALL` runs after its shortcut/registry/app-data steps,
+and `$UpdateMode` is already set by the time either hook runs, was to open
+`target/release/nsis/x64/installer.nsi` and read `Section Uninstall` and
+`Function un.onInit` directly — none of it is documented in Tauri's own
+`installerHooks` docs, which only name the four macro hooks and not their
+position or the variables already in scope.
+
+
+## PROBLEM 246 — the MSI leg turned ON, and the WiX `RegistrySearch` that caused PROBLEM 244 deleted: an `.msi` copy now updates itself with ONE UAC prompt and nothing else (built 1.0.100, MSI leg NOT installed on this machine — see "What was NOT exercised")
+
+**Symptom.** PROBLEM 245 shipped the updater with the MSI leg *detected and
+deliberately off*: an `.msi` copy logged why it would not update and did
+nothing. Its own "Generalise this" note said the reason out loud — *"a silent
+mode has no channel for a question"* — and stopped there. So every user who
+installed the `.msi` (the format some workplaces require) was on a channel that
+had been built, published and then switched off: `latest-msi.json` went up with
+every release and nothing ever read it.
+
+**The owner's decision, 2026-09-05, final.** Turn the leg on. MSI-installed
+users get **one UAC prompt** per update and the update proceeds. No other UI —
+no dialog, no toast, no badge, no "an update is available" nag. Declining is
+allowed and costs nothing but a day.
+
+**Root cause of the block, and why it is not a bug.** Nothing was broken; two
+constraints were in genuine conflict, and PROBLEM 245 correctly refused to ship
+a guess about which one to break. Measured this time rather than assumed —
+`msiexec /x` against a GUID that is not installed on this machine, so nothing
+could ever be installed, with `/L*v` logs read afterwards (msiexec
+5.00.10011.00):
+
+| command | UI objects created in the log | meaning |
+| --- | --- | --- |
+| `msiexec /x {GUID} /qn` | none | no UI exists |
+| `msiexec /x {GUID} /passive` | `Font created … MS Shell Dlg` ×2 | a basic UI exists |
+| `msiexec /x {GUID} /qn /passive` | `Font created …` ×2 | **the LAST UI switch wins** |
+| `msiexec /x {GUID} /passive /qn` | none | the last UI switch wins |
+
+A per-machine package launched from a non-elevated process must be elevated by
+the Windows Installer *service*, and the service asks for consent through the
+client's UI. At UI level none (`/qn`, `/quiet`) there is no client UI, so it
+cannot ask and the install simply fails. **`/passive` is the lowest UI level
+at which the UAC dialog can appear at all.** "Silent AND per-machine AND no
+prompt" is not on offer from Windows; one prompt a release is the smallest
+honest cost, and that is what the owner chose.
+
+**Root cause of PROBLEM 244, now actually removed.** PROBLEM 244 diagnosed it
+in September and hardened the *file-deletion* path; the `wix/main.wxs` element
+that caused it was left in place. It is now deleted:
+
+```xml
+<!-- DELETED from src-tauri/wix/main.wxs -->
+<Property Id="INSTALLDIR">
+  <RegistrySearch Id="PrevInstallDirNoName"   Root="HKCU" Key="Software\\{{manufacturer}}\\{{product_name}}" Type="raw" />
+  <RegistrySearch Id="PrevInstallDirWithName" Root="HKCU" Key="Software\\{{manufacturer}}\\{{product_name}}" Name="InstallDir" Type="raw" />
+</Property>
+```
+
+NSIS writes that key's **default value** with its own per-user directory. So on
+any machine that already had the `setup.exe` copy, a double-clicked `.msi`
+installed itself into `%LOCALAPPDATA%\Spaceadom`, registered the NSIS-written
+files as its own components, and stamped ARP `InstallLocation` with the same
+path — after which `msiexec /X` of that product deleted the *running per-user
+app*. With the Property gone, `INSTALLDIR` has no source but
+`<Directory Id="INSTALLDIR">` under `ProgramFiles64Folder`, so the `.msi` can
+only ever resolve to `C:\Program Files\Spaceadom` and can never adopt a folder
+another installer owns. This had to be fixed before the MSI leg could be turned
+on: an auto-updating `.msi` that adopts folders would have industrialised
+PROBLEM 244.
+
+**MSI → MSI upgrades stay in place.** Read out of the built package's own
+`Upgrade` table, not assumed:
+
+```text
+UPGRADE  {7A2C4E19-8B3D-4F6A-9C1E-5D8F2B7A4C63} |       | 1.0.100 | 513 | WIX_UPGRADE_DETECTED
+UPGRADE  {7A2C4E19-8B3D-4F6A-9C1E-5D8F2B7A4C63} | 1.0.100 |       |   2 | WIX_DOWNGRADE_DETECTED
+PROP     UpgradeCode  {7A2C4E19-8B3D-4F6A-9C1E-5D8F2B7A4C63}   (fixed in tauri.conf.json)
+PROP     ProductCode  {0788AAFC-2E45-450E-A336-0D1E7091E2E8}   (Product Id="*" — new every build)
+PROP     ALLUSERS     1                                        (per-machine)
+```
+
+`MajorUpgrade` matches on the fixed **UpgradeCode**, never on a directory, and
+both the old and the new package now resolve the same constant `INSTALLDIR`. So
+the upgrade removes the old product and installs the new one over the same
+path. `WixUI_InstallDir` still lets an *interactive* installer browse
+elsewhere; only the automatic registry adoption is gone.
+
+**One ordering caveat, stated because enabling this leg makes it matter.** In
+the built `InstallExecuteSequence`, `RemoveExistingProducts` sits at **1501**
+and `WixCloseApplications` at **3999** — the old product is removed *before*
+this package closes the running app:
+
+```text
+  1500  InstallInitialize
+  1501  RemoveExistingProducts
+  ...
+  3999  WixCloseApplications        VersionNT > 400
+  4000  InstallFiles
+```
+
+The expectation is that this is harmless, because `RemoveExistingProducts`
+performs a full uninstall of the OLD package, running the OLD package's own
+sequence — and every build carrying this `main.wxs` fork has `util:CloseApplication`
+in it, so the app is terminated there, before the old package reaches its own
+`RemoveFiles`. This package's 3999 entry is then a backstop for a process that
+is already gone. **That is reasoning from the sequence tables, not a
+measurement.** If it is wrong, the failure mode is PROBLEM 127's exact
+signature — msiexec exits 0 while the on-disk exe never changes version, or a
+delete-on-reboot is left pending against the new file. Step 5 of the recipe
+below checks for precisely that, and it is the single most important thing the
+second machine has to settle.
+
+**Exact files.**
+
+| File | What |
+| --- | --- |
+| `src-tauri/wix/main.wxs` | `<Property Id="INSTALLDIR">` + its two `RegistrySearch` elements DELETED (PROBLEM 244's root cause). `util:CloseApplication` kept untouched (PROBLEM 127). Header comment now says TWO Spaceadom changes, both marked, so a bundler upgrade is still diffable against stock. |
+| `src-tauri/src/updater.rs` | `MSI_AUTO_UPDATE = true`; `MSI_SWITCHES` + `MSI_RELAUNCH` constants; `msi_parameters()` (pure, tested); `install_msi()` — writes the verified bytes to `%TEMP%` and runs msiexec ITSELF, waiting; the `updater: MSI leg would run: …` dry run behind the dev-endpoint override. Module doc rewritten. |
+| `src-tauri/src/updater.rs` (tests) | 5 new, 1 replaced: exact command line, per-switch intent, MSI manifest choice, and BOTH directions of "MSI in Program Files + NSIS in `%LOCALAPPDATA%` at once". 388 → 392 lib tests. |
+
+**Design.**
+
+*The command, exactly.* One string, `Command::raw_arg`, never `Command::arg`:
+
+```text
+msiexec.exe /i "%TEMP%\Spaceadom-1.0.X-installer.msi" /passive /norestart REBOOT=ReallySuppress AUTOLAUNCHAPP=True LAUNCHAPPARGS="--autostart"
+```
+
+`raw_arg` because **msiexec does not parse its command line with
+`CommandLineToArgvW`**, and Rust's normal argument quoting would turn
+`LAUNCHAPPARGS="--autostart"` into `LAUNCHAPPARGS=\"--autostart\"` and break the
+relaunch. `REBOOT=ReallySuppress` is the half that binds — it suppresses the
+package's own `ScheduleReboot`/`ForceReboot`; `/norestart` is the command-line
+echo of the same intent. A keyboard utility does not get to reboot somebody's
+machine to finish a background update.
+
+*Elevation.* Nothing in this app elevates (PROBLEM 61 still holds). The
+non-elevated `msiexec` hands the package to the Windows Installer service, the
+service needs administrator rights for a per-machine product, and at
+`/passive` it raises the consent dialog through the client UI. The premise is
+confirmed from the built package's own Summary Information:
+
+```text
+SUMMARY  Template='x64;0'  WordCount=2  bit3('elevation NOT required')=False
+```
+
+Word Count bit 3 (value 8) is the "elevated privileges are not required" flag.
+It is **clear**, so this package demands elevation — which is exactly why the
+UI level has to be one at which consent can be asked for.
+
+*Relaunch.* `AUTOLAUNCHAPP=True` + `LAUNCHAPPARGS="--autostart"` are consumed by
+the **stock** bundler machinery already in `main.wxs` — nothing was added for
+this:
+
+```xml
+<Property Id="AUTOLAUNCHAPP" Secure="yes" />
+<Property Id="LAUNCHAPPARGS" Secure="yes" />
+<CustomAction Id="LaunchApplication" Impersonate="yes" FileKey="Path"
+              ExeCommand="[LAUNCHAPPARGS]" Return="asyncNoWait" />
+<Custom Action="LaunchApplication" After="InstallFinalize">AUTOLAUNCHAPP AND NOT Installed</Custom>
+```
+
+All four halves verified in the built package rather than trusted from the
+template:
+
+```text
+PROP  SecureCustomProperties  ARPNOREPAIR;AUTOLAUNCHAPP;LAUNCHAPPARGS;WIX_DOWNGRADE_DETECTED;WIX_UPGRADE_DETECTED
+CA    LaunchApplication | 210 | Path | [LAUNCHAPPARGS]
+SEQ   InstallFinalize      6600
+SEQ   LaunchApplication    6601   AUTOLAUNCHAPP AND NOT Installed
+```
+
+`SecureCustomProperties` carrying both names is what lets them survive the
+client → service hop of a per-machine install. Custom action **type 210** =
+18 (`Exe` 2 + `SourceFile` 16, i.e. run the installed file `Path`) + 192
+(`Async` 128 + `Continue` 64, i.e. `Return="asyncNoWait"`). Critically, the
+`NoImpersonate` bit (2048) is **not** set and the `InScript`/deferred bit
+(1024) is **not** set — so this is an *immediate*, *impersonated* action
+running in the non-elevated client, and the app comes back holding the
+**user's** token. A SYSTEM-launched `spaceadom.exe` would be a per-user
+keyboard hook in the wrong session, which is to say no hook at all.
+`NOT Installed` is satisfied because `Product Id="*"` mints a new ProductCode
+every build, so a MajorUpgrade is a fresh install of a new product.
+`--autostart` makes the returning instance logon-shaped: hook and engine live
+at once, no dashboard popping up at whatever hour the daily check fired.
+
+*Why this module launches msiexec itself instead of `update.install(bytes)`.*
+Two reasons, both load-bearing, both read out of `tauri-plugin-updater` 2.11.0's
+source rather than guessed:
+
+1. **A declined UAC must not kill the app.** `Update::install_inner` calls
+   `ShellExecuteW` and then `std::process::exit(0)` immediately — it never
+   waits. The UAC prompt is raised by the installer service *after* msiexec
+   starts, i.e. after we are already gone. Decline it and the machine is left
+   with no Spaceadom running until the next logon. That is strictly worse than
+   not updating. Owning the launch lets the `st-updater` thread WAIT on
+   msiexec: a decline returns 1602 to a process that is still alive, still
+   hooked, still in the tray.
+2. **The install mode is not per-installer.**
+   `plugins.updater.windows.installMode` is ONE value shared by both legs
+   (`src/config.rs`: `msiexec_args()` → `/quiet` for Quiet, `nsis_args()` →
+   `/S`), and `UpdaterBuilder` exposes no runtime override — only
+   `installer_args`, which are appended. Switching the config to `passive` for
+   the MSI's sake would swap the proven NSIS leg from `/S` to `/P` and put a
+   progress window on every NSIS user's screen. **`installer_args` CAN differ
+   per leg at runtime; `installMode` cannot.** Composing the MSI command
+   ourselves leaves the NSIS leg byte-for-byte as it shipped and was proved in
+   1.0.99 → 1.0.100.
+
+The signature is still the plugin's: `Update::download` calls
+`verify_signature` before it returns the bytes (2.11.0 `src/updater.rs:740`),
+and the MSI updater artifact is a raw `.msi`, not a zip
+(`scripts/write-updater-manifests.ps1`), so there is nothing to unpack.
+
+*The success path never returns.* PROBLEM 127's `util:CloseApplication`
+terminates the running `spaceadom.exe` early in the sequence — exactly as the
+NSIS leg's `taskkill` does — so `Command::status()` normally never returns at
+all, and the single-instance mutex is released by the kernel long before
+`LaunchApplication` runs after `InstallFinalize`. If msiexec *does* return 0
+while this process is still alive, that means `CloseApplication` did not close
+us; the code logs it loudly and deliberately does **not** exit, because a
+running old version beats no version.
+
+*Declines.* 1602 (user said no), 1925 (not enough privileges), 1618 (another
+install running), 1603 (fatal) each get a named log line. The full explanation
+is logged once per process and later declines get one short line —
+"log once, retry next day, no nag". There is no nag by construction: this
+module owns no UI.
+
+*The escape hatch is unchanged.* `auto_update: false` in
+`%APPDATA%\Spaceadom\config.json` still stops all checks, and
+`MSI_AUTO_UPDATE = false` still puts the MSI leg back to "detected, never
+driven" as a one-word change with its reason attached in the `Plan::Skip` arm.
+
+**What WAS proved on this machine.**
+
+- msiexec UI-level precedence, from `/L*v` logs, against a GUID that is not
+  installed (table above).
+- 392 lib tests pass (was 388: 5 added, 1 replaced), clippy `-D warnings` clean,
+  `tsc --noEmit` clean. A concurrent session added `src-tauri/src/packaged.rs`
+  (+7 tests) mid-task, so a run today reads 399 — 392 is this change measured
+  alone, before those files existed.
+- The `wix/main.wxs` change still bundles: `tauri build --bundles msi`
+  produces the `.msi`.
+- The built package, read **read-only** through `WindowsInstaller.Installer`
+  COM (`OpenDatabase` mode 0) from outside the app. The PROBLEM 244 check is
+  the important one — the only registry searches left in the package are the
+  stock WebView2 version probes, and nothing feeds `INSTALLDIR`:
+
+  ```text
+  REGLOCATOR       Webview2VersionSystemx64 | 2 | SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F30172...} | pv
+  REGLOCATOR       Webview2VersionSystemx86 | 2 | SOFTWARE\Microsoft\EdgeUpdate\Clients\{F30172...}            | pv
+  REGLOCATOR       Webview2VersionUser      | 1 | SOFTWARE\Microsoft\EdgeUpdate\Clients\{F30172...}            | pv
+  APPSEARCH        INSTALLED_WEBVIEW2_VERSION | (the three above)
+  DIR              INSTALLDIR | ProgramFiles64Folder | zb1nadly|Spaceadom
+  PROP-INSTALLDIR  (NO ROWS)
+  CLOSEAPP         spaceadom.exe
+  ```
+
+  No `Software\Nur Ifran Arpon\Spaceadom` search anywhere, no `AppSearch` row
+  writing `INSTALLDIR`, no `Property` row pre-seeding it — `INSTALLDIR` has one
+  and only one source, `ProgramFiles64Folder\Spaceadom`. PROBLEM 244's root
+  cause is gone from the artefact, not just from the template.
+
+**What was NOT exercised, and cannot be here.** The live MSI update itself. The
+`.msi` must not be installed on the owner's machine: his copy is the per-user
+NSIS build in `%LOCALAPPDATA%`, and on any build predating this fix the `.msi`
+adopts that folder (PROBLEM 244) — installing one to test the fix is the exact
+accident being fixed. So **no UAC prompt was actually observed, no msiexec exit
+code was actually collected, and no relaunch was actually timed.** The dry run
+(`updater: MSI leg would run: …`, behind the dev-endpoint override file, which
+installs nothing) and the unit tests stand in for it. A real proof needs a
+second machine; the recipe is below. Anyone who reads this entry later and
+wants to say "the MSI leg works" must run that recipe first.
+
+**Six-line second-PC test recipe.**
+
+1. On a PC that has **never** had Spaceadom: install `Spaceadom_1.0.100_x64_en-US.msi`
+   (the build with this fix), confirm it landed in `C:\Program Files\Spaceadom`
+   and NOT anywhere under `%LOCALAPPDATA%`.
+2. Build 1.0.101 with the signing key, run `scripts/write-updater-manifests.ps1`,
+   and serve `latest-msi.json` + the `.msi` from an HTTPS server that PC can reach.
+3. Put `st-updater-endpoint.txt` beside `C:\Program Files\Spaceadom\spaceadom.exe`
+   holding that `latest-msi.json` URL, start the app, wait 15 s, and read the log:
+   it must say `install kind decided — Msi` and `MSI leg would run: msiexec.exe /i … /passive …`
+   with nothing installed. **That is the dry run.**
+4. Delete `st-updater-endpoint.txt`, point the real `MSI_MANIFEST` at the test
+   server (or publish a real 1.0.101 release), restart, wait 15 s.
+5. Expect exactly ONE UAC prompt, a progress bar, no reboot, no other window.
+   Accept it, then check the three things PROBLEM 127 says a "status 0" can
+   hide: `(Get-Item 'C:\Program Files\Spaceadom\spaceadom.exe').VersionInfo`
+   really reads 1.0.101; the app came back by itself with `--autostart` (tray
+   icon, no dashboard); and `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager`
+   `PendingFileRenameOperations` names nothing under `Spaceadom`.
+6. Repeat once and DECLINE the prompt: the app must still be running and
+   unchanged, and the log must show `msiexec exited 1602 — the user declined`.
+
+**Generalise this.** PROBLEM 245's note said *"a silent mode has no channel for
+a question — either remove the question or do not call the path silent."* The
+third option is the one taken here: **keep the question, but make it the
+smallest and rarest question you can, and never ask it from a process that is
+about to die.** The plugin's `exit(0)`-immediately shape is fine when the
+installer cannot fail interactively (per-user NSIS) and actively harmful when
+it can (per-machine MSI): the difference is not the installer, it is whether
+anything can still say *no* after you have stopped existing. Wait on any
+installer that can be refused.
+
+**Measurement traps met on the way.** `cargo tauri build` is not installed —
+the CLI is `./node_modules/.bin/tauri`, and `cargo tauri` fails with "no such
+command" rather than falling back. A stale `Spaceadom_1.0.100_x64_en-US.msi`
+from the previous night sat in `target/release/bundle/msi/` with the version
+number the new build would also use, so the file's presence proved nothing;
+the mtime and size had to be compared before and after. And the first attempt
+to measure msiexec's UI level compared *exit codes* — all four variants return
+1605 identically, because the product-code check happens before any UI is
+built; only the `/L*v` log distinguishes them.
+
+### WIRED 2026-09-05 (reconciliation pass)
+
+No code in this section changed. Two things were CHECKED and one stale
+sentence elsewhere was corrected:
+
+- **The msiexec path is intact and matches this entry exactly.**
+  `updater.rs:291` `MSI_SWITCHES = ["/passive", "/norestart", "REBOOT=ReallySuppress"]`,
+  `:297` `MSI_RELAUNCH = ["AUTOLAUNCHAPP=True", "LAUNCHAPPARGS=\"--autostart\""]`,
+  `:390` `msi_parameters()` composing `/i "<path>"` + both arrays into ONE
+  string, and `:936` `Command::new(&msiexec).raw_arg(params).status()` — still
+  `raw_arg`, still WAITING on the child. `MSI_AUTO_UPDATE` is still `true`
+  (`:276`) and the test at `:1846` still asserts it. Nothing from this entry
+  was dropped by the four lanes that edited `updater.rs` after it landed.
+- **`CLAUDE.md` said the MSI leg was OFF.** That bullet predated this entry
+  and directly contradicted the shipped constant — the exact "a note saying X
+  does not work, long after X was fixed" failure this project has paid for
+  before. It now says the leg is ON, records `/passive` as the lowest UI level
+  at which consent can be asked for, names the two reasons `updater.rs` drives
+  msiexec itself rather than handing bytes to the plugin, and keeps the
+  one-word way back. It also repeats, in CLAUDE.md itself, that **no live MSI
+  update has ever been observed** — the second-PC recipe above is still owed.
+- `bundle.windows.allowDowngrades` was flipped to `true` in this pass, and the
+  `.msi` leg reads it too (`wix/main.wxs` already branches on it). The
+  reasoning is written up under PROBLEM 249's WIRED note, because that is the
+  entry that measured the key.
+
+---
+
+
+### REVIEW FIXES 2026-09-05 (H2) — the MSI upgrade removed the running exe first, and could delete the NEW one at the next reboot
+
+**Symptom.** Hypothetical, silent, and days apart from its cause: a `/passive`
+self-update reports success, the app runs fine, and then at some later reboot
+Spaceadom is simply gone. Nothing in any log connects the two events.
+
+**Root cause, measured rather than reasoned.** `MajorUpgrade
+Schedule="afterInstallInitialize"` puts `RemoveExistingProducts` at sequence
+**1501**. `WixCloseApplications` — the custom action behind SPACEADOM CHANGE 1's
+`util:CloseApplication` — sits at **3999**, immediately before `InstallFiles` at
+4000. So the OLD product was uninstalled 2,498 sequence numbers before anything
+closed the running app, and in a per-machine install the old product's files ARE
+`C:\Program Files\Spaceadom\spaceadom.exe`, which the running app holds open.
+
+Windows Installer cannot delete an in-use file, so it queues a delete-on-reboot
+through `PendingFileRenameOperations`. `InstallFiles` then writes the NEW exe to
+that same path — and the queued operation names a PATH, not a file handle. At
+the next reboot Windows deletes whatever is standing there.
+
+This is not theoretical for this app: PROBLEM 246's own updater runs
+`msiexec /i ... /passive` from inside the running app, so Spaceadom is ALWAYS
+running during its own MSI upgrade, exactly as PROBLEM 127 established for file
+replacement.
+
+**Exact file.** `src-tauri/wix/main.wxs` — now **SPACEADOM CHANGE 4**, the
+fourth deliberate deviation from tauri-bundler 2.9.4's stock template (the
+file's header comment has been updated from "exactly THREE changes").
+
+**The code.**
+
+```xml
+<!-- BEFORE -->
+<MajorUpgrade Schedule="afterInstallInitialize" DowngradeErrorMessage="..." AllowSameVersionUpgrades="yes" />
+<!-- AFTER -->
+<MajorUpgrade Schedule="afterInstallExecute" DowngradeErrorMessage="..." AllowSameVersionUpgrades="yes" />
+```
+
+New files go in first at `InstallFiles` 4000, with the app already terminated at
+3999; the old product is removed afterwards, and component reference counting
+sees the new product owns the same key paths, so shared files are kept rather
+than deleted and re-copied.
+
+**The alternative that was evaluated and NOT taken**, because the reviewer asked
+for the comparison rather than the answer: leave `RemoveExistingProducts` at
+1501 and re-schedule `WixCloseApplications` before it. It IS expressible —
+WixUtilExtension marks that sequence row `Overridable="yes"`. Three reasons
+against:
+
+1. It keeps the remove-then-reinstall shape. Every update deletes every file and
+   copies an identical set back, and between 1501 and 4000 the machine has **no
+   Spaceadom installed at all**. A failure in that window leaves the user with
+   nothing. `afterInstallExecute` inverts the failure mode: a failure leaves the
+   OLD version in place, which is the half a user can live with.
+2. It only closes OUR handle. Anything else holding the exe open at 1501 — an
+   on-access antivirus scan, a shell extension, the thumbnail cache —
+   reproduces the identical pending-rename hazard, and we cannot close those.
+   Moving the removal past `InstallFiles` removes the hazard rather than one
+   cause of it.
+3. It makes this template depend on WixUtilExtension continuing to mark its
+   scheduling row overridable — an implicit contract with a third-party
+   extension, which is what this file's header exists to avoid.
+
+The known cost of `afterInstallExecute`, stated rather than hidden: a mid-install
+failure makes rollback more involved and both products can briefly be
+registered. `REINSTALLMODE` is `amus` and `Product Id` is `*`, so every upgrade
+is a fresh product installing a full file set — the case this scheduling is
+documented to suit.
+
+**And `EndSessionMessage="yes"`.** `CloseMessage="yes"` sends `WM_CLOSE`, which
+Spaceadom answers by HIDING TO THE TRAY — so the process was still alive five
+seconds later and `TerminateProcess="1"` killed it. Every MSI update ended in a
+hard kill of a healthy app: no `session_end::teardown`, no
+`safe_mode::note_clean_exit()`, so the launch was recorded as a startup crash
+(H5, under PROBLEM 245, is the counter half of the same bug).
+`EndSessionMessage="yes"` sends `WM_QUERYENDSESSION` then `WM_ENDSESSION`, which
+is exactly what `session_end.rs` (PROBLEM 224) was written to own. `CloseMessage`
+is set explicitly to `"no"` rather than deleted, so the file keeps saying which
+message it sends; `TerminateProcess` stays as the backstop for an app that has
+wedged and cannot answer either message.
+
+**A comment was wrong too.** The `SetProperty` pair for PROBLEM 252's
+"keep your settings?" answer said "Scheduled After AppSearch (50) so both land
+at 51/52". AppSearch's standard sequence number is **400** — the standard
+immediate sequence runs LaunchConditions 100, FindRelatedProducts 200, AppSearch
+400, CCPSearch 500, RMCCPSearch 600, ValidateProductID 700, CostInitialize 800 —
+so they land at 401/402. The ORDERING the comment was justifying is unaffected
+and was always correct (both are still well before WixRemoveFoldersEx at 800);
+only the numbers were wrong, and a wrong number in a comment about sequencing is
+the kind of thing a later reader reasons FROM.
+
+**How it was verified — MEASURED, from OUTSIDE the agent container.**
+`npm run build` then `npm run tauri -- build --bundles msi` (the signer error at
+the end is expected without `TAURI_SIGNING_PRIVATE_KEY`), then the
+`InstallExecuteSequence` and `WixCloseApplication` tables read back through the
+`WindowsInstaller.Installer` COM object from a PowerShell process launched via
+`explorer.exe` (PROBLEM 143), with the previous build's `.msi` as a baseline:
+
+```
+=== BASELINE 1.0.99 (built with the OLD wxs: afterInstallInitialize) ===
+size: 13447168  mtime: 2026-09-04T22:00:54
+  1400  InstallValidate
+  1500  InstallInitialize
+  1501  RemoveExistingProducts        <-- 2,498 numbers before anything closed the app
+  3500  RemoveFiles
+  3999  WixCloseApplications          VersionNT > 400
+  4000  InstallFiles
+  6600  InstallFinalize
+
+=== NEW 1.0.100 (built with H2's wxs: afterInstallExecute) ===
+size: 13733888  mtime: 2026-09-05T13:51:37
+  1400  InstallValidate
+  1500  InstallInitialize
+  3500  RemoveFiles
+  3999  WixCloseApplications          VersionNT > 400
+  4000  InstallFiles                  <-- the new exe is on disk HERE
+  6500  InstallExecute                NOT Installed
+  6501  RemoveExistingProducts        <-- and the old product goes AFTER it
+  6600  InstallFinalize
+
+WixCloseApplication table:
+  1.0.99  Target=spaceadom.exe Attributes=33 (0x21)  = CLOSEMESSAGE | TERMINATEPROCESS
+  1.0.100 Target=spaceadom.exe Attributes=40 (0x28)  = ENDSESSIONMESSAGE | TERMINATEPROCESS
+```
+
+The same script run INSIDE the agent shell returned byte-identical sizes and
+tables, which is the differential CLAUDE.md asks for: `D:` is not redirected and
+the readback is genuine either way.
+
+**NOT verified: nothing was installed.** No `.msi` may be installed on this
+machine (PROBLEM 244). The reboot behaviour, the upgrade path and the
+`WM_ENDSESSION` close all still need the second-machine recipe.
+
+**Generalise this.** *A sequence table is the actual program.* Two custom
+actions whose XML sits four lines apart can run 2,500 sequence numbers apart,
+and no amount of reading the authoring tells you the order — read the built
+package back.
+
+## PROBLEM 248 — the emoji panel never opened, and `inserted=true` was a claim about `SendInput` dressed up as a claim about a panel (INSTRUMENTED + hardened; the verdict needs ONE owner click)
+
+**Owner, 1.0.100, 2026-09-05:** *"while choosing the emoji of the profiles, the
+Windows default emoji chooser doesn't come up."*
+
+### Symptom
+
+Clicking the emoji disc on a profile row does nothing visible. No panel, no
+error toast.
+
+### What the log settled before any code was read
+
+`%APPDATA%\Spaceadom\debug.log`, the 1.0.100 process that started
+`2026-09-05 08:27:15`:
+
+```
+2026-09-05 08:30:47.895 [INFO] space_toggle_os_lib::commands — open_emoji_panel: injected Win+period (inserted=true)
+```
+
+and, from the hook's own instrument panel for the 90-second window that
+contains it:
+
+```
+2026-09-05 08:31:45.902 [INFO] ... hook liveness split — primary_real:65 primary_injected:4 reference:5 mouse:3022 in the last 90s.
+```
+
+Four things fall out of those two lines, and each of them kills a hypothesis:
+
+1. **The command ran on the click.** So the frontend path is intact — the disc
+   handler still calls `invoke("open_emoji_panel")`, and PROBLEM 235's rewrite
+   did not break it. (Read anyway, to be sure: `openEmojiSlot` in
+   `src/components/profile-editor.ts` sets `_emojiFor`, calls
+   `renderProfileList()` **synchronously**, then `focus()`es the input it just
+   created and only then invokes. The input is a plain `<input>` in a visible
+   popover — no `hidden`, no `display:none` — so it is focusable. And the disc
+   click handler is only ever attached when `_editing` is true, which is the
+   same condition under which `emojiInput()` is appended, so the
+   `getElementById` cannot come back null on the path that reaches it.)
+2. **`SendInput` inserted every event.** `inserted=true` is
+   `send_keys_checked` returning true, which means all 4 of 4.
+3. **The events really entered the input stream** — `primary_injected:4` is a
+   callback-only counter (PROBLEM 236): nothing but our own low-level keyboard
+   hook proc can move it, and exactly 4 injected events arrived in that window.
+4. **Our hook passed them through.** The cookie branch in `keyboard_proc`
+   returns `CallNextHookEx` and sits ABOVE `track_modifier` (PROBLEM 230's
+   ordering), so it neither swallows the chord nor leaves the modifier mask
+   believing a Windows key is physically held.
+
+So: not a frontend bug, not a blocked injection, not our hook. **The shell
+received the chord and declined it.**
+
+### Root cause (the part that is certain)
+
+**The old log line could not tell "Windows opened the panel" from "Windows
+threw the chord away."** It reported `SendInput`'s return value in wording that
+read like a report about a panel — a check that cannot produce the negative it
+would need to produce. Six earlier `inserted=true` lines across two sessions
+had therefore been read as success while the owner was looking at nothing.
+
+That is the defect this entry actually fixes. Everything below it about *why*
+the shell declined is still, honestly, a hypothesis.
+
+### Root cause (the part that is still a hypothesis, and is labelled as one)
+
+A web review of the public record on 2026-09-05 found **no primary source** for
+any of the popular explanations of "injected Win+`.` does not open the emoji
+panel":
+
+- no source confirming `wScan` must be non-zero;
+- no source confirming `ctfmon`/`TextInputHost` filters `LLKHF_INJECTED` or a
+  non-zero `dwExtraInfo`;
+- no source confirming the four events must be split across `SendInput` calls
+  with a delay;
+- and **no report either way** that AutoHotkey's `Send #.` opens it. (The one
+  AHK thread that looks on-topic, "Send and the Emoji Panel", is about typing
+  into the panel's search box *after* it is open — a different failure. AHK's
+  `dwExtraInfo` is `KEY_IGNORE_LEVEL`, and its documented Win+`.` use case in
+  the wild is `#.::` to *block* the shortcut, not to simulate it.)
+
+What the record **does** corroborate, from several independent sources, is that
+Win+`.` silently does nothing *for a physical press too* when the **Touch
+Keyboard and Handwriting Panel Service (`TabletInputService`)** is not running,
+and that the hotkey has an HKLM kill switch at
+`SOFTWARE\Microsoft\Input\Settings\proc_1\loc_<LCID>\im_1` →
+`EnableExpressiveInputShellHotkey` (locale-keyed, mirrored under
+`WOW6432Node`). Note that is **HKLM, not HKCU** — the HKCU path this project's
+brief guessed at does not exist.
+
+The one respect in which our chord genuinely did not resemble a keypress was
+`wScan == 0` on all four events, so that is fixed on the "costs nothing, might
+be it" principle — explicitly as a hypothesis the instrument will now confirm
+or refute, not as a diagnosis.
+
+### Exact file
+
+`src-tauri/src/commands.rs` — `open_emoji_panel` and a new private
+`mod emoji_probe` immediately below it. **Nothing else was touched.**
+`src/components/profile-editor.ts` was read and left alone: the log proves it
+works. `src-tauri/src/hook/mod.rs` was read and left alone: no visibility
+change turned out to be needed, `send_keys_checked` is already `pub(crate)`.
+No new `Cargo.toml` features — everything used
+(`Win32_UI_WindowsAndMessaging`, `Win32_UI_Input_KeyboardAndMouse`,
+`Win32_System_Registry`, `Win32_System_Threading`) was already enabled.
+
+### The actual code
+
+**Before** — vk only, `wScan: 0`, and a boolean dressed as a verdict:
+
+```rust
+let ev = |vk: u16, up: bool| INPUT {
+    r#type: INPUT_KEYBOARD,
+    Anonymous: INPUT_0 {
+        ki: KEYBDINPUT {
+            wVk: VIRTUAL_KEY(vk),
+            wScan: 0,
+            dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) },
+            time: 0,
+            dwExtraInfo: 0x7A7A7A7A,
+        },
+    },
+};
+let inputs = [ev(VK_LWIN, false), ev(VK_OEM_PERIOD, false),
+              ev(VK_OEM_PERIOD, true), ev(VK_LWIN, true)];
+let ok = unsafe { crate::hook::send_keys_checked(&inputs, "emoji panel: Win+.") };
+log::info!("open_emoji_panel: injected Win+period (inserted={ok})");
+```
+
+**After** — the chord carries scan codes, and the command measures its own
+effect. The chord builder (note it is NOT `hook::kbd_input`, and why):
+
+```rust
+pub(super) fn scan_of(vk: u16) -> u16 {
+    unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) as u16 }
+}
+
+pub(super) fn chord_key(vk: u16, up: bool) -> INPUT {
+    let mut flags = 0u32;
+    if up { flags |= KEYEVENTF_KEYUP.0; }
+    // LWIN is an EXTENDED key (E0 5B) on every PC layout. A physical press
+    // sets this bit; filling `wScan` while omitting it would describe a key
+    // that does not exist, which is worse than sending no scan code at all.
+    if vk == VK_LWIN { flags |= KEYEVENTF_EXTENDEDKEY.0; }
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(vk),
+                wScan: scan_of(vk),
+                dwFlags: KEYBD_EVENT_FLAGS(flags),
+                time: 0,
+                dwExtraInfo: MAGIC_INJECTED,   // 0x7A7A7A7A, unchanged
+            },
+        },
+    }
+}
+```
+
+**Why `hook::kbd_input` is deliberately NOT reused, and why the duplication a
+reviewer once flagged now stays.** `kbd_input` is called from INSIDE the hook
+callback (`inject_space`, `inject_space_then_key`), where `MapVirtualKeyW`
+would put a syscall on the 300 ms `LowLevelHooksTimeout` path that PROBLEM 58
+is entirely about, and where vk-only injection has been correct for this app's
+whole life. Widening the shared helper would change how EVERY space and
+rollover injection is delivered in order to test one command that never runs on
+that path. The duplication is now a real behavioural difference with a name,
+not an oversight.
+
+The command itself — snapshot, inject, hand the verdict to a probe thread:
+
+```rust
+let where_from = emoji_probe::foreground_note();
+let before     = emoji_probe::visible_top_level();
+let fg_before  = emoji_probe::foreground_raw();
+
+let inputs = [ /* Win↓ .↓ .↑ Win↑ — one batch, nothing left held */ ];
+let ok = unsafe { hook::send_keys_checked(&inputs, "emoji panel: Win+.") };
+log::info!(
+    "emoji panel: injected Win+. ({}) with scan codes lwin=0x{:02X} period=0x{:02X} \
+     while {where_from}. This line reports SendInput and nothing else — …",
+    if ok { "4/4" } else { "PARTIAL — fewer than 4 of 4" },
+    emoji_probe::scan_of(emoji_probe::VK_LWIN),
+    emoji_probe::scan_of(emoji_probe::VK_OEM_PERIOD),
+);
+if !ok { return Err(/* unchanged user-facing message */); }
+
+let _ = std::thread::Builder::new()
+    .name("st-emoji-probe".into())
+    .spawn(move || emoji_probe::watch_then_maybe_retry(before, fg_before));
+Ok(())
+```
+
+**The instrument.** `foreground_note()` answers "was our window in front, and
+what had keyboard focus":
+
+```rust
+let tid = GetWindowThreadProcessId(fg, Some(&mut pid));
+let mut gti = GUITHREADINFO { cbSize: size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+let focus = if GetGUIThreadInfo(tid, &mut gti).is_ok() && !gti.hwndFocus.0.is_null() {
+    class_of(gti.hwndFocus)
+} else { "(the foreground thread reports no focused control)".to_string() };
+```
+
+`GetGUIThreadInfo` on the **foreground** thread, never `GetFocus()`:
+`GetFocus` only answers for the calling thread's own message queue, so from a
+Tauri command thread it returns null and would have logged a confident "no
+focused control" for a correctly focused input box. Same family as the rest of
+this file: **a check that cannot produce a true positive is not a check.**
+
+`wait_for_evidence()` polls every 25 ms for up to 500 ms for either a
+**top-level window that was not visible before the chord** or a **foreground
+change**, and logs the class, title and PID of whatever appeared. The test is
+deliberately broad — it does not depend on guessing the panel's window class,
+only on the panel being a window that was not visible a moment earlier. For
+reference when reading the output: on Windows 11 the panel is class
+`Windows.UI.Core.CoreWindow`, title **`Windows Input Experience`**, owned by
+`TextInputHost.exe` (evidenced by NVDA's own live window dumps, nvaccess/nvda
+#15836). **"Microsoft Text Input Application" is Task Manager's friendly
+*process* name, not the window title** — the brief's candidate string was
+wrong, which is exactly why the code logs class/title/PID instead of matching
+one guess. On Windows 10 the frame was the generic `ApplicationFrameWindow`
+(nvaccess/nvda #9205), which is another reason not to match on class.
+
+**The spaced retry**, and why it is a legitimate exception to the one-batch
+law. If 500 ms pass with **no new window AND an unchanged foreground**, the
+panel demonstrably did not open, so a second attempt is free and doubles what a
+single owner click tells us:
+
+```rust
+let a = hook::send_keys_checked(&[chord_key(VK_LWIN, false)], "…LWIN down (spaced)");
+std::thread::sleep(gap);                       // 30 ms
+let b = hook::send_keys_checked(&tap,          "…period tap (spaced)");
+std::thread::sleep(gap);                       // 30 ms
+// UNCONDITIONAL: even if the tap was blocked, LWIN has to come back up.
+let c = hook::send_keys_checked(&[chord_key(VK_LWIN, true)], "…LWIN up (spaced)");
+```
+
+The one-batch law is narrower than it reads: one batch exists so two **ordered
+characters** cannot be reordered by `CallNextHookEx` re-entry (the
+`hte`-for-`the` bug). A modifier chord has no such race — order inside a single
+`SendInput` array is guaranteed either way, and what a shell hotkey handler
+reads is the modifier's **held state** when the period arrives. Splitting the
+chord cannot scramble anything; it can only give an asynchronous handler time
+to settle. Two residual risks, named rather than hidden:
+
+- LWIN is held across two sleeps, so a crash inside that 60 ms window would
+  leave it latched. The release is unconditional and `send_keys_checked`
+  repairs a partial insert (PROBLEM 227) — that is as safe as this can be made.
+- If attempt A had actually opened the panel and the probe missed it, attempt B
+  would **toggle it shut**. That is precisely why the retry requires BOTH
+  negatives, the window diff AND the unchanged foreground, instead of one.
+
+On the double failure the probe reads
+`HKLM\SYSTEM\CurrentControlSet\Services\TabletInputService\Start` (2 = auto,
+3 = manual, **4 = disabled**) and prints it inside the verdict, because that is
+the one corroborated cause of "Win+. does nothing" and a 4 there would mean the
+shortcut is dead for a physical press too — making every line of injection work
+above irrelevant.
+
+### The three log lines this produces, and how to read them
+
+```
+emoji panel: injected Win+. (4/4) with scan codes lwin=0x5B period=0x34 while
+  foreground=Chrome_WidgetWin_1 "Spaceadom" pid=NNNN (OUR OWN WINDOW — …) focus=Chrome_RenderWidgetHostHWND
+```
+then, within ~1.2 s, exactly one of:
+```
+emoji panel: OPENED — within 500 ms of the one-batch Win+. chord, 1 window(s) became
+  visible …: class=Windows.UI.Core.CoreWindow title="Windows Input Experience" pid=NNNN
+emoji panel: OPENED ON THE SPACED RETRY — …   VERDICT: this shell needs the modifier settled …
+emoji panel: STILL NO PANEL after the spaced retry.  VERDICT: … TabletInputService Start = N …
+```
+
+### How it was verified
+
+**Proved on this machine, by measurement:**
+
+- The frontend is not the fault, and the injection is not blocked — the two
+  log lines quoted at the top, from the owner's own 1.0.100 session. That is a
+  measurement, not a reading of the code.
+- Our hook passes the chord through and does not corrupt its modifier mask —
+  read directly out of `keyboard_proc`: the `dwExtraInfo == MAGIC_INJECTED`
+  branch returns `CallNextHookEx` and sits above `track_modifier`.
+- The frontend focuses a focusable element before invoking, in that order —
+  read out of `openEmojiSlot`/`emojiInput`, with the `_editing` guard that
+  makes the null case unreachable.
+- Gates: `cargo test --lib` **399 passed, 0 failed**; `cargo clippy --lib
+  --all-targets -- -D warnings` **clean**; `tsc --noEmit` **clean**.
+
+**NOT proved, and it must not be written up as if it were:** that the emoji
+panel now opens. Nobody working on this can see the owner's screen, no build
+was installed (the owner is running 1.0.100 and the task forbade installing),
+and `SetForegroundWindow` is blocked for the agent shell, so the click cannot
+be simulated. **The verdict needs one owner click on the emoji disc, and then
+the three lines above pasted back.** That is the entire point of the change:
+the next person gets an answer from one click instead of another round trip.
+
+**Also still open, and one keypress from the owner settles it:** does a
+**physical** Win+`.` open the panel on this machine? If it does not, none of
+this is an app bug at all and the answer is `TabletInputService` or the HKLM
+kill switch. That question was never asked before this entry, which is why six
+`inserted=true` lines went uninterpreted.
+
+**Not built:** the in-app emoji grid fallback. Explicitly out of scope by the
+task — the owner decides whether to build it, and the `STILL NO PANEL` verdict
+is the evidence he would decide on.
+
+### Generalise this
+
+**A log line must name the thing it actually observed, not the thing you hoped
+it implied.** `inserted=true` observed `SendInput`'s return value and was read
+by three sessions as "the panel opened". The gap between those two claims —
+the shell's decision — is where the bug lived the whole time, and nothing in
+the log covered it. When an action's effect happens in another process, the
+instrument has to reach into that other process's world: here, *did a window
+that did not exist a moment ago become visible?* Same family as PROBLEM 135
+(a page cannot observe that its own window is hidden) and PROBLEM 236 (only a
+callback-only counter can prove a callback ran).
+
+**And when the public record does not confirm your fix, say so in the code.**
+The scan-code change is plausible, free, and completely unevidenced; writing it
+up as "the root cause" would have produced exactly the kind of confidently
+wrong entry that costs the next AI a full session to un-learn.
+
+---
+
+## PROBLEM 250 — a Microsoft Store MSIX package, and the four things this app does that are SILENTLY WRONG inside one (built and validated; **INSTALLED AND RUN on this machine 2026-09-05 — see "LIVE TEST 2026-09-05" at the end of this section, which supersedes every "never installed anywhere" claim below it, including in "What was NOT exercised"**)
+
+**Date:** 2026-09-05. **Files:** `src-tauri/src/packaged.rs` (new),
+`src-tauri/msix/AppxManifest.xml` (new), `src-tauri/msix/identity.example.json`
+(new), `scripts/build-msix.ps1` (new), plus branches in `startup.rs`,
+`rival_install.rs`, `commands.rs`, `lib.rs`, `updater.rs`, `main.ts`,
+`settings-panel.ts`, and steps in `.github/workflows/release.yml`.
+
+### Symptom
+
+There was no symptom. **That is the entry.**
+
+Route A into the Microsoft Store (submit a link to a hosted, signed `setup.exe`)
+has been blocked since 1.0.72 on one thing: a code-signing certificate that
+chains to a trusted CA, which costs money every year. Route B — submit an
+`.msix` and let the Store sign it — removes that blocker entirely.
+
+But Spaceadom inside an MSIX package is **not the same program**. Four of its
+behaviours are wrong in a package, and **every one of them fails silently**:
+
+| # | What breaks | How you would find out |
+| --- | --- | --- |
+| 1 | The in-app updater downloads `setup.exe` and runs it | a SECOND, unpackaged Spaceadom appears beside the packaged one, both hooking the spacebar (PROBLEM 129 all over again) |
+| 2 | Autostart writes an `HKCU\...\Run` value | it points into `WindowsApps\<Publisher>.Spaceadom_<VERSION>_x64__<hash>\`, and the Store rewrites that directory on every update. The app stops starting at logon and nothing says why |
+| 3 | Config may not be where the path string says | the user's profiles and bindings look empty |
+| 4 | The rival-install banner offers `msiexec /X` | a packaged app elevating to delete files outside its package — Store policy, and the exact shape of PROBLEM 244, which deleted the running app |
+
+Shipping the package without handling these would have produced four bug reports
+that each look like something else.
+
+### Root cause
+
+None of these is a bug. They are all **the same assumption**: that
+`current_exe()`, `%APPDATA%`, `HKCU` and "an installer can be run" mean, in a
+packaged process, what they have always meant in an unpackaged one. So the fix
+is not four fixes; it is **one question asked once at boot**, and four branches.
+
+### Exact file: `src-tauri/src/packaged.rs`
+
+`GetCurrentPackageFullName` — `Win32_Storage_Packaging_Appx`, already in
+`Cargo.toml` for PROBLEM 79's `GetPackageFamilyName`. The mapping is split from
+the syscall so the part that can be wrong is a pure, tested function:
+
+```rust
+pub(crate) fn classify_probe_rc(rc: u32) -> ProbeVerdict {
+    const ERROR_SUCCESS: u32 = 0;
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+    const APPMODEL_ERROR_NO_PACKAGE: u32 = 15700;
+    match rc {
+        APPMODEL_ERROR_NO_PACKAGE => ProbeVerdict::NoPackage,
+        ERROR_SUCCESS | ERROR_INSUFFICIENT_BUFFER => ProbeVerdict::Packaged,
+        other => ProbeVerdict::Unexpected(other),   // logged, never silent
+    }
+}
+
+#[cfg(windows)]
+fn probe() -> Identity {
+    let mut len: u32 = 0;
+    // Sizing call. For an UNPACKAGED process this is the whole story, so the
+    // common case (every install that exists today) costs ONE syscall.
+    let rc = unsafe { GetCurrentPackageFullName(&mut len, PWSTR::null()) };
+    match classify_probe_rc(rc.0) {
+        ProbeVerdict::NoPackage => return Identity::Unpackaged,
+        ProbeVerdict::Unexpected(code) => return Identity::Unpackaged.with_note(...),
+        ProbeVerdict::Packaged => {}
+    }
+    let mut buf = vec![0u16; len as usize];
+    let rc = unsafe { GetCurrentPackageFullName(&mut len, PWSTR(buf.as_mut_ptr())) };
+    if rc.0 != 0 { return Identity::Unpackaged.with_note(...) }
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Identity::Packaged { full_name: String::from_utf16_lossy(&buf[..end]) }
+}
+```
+
+Cached in a `OnceLock` and logged once at boot behind a long unique marker,
+`package-identity-probe-msix-store-mode-spaceadom`, as the third line of every
+log after "which version" and "from where".
+
+`APPMODEL_ERROR_NO_PACKAGE = 15700` was **not** taken from a doc page (the Learn
+page names the constant without printing its value). It was read out of
+`windows-0.58.0/src/Windows/Win32/Foundation/mod.rs` line 171 on this machine.
+
+### The four branches
+
+**1. Updater inert** — `updater.rs::run_check`, one guarded early return before
+anything else, added last and deliberately kept to the smallest possible shape
+because another agent was editing that file concurrently.
+
+**2. Autostart** — `startup.rs`. `ensure_startup_task` returns before touching
+`schtasks` or the Run key; `apply_task_enabled` drives
+`Windows.ApplicationModel.StartupTask` instead; `set_run_key` refuses outright
+as a belt to those braces, because it is reached from four branches and a fifth
+would otherwise inherit the bug.
+
+**The boot branch deliberately does NOT force Windows to agree with config:**
+
+```rust
+if crate::packaged::is_packaged() {
+    let state = crate::packaged::startup_task_state();
+    log::info!("startup: PACKAGED — no Scheduled Task and no Run key were touched. ...");
+    return;
+}
+```
+
+A user who switched Spaceadom off in Task Manager ▸ Startup apps has made a
+decision `RequestEnableAsync` is documented to refuse to override; one who
+switched it ON should not have it taken away at the next launch by a stale
+config value. Windows owns it, so Windows wins, and the UI reads the live state
+(`get_packaged_startup`) rather than config.
+
+**3. Config** — `packaged::migrate_legacy_data_once`, called before
+`config::load_or_init`. On the first packaged launch only, it copies
+`config.json` and the PROBLEM 94 backups into `<data dir>\packaged-migration\`
+and writes a marker. It never writes to the classic path and never deletes.
+
+**4. Rival banner** — `rival_install::status_kind()` returns a third variant,
+`"packaged_host"`, and `repair()` refuses on the same condition. The refusal is
+in Rust as well as in the banner on purpose: the banner is a rendering, `repair`
+is the thing that elevates, and the one that must never be wrong is the latter.
+
+### The Rust ↔ manifest contract, and how it is enforced
+
+`packaged::STARTUP_TASK_ID` must equal `desktop:StartupTask/@TaskId` in
+`AppxManifest.xml`. `StartupTask::GetAsync` fails with `E_INVALIDARG` for an
+unknown id, which in a log is indistinguishable from "the WinRT API is
+unavailable" — so a typo becomes a Store-only autostart bug that reads as
+something else. `build-msix.ps1` greps the constant out of `packaged.rs`, reads
+the attribute out of the manifest, and refuses to pack if they differ.
+
+### `windows` crate 0.58: the feature name is not what you would guess
+
+There is **no** `ApplicationModel_StartupTask` feature. `StartupTask` is a class
+sitting directly in the `Windows.ApplicationModel` namespace, so it rides on the
+plain `ApplicationModel` feature, which itself pulls in WinRT `Foundation` (that
+is where `IAsyncOperation<T>::get()` comes from). Guessing the sub-namespace
+spelling produces CLAUDE.md's documented "unresolved import on a path that
+plainly exists in the docs". Established by grepping
+`windows-0.58.0/Cargo.toml` and `src/Windows/ApplicationModel/mod.rs` on disk,
+not from docs.rs — the 0.58 docs.rs page for this type is a stub.
+
+Cost of adding it, measured: `cargo check --lib` **20.4 s** from the change.
+
+### How it was verified
+
+**The MSIX pipeline, end to end, twice:**
+
+```
+build-msix: binary: 21,237,760 bytes, FileVersion 1.0.100
+build-msix: assets: 6 logos generated from icons/icon.png
+build-msix: startupTask id 'SpaceadomStartupTask' matches packaged.rs
+build-msix: layout: 9 files, 31.6 MB
+build-msix: makeappx: C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\makeappx.exe
+build-msix: packed: Spaceadom_1.0.100_x64.msix (10,652,847 bytes, 10.2 MB)
+build-msix: round-trip: 9 files in, 12 files out
+build-msix: assets: 6 logo references, all resolved
+build-msix: VALIDATION PASSED.
+```
+
+The validation is not "makeappx exited 0" — that is a claim about MakeAppx, the
+same class of evidence PROBLEM 127 taught this project not to accept from an
+installer. The package is **unpacked again** and what comes out is checked:
+every file present, **SHA-256 per file**, manifest structure by XPath (Identity,
+Properties, TargetDeviceFamily, Resources, Application, VisualElements,
+`runFullTrust`, the startupTask), Identity/Version equals `1.0.100.0` and ends
+in `.0`, Executable and EntryPoint correct, and every logo the manifest names
+actually resolves inside the package. `Get-AppxPackageManifest` is deliberately
+NOT used: it reads an INSTALLED package, and nothing here may install anything.
+
+Signed run: `Get-AuthenticodeSignature` returns
+`Subject=CN=LOCAL-TEST-SPACEADOM-NOT-A-REAL-PUBLISHER`, `Status=UnknownError` —
+the correct result for a self-signed certificate that is not in Trusted Root,
+and the reason the package cannot be installed here even by accident.
+
+**The identity probe, with a positive control** — the rule from
+"verification techniques expire". `cargo test` gives `is_packaged() == false`,
+but a check that cannot produce the other answer is not a check, so the API
+family was pointed at processes that ARE packaged:
+
+```
+PACKAGED  claude          pid 2964   Claude_1.46388.3.0_x64__pzs8sxrjxfjjc
+PACKAGED  RuntimeBroker   pid 8404   MicrosoftWindows.Client.CBS_1000.26100.344.0_x64__cw5n1h2txyewy
+PACKAGED  RadeonSoftware  pid 9392   AdvancedMicroDevicesInc-2.AMDRadeonSoftware_10.25.10201.0_x64__0a9344xs7nr4m
+```
+
+Six named. So 15700 from our own process is a real negative, not a broken call.
+
+**Gates:** `cargo test --lib` 399 passed / 0 failed (7 new in `packaged`),
+`cargo clippy --lib --all-targets` 0 warnings, `npx tsc --noEmit` clean.
+
+### The packed binary, and one caveat about it
+
+The `spaceadom.exe` inside the validated package is the release build at
+`src-tauri/target/release/spaceadom.exe`, 21,237,760 bytes, dated 09:00:26 on
+2026-09-05. **It does contain this work** - confirmed by CLAUDE.md's ASCII
+marker method, which is only ever trusted for a POSITIVE result:
+
+```
+package-identity-probe-msix-store-mode-spaceadom     True
+SpaceadomStartupTask                                 True
+```
+
+That doubles as the confirmation the marker rule asks for: at 48 bytes the boot
+marker survives contiguously in `.rodata` rather than being assembled from
+overlapping immediate stores the way `st-hud-pointer` was.
+
+**The caveat:** that binary was produced by a `npm run tauri build` run by a
+CONCURRENT agent from the shared working tree, so it also carries whatever else
+was in flight at 09:00 (the MSI leg, the uninstaller prompt, the emoji-panel
+work). It is fine as a structural payload and it is not a clean build of this
+change alone. **Rebuild before producing a package for submission.**
+
+### THE MEASUREMENT WORTH KEEPING: package identity and file-system redirection are two different things
+
+Both taken in the Claude Code agent shell on 2026-09-05, in **one process**:
+
+```
+GetCurrentPackageFullName()  ->  APPMODEL_ERROR_NO_PACKAGE (15700)   # no identity
+%LOCALAPPDATA%\Spaceadom\spaceadom.exe  ->  1.0.53, 14,109,184 bytes  # but redirected
+                                             (the real machine has 1.0.100)
+```
+
+**A process can sit inside an MSIX redirection view with no package identity of
+its own.** So `is_packaged() == false` proves we are not a packaged app; it
+proves nothing about where our writes land. `packaged.rs` says so at the top.
+
+And the redirection turns out to be a **copy-on-write union view, not a
+redirect**. Listing `%APPDATA%\Spaceadom` from inside the container:
+
+```
+config.json           47,754 B  18 Aug   <- the CONTAINER's private copy (shadows)
+debug.log          4,753,847 B   5 Sep   <- the REAL file (falls through)
+picker-cache.json    827,272 B   5 Sep   <- the REAL file (falls through)
+```
+
+and the container's own store holds `config.json` and **no** `debug.log`.
+
+**This retro-explains a mystery CLAUDE.md has carried since 2026-08-26:**
+*"config.json is shadowed even though debug.log beside it is not."* It is not
+arbitrary. `config.json` was WRITTEN from inside the container once, which
+created the private copy; `debug.log` never was, so it still reads through.
+
+The consequence for the migration: a file the package has not yet written reads
+THROUGH to the real user file. So on a genuine first packaged launch,
+`config::config_path()` already resolves to the user's real config, and the
+"find the hidden real path" the brief asked for does not exist and is not needed.
+
+### The two decisions, and the honest state of each
+
+**Tooling: MakeAppx directly, not `@choochmeque/tauri-windows-bundle`.**
+Evaluated 2026-09-05. It is real, maintained (last commit 2026-09-04), and the
+only Tauri→MSIX tool that exists — Tauri's own MSIX issue (#4818) has been open
+since Aug 2022. It was still declined: it requires the identity values, the
+assets, the Windows SDK and the certificate from you anyway, so it removes none
+of the surface that costs anything, while adding a solo-maintainer npm package
+with a bundled native binary and open manifest-correctness bugs to a project
+whose rule is explicit, auditable scripts. Revisit if Tauri ships MSIX natively.
+
+**WebView2: the package carries none.** You cannot run an installer from inside
+a package, so `npm run store`'s offline bootstrapper is unreachable; Evergreen
+is a Windows 11 component and on nearly all Windows 10 machines;
+`win32dependencies:ExternalDependency` is honoured only by the App Installer
+app, not by Store installs. **Residual risk, stated plainly: on a Windows 10
+machine with no Evergreen runtime the packaged app starts and shows no window.**
+The fix, if it ever matters, is the Fixed Version runtime at +~250 MB — an owner
+decision, not a default. This is why the `.msix` is 10 MB and Route A's
+installer is 210 MB.
+
+### What was NOT exercised
+
+**The `.msix` has never been installed, anywhere.** Deliberately: a packaged
+copy beside the dev machine's NSIS copy is two `WH_KEYBOARD_LL` hooks fighting
+over the spacebar. So **every one of the four packaged branches is unexecuted**
+— the probe's PACKAGED arm, the inert updater, the StartupTask calls, the config
+snapshot, the packaged rival banner. What is proved is that they compile, that
+their pure logic is tested, and that the package they live in is structurally
+sound. The seven-row test plan that would actually prove them is in
+`to-publish-in-microsoft-store/SUBMIT-CHECKLIST.md`, "Route B".
+
+`identity.json` currently holds deliberately fake Partner Center values so the
+pipeline could be run at all; `build-msix.ps1` prints a large yellow warning on
+every run while they are there.
+
+### Generalise this
+
+**A runtime that changes what your primitives MEAN is not a new target, it is a
+new program.** `current_exe()`, `%APPDATA%`, `HKCU` and "run an installer" all
+still compile and still return plausible values inside an MSIX package — they
+just answer a different question. Every one of the four failures here is that
+same shape, which is why the fix is one probe and four branches rather than four
+independent repairs. When adding a packaging format, the question is not "does
+it build" but "which of my assumptions about the OS did this format quietly
+replace".
+
+**Corollary, and the reason the boot line exists:** when a program can be in two
+worlds, the log has to say which one it is in, on line three, before anything
+interesting has happened. Otherwise every Store bug report starts with a round
+trip to establish something the program already knew.
+
+---
+
+
+### REVIEW FIXES 2026-09-05 (MEDIUM) — a packaged copy could demote itself to unpackaged, silently, and flip all four behaviours at once
+
+**Symptom.** None observed — the packaged branches have never executed anywhere.
+
+**Root cause.** `probe()` makes two `GetCurrentPackageFullName` calls: a sizing
+call, then a naming call. When the sizing call said **packaged** and the naming
+call then failed, the function returned `Identity::Unpackaged`.
+
+That is a demotion the sizing call has already ruled out. The ONLY return code
+meaning "no package identity" is `APPMODEL_ERROR_NO_PACKAGE` (15700), and it was
+not returned. Something went wrong NAMING the package; nothing went wrong
+establishing that there is one.
+
+**What it would have cost.** All four packaged behaviours flip together, and
+CLAUDE.md says every one of the differences is silent. The in-app updater comes
+back to life inside a Store install and downloads a `setup.exe` that installs a
+SECOND, unpackaged copy — two `WH_KEYBOARD_LL` hooks fighting over the spacebar,
+PROBLEM 129/141/236. Autostart writes an HKCU Run value naming a
+`WindowsApps\..._<VERSION>_...` path that the next Store update deletes. And the
+rival-install banner offers to elevate and delete files outside the package.
+
+**Exact file.** `src-tauri/src/packaged.rs`.
+
+**The code.**
+
+```rust
+// BEFORE
+if rc.0 != 0 {
+    return Identity::Unpackaged.with_note(format!(
+        "GetCurrentPackageFullName said we are packaged, then failed to name the package ({})", rc.0));
+}
+// AFTER — still packaged; the NAME is what is missing, so the name is what is unknown.
+if rc.0 != 0 {
+    return Identity::Packaged { full_name: UNKNOWN_PACKAGE_NAME.to_string() }
+        .with_note(format!("... ({}) — treated as PACKAGED with an unknown name, never as unpackaged", rc.0));
+}
+```
+
+`package_full_name()` returns `None` for that sentinel, so a caller that wants a
+string to print gets `None` either way and a caller deciding BEHAVIOUR must ask
+`is_packaged()`. The only caller (`rival_install.rs:915`) already prints
+`"unknown package"` for `None`.
+
+"Fail safe toward the shipped path" is right for the SIZING call — an unknown
+code there could mean anything — and wrong here, where the answer is already
+known. Test: `a_named_failure_after_a_packaged_sizing_call_stays_packaged`.
+
+**Generalise this.** *A two-call probe has two failures, and only the first one
+is about identity.* Degrading the answer because the DETAIL could not be read
+throws away a fact that was already established.
+
+### REVIEW FIXES 2026-09-05 (MEDIUM) — a packaged copy made an undeclared network call for its release notes
+
+`release_notes::notes_for` fetched `api.github.com/repos/.../releases/tags/v<ver>`
+on every packaged launch. The cache read above it is kept — a Store install with
+notes on disk should show them — but the FETCH is now gated on
+`!packaged::is_packaged()`, with a log line rather than a silent `None`.
+
+Three reasons, in order of weight:
+
+1. **A Store submission declares what the app talks to**, and the Store's own
+   "what's new" text is the channel the platform provides for exactly this. An
+   app that additionally polls GitHub to render its own release notes is
+   describing a second, undeclared update channel beside the one the Store owns.
+2. The version a packaged copy runs is the PACKAGE version — a four-part
+   `1.0.100.0` minted by `AppxManifest.xml`, not the `v1.0.100` tag this API is
+   keyed on. The request is a 404 by construction on every packaged launch.
+3. CLAUDE.md's rule for a packaged build is that the in-app updater is INERT,
+   and these notes are that updater's user-facing half. Leaving the fetch on
+   made the app half-inert in a way nothing in the log said.
+
+Same shape as `updater::rollback_available`'s packaged/portable gates: the
+return value is often `None` anyway and the LOG LINE is the point. "No notes
+because we did not ask" and "no notes because GitHub said 404" are different
+facts, and a silent shared `None` makes them indistinguishable in a bug report.
+
+### LIVE TEST 2026-09-05 — the `.msix` was installed and run on this machine, and four of these branches were wrong
+
+**This section's heading, and its "What was NOT exercised" section, said the
+`.msix` had NEVER been installed anywhere. That stopped being true on
+2026-09-05.** The owner authorised the install, the NSIS copy was killed first,
+the package was signed with the local test cert (trusted in
+`LocalMachine\TrustedPeople` — `CurrentUser` was not enough; that is why there
+was an attempt 1), installed, driven, and removed again. Full record:
+`_probe/msix-test/log.txt`, §"ATTEMPT 2" (lines 180–535). The procedure that
+worked is now in CLAUDE.md, replacing the "NEVER INSTALL THE .MSIX ON THIS
+MACHINE" paragraph.
+
+**The package works.** Quoting the log's verdict block verbatim:
+
+> VERIFIED GOOD: "package-identity-probe-msix-store-mode-spaceadom: PACKAGED —
+> this copy is running from an MSIX package
+> (LOCALTEST.Spaceadom_1.0.100.0_x64__nj4cr7rfsqc4c)…" ; "config: loaded from
+> C:\Users\beamu\AppData\Roaming\Spaceadom\config.json" ; "hook:
+> WH_KEYBOARD_LL + WH_MOUSE_LL installed" (13:55:52.030) ; "packaged startup:
+> 'SpaceadomStartupTask' state is Enabled (raw 2)" ; "startup: PACKAGED — no
+> Scheduled Task and no Run key were touched … Its state is Enabled; config
+> says run_at_startup=true (they agree)" ; "overlay: configured (on-demand,
+> click-through)" (13:55:53.388) ; "SpaceToggle OS fully initialised" at
+> 13:55:53.398 = 1718 ms after "logger initialised" … no [ERROR] and no panic
+> in the packaged boot; HKCU Run gained no WindowsApps value; StartupTask
+> registry State=2 (Enabled).
+
+> STARTUP TOGGLE (packaged StartupTask path) WORKS: click OFF → "packaged
+> startup: 'SpaceadomStartupTask' disabled — no logon launch" … click ON →
+> "…enabled=true; it is now Enabled" (14:06:16.643). Registry
+> SystemAppData\<PFN>\SpaceadomStartupTask State=2 afterwards. HKCU Run never
+> gained a WindowsApps value.
+
+The ring drew over the app's own window, Space+x launched `D:\` through
+`ShellExecute`, and the toast rendered. **So the four packaged branches this
+section built are real, and the defects below are in what they did NOT
+consider.** Four fixes follow; each is written up where its code lives.
+
+---
+
+#### FINDING A — AppData was NOT virtualised, HKCU WAS, and the snapshot was 1.3 MB of nothing
+
+> FINDING A: AppData is NOT virtualised for this runFullTrust package on this
+> machine. The packaged copy logged "Spaceadom starting — data dir:
+> C:\Users\beamu\AppData\Roaming\Spaceadom", wrote packaged-first-run.txt +
+> packaged-migration\ into the REAL %APPDATA%\Spaceadom, and SAVED the real
+> config.json (77912 → 77949 bytes…). … Nothing under
+> %LOCALAPPDATA%\Packages\LOCALTEST.Spaceadom_nj4cr7rfsqc4c\LocalCache\Roaming\
+> was created by the app (only WebView2's EBWebView under LocalCache\Local\…)
+
+and, from the restore step, the other half of the split:
+
+> NotifyIconSettings after the NSIS relaunch: IsPromoted=1 on the NSIS path AND
+> on the Claude-container path (both written just now by the unpackaged copy),
+> still BLANK on the WindowsApps entry → confirms FINDING D and shows the
+> packaged copy's HKCU writes at 13:55:55 never reached the real hive (they went
+> to the package's Helium\User.dat, created 13:50:55).
+
+**Root cause of the waste.** `migrate_legacy_data_once` was unconditional: on
+a first packaged launch with a readable config it copied `config.json` and the
+whole backups folder to `<data dir>\packaged-migration\`. When the data dir IS
+the classic path, that copies a folder into a subfolder of itself — 1,309,141
+bytes of backups plus a 77,912-byte config — and neither reason the snapshot
+exists survives it. Reason 1 was "the NSIS uninstaller may take
+`%APPDATA%\Spaceadom` with it": it would take the snapshot too, because the
+snapshot is inside it. Reason 2, leaving evidence, is served by the log line.
+
+**Fix — `src-tauri/src/packaged.rs`.** `plan_migration` gained a fourth input
+and a fourth verdict:
+
+```rust
+pub(crate) enum MigrationPlan { NotPackaged, AlreadyDone, Snapshot, Nothing, SameDirectory }
+
+pub(crate) fn plan_migration(
+    packaged: bool,
+    marker_exists: bool,
+    classic_config_exists: bool,
+    data_dir_is_classic: bool,      // NEW
+) -> MigrationPlan {
+    if !packaged { return MigrationPlan::NotPackaged; }
+    // Checked BEFORE the marker: "there was never anything to migrate" is the
+    // useful answer for such a machine, not "it ran earlier".
+    if data_dir_is_classic { return MigrationPlan::SameDirectory; }
+    if marker_exists { return MigrationPlan::AlreadyDone; }
+    if classic_config_exists { MigrationPlan::Snapshot } else { MigrationPlan::Nothing }
+}
+```
+
+The `SameDirectory` arm logs *"AppData not virtualised — nothing to migrate"*,
+copies nothing, and — deliberately — **writes no marker**, so that if a future
+Windows, a future manifest or a future `portable::resolve_root` ever does put a
+package's data somewhere else, the snapshot can still run. `data_dir_is_classic`
+is computed with a new pure `same_directory(a, b)` (case-, slash- and
+trailing-separator-insensitive) against `portable::roaming_default()`, which was
+widened from private to `pub(crate)` so the comparison has ONE producer of
+`%APPDATA%\Spaceadom` on both sides rather than two that can drift.
+
+**`data_dir_is_classic` IS NOT A VIRTUALISATION DETECTOR, and the code says so
+in as many words.** File-system virtualisation under MSIX is transparent: the
+path string is byte-identical either way. This is the same trap CLAUDE.md's
+testing laws already record for the agent container ("printing `%LOCALAPPDATA%`
+is not proof that you escaped"). What the flag answers is the smaller,
+answerable question the snapshot actually depends on — *is the folder we
+resolved the same folder the classic path names?*
+
+**Why the split happened, from the documentation — and the old reasoning in
+this file was wrong.** `migrate_legacy_data_once`'s doc comment used to argue,
+from repeated scoping qualifiers on the "behind-the-scenes" page, that
+redirection "applies only to virtualized apps" i.e. appContainer ones, and
+therefore not to a `runFullTrust` package. **That inference is not supported.**
+Microsoft's "Flexible virtualization" page documents both file-system and
+registry write virtualization as ON BY DEFAULT for desktop-bridge packages;
+`desktop6:FileSystemWriteVirtualization` and `desktop6:RegistryWriteVirtualization`
+are **opt-OUTS** (default `enabled`), both require the `unvirtualizedResources`
+restricted capability, and the registry one is documented as intended only for
+certain Microsoft-published desktop games. We declare neither, and should not.
+
+What actually explains the split is AppData's **file-open fallback**, which has
+no registry equivalent: the OS opens the per-package copy first, and if that
+does not exist it opens the real AppData file — after which, in Microsoft's
+words, *"no virtualization for that file occurs"*
+([desktop-to-uwp-behind-the-scenes](https://learn.microsoft.com/en-us/windows/msix/desktop/desktop-to-uwp-behind-the-scenes)).
+`%APPDATA%\Spaceadom` already existed, written by the NSIS copy, so every file
+in it fell through. The registry table on the same page states flatly that HKCU
+writes are copied on write into a private per-user, per-app location, and
+documents no such escape.
+
+**UNVERIFIED, and it matters:** a genuine Store user with NO unpackaged copy has
+a folder that does NOT already exist, so the fallback has nothing to fall back
+to and the config will probably live in the package's private store. **That
+machine has still never been observed.** The code is right either way — it
+compares the resolved path rather than assuming which happened — but "AppData is
+never virtualised for this package" is NOT established and must not be written
+down as if it were.
+
+---
+
+#### FINDING C — the packaged-host banner could never fire in the commonest case
+
+> FINDING C (DEFECT, rival install): NSIS copy still fully present at
+> C:\Users\beamu\AppData\Local\Spaceadom\spaceadom.exe (v1.0.100) with its HKCU
+> Run value, yet the packaged copy logged "rival install: no second copy found
+> — this machine has one Spaceadom". rival_install.rs detect_full … only looks
+> at per_machine_exe() (Program Files) and HKLM MsiExec entries; a PER-USER
+> NSIS install (%LOCALAPPDATA%\Spaceadom, HKCU Uninstall) is never checked, so
+> the packaged_host banner … can never appear for the most common
+> Store-beside-NSIS case.
+
+**Root cause.** Path 1 looks only at `%ProgramFiles%\Spaceadom`, because when
+the module was written the per-user directory was where WE live and so could not
+be a rival — that stopped being true the moment a second KIND of install
+existed. Path 2 reads HKLM only, and a per-user NSIS install registers under
+HKCU. Both were correct for one world and blind in the other.
+
+**Fix — `src-tauri/src/rival_install.rs`.** A new pure classifier covers both
+directions, and `detect_full` gained Paths 3 and 4:
+
+```rust
+pub enum CrossKindVerdict { None, PerUserBesidePackaged, StoreBesideUnpackaged }
+
+pub fn classify_cross_kind(
+    we_are_packaged: bool,
+    per_user_exe_exists: bool,
+    per_user_exe_is_us: bool,
+    store_package_registered: bool,
+) -> CrossKindVerdict {
+    if we_are_packaged {
+        if per_user_exe_exists && !per_user_exe_is_us {
+            CrossKindVerdict::PerUserBesidePackaged
+        } else { CrossKindVerdict::None }
+    } else if store_package_registered {
+        CrossKindVerdict::StoreBesideUnpackaged
+    } else { CrossKindVerdict::None }
+}
+```
+
+The two arms are **mutually exclusive on purpose**: a packaged process asking
+"is a Spaceadom package installed?" always gets "yes" — itself — so it must
+never reach the Store branch. That is a unit test, not a comment.
+
+**Direction A is a FILE check, not an HKCU read**, and that is the interesting
+decision. An NSIS per-user install does write `HKCU\…\Uninstall\Spaceadom`, and
+reading it would hand over a `DisplayVersion` for free. Two reasons not to, and
+both have to hold: this module's own law since PROBLEM 238 is that it never
+depends on HKCU, because the agent shell virtualises HKCU and a negative read
+there is not evidence; and under a package HKCU is virtualised too — the ONE
+half of the split Microsoft documents with no escape hatch. Copy-on-write does
+mean a READ that misses the private hive falls through to the real one, so an
+HKCU read would probably have worked — but "probably, by a mechanism we inferred"
+is a worse foundation than `spaceadom.exe` being on disk or not, and
+`file_version()` already reads the version off the rival exe.
+
+**Direction B uses WinRT.** `PackageManager::FindPackagesByUserSecurityId("")`
+— the current user, read-only, no elevation, no capability (the all-users
+`FindPackages()` is the one that needs administrator). `FindPackagesByPackageFamily`
+was the first choice and cannot be used: it wants a package FAMILY name, derived
+from `msix/identity.json`, which is gitignored and compiled into this binary in
+no form at all. That added `"Management_Deployment"` and `"Foundation_Collections"`
+to the `windows` crate features, with the same per-API feature-name trap
+`ApplicationModel` documented one bullet above it in `Cargo.toml`.
+
+**A fourth banner kind, `store_copy`, and it must NEVER offer a repair.** There
+is no ProductCode, no `uninstall.exe`, and no directory this app may touch —
+`Program Files\WindowsApps` is ACL'd against the user by design. `repair()`
+refuses on the kind explicitly, and the `Finding`'s `path` is a SENTENCE with no
+path separator (the same device PROBLEM 238 uses for an orphaned entry), so
+`Path::parent()` yields `""` and `removal_target` answers `Ok(None)` even if the
+explicit guard were somehow bypassed. A `runas` that ends in "access denied"
+would be worse than no button at all: it teaches the user to accept a UAC prompt
+from this app for an action that cannot work.
+
+**Path 3/4 run BEFORE Path 2**, because only one finding is ever reported and
+Paths 1/3/4 all find a second LIVE install while Path 2 usually finds a leftover
+REGISTRATION. When both are true the banner must name the one that will fight
+over the spacebar at the next logon.
+
+**Frontend, NOT done here** (another agent owns `.ts` this pass) — see
+"SETTINGS-PANEL LINES TO ADD" in the handoff: `src/main.ts:~1289` switches the
+banner text on `kind` and has no `store_copy` arm, so today that case renders
+the generic "second copy" text with a working-looking Remove button that the
+backend refuses. The text and the button suppression both need adding.
+
+---
+
+#### FINDING D — the packaged copy promoted two icons that were not its own, then recorded the job as done
+
+> FINDING D (DEFECT, tray icon): "startup: tray icon promoted to the visible
+> taskbar corner (C:\Users\beamu\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Local\Spaceadom\spaceadom.exe)"
+> and "(C:\Users\beamu\AppData\Local\Spaceadom\spaceadom.exe)" — the packaged
+> copy promoted two STALE NotifyIconSettings entries, not its own …
+> It then wrote tray_promoted_for=<WindowsApps path> so the once-gate is
+> closed: a Store install's tray icon is never promoted.
+
+**Root cause, in two layers.** The match rule was
+`norm == current_exe || norm.ends_with(r"spaceadom\spaceadom.exe")`. Under a
+package the exe is `…\WindowsApps\<PFN>_<version>_x64__<hash>\spaceadom.exe`,
+which matches neither the (not-yet-existing) exact entry nor that suffix — but
+the suffix DID match two other installs. Returning `true` for them told the
+caller the job was done, so `lib.rs` wrote `tray_promoted_for = <WindowsApps
+path>` and closed the once-gate for ever.
+
+And it could not have worked anyway: registry writes from inside a package are
+copy-on-write into `…\Packages\<PFN>\SystemAppData\Helium\User.dat`, and the
+restore-step measurement above proves the real `NotifyIconSettings` entry for
+the WindowsApps exe still had `IsPromoted` **blank** afterwards.
+
+**Fix 1 — `src-tauri/src/startup.rs`: under a package, do nothing, and say why
+once.**
+
+```rust
+if crate::packaged::is_packaged() {
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| log::info!("startup: PACKAGED — NOT touching NotifyIconSettings. …"));
+    return false;
+}
+```
+
+`lib.rs`'s retry loop gained the same guard at the top of its thread, because
+without it the loop would sleep 3 s eight times on every launch for ever — the
+once-gate only closes on a successful promotion, and there will never be one.
+
+**Fix 2 — the match rule is now anchored on OUR OWN directory name**
+(`notify_icon_entry_matches`, pure and unit-tested):
+
+```rust
+if entry == me { return true; }                    // 1. the exact path
+// 2. `spaceadom.exe` inside a directory with the SAME NAME as ours — this is
+//    the shell's KNOWNFOLDER-GUID spelling of the same install:
+//    {6D809377-…}\Spaceadom\spaceadom.exe  ==  C:\Program Files\Spaceadom\spaceadom.exe
+entry_file == "spaceadom.exe" && my_file == "spaceadom.exe" && entry_parent == my_parent
+```
+
+Dev builds (`…\target\release\spaceadom.exe`) are still excluded, by the same
+comparison and for the same reason PROBLEM 142 excluded them.
+
+**Researched and closed, 2026-09-05: there is no non-virtualised route.** There
+is no supported API for an app to promote its own notification icon.
+`NOTIFYICONDATA`'s only visibility state is `NIS_HIDDEN` / `NIS_SHAREDICON` —
+there is no "promoted" flag; `Shell_NotifyIconGetRect` is read-only geometry;
+`Windows.UI.Shell` covers taskbar PINNING of app-list entries, not the
+notification area. Microsoft's
+["Notifications and the Notification Area"](https://learn.microsoft.com/en-us/windows/win32/shell/notification-area)
+page states the model outright: only the user promotes an icon, and the system
+may do so itself only as a sub-minute preview.
+`HKCU\Control Panel\NotifyIconSettings\<id>\IsPromoted` is real, is what the
+shell writes when the user drags an icon, and is an undocumented internal
+contract — which is precisely why it is unreachable from inside a package.
+**So Store users promote the icon themselves** (drag it out of the `^` overflow,
+or Settings ▸ Personalisation ▸ Taskbar ▸ Other system tray icons), and that
+belongs in the Store listing text, not in a retry loop.
+
+**Generalise: a write you cannot read back is not a write.** This function
+returned `true` on the strength of `RegKey::set_value` returning `Ok(())` —
+which it did, into a hive nobody reads.
+
+---
+
+#### FINDING E — every save re-ordered the bindings, so a config hash was never a change detector
+
+> CONFIG: 77912 bytes again, sha256 4CE86B44… vs step-1 9ADE0FDE… — a full JSON
+> diff of config-a2-restored.json against config-a2-step1.json finds NO semantic
+> difference (every key/value identical, including tray_promoted_for back to the
+> NSIS path, run_at_startup=true, tour_done=true); the bytes differ only in the
+> ORDER of the keys inside profiles[].bindings (first difference at byte 491:
+> "z" first vs "h" first) — bindings are serialised from a HashMap, so every
+> save re-orders them and the hash is never stable. Nothing the owner set was
+> changed.
+
+**Root cause.** `Profile::bindings`, `ProfileExport::bindings` and
+`AppConfig::special_keys` were `HashMap<String, KeyBinding>`. `HashMap`'s
+iteration order is randomised per map instance by design, so `serde_json` wrote
+the keys in a different order on every save.
+
+**What it cost, and the second one is the expensive one.** (1) Anything
+comparing two saves — a backup deduplicator, a "did the user change anything?"
+check, a diff in a bug report — sees every save as a change; during this very
+test, proving the packaged copy had changed nothing required a full semantic
+JSON diff, because the hashes said otherwise. (2) Every save rewrites the whole
+file's byte layout, so the rolling backups (PROBLEM 94) differ from each other
+for no reason and a user's `config.json` never settles.
+
+**Fix — `src-tauri/src/config/schema.rs`,** one named type replacing three
+identical declarations:
+
+```rust
+pub type BindingMap = BTreeMap<String, KeyBinding>;
+```
+
+`serde_json`'s `preserve_order` (IndexMap) was the alternative and is worse
+here: it is a Cargo feature that changes how EVERY map in the dependency tree
+serialises, to preserve *insertion* order — which, for a map rebuilt from disk
+on every load, is not a stable order at all, only a different unstable one. And
+IndexMap is not already a dependency of this crate. `BTreeMap` fixes it by
+construction rather than by remembering to sort at each serialisation site, and
+for single-character and special-key names lexicographic order is also the order
+a human expects to read.
+
+**No code depended on a `HashMap`-specific API** — checked by grep across
+`src-tauri/src` before the switch, not assumed. The used surface is
+`new`/`insert`/`get`/`remove`/`clear`/`len`/`is_empty`/`values`/`keys`/`iter`
+and indexing, all of which `BTreeMap` has, and `String` is `Ord`. Nine
+construction sites moved to `BindingMap::new()`
+(`config/schema.rs`, `config/defaults.rs`, `config/mod.rs`, `commands.rs`,
+`browser_profiles.rs`, `engine/mod.rs`); the compiler found every one.
+
+**Generalise: if two runs that did the same thing must produce the same bytes,
+that has to be a property of the TYPE, not a habit of the caller.**
+
+---
+
+#### What the live test did NOT settle
+
+- **A clean Store machine.** Everything above was measured beside an existing
+  NSIS install, and FINDING A depends on that (the AppData fallback fired
+  because the folder already existed). SUBMIT-CHECKLIST.md "Route B" is still
+  needed and is still the only way to see a first packaged launch with nothing
+  else on the machine.
+- **The About row.** From the log: *"ABOUT ROW: NOT PRESENT in the tested
+  binary … The backend get_about_info (commands.rs:1391-1393) returns
+  'Microsoft Store' when packaged but nothing in this build's frontend calls
+  it. UNVERIFIED until a rebuild."* The tested exe was built at 09:00; the
+  frontend files are dated 13:59–14:01 the same day.
+- **The Settings "Run at startup" repaint** — see FINDING F below. Backend
+  verified, frontend not fixed this pass.
+- **The rival banner's `store_copy` text.** Backend classifier, refusal and
+  tests are in; `src/main.ts` has no arm for it yet.
+- **Neither the second hook nor the update path.** The NSIS copy was killed
+  before the package was installed, so "two hooks fighting over the spacebar"
+  was avoided rather than observed, and no Store update was exercised.
+
+#### FINDING F — the Settings switch, and why it is not fixed here
+
+> OBSERVATION (re-verify after rebuild): in shot-startup-off.png, taken 2.2 s
+> after Windows reported Disabled, the "Run at startup" switch still draws ON.
+
+The backend is correct and logged both transitions. The row is painted from
+frontend state and is not re-read from `get_packaged_startup` after the toggle
+resolves, so under a package — where WINDOWS, not the app, owns the final answer
+— the switch can show the opposite of the truth. `.ts` was owned by another
+agent this pass; the exact change is written up under **SETTINGS-PANEL LINES TO
+ADD** in this pass's handoff report and must not be lost.
+
+#### Leftovers on the owner's machine (NOT deleted — the never-delete law)
+
+- `%APPDATA%\Spaceadom\packaged-first-run.txt` (90 B, 13:55:51)
+- `%APPDATA%\Spaceadom\packaged-migration\` — `config.json` 77,912 B plus
+  `backups\` with 20 files, 1,309,141 B
+
+Both were written by the old unconditional `migrate_legacy_data_once`. The fixed
+version will never write them again, and it will never read them either — they
+are dead bytes, not state. Removing them is safe and is the owner's call. The
+test certificate the log also names (`LocalMachine\TrustedPeople`, CN=LOCAL-TEST-SPACEADOM-NOT-A-REAL-PUBLISHER,
+thumbprint 710EB524F40B8233E6D485BCCC649839295BA0A1) is still installed and is
+also the owner's to remove.
+
+#### Known observations (attempt 3, 2026-09-05) — four things measured but NOT fixed
+
+Attempt 3 (`_probe/msix-test/log.txt`, the `a3-*` / `a3b-*` blocks) re-ran the
+packaged app to capture Store screenshots. It fixed nothing; it MEASURED four
+things, and all four are written down here because the next agent will
+otherwise re-derive them. None of them is a defect in the 1.0.101/1.0.102
+shipping build.
+
+**OBSERVATION A — injected keyboard input does not enter this process's own
+hook chain while this process's OWN window is foreground. Hardware input is
+unaffected.** Measured 3 times out of 3: `SendInput` from an explorer-launched
+script with the dashboard focused (15:35:01, 18:42:53, 18:45:42) produced
+NOTHING — the liveness split for that minute reads
+`primary_real:0 primary_injected:0 reference:0 mouse:46`. The same script's
+keystrokes with a DIFFERENT window in front (claude.exe at 18:39:15, and a 2x2
+window the harness owned at 18:45:46/18:45:49) produced the ring and the combo
+immediately. Both processes were measured `IL=0x2000 (MEDIUM) appcontainer=0`
+at 18:45:41, **so this is not integrity-level UIPI**, and the owner's own
+physical holds over the same window DO work (holds #36–#42, "shown over own
+window", 15:51). Attempt 2's packaged 1.0.100 DID see `SendInput` over its own
+window (14:07:51, `primary_real:11`), so it is not a fixed property of the
+package either.
+
+Where it is NOT: an Explore pass over `hook/mod.rs` established that
+`kb_hook_proc` (2754) increments `KB_EVENTS_SEEN` unconditionally at 2801
+*before* any gate; the only swallow is our own `dwExtraInfo` cookie
+`0x7A7A7A7A` (2803–2823, and generic `LLKHF_INJECTED` is deliberately not
+filtered — hook law 1); `FG_IS_SELF` (2905–2927) is a counter, never a gate;
+and `ref_kb_hook_proc` (1835–1846) has no injected filter at all. Three
+counters at zero therefore means the keystrokes never reached ANY
+`WH_KEYBOARD_LL` hook in the process — the drop is OS-side, and nothing in
+`hook/` or `engine/` calls `is_packaged()`.
+
+**What this changes for anyone testing:** an injection harness is void as a way
+to drive Space chords while the app's own window is in front. Give another
+window the foreground first (the a3b harness's `ownwin` action creates a 2x2
+one for exactly this), or ask the owner to press the keys. It does NOT affect
+clicking or scrolling in the dashboard — mouse input reached the app fine in
+the same minutes (`mouse:46`) and every screenshot in attempt 3 and in the
+1.0.102 pill proof was driven by injected clicks. **Generalise: a harness that
+cannot produce a positive control is not a harness** — this is the same law as
+CLAUDE.md's "assert a positive control and declare the run VOID when it fails",
+and the 15:35 ring/launch shots were correctly declared VOID under it.
+
+**OBSERVATION B — `updater: install kind decided — Unknown (…)` is logged ~40 ms
+BEFORE the packaged gate line, in a packaged build (15:28:35.063).** Cosmetic:
+the packaged copy's updater is inert either way and the very next line says so.
+It is listed because the caller asked that the updater line not say Unknown,
+and the generic classifier line does. Fix, when someone touches `updater.rs`:
+consult `packaged::is_packaged()` before classifying, or log the classifier's
+verdict only on the path that uses it.
+
+**OBSERVATION C — a watchdog asymmetry, and it is a real follow-up, not
+cosmetic** (`hook/mod.rs` ~2192 vs ~2200). `watchdog_check` returns EARLY when
+the foreground process is elevated ("elevated focus — UIPI silence is normal").
+When the foreground window is Spaceadom's OWN, it only bumps
+`BLIND_WHILE_OWN_FG` and **falls through to the eviction verdict**. So a quiet
+user with the dashboard focused can trigger a real re-hook on silence that has
+an innocent explanation — and Observation A is precisely a mechanism that
+produces that silence. This has not been made to fire on purpose and no code
+was changed for it; it wants its own PROBLEM entry and a decision from the
+owner (return early, or require the reference hook to be silent too).
+
+**OBSERVATION D — the `_probe` harness scripts have a `$log`/`$Log` collision
+that appended three blocks of script output into the REAL
+`%APPDATA%\Spaceadom\debug.log`** (`a3-snap.ps1`, `a2-step6.ps1`). PowerShell
+variable names are case-INSENSITIVE, so a `$log` set to the app's debug.log
+earlier in a script and a `$Log` meant for the harness's own log are the same
+variable, and the harness wrote into the app's log. **Those three foreign
+blocks are still in `debug.log` and must NOT be removed** — the never-delete
+law, and they are also dated evidence of when the harness ran. Anyone grepping
+`debug.log` for engine decisions around 2026-09-05 15:30–18:50 should expect
+them and skip them. Generalise: **a log a test harness can write to is a log
+you can no longer read as evidence** — give a harness its own file, and never
+name a variable after a path it does not own.
+
+---
+
+## PROBLEM 249 — the updater could only ever be waited for: no way to ask, no way back, and a "what changed?" that was a version number (built on 1.0.100, NOTHING exercised live — see "What was NOT exercised")
+
+**Symptom.** Three separate holes in the shipped 1.0.100 updater, all of them
+the same shape — the app knew something and had no way to say it, or the user
+knew something and had no way to say it:
+
+1. **No way to ask.** The check is a daily timer on the `st-updater` thread.
+   Someone who has just been told a fix exists has no button, no menu item and
+   no way at all to make it happen sooner than "some time in the next 24
+   hours". The only lever is `auto_update: false` in `config.json`, which is
+   the opposite lever.
+2. **No way back.** An update installs silently and replaces the exe. If the
+   new build is worse for that particular machine there is no route to the old
+   one short of finding the release on GitHub and installing it by hand — and
+   the NSIS installer would refuse it anyway (see the `allowDowngrades`
+   measurement below).
+3. **"Updated to 1.0.X" and nothing else.** PROBLEM 245's one-time toast is a
+   version number. It says something happened without saying what, which is
+   the shape of notification a person learns to dismiss without reading.
+
+**Root cause.** None of the three is a bug; all three are the cost of the
+smallest thing that could work. PROBLEM 245 shipped the mechanism (routing,
+signature verification, the relaunch) and stopped there deliberately. What was
+missing was every path that starts with a person.
+
+### The files
+
+| File | What changed |
+| --- | --- |
+| `src-tauri/src/updater.rs` | manual check + `update-status` events; the rollback archive, its retention rule and the 24 h hold; `install_msi` split so `run_msiexec` is shared with the rollback |
+| `src-tauri/src/tray.rs` | the "Check for updates" item and its self-relabelling |
+| `src-tauri/src/release_notes.rs` | **new** — the GitHub release-notes fetch, its cache, and `whats-new-available` |
+| `src-tauri/Cargo.toml` | ONE line: `reqwest` promoted from transitive to direct. Adds nothing to the build — see below |
+| `src-tauri/src/lib.rs` | `mod release_notes;`, five command registrations, one `release_notes::schedule` call |
+
+### 1. The manual check
+
+`check_for_updates_now()` runs the SAME `plan()` — same manifest, same
+installer routing — as the daily one. Two deliberate differences, and both are
+decisions, not accidents:
+
+* **It runs, and installs, even when `auto_update` is `false`.** That flag
+  means "never do it behind my back". A click is not behind anybody's back. A
+  report-only manual check would leave someone who set the flag once with no
+  route to a fix at all, which is CLAUDE.md's "a control that does nothing is
+  worse than a missing control" pointed at the updater.
+* **It ignores the rollback hold** and clears it, because the hold exists to
+  stop the *app* re-updating on its own, not to stop the user.
+
+**What it does NOT override is PROBLEM 250's MSIX gate**, and that is the line
+worth keeping:
+
+```rust
+if crate::packaged::is_packaged() {
+    return emit_always(app, UpdateStatus::plain(STATE_NOT_ELIGIBLE, current,
+        "This copy came from the Microsoft Store, so the Store keeps it up to date. \
+         Check for updates in the Store app."));
+}
+```
+
+> **Generalise: "the user asked for it" is a reason to override a POLICY, never
+> a reason to override a fact about the machine.** `auto_update` is a policy.
+> "This process lives inside an MSIX package, and installing a `setup.exe` from
+> in here leaves a second unpackaged Spaceadom hooking the same spacebar" is a
+> fact. A manual path that overrides everything uniformly is how PROBLEM 129
+> comes back with a button on it.
+
+The rate limit is one pure function, and it returns two different sentences on
+purpose:
+
+```rust
+pub(crate) fn manual_gate(in_flight: bool, since_last: Option<Duration>, min_gap: Duration)
+    -> Option<String>
+{
+    if in_flight { return Some("Already checking for updates…".into()); }
+    match since_last {
+        Some(d) if d < min_gap => {
+            let wait = (min_gap - d).as_secs() + 1;
+            Some(format!("Just checked. Try again in {wait} seconds."))
+        }
+        _ => None,
+    }
+}
+```
+
+A check still RUNNING and a check that FINISHED thirty seconds ago are not the
+same event. Collapsing them would tell somebody watching a progress bar that
+they should wait half a minute.
+
+The claim on the in-flight flag is `swap`, not `store`, so two callers racing
+between the read and the claim still cannot both proceed.
+
+### The event contract
+
+One event, `update-status`, one payload, used for both the event and the
+command's return value so a UI written against one is automatically right about
+the other:
+
+```rust
+pub struct UpdateStatus {
+    pub state: &'static str,                                  // the STATE_* constants
+    pub current: String,
+    #[serde(skip_serializing_if = "Option::is_none")] pub latest: Option<String>,
+    pub message: String,                                      // always a finished sentence
+    #[serde(skip_serializing_if = "Option::is_none")] pub progress: Option<u8>,
+}
+```
+
+States: `checking`, `up_to_date`, `downloading`, `installing`, `error`, `busy`,
+`not_eligible`. **`message` is always a finished English sentence, never a code
+and never a fragment** — that is what lets the UI contract be "switch on the
+states you handle, and show `message` verbatim for anything else", so a state
+added later can never produce a blank panel.
+
+`busy` and `not_eligible` are deliberately NOT folded into `error`: nothing has
+failed in either case, and painting a red failure for an impatient second click
+is a lie about the app's health.
+
+**Two emit rules, and the second one is the load-bearing one:**
+
+* `up_to_date`, `busy`, `not_eligible` are emitted for a MANUAL check only
+  (`emit_status(.., manual)`). The daily check stays silent for them, so the
+  tray label never rewrites itself at 3 a.m.
+* Once `downloading` has been emitted, a TERMINAL status is always emitted —
+  manual or daily (`emit_always`). A daily check that dies mid-download used to
+  be free to say nothing; now it cannot, because the UI is already showing a
+  progress bar. Leaving that bar at 60% forever is PROBLEM 135's hidden window
+  wearing a different costume: the page has no way to observe that the thing it
+  is waiting for stopped existing.
+
+### The tray item
+
+It follows `ENGINE_ITEM`'s pattern exactly: the label is written by an
+**event listener**, not by the click handler.
+
+```rust
+pub(crate) fn update_item_label(state: &str) -> Option<(&'static str, bool)> {
+    match state {                                   // (label, reverts after 5 s)
+        "checking"     => Some(("Checking…",                     false)),
+        "up_to_date"   => Some(("You're on the latest",          true)),
+        "busy"         => Some(("Already checking…",             true)),
+        "error"        => Some(("Couldn't check — try later",    true)),
+        "not_eligible" => Some(("Updates aren't available here", true)),
+        _ => None,
+    }
+}
+```
+
+Three things are decided here and each has a reason:
+
+* **`None` for `downloading` and `installing`.** A tray menu has no progress
+  bar. Both of those states end in the process exiting, so a label reading
+  "Downloading 45%" would freeze at whatever number it last showed and still be
+  there when the app came back.
+* **`checking` is NOT transient.** A five-second timer under it would put
+  "Check for updates" back on the menu in the middle of a download.
+* **`LABEL_GENERATION`.** Every status bumps a counter; the five-second revert
+  timer captures it and only resets the label if its generation is still
+  current. Without it two checks five seconds apart race, and the first one's
+  timer rewrites "Checking…" back to "Check for updates" while the second is
+  still downloading — the menu lying about the app's state, which is the exact
+  bug the Pause/Resume label was built to avoid.
+
+Because the LISTENER writes the label, a check started from the dashboard's own
+button relabels the tray too. The two entry points cannot disagree.
+
+### 2. Rollback
+
+**The data model, and why the obvious one does not work.** At the moment we
+install version N we hold the bytes for N, and never for the version we are
+leaving. So a single archive slot has to choose between being the SEED (the
+installer of the version now running, which becomes the way back when we later
+leave it) and being the TARGET (the way back right now) — and it ends up
+alternating: rollback available after one update, gone after the next, back
+after the one after that. Two slots make it available after every update from
+the second one onward, at a cost of one extra installer on disk (~6 MB NSIS,
+~10 MB MSI).
+
+The whole retention rule is one pure function:
+
+```rust
+pub(crate) fn retention(running: &str, kind: InstallKind, mut entries: Vec<ArchiveEntry>)
+    -> Retention
+{
+    entries.sort_by(|a, b| cmp_versions(&b.version, &a.version).then_with(|| a.file.cmp(&b.file)));
+    // keep:   the entry == running (the SEED) and the newest entry < running (the TARGET)
+    // delete: everything else OF OUR KIND, including anything NEWER than running
+    // keep, never delete: anything of the OTHER kind — it is the other copy's seed
+}
+```
+
+Four decisions inside it:
+
+* **Anything NEWER than the running version is pruned.** It is the leftover of
+  an update that was downloaded and then did not take (a declined UAC, a failed
+  install). It is neither a seed nor a way back, and the plugin always
+  re-downloads rather than reusing a local file, so keeping it buys nothing.
+* **An installer of the OTHER kind is never a target and never deleted.** Both
+  copies share `%APPDATA%`, so a per-machine `.msi` can be sitting there while
+  the per-user NSIS copy prunes. Running it would be PROBLEM 129/244; deleting
+  it would throw away the other copy's only way back.
+* **The sort has a filename tiebreak**, so the result never depends on the
+  order the directory happened to be read in. There is a test for exactly that.
+* **The first auto-update has no rollback, and must not pretend to.** The copy
+  being left was installed by hand and its installer was never ours to keep.
+
+`cmp_versions` is hand-written rather than the `semver` crate — that crate is
+in the tree only as `tauri-plugin-updater`'s private dependency, and every
+version this app has shipped is a plain `MAJOR.MINOR.PATCH` of decimals. The
+test that matters: **`1.0.9` vs `1.0.100`.** String order says `1.0.9` is the
+newer of the two, and a rollback aimed by string order would try to "go back"
+to a version that is ahead.
+
+**What this feature is allowed to delete** is decided by one strict pure
+predicate, `parse_archive_name`, and it is tested against thirteen names it must
+refuse — including `hold.json`, `config.json`, `Spaceadom-../../evil-installer.exe`
+and `PROJECT_STATUS.md.tmp`. If we did not write that exact name, in that
+directory, we do not touch it. (2026-09-04's deleted `.tmp` is why that test
+names it.)
+
+**The hold.** `rollback_to_previous` writes `rollback\hold.json` — 24 h out plus
+the version rolled back to — **FIRST, before anything irreversible**, because
+the normal NSIS ending is this process being killed mid-install. If the hold
+were written afterwards there would be no afterwards. The daily check obeys it;
+a manual check overrides and clears it. A `hold.json` that does not parse reads
+as NO hold, so a corrupt file can never freeze updates permanently.
+
+**The launch.** `run_nsis_installer` runs the archived installer with the same
+switches the plugin composes — `/S /UPDATE /R /ARGS --autostart` — in PROBLEM
+233's order and no other: stop the hook, run Tauri's exit cleanup, spawn, exit.
+The MSI leg goes through the *same* `run_msiexec` the update leg uses, so the
+two can never disagree about switches, quoting, or what a declined prompt
+means. Its `cleanup` argument is `None` for a rollback — the package IS the
+archive and must survive a decline so the user can try again.
+
+### THE ONE THING OUTSIDE THESE FILES: `allowDowngrades`
+
+**The key is not where it was expected to be.** It is
+`bundle.windows.allowDowngrades` — ONE key on `bundle.windows`, **not** under
+`bundle.windows.nsis` (`tauri-utils` 2.9.3 `src/config.rs`,
+`WindowsConfig::allow_downgrades`, `#[serde(default = "default_true", alias = "allow-downgrades")]`).
+It is currently **`false`** in `tauri.conf.json`, and Tauri's own default is
+`true`.
+
+It feeds **both** legs from that one place, so **`wix/main.wxs` needs no edit at
+all** — it already branches on it:
+
+```xml
+{{#if allow_downgrades}}
+    <MajorUpgrade Schedule="afterInstallInitialize" AllowDowngrades="yes" />
+{{else}}
+    <MajorUpgrade Schedule="afterInstallInitialize" DowngradeErrorMessage="!(loc.DowngradeErrorMessage)" AllowSameVersionUpgrades="yes" />
+{{/if}}
+```
+
+On the NSIS side, `target\release\nsis\x64\installer.nsi` compiles
+`!define ALLOWDOWNGRADES "false"` and, from it:
+
+```nsis
+Section EarlyChecks
+  ; Abort silent installer if downgrades is disabled
+  !if "${ALLOWDOWNGRADES}" == "false"
+  ${If} ${Silent}
+    ${If} $R0 = -1        ; downgrading
+      ...
+      Abort
+    ${EndIf}
+  ${EndIf}
+  !endif
+SectionEnd
+```
+
+**A measurement worth recording, because it is the difference between a
+guaranteed failure and an accidental success.** `$R0` is set to -1 by
+`Function PageReinstall`, and `PageReinstall` is a `Page custom` pre-function —
+**NSIS skips all pages in `/S` silent mode**, so `.onInit` never computes `$R0`
+and `${If} $R0 = -1` compares an unset register (integer 0) against -1 and is
+FALSE. On the reading of that script, a `/S` downgrade is not actually aborted
+today. **That is not a thing to depend on.** It is an accident of an
+uninitialised register, one refactor of Tauri's template away from becoming a
+silent `Abort` with no log line anywhere. Flip the key.
+
+**And flipping it only helps installers built AFTER the flip.** The rollback
+runs the PREVIOUS version's installer, and that installer's `ALLOWDOWNGRADES`
+was compiled into it at ITS build. So the first rollback that is guaranteed to
+work is a rollback to a build made after this change.
+
+> **Generalise: a config key that is "obviously" under the sub-object often
+> isn't.** The task this was built from said `bundle.windows.nsis.allowDowngrades`;
+> the real key is one level up and governs the `.msi` too. Read the config
+> struct in the dependency's source (`tauri-utils/src/config.rs`), not the
+> shape the name implies.
+
+### 3. What's new
+
+`release_notes.rs` fetches the GitHub release body for the running version —
+`https://api.github.com/repos/nur-arpon/Spaceadom/releases/tags/v<ver>`,
+unauthenticated (60/hour per IP; this app makes at most one per version change,
+so a token — which would be a committed secret — is not worth having) — caches
+it to `release-notes-<ver>.md` in the data dir, and works from the cache when
+offline. Everything runs on the `st-whats-new` thread 25 s after launch, behind
+window creation (10 s) *and* behind the updater's own first check (15 s); a
+test asserts that ordering against `crate::AUTOSTART_SETTLE` rather than
+trusting the comment.
+
+**The version string is sanitised, and that is a path-safety measure.**
+`get_release_notes(version?)` takes its version FROM THE FRONTEND and that value
+reaches a `Path::join` — `data_dir().join("release-notes-../../evil.md")`
+escapes the data directory. `sanitize_version` refuses anything with `..`,
+anything over 64 chars, anything outside `[A-Za-z0-9.\-_+]`, and anything left
+holding no digit; fifteen hostile inputs are tested, and each is asserted
+against all three of `sanitize_version`, `tag_url` and `cache_file_name` so a
+future caller cannot reach one of them by a route that skips the check.
+
+> **Generalise: a value that reaches a path join is untrusted until a pure
+> function says otherwise, and that function belongs next to its tests.**
+
+**The event has a `has_notes` field even when it is `false`, and that is the
+whole design.** Emitting `whats-new-available` only on success would leave the
+UI racing a network request it cannot see, with no way to know whether to keep
+waiting for a panel or fall back to the plain toast. With the field the answer
+is always definite: `true` → show the panel, `false` → PROBLEM 245's
+`Updated to 1.0.X` toast stands exactly as it is today.
+
+**And it is parked as well as emitted.** `WHATS_NEW` holds the payload and
+`get_whats_new()` returns it on demand. This is PROBLEM 245's own lesson applied
+before it could be paid for twice: an `--autostart` relaunch builds the
+dashboard webview HIDDEN, so an event emitted from a background thread can
+arrive before any listener exists and simply vanish. The page asks on every
+visibility change, exactly as it already does for the update notice.
+
+`peek_update_notice()` was added beside `take_update_notice()` for this — the
+one-shot notice belongs to the dashboard's toast and must still be there when a
+VISIBLE window asks for it, so What's New peeks and never takes.
+
+### The one Cargo.toml line
+
+```toml
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+```
+
+**This adds nothing to the build.** reqwest 0.13.4 is already compiled into this
+tree twice over — `tauri-plugin-updater` downloads the installer with it,
+`sentry` sends crash reports with it — and `Cargo.lock` already pins that exact
+version with `rustls` on (`hyper-rustls`, `tokio-rustls` and
+`rustls-platform-verifier` are all in its dependency list there). Naming it
+makes the crate that is being compiled anyway REACHABLE from our own code.
+**Measured, not assumed:** `git diff src-tauri/Cargo.lock` shows exactly one
+line from this change — `"reqwest"` joining `spaceadom`'s own dependency list.
+**No new `[[package]]` entry appears**, i.e. not one crate is downloaded or
+compiled that was not already. `default-features = false` so nothing new is
+switched on from our side either. The feature is `rustls`, **not**
+`rustls-tls` — it was renamed in 0.13.
+
+### How it was verified
+
+* `cargo test --lib` — **431 passed / 0 failed / 5 ignored**, from a measured
+  baseline of 399 before the change. 32 new tests: 13 in `updater.rs`
+  (version comparison including `1.0.9` vs `1.0.100`; the archive-name
+  round-trip; the thirteen names the delete predicate must refuse; first-update
+  has no target; second-update-onward has one; newer-than-running is pruned;
+  the other kind is never a target and never deleted; order independence; the
+  hold's exclusive expiry; hold round-trip and corrupt-file handling; the
+  rate limit's two sentences; state distinctness and JSON shape; every msiexec
+  outcome being a finished sentence; the rollback command line; 24 h),
+  6 in `tray.rs`, and 10 in `release_notes.rs` (a realistic saved GitHub
+  response, eight non-release shapes, char-boundary truncation, the fifteen
+  hostile versions, the URL, the cache name, the User-Agent, the payload, the
+  settle ordering).
+* `cargo clippy --all-targets` — **0 warnings, 0 errors.**
+* `npx tsc --noEmit` — **clean** (no frontend file was touched).
+
+### What was NOT exercised, and cannot be from here
+
+**Nothing on this page has been run against a real machine, a real GitHub
+release, or a real installer.** Specifically:
+
+* No manual check has ever contacted GitHub. No `update-status` event has ever
+  been received by a webview. The frontend that consumes them does not exist
+  yet — batch 2 wires it.
+* No installer has ever been archived, pruned, or re-run. `rollback_available`
+  has never returned `Some` on a real machine, and `rollback_to_previous` has
+  never been called. **The rollback path is unproven end to end**, and its
+  proof needs two consecutive real auto-updates followed by a rollback.
+* `allowDowngrades` is **still `false`** — that change is reported, not made,
+  because `tauri.conf.json` was outside this task's file list. Until it is
+  flipped, the rollback's success depends on the uninitialised-`$R0` accident
+  described above.
+* No release notes have been fetched. The parser is tested against a saved
+  sample; the network path is not.
+* Nothing was built, bundled, version-bumped or installed. `cargo test`,
+  `cargo clippy` and `tsc` are the only things that have run.
+
+> **Generalise, and it is the same one every entry in this file keeps arriving
+> at:** a feature whose whole value is what a person does with it cannot be
+> verified by the tests that prove its arithmetic. The tests here prove the
+> retention rule, the version ordering and the delete predicate — the parts
+> that would be wrong *silently*. Everything a user can see is still owed a
+> hand test.
+
+### WIRED 2026-09-05 (reconciliation pass)
+
+This entry ended with *"the frontend that consumes them does not exist yet —
+batch 2 wires it."* **This is batch 2.** Everything below is new work in the
+files this entry named as missing; nothing in `updater.rs`'s own logic changed.
+
+#### 1. `allowDowngrades` — flipped, not merely reported
+
+`src-tauri/tauri.conf.json:84` is now `"allowDowngrades": true`, on
+`bundle.windows` exactly as this entry measured (**not** under `nsis`). One key
+feeds both legs, so `wix/main.wxs` still needs no edit.
+
+**The caveat this entry recorded stands, and it is the important half:** the
+rollback runs the PREVIOUS version's installer, and that installer's
+`ALLOWDOWNGRADES` was compiled into it at ITS build. So the first rollback this
+flip is guaranteed to help is a rollback to a build made after today. Until
+then a `/S` downgrade continues to work only by the uninitialised-`$R0`
+accident described above — which is not a thing to depend on, and is now no
+longer depended on going forward.
+
+#### 2. What's New — `src/components/whats-new-sheet.ts` (NEW leaf module) + `src/main.ts`
+
+Both delivery routes are wired, because this entry is explicit that one is not
+enough:
+
+- `main.ts:1174` `wireWhatsNew()` — `listen("whats-new-available")`, registered
+  during bootstrap.
+- `main.ts:1196` `askWhatsNewOnce()` — one `get_whats_new()` call, placed
+  immediately AFTER `invoke("dashboard_ready")` (`main.ts:460`), because
+  `dashboard_ready` is the call in response to which Rust shows the window
+  (PROBLEM 74). An `--autostart` relaunch builds this webview HIDDEN and can
+  create the page after the 25-second emit has been and gone, in which case
+  `listen` never fires at all — which is the case the parked payload exists for.
+- `main.ts:1155` `_whatsNewShown` is the latch that makes two routes safe.
+  Whichever arrives first acts; the other finds it set. Without it the COMMON
+  case — an ordinary launch, listener registered long before the emit — would
+  show the sheet twice.
+- `has_notes: false` sets the latch and shows nothing. That is a real answer,
+  not a reason to keep asking: PROBLEM 245's `Updated to 1.0.X` toast stands
+  untouched, exactly as this entry's design says.
+- `rolled_back` changes the wording and nothing else: **"You're back on
+  1.0.99"**, never "What's new in".
+
+**The renderer, and the one rule it is built around: nothing from the network
+is ever assigned to `innerHTML`.** A GitHub release body is text somebody typed
+into a web form, and the dashboard webview holds `invoke` — i.e. the whole Rust
+command surface. So the renderer builds DOM NODES and every scrap of author
+text reaches the page through `textContent`. That also settles "which markdown
+library": none, because a library would emit an HTML STRING, which is the thing
+being avoided. Supported: `#`..`######` headings (collapsed to two visual
+weights, `h3`/`h4` — never `h1`, this sheet lives inside the dashboard's own
+heading outline), `-`/`*` bullets, `**bold**`, `[label](url)`. Anything else
+renders as its own literal text rather than disappearing: a line the renderer
+does not understand is still a line the user can read, and silently swallowing
+part of a changelog is worse than showing its punctuation.
+
+Links go through `safeHref` — `new URL()` and a protocol check, never a string
+prefix test, because `JaVaScRiPt:`, leading whitespace and percent-encoding all
+defeat a prefix test and none of them defeat `new URL()`. A refused scheme still
+shows its LABEL, so a sanitised link does not read as a truncated sentence.
+Clicks are intercepted and handed to `openUrl` (`@tauri-apps/plugin-opener`)
+rather than to a Rust command with a compile-time constant URL (PROBLEM 164's
+rule for this repo) — and the reason is worth stating: a release-notes link is
+an ARBITRARY url that arrives at runtime, so there is no constant to bake in,
+and a Rust command taking a url parameter would grant the webview exactly the
+"choose where this goes" power that rule exists to withhold. The scheme check is
+the guard instead.
+
+**Measured in the browser pane (Vite dev harness), against a hostile sample:**
+
+```
+input   - **Fixed** the [spacebar](https://github.com/.../issues/1) hang
+        - A hostile one: [click me](javascript:alert(document.cookie))
+        - And another: [x](JaVaScRiPt:alert(1))
+        - Balanced parens: [Foo](https://en.wikipedia.org/wiki/Foo_(bar)) ok
+        - Relative: [rel](/etc/passwd)
+        Plain paragraph with <img src=x onerror=alert(1)> in it.
+
+output  anchors     = [ "https://github.com/.../issues/1",
+                        "https://en.wikipedia.org/wiki/Foo_(bar)" ]
+        imgCount    = 0
+        scriptCount = 0
+        html        … <p>Plain paragraph with &lt;img src=x onerror=alert(1)&gt; in it.</p>
+        both javascript: rows render as "A hostile one: click me" — label kept,
+        no anchor, and NO stray ")" left behind
+```
+
+That last detail is a bug this harness run caught and the code now handles. The
+first version's URL group was `[^)\s]+`, which stops at the first `)`, so
+`javascript:alert(document.cookie)` left a `)` sitting in the sentence and a
+legitimate `…/wiki/Foo_(bar)` link broke in half. The group allows one level of
+balanced parentheses now. Neither shape was ever a security hole — the scheme
+check refused both spellings from the start — but **a renderer that visibly
+mangles its input is one nobody trusts the sanitising half of.**
+
+The sheet was also opened for real in the harness and looked at in both
+palettes: Earthy, and `body.nocturne[data-theme="starry"]`. Escape closes it
+(capture phase, because the dashboard has its own document-level Escape handler
+for popovers), the scrim closes it, `aria-modal`/`aria-label` are set from the
+same string as the title, and "Got it" takes focus on open.
+
+#### 3. About ▸ "Check for updates" — driven by the EVENT, not by the return
+
+`src/components/settings-panel.ts` (`wireAboutSection`,
+`wireUpdateStatusListener`, new `setUpdateBusy`) plus three new helpers in the
+leaf module `src/components/controls.ts` (`updateStateIsBusy`,
+`fetchRollbackTarget`, `requestRollback`).
+
+The old handler was `try { text = await requestUpdateCheck() } finally {
+btn.disabled = false }`. **That `finally` never runs in the case that matters.**
+`check_for_updates_now` does not resolve when an update actually installs —
+PROBLEM 233's sequence is stop the hook, run Tauri's exit cleanup, spawn the
+installer, exit — so the process is gone before any continuation. A re-enable
+that executes only when nothing happened is a re-enable that lies about the
+app's state. Now:
+
+- the busy paint happens BEFORE the call;
+- `setUpdateBusy(updateStateIsBusy(state))` in the `update-status` listener owns
+  the button from then on — `checking`/`downloading`/`installing` busy, the
+  other four terminal;
+- the promise is still consumed, but as a bonus rather than as the mechanism:
+  when it resolves it carries the same `message` the event already carried.
+
+This leans on `emit_always`'s guarantee that a terminal status always follows
+`downloading`, manual or daily. The listener switches on exactly one thing —
+"is it still working on it" — and shows `message` VERBATIM for all seven
+states, which is this entry's own stated UI contract. `message` being a
+finished English sentence is what makes a state added in a later build show its
+own words instead of a blank line.
+
+#### 4. Roll back to 1.0.X
+
+`aboutRowHtml` gained a fifth parameter, `rollbackVersion`, and renders the
+button only when it is non-null — never a disabled one, because there is
+nothing a user could do to make a way back appear and a permanently greyed
+control in an About box is a question with no answer. `settings-panel.ts`
+fetches it alongside `_aboutInfo` on every panel open (an update installed by
+the daily check while the panel was shut changes the answer) and re-renders
+only when the answer CHANGED, so the panel's entrance wave is not replayed on
+every open.
+
+The version is IN THE LABEL — "Roll back to 1.0.99", never a bare "Roll back":
+this is the one button in the panel whose consequence is a different program,
+and the person pressing it is entitled to know which one they end up with.
+One-tap confirm, the same shape "Reset to defaults" uses (a `window.confirm()`
+over this stage looks like a different app) — and, the part that is easy to get
+wrong, `_rollbackArmed` is cleared at the top of `wireAboutSection`, which runs
+on every `render()`. Without that, a render between arming and clicking
+destroys the button reading "Confirm — go back to 1.0.99" and builds a fresh
+one reading "Roll back to 1.0.99" while the module-scope flag still says armed
+— so the next single press would roll the machine back with no confirm at all.
+Same class as the 2026-08-20 "after confirming it still shows Confirm" bug,
+arriving from the opposite direction: there the state outlived the label, here
+the label outlives the state.
+
+`rollback_to_previous` gets the identical treatment as the update button: paint
+first, treat a RETURN as news rather than as completion, because on the NSIS
+leg it does not return either.
+
+#### 5. Harness parity
+
+`preview.ts` gained a `?rollback` flag. The button is otherwise unreachable in
+the harness — `rollback_available()` needs two consecutive real auto-updates to
+answer with anything — and PROBLEM 148's rule is that the harness renders the
+identical markup from the identical leaf function.
+
+#### What is STILL not exercised (unchanged by this pass)
+
+Everything this entry already listed. No manual check has contacted GitHub, no
+`update-status` event has crossed a real IPC boundary, no installer has been
+archived, pruned or re-run, `rollback_available` has never returned `Some` on a
+real machine, and `rollback_to_previous` has never been called. What was added
+here is the UI that consumes them, verified in a browser against hand-built
+inputs. **The rollback path is still unproven end to end**, and its proof still
+needs two consecutive real auto-updates followed by a rollback. `allowDowngrades`
+is now `true`, which removes one dependency on an accident and changes nothing
+that has been observed.
+
+#### REVIEW FIXES 2026-09-05 — three follow-ups on this feature's own surfaces
+
+Full write-ups at the end of this file, under **REVIEW FIXES 2026-09-05
+(frontend/CI lane)**. In one line each:
+
+- **C2 — the release workflow could publish from a branch, and published
+  before it was finished.** `tauri-action` had no tag guard, so a
+  `workflow_dispatch` run created a public release named after the BRANCH; and
+  the release went public before the updater manifests this feature depends on
+  were uploaded, so `releases/latest/download/latest.json` could 404 for the
+  minutes in between. Now: build-only on dispatch, draft until the last step.
+- **LOW — `aboutRowHtml`'s `updateStatusText` hole is escaped.** It is
+  `updater.rs`'s `message` field, and this section's own contract says the
+  listener prints it VERBATIM for any state it does not recognise — which is
+  exactly what makes an unescaped `innerHTML` interpolation load-bearing.
+  `rollbackVersion` too: it is read off a directory NAME on disk.
+- **LOW — the What's New sheet's links intercept `auxclick` as well as
+  `click`.** A middle-click did not fire `click`, so the webview followed the
+  `href` itself and the DASHBOARD navigated to GitHub with no way back.
+
+---
+
+
+### REVIEW FIXES 2026-09-05 (H1) — an archived rollback installer was never re-verified, and ran elevated
+
+**Symptom.** None observed. This is a security hole, not a bug report.
+
+**Root cause.** `archive_installer` wrote 6 MB of installer into
+`%APPDATA%\Spaceadom\rollback\` and nothing ever looked at it again.
+`rollback_to_previous` ran that file — an NSIS installer that writes into
+`%LOCALAPPDATA%`, or an `.msi` behind a UAC prompt the user is about to accept
+**because the app asked for it**. `%APPDATA%` is writable by anything running
+as this user. Replacing one file there, with a name derived from the public
+release feed and no signature to forge, turned "go back to the previous
+version" into "execute this, elevated, with the owner's blessing".
+
+The bytes ARE signed — `tauri-plugin-updater 2.11.0`'s `Update::download`
+calls `verify_signature` against the public key baked into the exe before it
+hands them back — but the signature was **thrown away** the moment the download
+finished.
+
+**Exact file.** `src-tauri/src/updater.rs` (+ two `Cargo.toml` lines).
+
+**The code.** Keep the signature, and check it again — three times, at
+narrowing distances from the launch:
+
+```rust
+// 1. archive it. `Update::signature` is a PUBLIC field: the base64 minisign
+//    signature from the manifest that the plugin has just checked these very
+//    bytes against. Nothing is re-downloaded.
+archive_installer(&bytes, &latest, kind, &update.signature);
+// -> Spaceadom-1.0.99-installer.exe  +  Spaceadom-1.0.99-installer.exe.sig
+```
+
+An installer whose `.sig` cannot be written is **removed again**: half an
+archive is worse than none, because `rollback_available` would offer a version
+the user can see and cannot use.
+
+```rust
+// 2. the same check the plugin does, on OUR side. The plugin's
+//    `verify_signature` is private, so it cannot be asked about a file it did
+//    not download; this is a transcription using the same crate.
+pub(crate) fn verify_minisign(data: &[u8], signature_b64: &str, pubkey_b64: &str)
+    -> Result<(), String>
+{
+    let key = minisign_verify::PublicKey::decode(&decode(pubkey_b64, "public key")?)...;
+    let sig = minisign_verify::Signature::decode(&decode(signature_b64, "signature")?)...;
+    key.verify(data, &sig, true)   // `true` = allow_legacy, exactly as the plugin passes it
+        .map_err(|e| format!("the signature does not match the file ({e:?})"))
+}
+```
+
+The public key is read at runtime from `tauri.conf.json` —
+`app.config().plugins.0["updater"]["pubkey"]` — never copied into a Rust
+constant that could drift away from the one the plugin uses.
+
+```rust
+// 3. the gates.
+//  - rollback_available()  -> None, at ERROR, if the archive does not verify.
+//    Refused HERE so the button is never offered: "there is nothing to go back
+//    to" and "there is something and it is wrong" are different facts, and a
+//    button that fails when pressed teaches the user to press it again.
+//    An installer archived before this existed has no .sig and is REFUSED
+//    rather than trusted.
+//  - rollback_to_previous() re-verifies immediately before anything
+//    irreversible. Not a duplicate: the whole point of the attack is that the
+//    swap happens at the last possible moment.
+//  - run_msiexec() takes a `guard: &dyn Fn() -> Result<(), String>` that runs
+//    as the statement immediately before `raw_arg`. The parameter has no
+//    default, so a future third caller cannot forget to check.
+```
+
+**`install_msi` — the same hole in `%TEMP%`.** The verified bytes were written
+to a fixed, predictable path (`%TEMP%\Spaceadom-1.0.X-installer.msi`, printed
+in the log and derivable from the release feed) and then handed to msiexec,
+which runs it elevated. The signature check protects the bytes **in memory**;
+it says nothing about what is on disk a moment later. Three changes:
+
+1. a **fresh, randomly-named subdirectory** of `%TEMP%`, created by us — the
+   name is seeded from `RandomState`, which the OS seeds, so it cannot be
+   pre-created or symlinked in advance;
+2. the **SHA-256 is taken from the in-memory bytes at write time**, not from
+   the file (hashing the file would only prove it equals itself);
+3. the hash is **recomputed from disk immediately before `raw_arg`**, through
+   that same `guard`, and a mismatch refuses the launch loudly.
+
+**Cargo.toml.** `minisign-verify = "0.2"` and `sha2 = "0.10"`. **Neither adds a
+crate to the build** — both are already compiled into this tree
+(`minisign-verify 0.2.5` is `tauri-plugin-updater`'s own signature check and has
+no dependencies of its own; `sha2 0.10.9` arrives via the sentry/reqwest graph)
+and both were already pinned at those exact versions in `Cargo.lock`. Measured
+the way the `reqwest` and `zip` notes were: the only `Cargo.lock` delta is two
+names joining `spaceadom`'s dependency list —
+
+```
+4015a4016
+>  "minisign-verify",
+4022a4024
+>  "sha2",
+```
+
+no new `[[package]]` entry, nothing downloaded.
+
+**How it was verified.** Six new tests in `updater::tests`:
+
+* `a_correctly_signed_file_verifies_and_one_changed_byte_does_not` — a REAL
+  minisign key pair and signature (`minisign-verify 0.2.5`'s own published test
+  vector, base64-wrapped the way Tauri wraps them). `b"test"` verifies; `b"Test"`
+  is refused. Somebody else's vector rather than ours on purpose: it asserts the
+  algorithm wiring, and keeps a real Spaceadom release signature out of a test
+  suite that would rot the day the key is rotated.
+* `a_garbled_signature_or_key_is_refused_and_never_panics` — not-base64, valid
+  base64 of the wrong thing, and empty (a truncated `.sig`).
+* `the_shipped_public_key_is_a_decodable_minisign_key` — catches the failure
+  that would otherwise disable rollback silently and for the wrong reason.
+* `the_signature_sits_beside_the_installer_and_is_never_an_archive_entry` —
+  `parse_archive_name` still refuses `*.sig`, so a signature can only ever be
+  deleted as the companion of the installer it belongs to (the prune deletes it
+  alongside).
+* `sha256_is_the_real_thing_and_one_byte_changes_it` — NIST's `abc` and empty
+  vectors, so a wrong hasher cannot pass.
+* `each_update_stages_into_its_own_unpredictable_temp_directory`.
+
+**NOT verified:** no rollback was performed, no `.msi` installed, nothing
+elevated. The end-to-end path still needs the second-machine recipe.
+
+**A migration note.** Every installer already sitting in a user's
+`%APPDATA%\Spaceadom\rollback\` has no `.sig` beside it and is now refused, so
+the rollback button goes unavailable until the NEXT update archives a signed
+pair. That is the intended direction — refuse rather than trust — and the log
+line says exactly that when it happens.
+
+**Generalise this.** *A signature verified in memory does not protect the file
+you wrote afterwards.* The check has to be against the bytes you are about to
+execute, at the moment you execute them — and if you are going to need it later,
+keep the signature.
+
+## PROBLEM 254 — a portable, no-installer build: `portable.txt` beside the exe moves ALL app data into `<exe dir>\data\`, turns autostart off, and makes the in-app updater inert (`npm run portable`, never installed or run yet — see "What was not exercised")
+
+**Symptom / feature request.** A friend who does not want an installer
+touching their machine — no Program Files entry, no Task Scheduler entry, no
+registry Run value, nothing an uninstaller could miss — has no way to run
+Spaceadom. Every existing build target (`setup.exe`, `.msi`, the Store
+`.msix`) either writes to the machine at install time or is a package Windows
+itself manages. There was no "just unzip it and run it" shape.
+
+**Root cause.** There wasn't a design bug to fix — this is new. But the
+existing codebase already had ALMOST everything needed for it: every site
+that writes Spaceadom's own data (`config.json`, `debug.log`, the rolling
+backups, the picker cache, cached release notes, the update rollback archive,
+`last-run-version.txt`) already funnelled through exactly ONE function,
+`startup::data_dir()`, with a single deliberate exception
+(`config::backup_dir()`, which reads `%LOCALAPPDATA%` directly so an
+uninstall does not take the backups with it — see PROBLEM 94). That meant a
+portable mode needed one new resolver plus a two-line change to the two
+non-conforming call sites, not a rewrite of every path in the app.
+
+**Exact files.**
+
+* NEW `src-tauri/src/portable.rs` — the resolver. `is_portable()` (cached,
+  `OnceLock`) is true only when `packaged::is_packaged()` is false AND
+  `portable.txt` exists beside `current_exe()`. `data_root()` returns
+  `<exe dir>\data` when portable, `%APPDATA%\Spaceadom` otherwise — packaged
+  wins unconditionally, proven by a test, because a Store package cannot
+  carry a marker file of its own. The decision itself,
+  `resolve_root(packaged, exe_dir, marker_present, roaming)`, is a pure
+  function so the three-way precedence (packaged / portable / roaming) is
+  testable without touching the filesystem.
+* `src-tauri/src/startup.rs` — `data_dir()` is now a one-line wrapper around
+  `portable::data_root()`. `set_run_key`, `ensure_startup_task` and
+  `apply_task_enabled` each gained a portable guard, placed right after their
+  existing `packaged::is_packaged()` guard, that logs and returns without
+  touching the registry or Task Scheduler at all — the exact same shape as
+  the packaged guard PROBLEM 250 added, one precedent level down.
+* `src-tauri/src/config/mod.rs` — `backup_dir()` is the ONE call site that
+  bypassed `data_dir()` on purpose (PROBLEM 94's uninstall-safety reasoning).
+  That reasoning does not hold for a portable copy — there is no separate
+  uninstall step, deleting the one self-contained folder IS the uninstall —
+  so `backup_dir()` now checks `portable::is_portable()` first and nests
+  backups under `data_root().join("backups")` instead of `%LOCALAPPDATA%`.
+* `src-tauri/src/picker_worker.rs` — no functional change. `cache_path()`
+  already called `startup::data_dir()`, so it became portable-aware for
+  free; a comment was added saying so, to stop a future reader from assuming
+  it was missed.
+* `src-tauri/src/lib.rs` — `mod portable;` (top of the mod list) and one
+  boot-log call, `portable::log_root_once()`, immediately after
+  `packaged::log_identity_once()` — same rationale: which world a bug report
+  came from must be answerable from `debug.log` alone.
+* NEW `scripts/build-portable.mjs` — packs the plain `npm run tauri build`
+  release exe (NOT the NSIS/MSI/Store builds — see the file's own header for
+  why each is wrong here) plus a `portable.txt` marker and a
+  `README-portable.txt` into
+  `src-tauri/target/release/bundle/portable/Spaceadom_<ver>_x64-portable.zip`,
+  using Windows' own `Compress-Archive` (no new npm dependency). Wired as
+  `npm run portable` in `package.json`, exactly like `npm run msix` — a
+  separate, deliberate command, not part of the ordinary build.
+* `.github/workflows/release.yml` — one new step, "Build and publish the
+  portable zip", after the updater-manifest step and before the MSIX
+  section. Runs `npm run portable` against the release exe `tauri-action`
+  already built earlier in the same job, then `gh release upload`s the zip
+  to the tag's release — unlike the `.msix`, a portable copy is meant for
+  anyone to download directly, so it belongs on the release page, not in
+  workflow artifacts. **Never referenced by `latest.json` /
+  `latest-msi.json`** — a portable copy's updater is inert by design and
+  must never be offered anything to "update" to.
+
+**Not edited here, by scope, but required for the feature to be complete —
+handed off as exact text rather than applied, because other agents own these
+files in this task:**
+
+* `src-tauri/src/updater.rs` — needs an explicit `portable::is_portable()`
+  gate mirroring the existing `packaged::is_packaged()` one, in `run_check`,
+  `manual_check_inner`, and (for a clearer log line, though the existing
+  `InstallKind::Unknown` path already returns `None`) `rollback_available`.
+* `src/components/settings-panel.ts` — "Run at startup" already goes inert
+  correctly with **zero code changes** if `commands.rs::get_packaged_startup`
+  is extended to also report the portable case through the same
+  `(bool, state, may_change, note)` shape it already returns for a packaged
+  install — the row's `paintInert`/`paintRow` machinery does not care WHY a
+  row is locked, only that `may_change` is false and `note` is non-empty.
+* `src/main.ts` — `checkRivalInstall()`'s banner text should name a portable
+  copy explicitly when one is involved, since the underlying conflict (two
+  `WH_KEYBOARD_LL` hooks) is exactly as real as it is for two installed
+  copies, and nothing on the Rust side (`rival_install.rs`) needs to change
+  for the one-click repair to keep working — a portable copy is a normal,
+  unpackaged, non-elevated process and can still elevate via `runas`.
+
+**How it was verified.** `cargo test --lib` — 438 passed, 0 failed (7 of them
+`portable::tests::*`, covering the pure resolver's four precedence cases plus
+the boot-marker length rule). `cargo clippy --lib` — 0 warnings. `npm run
+build` then `cargo build --lib` — compiles clean. `node scripts/build-portable.mjs`
+was run for real against the existing `target/release/spaceadom.exe`: it
+produced `Spaceadom_1.0.100_x64-portable.zip` (7.2 MB), and the zip was
+extracted and confirmed to contain exactly `spaceadom.exe` (21,620,736
+bytes), `portable.txt` (426 bytes, explanation intact) and
+`README-portable.txt` (1,946 bytes) — nothing else.
+
+**What was NOT exercised, said plainly.** The extracted portable exe was
+**never actually launched** on this machine. The owner already runs an
+installed Spaceadom day to day, and CLAUDE.md is explicit that a second
+`WH_KEYBOARD_LL` hook from a second running copy fights the first one over
+the spacebar (PROBLEM 129/141/236) — starting the portable copy here to watch
+`debug.log` for the boot marker and confirm the `data\` folder appears would
+have risked exactly that interference with the owner's live keyboard input.
+So: the **resolver** is proven by unit test, the **packaging** is proven by
+extracting and inspecting the real zip, and the **runtime behaviour** — does
+`portable.txt` beside a running exe actually produce `data\config.json`,
+`data\debug.log`, etc., and does the Settings row actually go inert — is
+unverified. Test it on a second machine, or after quitting the installed
+copy: unzip, run `spaceadom.exe`, and `grep "PORTABLE" data\debug.log`.
+
+> **Generalise:** the reason this feature was a small diff instead of a
+> sweeping one is that PROBLEM 94 (backups) and PROBLEM 250 (packaged) had
+> already forced every OTHER data-path site through one function apiece.
+> A resolver is only as easy to add as the number of places that bypassed the
+> existing one — here, exactly one (`backup_dir`, and only because it had a
+> documented reason to). Keeping that count near zero is what makes the NEXT
+> mode (whatever it turns out to be) a small diff too.
+
+### WIRED 2026-09-05 (reconciliation pass)
+
+**All three "handed off as exact text rather than applied" items above are now
+applied**, plus two more the wiring pass found while doing it.
+
+#### 1. `updater.rs` — the three portable gates
+
+Each sits immediately after the existing `packaged::is_packaged()` guard, the
+same shape one precedent level down:
+
+- `updater.rs:578` in `run_check` — the daily check.
+- `updater.rs:1216` in `manual_check_inner`, and the comment there records why
+  it is not an exception to PROBLEM 249's rule about manual checks overriding
+  things: **"the user asked for it" is a reason to override a POLICY, never a
+  reason to override a FACT about the machine.** `auto_update: false` is a
+  policy and a click overrides it; "this copy was unzipped rather than
+  installed, so no installer of ours exists to re-run" is a fact, and a click
+  cannot make one appear. It returns `STATE_NOT_ELIGIBLE` with a finished
+  sentence — *"This is the portable copy, so it can't update itself. Download
+  the newest portable zip and unzip it over this folder."* — never `error`,
+  because nothing has failed.
+- `updater.rs:1599` in `rollback_available` — **this one changes no behaviour at
+  all**, exactly as this entry predicted: the `InstallKind::Unknown` path two
+  lines below already returns `None`. It exists for the LOG LINE. The two "no
+  rollback here" cases are answered by different facts (no installer of ours vs.
+  no install at all) and a shared silent `None` makes them indistinguishable in
+  a bug report.
+
+#### 2. `commands.rs::get_packaged_startup` — the portable branch, FIRST
+
+`commands.rs:1342`. It returns `(true, "portable", false, note)` through the
+tuple that already existed, and `settings-panel.ts` needed **zero changes**,
+exactly as this entry predicted: `paintPackagedStartup` computes
+`inert = first && !may_change` and has no opinion about WHY a row is locked.
+`startupShownAsOn` then reports the switch as OFF, which is the truth — a
+portable copy writes no Run value and no Scheduled Task at all.
+
+The note names the remedy rather than only the refusal: *"To start it with
+Windows, put a shortcut to spaceadom.exe in your Startup folder (Win+R,
+shell:startup)."*
+
+Written portable-first even though the order cannot matter
+(`portable::is_portable()` is false inside a package, by that module's own
+precedence test), so a reader does not have to hold that precedence in their
+head to see that the two cases cannot both fire.
+
+#### 3. `main.ts::checkRivalInstall` — the portable wording
+
+`main.ts:1228` (the probe) and a fourth branch in the banner text. A new command
+backs it — `commands::is_portable_install` (`commands.rs:1424`, registered at
+`lib.rs:1307`) — and the probe runs ONLY after a rival has actually been found,
+so the ordinary installed-copy path pays nothing for it. `catch → false`, so an
+older backend degrades to the wording this banner has always had.
+
+Deliberately NOT folded into `get_about_info`'s `install_kind`: that value is a
+SENTENCE for a human and already collapses portable and dev builds into one
+phrase, while a banner needs a DECISION — and a decision taken by
+string-matching a human-facing sentence is one rename away from silently
+reverting to the wrong wording.
+
+Nothing about the remedy changed, as this entry says: a portable copy is an
+ordinary unpackaged, non-elevated process and `rival_install::repair` can still
+elevate via `runas`. What changed is that the default sentence — *"Another copy
+of Spaceadom is INSTALLED at …"* — is true but points the reader at the wrong
+one of the two. The portable copy is the one with no entry in Apps & features
+at all, and somebody sent looking for it there finds exactly one entry and
+concludes the banner is confused. The portable wording says which copy is
+which, and names the remedy people running an unzipped copy actually want:
+**close it, or delete its folder** — no uninstaller, no permission prompt. The
+one-click removal of the installed copy is still offered; it is simply no
+longer the only door named.
+
+#### 4. FOUND IN THIS PASS — "Open log folder" opened the wrong folder on a portable copy
+
+`commands.rs::open_log_folder` called `logger::log_dir()`, which recomputed
+`%APPDATA%\Spaceadom` from its own private `dirs_or_appdata()` helper. But
+`run()` initialises the logger with `logger::init(&startup::data_dir())`, and
+this feature made `startup::data_dir()` portable-aware — so on a portable copy
+the button opened an empty `%APPDATA%\Spaceadom` (or, worse, an installed
+copy's months-old log folder) while the live `debug.log` sat in
+`<exe dir>\data\`. `logger.rs:120` is now a one-line wrapper around
+`startup::data_dir()`, and the duplicate resolver is deleted rather than left
+to drift a second time.
+
+`diagnostics.rs` had already made this exact choice for `build_bundle` and said
+so in a comment — it read the log from `startup::data_dir()` explicitly BECAUSE
+the two disagreed. That comment is the only reason this was findable, and it is
+why it stays now that they agree again: this module must read the log from
+where the logger was POINTED, and saying so directly does not depend on a
+second function continuing to agree.
+
+One behavioural difference, stated rather than buried: where `%APPDATA%` is
+unset, the deleted helper fell back to the exe's own directory and
+`portable::roaming_default()` falls back to the relative path `Spaceadom`. That
+is the fallback the LOGGER has already been using since this feature landed, so
+aligning with it removes a disagreement rather than creating one.
+
+> **Generalise:** this entry's own note said the feature was a small diff
+> because every data-path site had already been funnelled through one function.
+> That was true of every site that WRITES. `log_dir()` was a site that only
+> ever answered "where is it?", nothing depended on it for correctness, and it
+> was therefore invisible to the audit that found `backup_dir()`. **When you
+> re-point a resolver, the sites to hunt for are not only the writers — a
+> read-only "where is it" helper is exactly the shape that keeps compiling,
+> keeps returning a real path, and quietly answers about the wrong world.**
+
+#### 5. `diagnostics.rs` said "PROBLEM 251" where it meant 254
+
+Corrected. It was the last surviving "251" anywhere in the tree; see PROBLEM
+253's WIRED note for the two `controls.ts` comments that referred to it.
+
+#### Still not exercised — unchanged, and none of the above moves it
+
+**The portable exe has never been launched.** Every one of these branches — the
+three updater gates, the Settings row going inert, the banner's portable
+wording, the log folder resolving to `<exe dir>\data\` — is unexecuted code.
+The gates compile, the pure resolver is unit-tested, and `is_portable()` has
+returned `false` in every context anything has ever run in. Test it on a second
+machine, or after quitting the installed copy: unzip, run `spaceadom.exe`, and
+`grep "PORTABLE" data\debug.log`.
+
+#### REVIEW FIXES 2026-09-05 — the Settings row was NOT inert for the reason it looked inert, and it toasted success
+
+Full write-up at the end of this file (**H6**). The short version, because it
+changes what "the Settings row going inert" above means:
+
+`commands.rs::get_packaged_startup` answers a portable copy with
+`(packaged: true, state: "portable", mayChange: false, note: …)` — a
+`packaged: true` that is a lie told to reuse a tuple shape. The frontend read
+that field as "Microsoft Store" and computed the row's dead state as
+`packaged && !mayChange`, so **the greying depended on the lie**: an honest
+`packaged: false` — which is what any reader would call the correct value —
+would silently have made the row live again. Worse, the toggle path used the
+same read as its only guard, and `set_startup_enabled` returns `Ok(())` for a
+portable copy while `startup::apply_task_enabled` returns early having written
+nothing at all, so switching the row OFF toasted **"🚀 Won't start with
+Windows"** — a completed action announced for a write that never happened —
+and switching it ON toasted "🔒 Windows decides this one", about a copy
+Windows has no opinion on.
+
+Fixed in the frontend only (`controls.ts` gained four pure functions;
+`settings-panel.ts` calls them). The row is inert on `!mayChange`, its switch
+reads OFF whatever config holds, and `startupOutcome` gives "nothing was
+written" a toast of its own: **"📦 Portable copy — put a shortcut in your
+Startup folder"**, with no switch sound, because the sound is the app saying
+"done". `commands.rs` was NOT changed — the tuple is somebody else's file and
+the fix does not need it to be honest, only to be read correctly.
+
+`scripts/build-portable.mjs` also gained the guard its own comment had
+promised and never implemented, plus a read-back of the finished zip. The
+`portable.txt` check there is this feature's marker file: without it in the
+archive, the "portable" build silently stops being portable and writes to
+`%APPDATA%` like an installed one.
+
+---
+
+## PROBLEM 251 — intentionally unused (renumbering artefact)
+
+There is no PROBLEM 251 and there never was. The number was skipped during a
+renumbering pass while several problems were being written in parallel, and this
+heading exists so that the next reader — human or AI — can stop looking.
+
+Recorded rather than silently closed up, for the same reason every other entry
+in this file exists: a gap in a numbered sequence reads as a missing document,
+and somebody will spend time establishing that it is not one. Renumbering the
+entries above it to close the gap would be worse still — the numbers are cited
+from `CLAUDE.md`, from `PROJECT_STATUS.md`, from source comments in a dozen
+files and from git commit messages, and every one of those citations would
+silently start pointing at a different problem.
+
+**Generalise this.** *An identifier that has been published is never reused and
+never renumbered — it is retired in public.*
+
+## PROBLEM 252 — the `.msi` uninstaller still kept every setting silently, because PROBLEM 247's prompt was NSIS-only; the MSI half, built with a WiX dialog and `util:RemoveFolderEx` (built 1.0.100, `.msi` NEVER installed on this machine — PROBLEM 244)
+
+**Symptom.** PROBLEM 247 made an interactive `setup.exe` uninstall ask *"Keep
+your settings? (profiles, key bindings, backups)"* and, on No, remove
+`%APPDATA%\Spaceadom` and `%LOCALAPPDATA%\SpaceadomBackups`. It closed with its
+own honest note: *"Until that lands: uninstalling the `.msi` still always keeps
+both folders unconditionally, with no prompt at all."* Tauri v2 exposes
+`installerHooks` for NSIS and nothing equivalent for WiX, so the two installers
+had two different behaviours for the same question. This is the WiX half. Same
+question, same wording, same default, same two folders.
+
+**The constraint that shapes everything.** The `.msi` is **per-machine** and
+runs elevated, and it is also the format the self-updater drives with
+`msiexec /i … /passive` (PROBLEM 246). So three things have to be true at once
+and they pull against each other:
+
+1. An **interactive** uninstall must ask.
+2. `/qn` and `/passive` must **never prompt and never delete** — there is
+   nobody to answer, and PROBLEM 246's `/passive` upgrade path runs
+   `RemoveExistingProducts` over the old product on every MSI self-update.
+3. The deletion must resolve `%APPDATA%` / `%LOCALAPPDATA%` for the
+   **installing user**, not for `SYSTEM`, even though the Windows Installer
+   service is `LocalSystem`.
+
+### Root cause of the gap, and what was read before writing anything
+
+NSIS has `IfSilent` and `$UpdateMode`. WiX has neither; the same distinctions
+have to be reconstructed from `REMOVE`, `UPGRADINGPRODUCTCODE` and `UILevel`.
+Three things had to be established from artefacts rather than assumed, and each
+one changed the design:
+
+**(a) The uninstall path shows NO wizard dialog at all.** Read out of the
+1.0.100 package's own `InstallUISequence` (read-only, through
+`WindowsInstaller.Installer` COM, `OpenDatabase` mode 0):
+
+```text
+MigrateFeatureStates       1200
+MaintenanceWelcomeDlg      1296   Installed AND NOT RESUME AND NOT Preselected AND NOT PATCH
+ResumeDlg                  1297   Installed AND (RESUME OR Preselected)
+WelcomeDlg                 1298   NOT Installed OR PATCH
+ProgressDlg                1299
+ExecuteAction              1300
+```
+
+and out of its `ControlEvent` table, the only route to `VerifyReadyDlg` on a
+maintenance run:
+
+```text
+MaintenanceTypeDlg | RemoveButton | NewDialog | VerifyReadyDlg | 1 | 1
+MaintenanceTypeDlg | RemoveButton | [WixUI_InstallMode] | Remove | 1 | 1
+```
+
+Add/Remove Programs runs `MsiExec.exe /X{ProductCode}`, which sets `REMOVE=ALL`
+on the command line, which sets `Preselected` — so `MaintenanceWelcomeDlg` is
+skipped, `MaintenanceTypeDlg` is never reached, and `VerifyReadyDlg` is never
+shown. **Hanging the question off a wizard button alone would have missed the
+one path almost every uninstall actually takes.** The question is therefore a
+`<Show>` row in the `InstallUISequence`, which does not care which dialogs run,
+plus a `SpawnDialog` on `MaintenanceTypeDlg`'s Remove button for the
+double-clicked-`.msi` path where `REMOVE` is not set until later.
+
+**(b) `util:RemoveFolderEx` FAILS on an empty property — it does not skip.**
+This is the single most load-bearing fact in the change and it is the opposite
+of the obvious assumption. From WiX 3.14's own
+`src/ext/ca/wixca/dll/RemoveFoldersEx.cpp`:
+
+```c
+hr = WcaGetProperty(sczProperty, &sczPath);
+ExitOnFailure2(hr, "Failed to resolve remove folder property: %S for row: %S", sczProperty, sczId);
+
+// fail early if the property isn't set as you probably don't want your installers trying to delete SystemFolder
+// StringCchLengthW succeeds only if the string is zero characters plus 1 for the terminating null
+hr = ::StringCchLengthW(sczPath, 1, reinterpret_cast<UINT_PTR*>(&cchLen));
+if (SUCCEEDED(hr))
+{
+    ExitOnFailure2(hr = E_INVALIDARG, "Missing folder property: %S for row: %S", sczProperty, sczId);
+}
+```
+
+and, in the same file, the reason a *non-existent* path is harmless:
+
+```c
+hFind = ::FindFirstFileW(sczSearch, &wfd);
+if (INVALID_HANDLE_VALUE == hFind)
+{
+    er = ::GetLastError();
+    if (ERROR_PATH_NOT_FOUND == er)
+    {
+        WcaLog(LOGMSG_STANDARD, "Search path not found: %ls", sczSearch);
+        ExitFunction1(hr = S_FALSE);          // S_FALSE is not a failure
+    }
+```
+
+and, from `src/ext/UtilExtension/wixlib/UtilExtension_Platform.wxi`, the reason
+that failure cannot break an uninstall:
+
+```xml
+<CustomAction Id="WixRemoveFoldersEx$(var.Suffix)" BinaryKey="WixCA$(var.Suffix)"
+              DllEntry="WixRemoveFoldersEx" Execute="immediate" Return="ignore" />
+<InstallExecuteSequence>
+  <Custom Action="WixRemoveFoldersEx$(var.Suffix)" Before="CostInitialize" />
+</InstallExecuteSequence>
+```
+
+Three consequences, all of which the design depends on:
+
+- **"No answer" is safe.** An empty property means the custom action refuses
+  and, because it is scheduled `Return="ignore"`, the sequence continues and
+  nothing is deleted. So *leaving the property unset* is a valid, fail-safe
+  gate — which matters because a component's RemoveFile rows cannot be
+  conditioned any other way (a component condition that is False during an
+  uninstall causes removal, it does not prevent it).
+- **The action runs `Before CostInitialize` (799 in the built package).** The
+  properties therefore have to be set *before* costing, not at `CostFinalize`.
+  They are set at 51/52, right after `AppSearch`.
+- **A missing folder is a clean no-op**, so uninstalling on a machine that
+  never wrote a config logs one benign line and adds no rows.
+
+**(c) Why `[AppDataFolder]` is the installing user's profile and not
+`SYSTEM`'s.** Two independent reasons, and the change relies on both:
+
+1. Windows Installer runs the **immediate** half of the `InstallExecuteSequence`
+   — everything before `InstallInitialize` (1500), which is everything involved
+   here: the two `SetProperty` actions at 51/52 and `WixRemoveFoldersEx` at 799
+   — in the **client** `msiexec.exe`, the invoking user's own non-elevated
+   process. Only the deferred script between `InstallInitialize` and
+   `InstallFinalize` runs in the service as `LocalSystem`, and by then the
+   standard `RemoveFiles` action (3500) is executing literal absolute paths that
+   were already resolved client-side. This is the same mechanism that makes a
+   per-user `[AppDataFolder]` component in a per-machine package land in the
+   installing user's profile.
+2. The deletion is gated on `UILevel = 5`. The one realistic way
+   `[AppDataFolder]` could ever mean SYSTEM's profile is an `msiexec` launched
+   **by** SYSTEM (SCCM, Intune, a scheduled task), and such a removal is silent
+   by definition — UI level 2 or 3 — so it is excluded before the question of
+   whose profile it is can even arise.
+
+### Exact file: `src-tauri/wix/main.wxs`
+
+The header comment now says **THREE** Spaceadom changes instead of two.
+`util:CloseApplication` (PROBLEM 127) and the deleted `<Property Id="INSTALLDIR">`
+(PROBLEM 244/246) are untouched; both were re-read out of the built package
+afterwards to prove it (below). The feature is in four places, each marked
+`SPACEADOM CHANGE 3`.
+
+**Part 1 — the answer and the two paths it governs.**
+
+```xml
+<Property Id="ST_KEEPDATA" Secure="yes" />
+
+<SetProperty Id="StRemoveAppDataDir"
+             Value="[AppDataFolder]Spaceadom"
+             After="AppSearch"
+             Sequence="execute">
+    <![CDATA[ST_KEEPDATA = "0" AND REMOVE = "ALL" AND UILevel = 5 AND NOT PATCH AND NOT UPGRADINGPRODUCTCODE AND NOT WIX_UPGRADE_DETECTED AND AppDataFolder <> "" AND LocalAppDataFolder <> ""]]>
+</SetProperty>
+<SetProperty Id="StRemoveBackupsDir"
+             Value="[LocalAppDataFolder]SpaceadomBackups"
+             After="AppSearch"
+             Sequence="execute">
+    <![CDATA[ST_KEEPDATA = "0" AND REMOVE = "ALL" AND UILevel = 5 AND NOT PATCH AND NOT UPGRADINGPRODUCTCODE AND NOT WIX_UPGRADE_DETECTED AND AppDataFolder <> "" AND LocalAppDataFolder <> ""]]>
+</SetProperty>
+```
+
+`ST_KEEPDATA` has **no default value on purpose**: *Keep is the absence of an
+answer*, so every path that cannot ask keeps by construction and no later edit
+can turn a missing answer into a delete. Only the exact string `"0"` deletes
+anything. `Secure="yes"` lets an attended script pre-answer it
+(`msiexec /x {ProductCode} ST_KEEPDATA=0`) and skip the dialog; without it the
+value would be dropped on this per-machine package's client→service hop, the
+same reason the stock `AUTOLAUNCHAPP`/`LAUNCHAPPARGS` are `Secure`. It still
+cannot delete anything under `/qn` or `/passive` — `UILevel = 5` is a separate,
+independent gate.
+
+The two folder properties are **private** (mixed case), and that is a security
+decision, not a style one. `util:RemoveFolderEx` recursively deletes whatever
+path its property holds, and a **public** property can be set on anyone's
+command line: `msiexec /x {ProductCode} ST_APPDATA_DIR=C:\Users\me\Documents`
+would hand a stranger's command line a recursive delete running inside the
+uninstall. Private properties cannot be set from a command line at all, so the
+only writer of these two values is the `SetProperty` pair above.
+
+The `AppDataFolder <> ""` guard mirrors `installer-hooks.nsh`'s
+`${If} $APPDATA != ""` and is load-bearing for a different reason than it is in
+NSIS: if the folder property were ever empty, `"[AppDataFolder]Spaceadom"`
+collapses to the **relative** path `Spaceadom`, and `RecursePath` would walk it
+against whatever the current directory happens to be.
+
+Both conditions are identical on purpose. `WixRemoveFoldersEx` aborts its whole
+loop on the first row whose property is empty, so "one set, one empty" would
+silently drop whichever row the table ordered second.
+
+**Part 2 — the question.** A small modal dialog shaped like WixUI's own
+`CancelDlg` (one text control, two buttons, `EndDialog Return`), not a wizard
+page, because it has to work on a path where no wizard page is shown:
+
+```xml
+<Dialog Id="SpaceadomKeepDataDlg" Width="330" Height="135"
+        Title="[ProductName] Setup" NoMinimize="yes">
+    <Control Id="Text" Type="Text" X="15" Y="15" Width="300" Height="72"
+             Text="Keep your settings? (profiles, key bindings, backups)&#13;&#10;&#13;&#10;Choose No to also delete [AppDataFolder]Spaceadom and [LocalAppDataFolder]SpaceadomBackups from this PC." />
+    <Control Id="Yes" Type="PushButton" X="197" Y="103" Width="56" Height="17"
+             Default="yes" Cancel="yes" Text="!(loc.WixUIYes)">
+        <Publish Property="ST_KEEPDATA" Value="1" Order="1">1</Publish>
+        <Publish Event="EndDialog" Value="Return" Order="2">1</Publish>
+    </Control>
+    <Control Id="No" Type="PushButton" X="259" Y="103" Width="56" Height="17"
+             Text="!(loc.WixUINo)">
+        <Publish Property="ST_KEEPDATA" Value="0" Order="1">1</Publish>
+        <Publish Event="EndDialog" Value="Return" Order="2">1</Publish>
+    </Control>
+</Dialog>
+```
+
+The wording is PROBLEM 247's, character for character. MSI's Formatted syntax
+expands `[AppDataFolder]` / `[LocalAppDataFolder]` at display time in the
+interactive user's session, so the person answering sees exactly which profile
+is about to be cleaned — the NSIS half's `$APPDATA` / `$LOCALAPPDATA` do the
+same. Yes carries **both** `Default="yes"` and `Cancel="yes"`, copying
+`CancelDlg`'s No button: Enter presses Keep, and Esc / Alt+F4 / the title-bar X
+are Keep, exactly like the NSIS `MB_YESNO`'s `IDYES`. There is no way to dismiss
+this dialog into a delete.
+
+**Part 3 — the two entry points.**
+
+```xml
+<!-- the maintenance wizard, where REMOVE is not set until VerifyReadyDlg -->
+<Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton"
+         Event="SpawnDialog" Value="SpaceadomKeepDataDlg" Order="0">
+    <![CDATA[ST_KEEPDATA = "" AND REMOVE <> "ALL" AND UILevel = 5 AND NOT UPGRADINGPRODUCTCODE]]>
+</Publish>
+
+<!-- Add/Remove Programs, where no wizard dialog is shown at all -->
+<InstallUISequence>
+    <Show Dialog="SpaceadomKeepDataDlg" After="MigrateFeatureStates">
+        <![CDATA[Installed AND REMOVE = "ALL" AND ST_KEEPDATA = "" AND UILevel = 5 AND NOT PATCH AND NOT UPGRADINGPRODUCTCODE AND NOT WIX_UPGRADE_DETECTED]]>
+    </Show>
+</InstallUISequence>
+```
+
+`Order="0"` puts the spawn ahead of the stock `NewDialog` and
+`[WixUI_InstallMode]` events on the same button (both `Ordering` 1). Both
+conditions require `ST_KEEPDATA = ""` — ask only if nobody has answered yet —
+which is what makes the command-line override meaningful and stops a
+double-ask when both entry points are live on one run.
+
+The `Show` row sits at 1201 rather than beside the welcome dialogs because
+1296–1300 is a contiguous block with no free sequence number in it. So the
+question comes before the stock dialogs rather than after them; nothing is
+deleted until `ExecuteAction`, so cancelling the wizard afterwards still keeps
+everything.
+
+**The `InstallUISequence` itself is the outermost guard:** Windows Installer
+does not run it at UI level 2 (`/qn`) or 3 (`/passive`) at all, so a silent
+removal and the self-updater's `/passive` upgrade can never reach this dialog
+whatever the condition says.
+
+**Part 4 — the removal.**
+
+```xml
+<Component Id="SpaceadomUserDataCleanup" Guid="*" Win64="$(var.Win64)">
+    <RegistryValue Root="HKLM"
+                   Key="Software\\{{manufacturer}}\\{{product_name}}"
+                   Name="UserDataCleanup"
+                   Type="integer"
+                   Value="1"
+                   KeyPath="yes" />
+    <util:RemoveFolderEx Id="StRemoveAppDataFolder" On="uninstall" Property="StRemoveAppDataDir" />
+    <util:RemoveFolderEx Id="StRemoveBackupsFolder" On="uninstall" Property="StRemoveBackupsDir" />
+</Component>
+```
+
+plus `<ComponentRef Id="SpaceadomUserDataCleanup"/>` in the `MainProgram`
+feature, which is `Level="1" Absent="disallow"`, so the component is always
+installed and therefore always present to be removed.
+
+`util:RemoveFolderEx`, **not a shell-out.** `WixRemoveFoldersEx` walks the
+nominated path and adds temporary `RemoveFile` rows against this component,
+which the *standard* `RemoveFiles` action (3500) executes. The delete is
+therefore ordinary Windows Installer file removal — logged, sequenced and rolled
+back like every other file the package touches — instead of a `cmd /c rd /s /q`
+whose only safety is the string handed to it. After PROBLEM 244, where an
+installer deleted the running app, a recursive delete driven by an interpolated
+string is not something to hand-roll.
+
+`HKLM` rather than the neighbouring components' `HKCU` because this package is
+per-machine: an HKCU key path makes the component "not installed" for any user
+other than the one who installed it, and the whole point of this component is
+that its removal fires for whoever is doing the uninstalling. Nothing reads the
+value — `rival_install::detect()` scans the ARP `Uninstall` keys, never this one
+— it exists only to be a key path.
+
+Both folder names are **hardcoded**, not derived from `{{product_name}}` or
+`{{bundle_id}}`. They are the app's own constants: `config::backup_dir()`
+deliberately does not live under the product name or the bundle id (PROBLEM 94
+— *"an uninstaller that removes `%APPDATA%\Spaceadom` … would take the backups
+with it, which is precisely the case they exist for"*), and a rename of either
+must not silently re-point a recursive delete at some other folder.
+
+### The log line this feature deliberately leaves behind
+
+Stated plainly so nobody later "fixes" it: **every run of this package that is
+not an interactive uninstall-and-answer-No leaves both properties empty, so a
+`/L*v` log of an ordinary install, or of an ordinary keep-my-settings uninstall,
+CONTAINS a `WixRemoveFoldersEx` failure** — `Error 0x80070057: Missing folder
+property: StRemoveAppDataDir` and a returned error code, followed by the
+sequence carrying on because the action is `Return="ignore"`. That line is the
+feature working, not the feature broken. It is the price of having "no answer"
+mean "delete nothing" rather than pointing the deleter at a decoy path to keep
+the log tidy. Given this project's history of misread installer logs (PROBLEM
+127, 228, 236, 244), the choice was: a line that is honest and explained here,
+or a tidy log and an invented path that a future reader has to trust.
+
+### How it was verified
+
+`npm run build` — exit 0 (`tsc && vite build --outDir dist2`).
+
+`npm run tauri build -- --bundles msi`, from a shell with
+`CARGO_HOME`/`RUSTUP_HOME`/`PATH` per `CLAUDE.md`. (The task brief said
+`cargo tauri build`; that is not installed here — the CLI is the npm
+`@tauri-apps/cli`, `cargo tauri` fails with "no such command". Same trap
+recorded in PROBLEM 246 and 247.)
+
+- cargo release build finished clean; `candle` and `light` both ran and the
+  bundle was written: `Finished 1 bundle at: …\bundle\msi\Spaceadom_1.0.100_x64_en-US.msi`.
+- The command still exits 1 at the step **after** the bundle exists —
+  `tauri-plugin-updater`'s signer refusing to sign without
+  `TAURI_SIGNING_PRIVATE_KEY`. Documented, expected, unrelated (same as
+  PROBLEM 247).
+- **Stale-artefact trap avoided** (PROBLEM 246's own note): the version is not
+  bumped, so the output file has the same name as the previous night's build.
+  Before: 13,447,168 bytes, 2026-09-05 08:53:23. After the first build:
+  13,582,336 bytes, 09:23:12. Rebuilt twice more after that, each time because
+  this entry's PROBLEM number had to move (249 → 251 → 252; see "Numbering"
+  below) and the number appears in `main.wxs`'s comments. Comments never reach
+  an `.msi`, so no table row changed — the rebuilds exist only so that the
+  package on disk was produced from the file exactly as it now stands. The
+  file's presence proves nothing; the mtime and size do. The final artefact is
+  **13,611,008 bytes, 2026-09-05 09:32:01**, and every row quoted below was
+  re-read from it — all three builds produced identical rows.
+- WiX validation logs an MsiInstaller 1033 in the event log. That is `light.exe`
+  validating the package it just wrote and is **not** an install — see
+  `CLAUDE.md`; a real install is bracketed by 1040/1042, which these are not.
+
+**Read out of the built package**, read-only, through
+`WindowsInstaller.Installer` COM (`OpenDatabase` mode 0), from a PowerShell
+script outside the app:
+
+```text
+PROP   SecureCustomProperties   ARPNOREPAIR;AUTOLAUNCHAPP;LAUNCHAPPARGS;ST_KEEPDATA;WIX_DOWNGRADE_DETECTED;WIX_UPGRADE_DETECTED
+PROP   ST_KEEPDATA              (NO ROW — no default value, as designed)
+
+DIALOG SpaceadomKeepDataDlg | HCentering 50 | VCentering 50 | 330 | 135 | Attributes 3 | [ProductName] Setup | Control_First=Yes
+
+CTRL   SpaceadomKeepDataDlg | Text | Text       | 15  | 15  | 300 | 72 | 3 | Keep your settings? (profiles, key bindings, backups)
+                                                                            (blank line)
+                                                                            Choose No to also delete [AppDataFolder]Spaceadom and [LocalAppDataFolder]SpaceadomBackups from this PC.
+CTRL   SpaceadomKeepDataDlg | Yes  | PushButton | 197 | 103 | 56  | 17 | 3 | &Yes
+CTRL   SpaceadomKeepDataDlg | No   | PushButton | 259 | 103 | 56  | 17 | 3 | &No
+
+CEVT   SpaceadomKeepDataDlg | Yes | [ST_KEEPDATA] | 1      | 1 | 1
+CEVT   SpaceadomKeepDataDlg | Yes | EndDialog     | Return | 1 | 2
+CEVT   SpaceadomKeepDataDlg | No  | [ST_KEEPDATA] | 0      | 1 | 1
+CEVT   SpaceadomKeepDataDlg | No  | EndDialog     | Return | 1 | 2
+CEVT   MaintenanceTypeDlg   | RemoveButton | SpawnDialog          | SpaceadomKeepDataDlg | ST_KEEPDATA = "" AND REMOVE <> "ALL" AND UILevel = 5 AND NOT UPGRADINGPRODUCTCODE | 0
+CEVT   MaintenanceTypeDlg   | RemoveButton | NewDialog            | VerifyReadyDlg       | 1 | 1
+CEVT   MaintenanceTypeDlg   | RemoveButton | [WixUI_InstallMode]  | Remove               | 1 | 1
+
+UISEQ  MigrateFeatureStates   1200
+UISEQ  SpaceadomKeepDataDlg   1201   Installed AND REMOVE = "ALL" AND ST_KEEPDATA = "" AND UILevel = 5 AND NOT PATCH AND NOT UPGRADINGPRODUCTCODE AND NOT WIX_UPGRADE_DETECTED
+UISEQ  MaintenanceWelcomeDlg  1296   Installed AND NOT RESUME AND NOT Preselected AND NOT PATCH
+UISEQ  ResumeDlg              1297   Installed AND (RESUME OR Preselected)
+UISEQ  WelcomeDlg             1298   NOT Installed OR PATCH
+UISEQ  ProgressDlg            1299
+UISEQ  ExecuteAction          1300
+
+EXSEQ  AppSearch              50
+EXSEQ  SetStRemoveAppDataDir  51    ST_KEEPDATA = "0" AND REMOVE = "ALL" AND UILevel = 5 AND NOT PATCH AND NOT UPGRADINGPRODUCTCODE AND NOT WIX_UPGRADE_DETECTED AND AppDataFolder <> "" AND LocalAppDataFolder <> ""
+EXSEQ  SetStRemoveBackupsDir  52    (the same condition, character for character)
+EXSEQ  LaunchConditions       100
+EXSEQ  ValidateProductID      700
+EXSEQ  WixRemoveFoldersEx     799
+EXSEQ  CostInitialize         800
+EXSEQ  RemoveFiles            3500
+EXSEQ  WixCloseApplications   3999   VersionNT > 400
+
+CA     SetStRemoveAppDataDir  | 51 | StRemoveAppDataDir | [AppDataFolder]Spaceadom
+CA     SetStRemoveBackupsDir  | 51 | StRemoveBackupsDir | [LocalAppDataFolder]SpaceadomBackups
+CA     WixRemoveFoldersEx     | 65 | WixCA              | WixRemoveFoldersEx
+
+RFX    StRemoveAppDataFolder  | SpaceadomUserDataCleanup | StRemoveAppDataDir | 2
+RFX    StRemoveBackupsFolder  | SpaceadomUserDataCleanup | StRemoveBackupsDir | 2
+
+COMP   SpaceadomUserDataCleanup | {B9273C91-E482-561F-949C-C4D16A4317F8} | INSTALLDIR | Attributes 260 | Condition (empty) | KeyPath regEDA28C006CF93DE845BFA5621FA52561
+FCOMP  MainProgram | SpaceadomUserDataCleanup
+REG    regEDA28C006CF93DE845BFA5621FA52561 | Root 2 (HKLM) | Software\Nur Ifran Arpon\Spaceadom | UserDataCleanup | #1
+```
+
+Reading the numbers rather than trusting the template:
+
+- **Custom action type 51** on both `SetStRemove*` rows = a property assignment,
+  immediate. **Type 65** on `WixRemoveFoldersEx` = 1 (`Dll` from the `Binary`
+  table) + 64 (`Continue`, i.e. `Return="ignore"`) — the `Return="ignore"` this
+  design depends on is confirmed *in the artefact*, not only in WiX's source.
+- **`WixRemoveFolderEx` `InstallMode` = 2** on both rows = remove on uninstall
+  only.
+- **Component attributes 260** = 256 (`64bitComponent`) + 4 (`RegistryKeyPath`),
+  and the `Condition` column is **empty** — the component is unconditional, as
+  it must be; the gate is entirely in the two properties.
+- **51/52 < 799** — the properties are set before the custom action that reads
+  them, which is the only ordering that works.
+- The sequence numbers put every one of these actions **below `InstallInitialize`
+  (1500)**, i.e. in the client process, which is reason (c1) above.
+
+**PROBLEM 127 and PROBLEM 244/246 re-checked in the same artefact, because this
+change had to leave both alone:**
+
+```text
+CLOSEAPP  CloseSpaceadom | spaceadom.exe | Attributes 33 | Sequence 1 | Timeout 5000
+PROP      INSTALLDIR     (NO ROWS)
+REGLOCATOR Webview2VersionSystemx64 | 2 | SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-…} | pv | 18
+REGLOCATOR Webview2VersionSystemx86 | 2 | SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-…}            | pv | 18
+REGLOCATOR Webview2VersionUser      | 1 | SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-…}            | pv | 18
+```
+
+`util:CloseApplication` is intact (attributes 33 = `CloseMessage` 1 +
+`TerminateProcess` 32). The only registry searches in the package are still the
+three WebView2 version probes, and there is still **no** `Property` row for
+`INSTALLDIR` — PROBLEM 244's root cause has not crept back in.
+
+The authored `RemoveFile` table is unchanged from before this work (the three
+stock shortcut/folder rows); the two folder deletions are added at runtime by
+`WixRemoveFoldersEx`, which is why nothing new appears there.
+
+### What was NOT exercised, and cannot be here
+
+**Everything that requires running the installer.** The `.msi` must not be
+installed on this machine (PROBLEM 244: the owner's copy is the per-user NSIS
+build, and installing an `.msi` to test it is the exact accident being fixed).
+So:
+
+- The dialog has **never been displayed**. Its layout, wrapping and button
+  placement are authored numbers, verified only as table rows.
+- No folder has **ever been deleted** by this code.
+- `Preselected` being set by `MsiExec.exe /X{ProductCode}` is reasoning from the
+  documented behaviour of a command line that sets feature states, plus the
+  package's own `Show` conditions — **it was not observed**. If it turns out
+  ARP does not set it, the `MaintenanceWelcomeDlg` path runs instead and the
+  `SpawnDialog` on `RemoveButton` covers it; the `REMOVE <> "ALL"` term stops a
+  double-ask. Both entry points exist precisely because this was not settled by
+  measurement.
+- The claim that immediate actions run in the client process is architectural,
+  read from the sequence numbers, not from a `/L*v` log of a real uninstall.
+
+### Second-PC recipe (not run this session)
+
+Run every step on a PC that has **never** had Spaceadom. Steps 3–5 are the
+whole point; step 1 is the baseline and step 2 makes the data real.
+
+1. Install `Spaceadom_1.0.100_x64_en-US.msi` (the build carrying this change).
+   Confirm it landed in `C:\Program Files\Spaceadom` and **nowhere** under
+   `%LOCALAPPDATA%` (PROBLEM 246's check — do this before anything else).
+2. Launch it, bind at least one key in a profile you will recognise, change a
+   setting so a backup is written, close it. Confirm
+   `%APPDATA%\Spaceadom\config.json` and `%LOCALAPPDATA%\SpaceadomBackups`
+   both exist.
+3. **Interactive uninstall → No.** Settings → Apps → Spaceadom → Uninstall.
+   Expect the question *"Keep your settings? (profiles, key bindings,
+   backups)"*, with the two full paths spelled out in your own profile.
+   Answer **No**. Afterwards: `%APPDATA%\Spaceadom` gone,
+   `%LOCALAPPDATA%\SpaceadomBackups` gone, `C:\Program Files\Spaceadom` gone.
+4. **Reinstall, then interactive uninstall → Yes.** Rebind the key, uninstall,
+   answer **Yes**. Afterwards: `%APPDATA%\Spaceadom\config.json` still there
+   with the binding, `%LOCALAPPDATA%\SpaceadomBackups` still there. Repeat once
+   more pressing **Esc** instead of clicking, and once more clicking the
+   title-bar **X** — all three must keep.
+5. **`/passive` upgrade → no prompt, data intact.** With an `.msi` copy
+   installed and a config in place, take a SHA-256 of `config.json`, then run
+   the next version the way the self-updater does:
+   `msiexec.exe /i "…\Spaceadom-1.0.101-installer.msi" /passive /norestart REBOOT=ReallySuppress AUTOLAUNCHAPP=True LAUNCHAPPARGS="--autostart"`.
+   Expect exactly one UAC prompt and a progress bar — **no "Keep your
+   settings?" dialog at any point**, including during the
+   `RemoveExistingProducts` of the old product at sequence 1501. Afterwards the
+   SHA-256 must be unchanged and `%LOCALAPPDATA%\SpaceadomBackups` untouched.
+6. **`/qn` uninstall → data kept.** `msiexec /x {ProductCode} /qn`. No dialog
+   (there is no UI to show one in), and both folders still present afterwards.
+   Then repeat as `msiexec /x {ProductCode} /qn ST_KEEPDATA=0` — the property is
+   accepted and still **nothing is deleted**, because `UILevel = 5` fails. That
+   is the test that proves the two gates are independent.
+7. **Attended pre-answer.** `msiexec /x {ProductCode} ST_KEEPDATA=0` with no
+   `/q` switch: no dialog appears (it was already answered) and both folders are
+   removed.
+8. Read a `/L*v` log of step 4 (the Keep run) and confirm it contains
+   `Missing folder property: StRemoveAppDataDir` followed by the sequence
+   continuing. **That line is expected.** Its absence in step 3's log, replaced
+   by `Recursing path: …`, is the positive control.
+
+### Generalise this
+
+**A gate you cannot author is a gate you have to move upstream.** Windows
+Installer will not let a component's file-removal rows be conditioned: a
+component condition that is False during an uninstall causes removal rather than
+preventing it, and `RemoveFile` rows carry no condition of their own. The only
+lever left is the *value the deleter is pointed at*, so the whole design
+collapses into one question — what does "not now" look like as a path? Reading
+WiX's custom action source turned that from a guess into a specification:
+"not now" is the empty string, it is refused loudly, and the refusal is ignored
+by design. **Before building a gate on a component you did not write, find out
+what its code does with the input that means "do nothing".** The alternative —
+assuming it skips — would have shipped an uninstaller that fails on every run
+where the answer is Keep, which is most of them.
+
+**"Where do I hang the prompt?" is answered by the artefact, not by the wizard
+you have seen.** The obvious place for this question is the Remove button, and
+the obvious place is wrong: Add/Remove Programs never reaches that button.
+Dumping the shipped package's own `InstallUISequence` and `ControlEvent` tables
+took two minutes and changed the design from "works when you double-click the
+`.msi`" to "works the way people actually uninstall". A UI you did not author
+has a control flow you have to read, not remember.
+
+**Numbering.** Written as 249, moved to 251, moved again to 252 — the second
+move happened *between* the grep that cleared 251 and the final save, when
+another agent claimed it across six source files, two of which did not exist
+when the grep ran. PROBLEM 250's entry already warned that grepping the doc
+headings is not enough and that grepping the source is "only a snapshot"; this
+is what a stale snapshot costs inside a single session. The renumber was a
+`sed` scoped to three files **by name**. Never a global one: a global `sed` over
+shared documents is how PROBLEM 250's agent had two of its own comments
+rewritten by somebody else's renumber.
+
+**The same guarantee twice, from two different facts, is not redundancy.**
+Silent-vs-interactive is enforced *structurally* (the InstallUISequence does not
+run below UI level 4, so the dialog cannot appear) and *again explicitly*
+(`UILevel = 5` in the condition that nominates the folders). Upgrade-vs-uninstall
+is enforced by `NOT UPGRADINGPRODUCTCODE` and again by `REMOVE = "ALL"` and again
+by the UI level the parent install passes down. PROBLEM 247 made the same
+argument for `IfSilent` plus `$UpdateMode`: today one implies the other, and
+nothing forces that to stay true. Every one of these guards is one line; the
+failure they prevent is deleting somebody's profiles during an automatic update.
+
+### WIRED 2026-09-05 (reconciliation pass)
+
+No change to `wix/main.wxs`. One documentation correction, and it is the kind
+this file exists to prevent:
+
+**`CLAUDE.md` still said `main.wxs`'s ONLY change from stock was
+`util:CloseApplication`.** That was true until PROBLEM 244/246 deleted the
+`<Property Id="INSTALLDIR">` block and this entry added the "Keep your
+settings?" dialog — i.e. it had been wrong through two whole features, in the
+one file every session is told to read first. It now lists all three marked
+changes with their PROBLEM numbers and points at `main.wxs`'s own header
+comment as the authority, since that comment is already correct and lives
+beside the code it describes.
+
+Verified against the file rather than against the header: `SPACEADOM CHANGE 1`
+at `wix/main.wxs:58`, `CHANGE 2` at `:114`, and `CHANGE 3`'s four parts at
+`:140`, `:304`, `:343`/`:367` and `:428`/`:598`.
+
+Nothing about the feature was re-tested. The `.msi` still must not be installed
+on this machine (PROBLEM 244), so every "was NOT exercised" line above stands
+exactly as written.
+
+---
+
+## PROBLEM 253 — an app that dies during its own startup left the user with no window, no shortcuts and no button to press; now the fourth launch comes up with the hook off, a banner that says why, and a "Report a problem" zip
+
+**Status:** built, `cargo test --lib` 459 passed / 0 failed, `cargo clippy --lib --all-targets` 0 warnings, `tsc` clean. **Nothing about this has run on a real machine** — no install, no version bump. See "What was NOT exercised".
+
+### Symptom
+
+The one report nobody can act on: *"I double-clicked it and nothing happened."*
+It is PROBLEM 89's sentence and it keeps coming back, because the failures that
+produce it are the ones that happen **before there is any UI to complain
+through**. The recorded list on this project alone: WebView2 not serviceable at
+a cold logon (PROBLEM 59), a display driver that makes the transparent overlay
+compose zero pixels (PROBLEM 37/80/117), a second install fighting for the
+spacebar (PROBLEM 129/141), a panic on the main thread before the tray exists
+(PROBLEM 89). Every one of them repeats on every launch, because nothing about
+launching the app is different the second time.
+
+The user's only escape hatches were: uninstall it, or find `config.json` by hand
+and edit it. Both require knowing things they do not know.
+
+### Root cause, stated as a design gap rather than a bug
+
+**The app had no memory of its own launches.** Every start was the first start.
+There was no counter, so there was no branch that could ever be written that
+said "this has failed before, do less this time."
+
+### The fix, in two halves
+
+#### Half one — SAFE MODE (`src-tauri/src/safe_mode.rs`, NEW)
+
+One counter, `%APPDATA%\Spaceadom\boot-attempts.json`, holding `failed_starts`.
+Three transitions, and the whole design is in **which of them writes what**:
+
+| When | What is written |
+| --- | --- |
+| process start | `failed_starts + 1` — a launch is a failure until proven otherwise |
+| alive 30 s with no early panic | `0` |
+| a CLEAN exit before the 30 s mark | the value from *before* this launch — the increment is undone |
+
+Anything else — the process dying, being killed, or panicking inside the first
+30 s — simply leaves the incremented value on disk, because nothing came along
+to lower it. **That is the point: a crash cannot forget to record itself, since
+recording it is the DEFAULT and the healthy paths are what have to run.**
+
+At `failed_starts >= 3` the next launch:
+
+- does **not** call `hook::spawn_hook_thread` (no `WH_KEYBOARD_LL`, no
+  fullscreen / exclusion / pointer watchers) — the channel is parked in
+  `safe_mode::arm_pending_hook` instead;
+- does **not** create the `overlay` window, does not run the PROBLEM 59
+  rebuild for it, and does not start `display_watch` (whose job is to rebuild a
+  missing overlay);
+- shows the dashboard with a banner and two buttons.
+
+The engine actor still starts. It is *paused by starvation* rather than by a
+flag: with no hook there are no `HookEvent`s, so it dispatches nothing. One less
+state to get wrong.
+
+#### The line that makes it safe to ship — the clean-exit exclusion
+
+`session_end.rs` (PROBLEM 224) takes `WM_ENDSESSION` and calls
+`std::process::exit(0)` **from inside the handler**, so tao's runner is never
+told the session ended. That path fires for a sign-out, a shutdown, and an
+installer's Restart Manager closing us to replace the exe — and every one of
+those routinely happens inside the first thirty seconds (a logon autostarts the
+app and an update arrives; a user signs in and straight back out). Without an
+exclusion, **three reboots shortly after logon would disarm a perfectly healthy
+app's shortcuts and tell its owner it had crashed three times.**
+
+So there are two clean-exit call sites, because there genuinely are two exits:
+
+```rust
+// src-tauri/src/session_end.rs, in teardown() — the WM_ENDSESSION path.
+// lib.rs's RunEvent handler NEVER runs here: we exit from inside the handler.
+crate::safe_mode::note_clean_exit();
+```
+
+```rust
+// src-tauri/src/lib.rs, in the app.run() event closure — the ORDERLY path
+// (tray "Exit Spaceadom", the updater exiting so its installer can run).
+if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
+    engine::actions::pip::restore_all();
+    safe_mode::note_clean_exit();
+}
+```
+
+`note_clean_exit` writes `COUNTER_BEFORE` — the value read at process start —
+and **not** "the disk value minus one". If the 30-second marker has already
+written `0`, decrementing would put a phantom failure back. The unit test
+`a_clean_exit_undoes_only_its_own_launch` is that trap, pinned.
+
+#### Why a panic needs its own flag
+
+A panic on the hook or engine thread is survivable — PROBLEM 82's supervisor
+restarts it — so the process can panic at 5 s and still be alive at 30 s.
+Without this the health timer would write `0` and call that launch healthy, and
+**a machine that panics on every launch would never reach safe mode**:
+
+```rust
+// src-tauri/src/lib.rs, inside the app's ONE panic hook (PROBLEM 131),
+// ABOVE the backtrace and above capture_panic: both of those can take real
+// time, and if the process is killed part-way through this hook the one fact
+// that decides whether the next launch protects the user has to be on disk.
+safe_mode::note_panic();
+```
+
+`note_panic` is a no-op after 30 s: a panic in a long-running session is not a
+*startup* crash, and treating it as one would eventually disarm the shortcuts of
+somebody whose app works fine for an hour at a time.
+
+#### The pure core
+
+`decide`, `counter_at_launch` and `run_launch` take numbers and return numbers.
+`run_launch(stored, outcome) -> (ran_in_safe_mode, next_counter)` is the whole
+feature, and the tests fold it over sequences of launches:
+
+```rust
+pub fn run_launch(stored: u32, outcome: LaunchOutcome) -> (bool, u32) {
+    let safe = decide(stored);
+    let during = counter_at_launch(stored);
+    let after = match outcome {
+        LaunchOutcome::Healthy       => 0,
+        LaunchOutcome::CleanExitEarly => stored,  // undo THIS launch's increment
+        LaunchOutcome::Lost          => during,
+    };
+    (safe, after)
+}
+```
+
+#### The markers
+
+`grep` these in `debug.log`, and in a built exe to prove the feature shipped
+(CLAUDE.md: a long `log::` format string, never a short identifier):
+
+- `safe-mode-entered-after-three-consecutive-startup-crashes-spaceadom`
+- `safe-mode-cleared-by-the-user-turn-back-on-button-spaceadom`
+
+**To clear safe mode by hand:** delete `%APPDATA%\Spaceadom\boot-attempts.json`,
+or set its `failed_starts` to `0`. Pressing "Turn back on" does the same thing
+and installs the hook immediately, without a restart.
+
+#### Sentry
+
+One new `telemetry::Degraded` variant, `SafeModeEntered`, key
+`"safe-mode-entered"`. It belongs in that enum by the enum's own definition —
+"the app is degraded and the user probably cannot tell". Here the user *is* told
+(there is a banner), but what the banner cannot say is *why* the three crashes
+happened, and this is the only signal that a build is failing to start on
+machines nobody here owns. The existing rate limiter is exactly right for it: a
+permanently broken machine says so once or twice, not once per launch forever.
+It is reported from `setup()` and **not** from `safe_mode::begin()`, because
+`telemetry::publish` (which seeds consent from the config) has not run at
+`begin()` time — a report sent there would be a report sent without consent.
+
+### Half two — REPORT A PROBLEM (`src-tauri/src/diagnostics.rs`, NEW)
+
+`build_diagnostics_bundle(description) -> Result<String /* zip path */>` writes
+`%APPDATA%\Spaceadom\reports\spaceadom-report-<YYYYMMDD-HHMMSS>.zip`:
+
+| Entry | Notes |
+| --- | --- |
+| `description.txt` | what the user typed, verbatim, capped at 20 KB |
+| `system.txt` | version, exe, install kind, packaged?, Windows build, safe-mode state, rival verdict, hook health, plus monitor/DPI and hook lines **lifted out of the log** |
+| `debug.log.tail.txt` | last 5,000 lines, with a header saying how many were dropped |
+| `debug.log.0.tail.txt` | last 2,000 lines of the rolled log, only if it exists |
+| `config.json` | scrubbed — see below |
+| `listing-data-dir.txt` | names and sizes only |
+| `listing-backups.txt` | names and sizes only |
+
+**The listings are names and sizes, never contents**, and that is a decision not
+an omission. `picker-cache.json` alone is ~800 KB naming every application
+installed on the machine, and the backups folder is a stack of complete configs.
+That they *exist* and how big they are is the diagnostic — a zero-byte picker
+cache explains an empty app picker on its own.
+
+**`system.txt` re-measures nothing.** Monitors, DPI and hook health are grepped
+out of `debug.log` rather than probed again, because two sources for one fact is
+how a diagnostic starts disagreeing with the log it ships beside.
+
+#### The scrub, and the field `scrub` cannot see
+
+Every string in the config goes through `telemetry::scrub` — the same function
+the Sentry paths use, so there is ONE definition of "safe to send" in this
+codebase. It was private; it is now `pub(crate)`.
+
+**`scrub` is not enough on its own, and the reason is specific.**
+`browser_profile_name` holds an email **local part**. The browser-profile
+feature reads the signed-in account out of each Chromium profile's `Local State`
+and the UI shows only the part before the `@`, so a real config on this machine
+contains `"browser_profile_name": "nur.arpon"` — no `@`, not address-shaped, and
+it sails straight through `scrub`, whose email rule is anchored on the `@` by
+design.
+
+So the walk redacts by **field name**, before scrubbing:
+
+```rust
+pub const REDACTED_FIELDS: &[&str] = &[
+    "browser_profile_name", "account_label", "account_name",
+    "account", "email", "user_email", "signed_in_as",
+];
+```
+
+Widening `scrub` itself was rejected: it is shared with the crash reporter, and a
+rule that makes sense for a config key ("any string under this name is an
+identity") makes none for a stack trace.
+
+A config that will not parse is **replaced by a note, never passed through raw** —
+that would be the one path by which an unscrubbed personal file reached the
+archive. `an_unparseable_config_is_replaced_not_passed_through` pins it.
+
+**Accepted cost, written down so nobody "fixes" it later:** an app path in a
+binding becomes `<path>`, so the bundle cannot say which exe a key launches. The
+binding's `label` survives (it is a plain word like "Brave") and so does the key
+and profile structure, which is what the diagnostic actually needs. Keeping the
+basename was considered and rejected: a file name is exactly where a user's own
+name turns up.
+
+#### Nothing is uploaded, and the wording says so
+
+Rust writes the file, runs `explorer /select,<path>` (one argument,
+comma-separated **with no space** — `explorer /select, X` silently opens
+Documents instead), and returns the path. The dialog then says *"Your report is
+at … — attach it to a GitHub issue"* with a button that opens the Issues page.
+`open_issues_page` is a Rust command with a compile-time constant URL rather than
+the `opener` plugin from the webview, matching PROBLEM 164's rule for this repo.
+
+#### Why the command is `async`
+
+PROBLEM 237: a non-`async` Tauri command runs on the MAIN thread, and this one
+reads two logs, a config and two directory listings and then deflates a few
+megabytes — precisely the shape of work that froze the app for 6-17 s the last
+time it was done inline. The command is `async` and hands the body to
+`tauri::async_runtime::spawn_blocking`, because every call inside it is blocking
+file I/O.
+
+### The zip crate: no new crate was added to the build
+
+```toml
+zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
+```
+
+`zip 4.6.1` was **already compiled into this tree** — `tauri-plugin-updater`
+depends on it to unpack a downloaded update — and Cargo.lock already pinned that
+exact version. Naming it makes it reachable from our own code.
+
+- `default-features = false`, because the default set is aes-crypto + bzip2 +
+  deflate64 + lzma + ppmd + time + zstd + xz: seven compression and crypto trees
+  for an archive holding four text files.
+- **`deflate-flate2`, not `deflate`.** zip's aggregate `deflate` feature pulls in
+  `zopfli` and `flate2-zlib-rs`, which *are* new crates. `deflate-flate2` takes
+  `flate2` with its default rust backend, and `flate2 1.1.9` + `miniz_oxide` were
+  likewise already in the lock (via `png` and `tauri-plugin-updater`).
+
+**Measured, not assumed:** the only change to `Cargo.lock` is the string
+`"flate2"` appearing in the existing `zip` entry's dependency list. Zero new
+packages, zero downloads.
+
+Not `Stored`: a 5,000-line log tail is a megabyte of repetitive text and deflates
+roughly tenfold, which is the difference between a report a user attaches to an
+issue and one they do not.
+
+### Frontend
+
+`src/components/report-dialog.ts` is **NEW and a LEAF module** (PROBLEM 148): it
+imports only `invoke`. That is the whole reason it is its own file — `main.ts`'s
+safe-mode banner and `settings-panel.ts`'s About link both need the one dialog,
+they are owned separately, and neither may drag the other's dependencies into
+`preview.ts`'s harness. `openReportDialog()` is the entire public surface.
+
+Its CSS is injected from the module, not added to `styles.css`. Same reason: a
+component another file imports should not need a second edit somewhere else to
+be visible. Theme handling is free — every colour is a design-system token and
+`body.nocturne` redefines the tokens.
+
+`main.ts` gets `checkSafeMode()`, its own `#safe-mode-banner` element and its own
+injected stylesheet. **It does not share `#conflict-banner`**, because the
+rival-install check runs three seconds later and claims that element
+unconditionally — it would overwrite the one message the user has to read. While
+the banner is up, a `body.st-safe-mode` class moves the two shared-strip banners
+down a row so both can be on screen.
+
+#### The banner that had to be silenced
+
+PROBLEM 161's dead-hook banner reads `HookStatus.installed`, which is `false` in
+safe mode — **by decision**. Its text blames another keyboard program or Windows
+and offers "Try again", which reinstalls a hook that was never installed. All of
+that is right for the failure it was written for and all of it is wrong here.
+Two banners contradicting each other about the same symptom is worse than one,
+so `applyHookState` returns early while `body.st-safe-mode` is set, and
+`checkSafeMode` reclaims the strip if the bootstrap's own `get_hook_status` won
+the race and already put it up.
+
+**Generalise this:** *a status banner derived from a symptom must be suppressed
+by whichever code deliberately caused that symptom.* A second banner in this
+codebase already had the same shape (`el.dataset.owner`, added so the conflict
+banner and the dead-hook banner could not fight); this is the third owner of
+that strip, and the reason the ownership convention was worth having.
+
+### What was NOT exercised
+
+- **The app has not been run.** Not once, in any mode. Every claim below is from
+  reading code, not from watching it.
+- **Safe mode has never been entered.** Producing three real startup crashes in
+  a row means breaking the app on purpose. To test it by hand: create
+  `%APPDATA%\Spaceadom\boot-attempts.json` containing `{"failed_starts": 3}`
+  through `explorer.exe` (PROBLEM 143 — a file written from the agent shell goes
+  into the MSIX container's private store and the app will never see it), then
+  launch. Expect the banner, no `hook: rollover window` line, and the
+  `safe-mode-entered-…` marker in `debug.log`.
+- **No bundle has been built by the running app.** `write_bundle` and the whole
+  scrub are unit-tested against a temp dir and a sample config; `build_bundle`'s
+  composition of the real inputs (which reads the live log, the live config and
+  two live directories) has never executed. Deliberate: it writes into the
+  owner's data dir and opens an Explorer window on his desktop.
+- **The `explorer /select,` reveal is unverified**, as is `open_issues_page`.
+- **The Sentry `SafeModeEntered` event has never been submitted** — there is no
+  DSN compiled in on this machine.
+- **The 30-second health timer and the two clean-exit call sites have never
+  run.** The arithmetic they implement is unit-tested; the wiring is not.
+
+### Files
+
+| File | Change |
+| --- | --- |
+| `src-tauri/src/safe_mode.rs` | NEW — the counter, the decision, the three transitions, "Turn back on", 8 tests |
+| `src-tauri/src/diagnostics.rs` | NEW — the bundle, the config scrub, the listings, 12 tests |
+| `src-tauri/src/lib.rs` | `mod` decls; `safe_mode::begin()` in `run()`; `note_panic()` in the panic hook; the safe-mode branch in `setup()`; three overlay skips in `create_app_windows`; `display_watch` skip; `note_clean_exit()` in the `RunEvent` closure; four commands registered |
+| `src-tauri/src/commands.rs` | four thin wrappers |
+| `src-tauri/src/telemetry.rs` | `Degraded::SafeModeEntered`; `scrub` made `pub(crate)` |
+| `src-tauri/src/session_end.rs` | one line in `teardown()` — the `WM_ENDSESSION` clean exit |
+| `src-tauri/Cargo.toml` | `zip` (already in the tree; no new package) |
+| `src/components/report-dialog.ts` | NEW — leaf module, exports `openReportDialog()` |
+| `src/main.ts` | `checkSafeMode()` + the banner; the `applyHookState` suppression |
+
+### Contracts another lane can rely on
+
+**Tauri commands** (all registered in `lib.rs`'s `invoke_handler`):
+
+| Command | Signature | Notes |
+| --- | --- | --- |
+| `get_safe_mode` | `() -> { active: bool, failed_starts: u32, threshold: u32 }` | `active: false` on every normal launch |
+| `safe_mode_turn_back_on` | `() -> Result<(), String>` | spawns the hook thread now; `Err` carries a sentence for the user |
+| `build_diagnostics_bundle` | `async (description: String) -> Result<String, String>` | returns the zip path; reveals it in Explorer |
+| `open_issues_page` | `() -> bool` | compile-time constant URL |
+
+**Frontend event, listened for in `main.ts`:** `open-report-dialog` — payload
+ignored. Emitting it opens the report dialog on the dashboard.
+
+**Frontend export:** `openReportDialog()` from `src/components/report-dialog.ts`
+(a leaf module — it imports only `invoke`). `settings-panel.ts`'s About link and
+`main.ts`'s safe-mode banner both call it; nothing else may grow a second copy.
+
+### TRAY.RS LINES TO ADD
+
+`tray.rs` belongs to another lane, so these are written out rather than applied.
+Three edits, all additive. The item goes UNDER "Check for updates" and still
+above the separator that keeps everything well away from Exit — same reasoning
+PROBLEM 249 used for its own placement.
+
+**1. In `build_tray`, after the `update` item is built:**
+
+```rust
+    // PROBLEM 253 — a way to report a problem that does not require finding
+    // the Settings panel first. Under "Check for updates" and above the
+    // separator, well away from Exit.
+    let report = MenuItem::with_id(
+        app, "report-problem", "Report a problem", true, None::<&str>,
+    )?;
+```
+
+**2. Add it to the menu (this line already exists — add `&report`):**
+
+```rust
+    let menu = Menu::with_items(app, &[&show, &engine, &update, &report, &sep1, &exit])?;
+```
+
+**3. In `handle_menu_event`, a new arm:**
+
+```rust
+        // PROBLEM 253 — front the dashboard, then ask it for the report dialog.
+        //
+        // An EVENT and not a direct call to `diagnostics::build_bundle`, and
+        // the difference matters: a bundle built straight from here would carry
+        // an empty `description.txt`, and a report that does not say what went
+        // wrong is barely a report. The dialog is where the user types that.
+        //
+        // `restore_window` first, and it is not optional — it is also what
+        // CREATES the windows during an autostart launch's ten-second settle
+        // (PROBLEM 215), so emitting without it can address a dashboard that
+        // does not exist yet. Global `emit`, never `emit_to`: `emit_to` has
+        // never worked in this project (CLAUDE.md, window rules).
+        "report-problem" => {
+            log::info!("tray: 'Report a problem' chosen — showing the dashboard and \
+                        asking it to open the report dialog (PROBLEM 253)");
+            restore_window(app);
+            if let Err(e) = app.emit("open-report-dialog", ()) {
+                log::warn!(
+                    "tray: could not emit open-report-dialog ({e}) — the same dialog is \
+                     still reachable from Settings ▸ About"
+                );
+            }
+        }
+```
+
+`Emitter` is already imported at the top of `tray.rs`, so no new `use` is
+needed. Nothing else in the file changes.
+
+**One thing that is deliberately NOT in these lines.** `tray.rs`'s `"exit"` arm
+does not call `safe_mode::note_clean_exit()`, and it must not be given one: the
+tray's `app.exit(0)` produces `RunEvent::ExitRequested` and `RunEvent::Exit`, and
+`lib.rs`'s run-event closure already handles both. Adding a second call here
+would be harmless but redundant, and redundant clean-exit calls are how the two
+copies eventually disagree about which one owns the rule.
+
+### WIRED 2026-09-05 (reconciliation pass)
+
+**The TRAY.RS LINES TO ADD above are now applied**, verbatim, by the lane that
+owns `tray.rs`:
+
+- `src-tauri/src/tray.rs:103` — the `report-problem` `MenuItem`, built
+  immediately after the `update` item.
+- `src-tauri/src/tray.rs:108` — `Menu::with_items(app, &[&show, &engine,
+  &update, &report, &sep1, &exit])` — under "Check for updates", above the
+  separator, well away from Exit.
+- `src-tauri/src/tray.rs:320` — the `"report-problem"` arm: `restore_window`
+  first (it is also what CREATES the windows during an autostart launch's
+  ten-second settle, PROBLEM 215), then a global `app.emit("open-report-dialog",
+  ())`, with the warn path naming Settings ▸ About as the other door.
+
+`Emitter` was already imported (`tray.rs:10`), so no new `use` was needed, and
+nothing else in the file changed. The deliberate omission this entry names —
+`"exit"` must NOT gain a `safe_mode::note_clean_exit()` call, because `lib.rs`'s
+run-event closure already handles both `ExitRequested` and `Exit` — was checked
+and honoured.
+
+The four commands this entry contracts for were already registered and each
+appears exactly once: `commands::get_safe_mode` (`lib.rs:1316`),
+`safe_mode_turn_back_on` (`:1317`), `build_diagnostics_bundle` (`:1318`),
+`open_issues_page` (`:1319`). `mod safe_mode;` (`:56`) and `mod diagnostics;`
+(`:32`) likewise, once each. `main.ts:291` holds the `open-report-dialog`
+listener the tray arm addresses.
+
+**One number corrected.** `diagnostics.rs`'s comment about reading the log from
+`startup::data_dir()` said *"since PROBLEM 251 made `startup::data_dir()`
+portable-aware"*. It was the last surviving "251" anywhere in the tree — and it
+turned out **not** to be a mislabel of 253 at all: the portable data root is
+PROBLEM 254. Fixed to 254. `controls.ts`'s two comments that hedged about a
+"251 vs 253" mix-up were rewritten to record that the mix-up is resolved rather
+than to keep warning about a thing that no longer exists.
+
+**Still not exercised**, unchanged: the tray item has never been clicked, the
+app has not been run, safe mode has never been entered, and no bundle has been
+built by the running app. Wiring a menu item is not evidence that the dialog
+opens.
+
+---
+
+
+### REVIEW FIXES 2026-09-05 (C1) — three double-clicks on the icon put a healthy app into safe mode
+
+**Symptom.** Nothing anybody saw yet — this was found by review, not by a user.
+Double-click the tray icon or the desktop shortcut three times in a row while
+Spaceadom is already running, and the FOURTH launch comes up with no keyboard
+hook, no overlay and a banner saying the app crashed three times. It did not
+crash once.
+
+**Root cause.** `safe_mode::begin()` was called from `run()` and did two things:
+it READ the counter and decided, and it WROTE `failed_starts + 1`. `run()` is
+earlier than the single-instance plugin. Measured in the dependency sources
+rather than assumed:
+
+* `tauri-plugin-single-instance 2.4.2`, `src/platform_impl/windows.rs` — the
+  plugin's `setup` creates a named mutex, and when `GetLastError()` is
+  `ERROR_ALREADY_EXISTS` it sends the args to the running window and then calls
+  `app.cleanup_before_exit(); std::process::exit(0);`.
+* `tauri 2.11.5`, `src/app.rs` — `app.manager.initialize_plugins(handle)?` is at
+  line 2440 and `(setup)(app)` at line 2531. **Plugin initialisation runs before
+  the app's own `setup()` closure.**
+
+So a duplicate launch incremented the counter and then left through
+`process::exit(0)`. That path produces no `RunEvent::Exit` and no
+`WM_ENDSESSION`, so neither of safe mode's two clean-exit callers
+(`lib.rs`'s RunEvent closure, `session_end::teardown`) ever ran, and the `+1`
+stayed on disk. Three duplicates = three recorded startup crashes.
+
+**Exact files.** `src-tauri/src/safe_mode.rs`, `src-tauri/src/lib.rs`.
+
+**The code.** `begin()` lost its write:
+
+```rust
+// BEFORE — safe_mode.rs
+pub fn begin() -> bool {
+    let _ = STARTED_AT.set(std::time::Instant::now());
+    let stored = read_counter();
+    let safe = decide(stored);
+    FAILED_STARTS.store(stored, Ordering::SeqCst);
+    COUNTER_BEFORE.store(stored, Ordering::SeqCst);
+    ACTIVE.store(safe, Ordering::SeqCst);
+    write_counter(counter_at_launch(stored));   // <-- every duplicate did this
+    ...
+}
+```
+
+```rust
+// AFTER — safe_mode.rs. `begin()` is read-only; the write moved here.
+pub fn note_surviving_instance() {
+    if INCREMENTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let before = COUNTER_BEFORE.load(Ordering::SeqCst);
+    let next = counter_at_launch(before);
+    if write_counter(next) { /* one log line naming both values */ }
+}
+```
+
+and `lib.rs`'s `setup()` gained one line, which must stay FIRST in the closure:
+
+```rust
+.setup(move |app| {
+    let app_handle = app.handle().clone();
+    safe_mode::note_surviving_instance();   // REVIEW FIXES 2026-09-05 (C1)
+    safe_mode::spawn_healthy_timer();
+    ...
+```
+
+A new `INCREMENTED: AtomicBool` also guards `note_clean_exit()`: a process that
+never incremented must not "undo" an increment, because the file it would write
+to belongs to the instance that is still running and `COUNTER_BEFORE` is a
+snapshot from before that instance raised it.
+
+**What was traded away, stated rather than hidden.** A crash between plugin
+initialisation and the first line of `setup()` is no longer counted. Nothing in
+that gap is this app's code — it is plugin construction — and every failure safe
+mode exists for (the hook, the overlay window, the engine) happens inside
+`setup()`, after the increment.
+
+**How it was verified.** `cargo test --lib` — two new tests in
+`safe_mode::tests`: `a_duplicate_launch_that_never_reaches_setup_leaves_the_counter_alone`
+(the absence of a `run_launch` call IS the fix) and
+`the_old_behaviour_is_what_armed_safe_mode_on_three_double_clicks`, which pins
+the mechanism the fix disconnects so a refactor that moves the increment back
+fails a test instead of a user. **NOT verified by clicking the icon three times
+on the real machine** — the app was never built as a bundle, installed or run in
+this pass.
+
+**Generalise this.** *An "at process start" side effect is really "at start of
+every process that gets that far", and a single-instance plugin's whole job is
+to make some processes not get that far.* Any counter, lock file, log rotation
+or telemetry ping placed before the single-instance decision is measuring
+launches, not sessions.
+
+### REVIEW FIXES 2026-09-05 (MEDIUM) — an unwritable counter file could pin safe mode on for ever
+
+**Symptom.** Hypothetical and permanent: a machine where
+`%APPDATA%\Spaceadom\boot-attempts.json` holds `3` or more and cannot be
+written — a permissions accident, a sync client holding it, a read-only
+profile — comes up in safe mode on every launch for the rest of the install's
+life. "Turn back on" cannot help, because that button's whole action is
+`write_counter(0)`.
+
+**Root cause.** The decision read the counter and never asked whether anything
+could ever change it. The healthy marker's `write_counter(0)` is the only thing
+that lowers this file.
+
+**The code.** A new pure seam, and a probe on the rare branch only:
+
+```rust
+pub fn decide_trusted(stored: u32, trusted: bool) -> bool {
+    trusted && decide(stored)
+}
+
+// in begin():
+let mut safe = decide(stored);
+if safe {
+    let writable = write_counter(stored);   // idempotent: only written_unix changes
+    safe = decide_trusted(stored, writable);
+    if !safe { /* WARN: naming the file and what to do about it */ }
+}
+```
+
+`read_counter` and `write_counter` also moved their failure logging from DEBUG
+(or nothing at all) to WARN, and `read_counter` now separates "the file does not
+exist yet", which is an ordinary first launch, from "the file could not be
+read", which is a condition under which the whole mechanism is inert.
+
+**How it was verified.** `an_unwritable_counter_can_never_pin_safe_mode_on` in
+`safe_mode::tests`. The disk half is not unit-tested — it is one `fs::write`
+whose return value is now read.
+
+**Generalise this.** *A recovery mode needs an exit that is known to work before
+it is entered.* Safe mode's asymmetry is the rule: refuse to enter when you
+cannot prove you could leave.
+
+### REVIEW FIXES 2026-09-05 (H3) — the report promised "nothing personal" and shipped every window title the user had ever focused
+
+**Symptom.** "Report a problem" builds a zip and opens Explorer with it
+selected, for the user to attach to a PUBLIC GitHub issue. The module header
+said the config was scrubbed, and it was. The LOGS were not scrubbed at all.
+
+**Root cause.** `build_bundle` put `tail_lines(&raw_log, ...)` straight into the
+archive. This app logs, in the ordinary course of working:
+
+| What | Where |
+| --- | --- |
+| every foreground window's TITLE, on every Smart Search press | `engine/actions/focus_engine.rs:64` — `smart_search: proc='...' title='...' -> ...` |
+| the exe path, the data dir, the rival-install path | `system.txt` and the log |
+| every URL fetched, query strings included | `updater.rs`, `release_notes.rs` |
+
+A window title is a document name, an email subject line, a browser tab or a
+chat contact. `folder_listing`'s header was a full `C:\Users\<name>\...` path.
+
+**Exact file.** `src-tauri/src/diagnostics.rs`.
+
+**The code.** One function, applied at every point a log line or a path enters
+the bundle — `tail_lines`, `log_lines_matching`, `folder_listing`,
+`read_or_note`, and `system_txt`'s exe and rival paths:
+
+```rust
+pub fn scrub_for_report(line: &str) -> String {
+    scrub_for_report_with(line, &current_user_names())
+}
+
+pub fn scrub_for_report_with(line: &str, user_names: &[String]) -> String {
+    let masked   = mask_window_titles(line);         // title='...' -> <window title omitted>
+    let scrubbed = crate::telemetry::scrub(&masked);  // paths, UNC, URLs, addresses
+    let no_urls  = redact_all_urls(&scrubbed);        // NO localhost carve-out here
+    let no_tails = redact_path_remainders(&no_urls);  // "<path> Documents\tax.pdf" -> "<path>"
+    redact_user_names(&no_tails, user_names)          // the real profile name, anywhere
+}
+```
+
+It WRAPS `telemetry::scrub` rather than replacing it, and is stricter in exactly
+four ways, each of which only applies to a file a user attaches to a public
+issue:
+
+1. **Window titles are masked first**, whole, so a title containing a path or an
+   address is gone as a unit rather than picked at.
+2. **No localhost carve-out.** `telemetry::scrub` deliberately KEEPS
+   `tauri.localhost` / `127.0.0.1` URLs because they are the app's own bundle
+   and are what makes a minified JS stack readable in a crash report. In a
+   diagnostics bundle a loopback URL is a dev session's token, not a stack
+   frame.
+3. **The remainder after a space in a path is redacted.** `telemetry::scrub`
+   stops a path at the first whitespace, so `C:\Users\me\My Documents\tax.pdf`
+   came out as `<path> Documents\tax.pdf`.
+4. **The real profile name is removed wherever it appears**, path or not. Taken
+   from `%USERNAME%` and the last component of `%USERPROFILE%` (they differ on a
+   renamed account, and the folder name is the one in paths). A name under two
+   characters is ignored — a report nobody can read protects nothing.
+
+`config.json`'s `icon_override` is also replaced by `<icon data omitted, N
+bytes>`: it is a base64 PNG, and a keyboard of custom icons is megabytes of
+base64 in an archive whose whole purpose is to be small enough to attach.
+
+**How it was verified.** Six new tests in `diagnostics::tests`, driven by a
+`SAMPLE_LOG` shaped like a real one — an email address inside a window title, a
+URL with a query string, a `C:\Users\beamu\...` path, a path with a space, a
+loopback dev URL, and the bare user name in a sentence. They assert both halves:
+nothing personal survives, AND the decision the line records still does
+(`smart_search:` and `prompt site: UIA` are still there). Separate tests assert
+that `tail_lines` and `log_lines_matching` actually CALL it — "the scrubber
+works" and "the scrubber is called" are different claims, and it was the second
+one that was false. **No real bundle was built and opened**; the app was never
+run in this pass.
+
+**Generalise this.** *A privacy claim attaches to a document, not to a function.*
+`telemetry::scrub` was correct for the document it was written for. The bug was
+reusing "we have a scrubber" as if it were "this file is scrubbed".
+
+### REVIEW FIXES 2026-09-05 (MEDIUM) — the one-shot overlay re-test could be spent by a safe-mode launch
+
+`commands::retest_software_overlay_once` draws a ring into the overlay window
+and judges the machine's compositing from what comes back. Safe mode creates NO
+overlay window. Worse, the marker file that makes it a ONE shot is written
+BEFORE the test runs (deliberately, so a crash mid-check cannot make the ring
+reappear at every launch) — so a safe-mode launch would consume the only re-test
+the machine ever gets and write `overlay_compositing` from a measurement taken
+with nothing to measure. Guarded with `if crate::safe_mode::active() { ... return; }`
+placed **before** the marker write, with a WARN line naming the safe-mode
+marker. Same class as the display watcher's existing safe-mode skip in `lib.rs`:
+a recovery that assumes the overlay exists must not run on the launch that
+deliberately has none.
+
+### REVIEW FIXES 2026-09-05 (MEDIUM) — `explorer.exe`, and the reveal path is quoted
+
+`diagnostics::reveal_in_explorer` ran `Command::new("explorer")` with
+`/select,<path>` unquoted. Two changes, on one line. `explorer.exe` rather than
+the bare name removes the extension-less variant from the PATH search, which on
+Windows begins with the CURRENT DIRECTORY — whatever the shortcut's "Start in"
+or the installer's temp folder happened to be. And the path is now quoted inside
+the single argument: a report path is built from the data dir, which a portable
+install (PROBLEM 254) takes from the exe's own location, and
+`/select,C:\a,b\x.zip` would silently truncate at the comma and open the wrong
+folder.
+
+## PROBLEM 255 — Settings gained an About section, the theme pill learned to follow Windows' own light/dark setting, and every switch/pill/slider in the panel became genuinely keyboard-operable
+
+**Status:** built. `cargo test --lib` 459 passed / 0 failed, `cargo clippy --lib
+--all-targets` 0 warnings, `tsc --noEmit` clean, `npm run build` clean.
+Verified LIVE in the Vite dev harness (`preview.html?gear`) via the browser
+pane — Tab order, arrow-key pill navigation, focus-ring computed styles, the
+About section's real markup and its degrade-with-no-backend paths, and the
+search filter finding the new rows. **The app itself was never built, installed
+or run** — no version bump, nothing tagged or pushed. Three owner-decided
+features landed together because they touch the same file (`settings-panel.ts`
+render()) and were briefed as one pass.
+
+### Symptom / what was missing
+
+1. Settings had no About section at all: no version, no way to tell an
+   NSIS install from an MSI one or a Store package, no links out (GitHub,
+   issues, privacy, licence), no third-party notices, no way to ask for an
+   update check from inside the app.
+2. The theme pill (Earthy / Warcry / Starry night) had no "just match Windows"
+   option — a user whose OS follows sunrise/sunset had to flip the app's theme
+   by hand every time.
+3. Large parts of the panel were mouse-only in practice: the segmented pills
+   (Theme, Ring layout) had no arrow-key behaviour despite `role="radio"`; the
+   toggle switches had a visually-hidden native `<input type="checkbox">`
+   with **no accessible name of its own** (the visible label text lives on a
+   separate `<button data-desc>` beside it — PROBLEM 144's press-to-expand
+   design) and no visible focus ring; the range sliders had no `aria-label`
+   either, for the same reason; and `#set-search-empty` was a plain, silent
+   `<div>` — a screen-reader user typing a query that matched nothing got no
+   feedback at all.
+
+### Fix 1 — About section
+
+New leaf functions in `src/components/controls.ts` (same "leaf module" rule
+every other row-builder here follows — PROBLEM 148 — so `preview.ts` renders
+the identical markup and the two can never drift):
+
+- `aboutRowHtml(info, thirdPartyCount, thirdPartyOpen, updateStatusText)` —
+  pure markup for the whole row.
+- `fetchAboutInfo()` — tries the new Rust command first, falls back to
+  `@tauri-apps/api/app`'s `getVersion()`, returns `null` only if neither
+  answers (an older build, or the dev harness with no Tauri runtime).
+- `requestUpdateCheck()` — calls `check_for_updates_now` (built by a parallel
+  lane, already registered in `lib.rs` by the time this landed) inside a
+  `try`/`catch`; the fallback string is literally `"Coming in the next
+  build."`, per the brief, for a build where the command is missing.
+- `openAboutLink(kind)` — GitHub / Privacy policy / Licence open via
+  `@tauri-apps/plugin-opener`'s `openUrl` (capability `opener:default` is
+  already granted, unrestricted, in `capabilities/default.json`); **"Report a
+  problem" is the one exception** — it calls `openReportDialog()` from
+  `src/components/report-dialog.ts` (PROBLEM 253, a parallel lane's leaf
+  module built explicitly so this section and `main.ts`'s safe-mode banner
+  could share one dialog) instead of opening a bare Issues link, because that
+  dialog builds a local diagnostic zip and lets the user decide whether to
+  attach it.
+- `renderThirdPartyGroups(entries)` — groups `src/generated/third-party.json`
+  (571 entries) by licence, largest group first, names alphabetical inside
+  each group, count in both the group heading and the row's own toggle label
+  ("Third-party software · 571"). Rendered into the DOM only on first expand
+  (`settings-panel.ts`'s `wireAboutSection`, `tpList.dataset.built` guard) —
+  never at panel-open time.
+
+`src-tauri/src/commands.rs` (the only file this pass touched there, by
+instruction):
+
+```rust
+#[tauri::command]
+pub fn get_about_info(app: tauri::AppHandle) -> (String, String, String) {
+    let version = app.package_info().version.to_string();
+    let install_kind = if crate::packaged::is_packaged() {
+        "Microsoft Store".to_string()
+    } else {
+        match crate::updater::detect_install_kind() {
+            crate::updater::InstallKind::Nsis => "Installer (setup.exe)".to_string(),
+            crate::updater::InstallKind::Msi => "Windows Installer (.msi)".to_string(),
+            crate::updater::InstallKind::Unknown => "Portable / development build".to_string(),
+        }
+    };
+    let data_dir = crate::startup::data_dir().display().to_string();
+    (version, install_kind, data_dir)
+}
+```
+
+It reuses `updater::detect_install_kind()` — the SAME function the updater
+itself uses to decide which manifest to trust (CLAUDE.md's NSIS/MSI table) —
+with `packaged::is_packaged()` checked FIRST, because the updater's own
+detector has no idea Store packages exist and would read one as "Unknown" (no
+`uninstall.exe`, no MSI registry entry), which would show a Microsoft Store
+install as "a dev build" — wrong in the single most confusing direction
+available. **This command is NOT yet registered in `lib.rs`** (out of this
+pass's file scope) — see "LIB.RS LINES TO ADD" at the end.
+
+Every About row lives in a `.set-item.set-filterable` wrapper (same class
+every other searchable row in this panel uses), so the owner's "search must
+find About rows" requirement is free — `filterSettings` reads `textContent`,
+and the row's own visible text ("Check for updates", "Third-party software",
+etc.) is the haystack.
+
+### Fix 2 — "Auto" theme (follows `prefers-color-scheme`)
+
+`THEME_OPTS` in `settings-panel.ts` gained `["auto", "Auto"]` as its FIRST
+entry. The pill itself stores and shows the literal string `"auto"` — nothing
+resolves it away before it reaches `appConfig.theme` or `config.json`. The
+resolution lives in ONE place, `src/main.ts`:
+
+```ts
+export function resolveTheme(rawTheme: string | undefined): "earthy" | "warcry" | "starry" {
+  if (rawTheme === "warcry" || rawTheme === "starry") return rawTheme;
+  if (rawTheme === "earthy") return "earthy";
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "starry" : "earthy";
+}
+```
+
+`applyLook()` calls `resolveTheme()` before touching `document.body.dataset
+.theme`, the cross-fade comparison, `applyTheme()` or `syncStarrySky()` — every
+consumer of "which of the three real palettes" gets the resolved value, never
+the literal `"auto"`. A module-level listener, registered once at load (not
+inside `bootstrap()`, so it has no dependency on boot order):
+
+```ts
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+  if ((appConfig?.theme || "earthy") !== "auto") return;
+  applyLook();
+});
+```
+
+`settings-panel.ts`'s theme-pill click handler was changed to compute
+`resolveTheme(next)` and use THAT (not `next`) for the theme chord
+(`sfx.theme(...)`) and for `appConfig.dark_mode`, so picking "Auto" plays the
+correct sound and sets `dark_mode` to whatever the OS says RIGHT NOW rather
+than treating `"auto" !== "earthy"` as "dark" unconditionally (which is what
+the naive one-line change would have done).
+
+**Schema (`src-tauri/src/config/schema.rs`):** `AppConfig::default()`'s
+`theme` field changed from `"earthy"` to `"auto"` — this is the path a
+genuinely NEW install takes (`generate_defaults()` in `config/mod.rs`, used
+only when there is no config on disk at all). The PER-FIELD `#[serde(default)]`
+on the `theme` field itself is UNCHANGED (still the empty string) — that is
+the path an OLD config missing the key takes, and `config/mod.rs`'s existing
+migration (`cfg.theme = if cfg.dark_mode {"starry"} else {"earthy"}` when
+`cfg.theme.is_empty()`) must keep working exactly as it did, or an upgrading
+dark-mode user gets silently flipped to daylight. The `first_install_tests`
+module's `first_install_is_quiet_and_earthy` test was updated to assert
+`d.theme == "auto"` with a comment explaining the supersession of the older
+PROBLEM 157 decision it used to encode.
+
+**Pill CSS generalised from 3-way to N-way** (`src/styles.css`,
+`.theme-seg`/`.theme-seg-ind`): `grid-template-columns` and the indicator's
+`width` now read `var(--seg-n, 3)` instead of a literal `3`, and
+`controls.ts`'s `segRowHtml` sets `--seg-n:${opts.length}` inline. The
+indicator's translateX formula (`--seg-i * 100%`) needed NO change — it moves
+the indicator by `i` copies of its OWN width, which lands on segment `i`
+regardless of how many segments exist. The Ring layout pill (still 3-way) is
+unaffected; only the Theme pill grew a 4th segment. Added
+`.theme-seg-ind[data-seg="auto"]` — a half-earthy/half-starry diagonal split
+gradient, since "auto" is never itself the result, only ever the instruction
+to match Windows.
+
+### Fix 3 — Accessibility pass
+
+- **Toggle switches** (`controls.ts`'s `toggleSwitchHtml`): gained
+  `role="switch"`, an explicit `aria-checked`, and two new optional
+  parameters, `ariaLabel` and `describedBy`. Every call site in
+  `settings-panel.ts` (`toggleRow`, `engineRow`, `specialsRow`, `startupRow`)
+  and in `preview.ts`'s own `switchRow` now passes the row's own label text as
+  `ariaLabel` — without it the checkbox had **no accessible name of its own**,
+  because the visible text lives on a separate `<button data-desc>` beside it
+  by design (PROBLEM 144). Native Tab-focus and Space-toggle needed no new
+  code — a real `<input type="checkbox">` has always had both; they were
+  simply unlabelled.
+- **Segmented pills** (`controls.ts`'s new `wireSegRowsKeyboard(root)`):
+  Left/Up moves to the previous segment, Right/Down to the next (wrapping),
+  Home/End jump to the ends; the newly-focused segment is `.click()`ed, which
+  runs through the SAME handlers `settings-panel.ts`/`preview.ts` already
+  wire for a mouse click — no second code path that can drift from the first.
+  Deliberately NOT a roving tabindex (every segment stays an ordinary Tab
+  stop) — `render()` rebuilds this panel's subtree after most changes, and a
+  roving tabindex kept correct only by re-reading `.is-on` at render time is
+  one more thing a repaint can leave stale.
+  **Verified live:** focused "Compact" on the Ring layout pill, pressed
+  ArrowRight via the browser pane, and confirmed BOTH the focus move (to
+  "Wide") and the real state change (`--seg-i` moved, the indicator's
+  `data-seg` became `"wide"`, `aria-checked="true"` on Wide) — end to end,
+  not just the keyboard part in isolation.
+- **Sliders**: `aria-label` added to every `<input type="range">` in
+  `settings-panel.ts` (`sliderRow`, `typingSpeedRow`) and mirrored in
+  `preview.ts`'s own `sliderRow`. `aria-describedby` added wherever the row
+  has a `DESC` entry.
+- **`aria-describedby` wiring**: `descBox(id)` now stamps `id="desc-${id}"` on
+  the description box, and a new `descId(id)` helper returns that id only
+  when `DESC[id]` actually exists (never points a control at a box that will
+  not render). Every switch/pill/slider row passes the combined id(s) through
+  the new `describedBy` parameters, so a screen reader reads the row's
+  explanatory copy as the control's description WHETHER OR NOT it is visually
+  expanded — the sighted "press the label to reveal it" interaction and the
+  screen-reader description are two different audiences that no longer have
+  to wait on each other.
+- **Live region**: `#set-search-empty` gained `role="status"
+  aria-live="polite"` in both `settings-panel.ts` and `preview.ts`'s own copy
+  of that markup.
+- **Focus rings** (`src/styles.css`, appended section): the checkbox itself is
+  a visually 0×0 box under `.toggle-track` (design-system.css), so
+  `input:focus-visible` alone draws around nothing visible —
+  `#settings-panel .toggle-switch input:focus-visible + .toggle-track` puts
+  the ring on the sibling that is actually on screen. `#settings-panel
+  .btn:focus-visible` was added too — `.btn` (design-system.css) had
+  previously set no focus style at all, suppressed or otherwise, so this is
+  additive. **Verified via `getComputedStyle` in the browser pane** (not by
+  eye — a 2px ring is hard to confirm from a compressed screenshot at this
+  viewport scale): a real Tab-focused switch reported
+  `matches(':focus-visible') === true` and a computed `outline` of
+  `solid rgb(224, 172, 128) ~2px` (the light theme's `--st-accent-brd`).
+- The sticky Engine row was already first in DOM/tab order before this pass;
+  confirmed unchanged (it is `.set-item.set-engine`, not `.set-filterable`,
+  by earlier design — 1.0.96 review fix — and this pass did not touch that).
+
+### A tool limitation hit while verifying, worth recording
+
+The Browser pane's `computer` `key` action does not toggle a native
+`<input type="checkbox">` when given `text: "space"` — confirmed against a
+BARE, freshly-injected checkbox with zero app code attached, which also
+failed to toggle. This is the automation tool's behaviour, not the app's: the
+element is genuinely focusable (`document.activeElement === it` after Tab),
+carries `role="switch"`, `aria-checked`, and `aria-label` correctly, and
+nothing in this codebase attaches a `keydown` handler to the switch that could
+intercept or suppress the browser's native Space-toggle default. **Generalise
+this:** when a keyboard-simulation tool reports a negative on a native,
+unmodified HTML control, test the SAME interaction against a control with no
+app code attached before concluding the app is at fault — the same "a check
+that cannot produce a negative result is not a check" rule CLAUDE.md already
+records, applied to a testing TOOL instead of a testing TECHNIQUE.
+
+### Cross-file dependencies this pass found but could NOT fix (out of scope)
+
+The task explicitly scoped this pass to `settings-panel.ts`, `controls.ts`,
+`main.ts` (theme region only), `styles.css`, `preview.ts`, `types.ts`,
+`config/schema.rs` (theme value + tests), and `commands.rs` (ONLY
+`get_about_info`). Three real issues were found that need a DIFFERENT file:
+
+1. **`config/mod.rs` line ~56, `cfg.dark_mode = cfg.theme != "earthy";`, runs
+   unconditionally on every config LOAD** (not just on migration). For a
+   config whose `theme` is `"auto"` (every new install now, per this pass),
+   this sets `dark_mode = true` on the SECOND launch onward — regardless of
+   what the OS light/dark setting actually is — because `"auto" != "earthy"`
+   is `true`. It does not affect the dashboard (which resolves `"auto"`
+   itself via `resolveTheme()` and never reads `dark_mode` for that
+   decision), but it DOES affect the overlay, which trusts `dark_mode` as
+   sent. This needs a fix in `config/mod.rs`, not touched here.
+2. **The overlay (`overlay.ts`/`toast.ts`) has no idea `"auto"` exists.**
+   `applyThemeName(theme)` in `toast.ts` treats anything that is not
+   `"warcry"`/`"starry"` as `"earthy"` — so an overlay fed the literal string
+   `"auto"` (via `get_config` or the `theme-name-changed` event) currently
+   renders it as Earthy regardless of the OS setting or of item 1 above. Per
+   the brief's own framing ("Rust may need to store 'auto' and the frontend
+   resolves... make Auto resolve on both windows consistently"), the fix is a
+   SECOND `matchMedia` listener and the same `resolveTheme`-shaped logic,
+   duplicated (or factored into a tiny shared file) for the overlay window —
+   which is a separate webview with its own `matchMedia`, so it needs no
+   cross-window signal, only its own copy of the resolution rule. Neither
+   `overlay.ts` nor `toast.ts` is in this pass's file list.
+3. **`get_about_info` is written but NOT wired into `lib.rs`'s
+   `invoke_handler![]`** — see "LIB.RS LINES TO ADD" below. Until that line
+   is added, `fetchAboutInfo()`'s `try` branch always fails and every build
+   shows the `getVersion()`-only fallback (version, no install-kind line) —
+   itself a correct, tested degrade path, just not the richer one.
+4. **The GitHub/Privacy-policy/Licence links use the frontend's
+   `openUrl` (`@tauri-apps/plugin-opener`), not a Rust command**, which
+   deviates from the established convention this codebase already has for
+   exactly this (`commands.rs`'s `open_issues_page`, whose own doc comment
+   states the rule: *"A Rust command rather than the `opener` plugin from the
+   webview... every shell-out is a Rust command, and the URL is a
+   compile-time constant so the webview cannot choose where this goes"* —
+   PROBLEM 164). This pass's scope explicitly limited `commands.rs` changes
+   to `get_about_info` only, so three more commands
+   (`open_github_page`/`open_privacy_policy`/`open_licence_page`) were not
+   added. `opener:default` is already granted, unrestricted, in
+   `capabilities/default.json`, and the three URLs are hardcoded constants
+   with no user input reaching them, so this is a convention deviation, not a
+   security gap — but it is a deviation, and the owner may want the three
+   extra commands added later for consistency.
+
+### LIB.RS LINES TO ADD
+
+One line, in the same `invoke_handler![]` list as `commands::get_packaged_startup`:
+
+```rust
+commands::get_about_info,
+```
+
+### What was NOT exercised
+
+- **The app was never built, installed or run.** Every claim above about the
+  REAL app (not the dev harness) is from reading code, from `cargo
+  test`/`clippy`, and from `tsc`/`vite build`.
+- `get_about_info` has never been called through real IPC (not registered in
+  `lib.rs` yet, per above) — its logic (`packaged::is_packaged()` branch,
+  `updater::detect_install_kind()` branch) is exercised only by
+  inspection and by the existing unit tests on those two functions
+  themselves, not by a new test of `get_about_info` as a whole (a
+  `#[tauri::command]` taking `AppHandle` is awkward to unit-test directly in
+  this codebase's existing style — none of the other `AppHandle`-taking
+  commands in `commands.rs` have a dedicated unit test either).
+- `check_for_updates_now`'s real network round trip, and the `update-status`
+  event's live delivery to the About row, were not exercised — verified only
+  that the button's `try`/`catch` degrades correctly when the command
+  resolves with no useful `message` (observed in the dev harness: "Checked —
+  nothing to report.") and that a missing command would show "Coming in the
+  next build." (the `catch` branch, not separately triggered in this
+  environment since a real `window.__TAURI_INTERNALS__` happened to be
+  present in the browser pane's dev session).
+- Native `prefers-color-scheme` OS-level flips (actually changing Windows'
+  light/dark setting while the app is open) were not exercised — verified
+  only that the `matchMedia` listener is registered and that `resolveTheme()`
+  reads the query correctly at call time; simulating an OS-level theme change
+  from within this environment was not attempted.
+- The third-party list's per-package links (`openUrl` on each of the 571
+  entries) were spot-checked for markup correctness only, not clicked
+  individually.
+
+### WIRED 2026-09-05 (reconciliation pass)
+
+**All four "found but could NOT fix" items above are now fixed**, and the
+LIB.RS LINE TO ADD is applied.
+
+#### Item 3 first, because everything else here was already correct without it
+
+`commands::get_about_info` is registered at `src-tauri/src/lib.rs:1325`, once.
+Until that line existed, `fetchAboutInfo()`'s `try` branch always threw and
+every build showed the `getVersion()`-only fallback — a correct, tested degrade
+path, just never the richer one.
+
+#### Item 1 — `config/mod.rs`'s unconditional `dark_mode` recompute
+
+It read `cfg.dark_mode = cfg.theme != "earthy"`, which is `true` for `"auto"`.
+Since `"auto"` is the default for every NEW install as of this entry, every new
+install went **dark on its second launch, in daylight, whatever Windows said**
+— and because the dashboard resolves `"auto"` itself and never reads `dark_mode`
+for that decision, the symptom would have surfaced only in the OVERLAY: a dark
+HUD under a light dashboard. `config/mod.rs:175` now reads:
+
+```rust
+cfg.dark_mode = dark_mode_for(&cfg.theme, os_prefers_dark());
+```
+
+`cfg.theme` itself is deliberately left as the literal `"auto"`. The user's
+choice is "match Windows"; resolving it away here would quietly convert that
+into a fixed palette the next time the config was written back.
+
+**How Rust learns the OS theme, and why the registry rather than the `windows`
+crate's `UISettings`.** `config/mod.rs:115` reads
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize` →
+`AppsUseLightTheme` (REG_DWORD, `1` = light, `0` = dark) through `winreg`, which
+this codebase already uses for HKCU reads (`commands.rs::read_hook_timeout`).
+Three reasons:
+
+1. A plain read of a documented value, with no COM/WinRT apartment question at
+   whatever point in boot the config happens to load.
+2. `UISettings::GetColorValue` answers a question about COLOURS. This needs the
+   light/dark PREFERENCE, and deriving the preference from a returned colour is
+   the kind of inference that is right until somebody's high-contrast theme
+   makes it wrong.
+3. No new `windows` crate feature. `Win32_System_Registry` is already on and
+   `winreg` is already a dependency; PROBLEM 250 measured 20 s of `cargo check`
+   for adding one `ApplicationModel`-family feature, for one call.
+
+**`AppsUseLightTheme`, NOT `SystemUsesLightTheme`.** Windows keeps two
+independent switches — "Default app mode" and "Default Windows mode" — and only
+the first governs how an application's own surfaces should look; the second is
+the taskbar and Start. A light taskbar with dark apps is a common
+configuration, and reading the wrong value would fight the user.
+
+The probe returns `Option<bool>`, never a guessed default, so the ONE fallback
+rule lives in the pure resolver instead of the probe inventing a second one.
+`None` (absent value, unreadable key, non-Windows) resolves to Earthy — the
+same answer the frontend gives when `matchMedia` reports no dark preference.
+Two halves that disagreed about the fallback would put the dashboard and the
+overlay in different palettes on exactly the machines least able to explain why.
+
+**A note for anyone verifying this by hand**, written into the function's own
+doc comment as well as here, because that is where somebody about to be misled
+will be standing: the agent shell runs inside an MSIX container that virtualises
+HKCU (CLAUDE.md, PROBLEM 143), so a value read or written from THERE may be the
+container's private copy. That affects the SHELL, not the app — the installed
+`spaceadom.exe` has no package identity and no redirection view, and reads the
+real hive. Do not "fix" a discrepancy observed only from the agent shell.
+
+Six tests, `config::auto_theme_tests` (459 → 465 lib tests): named themes are
+returned untouched whatever the OS says; `"auto"` follows the OS and never
+becomes Warcry; an unanswerable OS question is daylight; an empty or unknown
+theme resolves like `"auto"`; **`auto_in_daylight_is_not_dark_mode`, which is
+the regression itself pinned**; and one that calls the REAL probe and asserts
+only that it answers without panicking and that its answer feeds the pure rule
+to one of the two palettes `"auto"` may produce. A machine-dependent value
+cannot be asserted — but a broken registry path must not be able to hide as a
+permanent `None` that reads exactly like "the user picked light".
+
+#### Item 2 — the overlay had no idea `"auto"` existed
+
+Fixed by REMOVING the duplicate rule, not by writing a second one.
+
+NEW `src/theme-resolve.ts` — a LEAF module that imports **nothing at all**, so
+both bundles and `preview.ts` can take it. It holds `resolveTheme`,
+`systemPrefersDark`, `onSystemThemeChange` and `THEME_AUTO`.
+
+- `main.ts:63` imports it; `main.ts`'s own `resolveTheme` is now a re-export, so
+  `settings-panel.ts`'s existing import path keeps working unchanged.
+- `main.ts`'s module-scope `prefers-color-scheme` listener now goes through
+  `onSystemThemeChange`.
+- `components/toast.ts:22` imports it, and `applyThemeName` uses it instead of
+  its own "anything that is not warcry/starry is earthy" rule. It remembers the
+  RAW value, never the resolved one: `reapplyResolvedTheme()` cannot re-resolve
+  unless it still knows the user asked for `"auto"` rather than for whatever
+  `"auto"` happened to mean at seed time.
+- `applyThemeName` now also owns the `nocturne` class, set from the same
+  resolved value. For the three fixed palettes this is identical to what
+  `applyTheme(dark_mode)` already does — Rust guarantees
+  `dark_mode == (theme != "earthy")` — so nothing changes for them. For
+  `"auto"` it is the only thing that CAN be right: an OS flip emits no Rust
+  event at all, so `dark_mode` is stale the moment the user changes their
+  Windows setting, and a window wearing the starry palette on a light nocturne
+  base is unreadable.
+- `overlay.ts:15` plus its module-scope
+  `onSystemThemeChange(() => reapplyResolvedTheme())`. Its OWN listener,
+  deliberately, not a cross-window signal: this is a separate webview with its
+  own `matchMedia` answering the same question, and Rust emits nothing when the
+  OS theme flips, so there is no event to forward even if forwarding were
+  wanted.
+- `overlay.ts`'s seed changed from `cfg?.theme ?? "earthy"` to
+  `cfg?.theme || (cfg?.dark_mode ? "starry" : "earthy")`, mirroring
+  `applyLook()`'s first line exactly. `applyThemeName` now runs AFTER the
+  `applyTheme` seed and gets the last word, so a config with an EMPTY theme
+  string would have had daylight quietly undo the dark seed one line above.
+  `||` catches the empty string; `??` does not.
+
+**Verified LIVE in the Vite dev harness (browser pane), on `overlay.html`
+itself:**
+
+```
+light + applyThemeName("auto")   -> data-theme=earthy  nocturne=false
+dark  + applyThemeName("auto")   -> data-theme=starry  nocturne=true
+dark  + reapplyResolvedTheme()   -> data-theme=starry  nocturne=true   (after wiping both)
+dark  + applyThemeName("warcry") -> data-theme=warcry  nocturne=true   (immune; re-apply is a no-op)
+```
+
+and the shared helper, against a stubbed `matchMedia` so a change event could
+actually be delivered:
+
+```
+onSystemThemeChange  -> listeners attached = 1, callback fired on change = 1,
+                        listeners after teardown = 0
+resolveTheme("auto") -> "earthy" when light, "starry" when dark  (read at CALL time)
+resolveTheme("warcry" / "earthy") -> unchanged in both
+```
+
+**A TOOL LIMITATION, measured, and the positive control that established it.**
+The browser pane's `resize_window({colorScheme})` changes what
+`matchMedia(...).matches` REPORTS but does **not dispatch a `change` event**.
+The first run of this looked exactly like "the overlay's listener is not
+wired": the scheme flipped, `mq.matches` flipped, and the theme did not move.
+A BARE control listener — `window.matchMedia(...).addEventListener("change", …)`
+attached from the console with no app code involved — did not fire either,
+which is what proved the tool rather than the app. Same shape as this entry's
+own note about the pane's `key` action not toggling a native checkbox.
+**Generalise, again: when an automation tool reports a negative, test the same
+interaction against a control with no app code attached before concluding the
+app is at fault.** (Dispatching a synthetic `MediaQueryListEvent` is not a way
+around it either: `matchMedia` returns a NEW `MediaQueryList` object per call,
+so a manual `dispatchEvent` reaches only listeners on that one object and never
+the app's.) What remains unverified is precisely one link — that a REAL Windows
+light/dark flip emits the event this listener is attached to. The listener's
+attachment, its callback, and everything the callback calls are proved above.
+
+#### Item 4 — the three constant links still use `openUrl`
+
+Unchanged, deliberately. This pass added no `open_github_page` /
+`open_privacy_policy` / `open_licence_page`. PROBLEM 249's What's New sheet
+reached the same conclusion from the other direction and its WIRED note carries
+the reasoning in full: a runtime-supplied URL has no compile-time constant to
+bake in, and a Rust command that takes a url parameter grants the webview
+exactly the power PROBLEM 164's rule withholds. It remains a convention
+deviation the owner may want closed for the three CONSTANT links.
+
+#### Also wired here (contract, not a finding)
+
+`check_for_updates_now` is now genuinely consumed by the About row — driven by
+the `update-status` event rather than by the command's return, which on the
+NSIS leg never arrives — and a "Roll back to 1.0.X" button sits beside "Check
+for updates". Both belong to PROBLEM 249; see its WIRED note.
+
+#### Still not exercised
+
+The app was never built as a bundle, installed or run. `get_about_info` has
+still never been called through real IPC — it is registered now, which is a
+necessary condition and not evidence. No OS-level light/dark flip has been
+performed against a running Spaceadom.
+
+
+#### REVIEW FIXES 2026-09-05 — the "one shared rule" was not enough, because the two windows were not asked the same question
+
+Full write-up immediately below (**H4**), and it supersedes this section's
+claim that two independent `matchMedia` listeners "answer the same question".
+They did not: `tauri.conf.json` pinned the `settings` window to
+`"theme": "Light"`.
+
+### PROBLEM 255 follow-up (2026-09-05) — "Auto" made the theme pill 4-way, and the sliding indicator started covering the labels
+
+**Symptom (owner screenshot).** Settings → Appearance → Theme now shows four
+segments — Auto · Earthy · Warcry · Starry night. The sliding highlight was
+sized and positioned as an equal `1fr` of the track, so on any selection it
+was either too narrow for its own label or wide enough to lap onto the
+neighbouring one; "Starry night" (the widest label, by a wide margin) crowded
+"Warcry" beside it in the 280px popover.
+
+**Root cause.** `styles.css`'s `.theme-seg`/`.theme-seg-ind` (added when this
+pill was still 3-way and every option really was the same width) positioned
+the indicator by ARITHMETIC: `grid-template-columns: repeat(var(--seg-n), 1fr)`
+gave every segment an identical box, and `.theme-seg-ind`'s
+`transform: translateX(calc(var(--seg-i) * 100%))` moved the indicator by `i`
+COPIES OF ITS OWN (also `1fr`) WIDTH. That arithmetic is only correct when
+every segment genuinely is the same width. The moment "Auto" (feature 2 of
+PROBLEM 255) joined three already-uneven-by-content labels, `1fr` forced them
+all to the SAME box regardless of what text they held — "Auto" got Starry
+night's whole width, and "Starry night" got Auto's. **Generalise this: any
+sliding-indicator pill whose segments size to `1fr` can only ever be correct
+if a change never adds a segment whose natural label length differs from the
+others — worth flagging in review the next time one gains a segment**, which
+is exactly the trigger here.
+
+**Exact files.**
+
+- `src/styles.css` — `.theme-seg`, `.theme-seg-ind`, `.theme-seg-opt`, and one
+  new rule, `#settings-panel:not(.expanded) .theme-seg-opt`.
+- `src/components/controls.ts` — `segRowHtml` (dropped the now-meaningless
+  `--seg-i`/`--seg-n` inline style), three new exports —
+  `positionSegIndicator`, `wireSegIndicators`, and a module-private
+  `positionAllSegIndicators` — plus one call added inside the existing
+  `setPanelExpanded`.
+- `src/components/settings-panel.ts` — the theme-pill and Ring-layout click
+  handlers (import list, and the two `[data-theme-set]`/`[data-hudring-set]`
+  listeners), and the `wireSegIndicators(panelEl)` call added beside the
+  existing `wireSegRowsKeyboard(panelEl)`.
+- `src/preview.ts` — the Ring-layout click handler (the Theme pill has no
+  click handler in this harness; it is driven by the `?theme=` query param
+  only, unchanged by this pass) and the `wireSegIndicators(previewPanel)` call
+  beside `wireSegRowsKeyboard(previewPanel)`.
+
+**The fix, in three parts.**
+
+1. **Segments size to content, not to an equal fraction.** `.theme-seg`
+   changed from `display: grid; grid-template-columns: repeat(var(--seg-n),
+   1fr)` to `display: flex`; `.theme-seg-opt` changed from an implicit grid
+   cell to `flex: 1 1 auto` (content basis, but still shares leftover room via
+   `flex-grow`). `--seg-n` is gone from both the CSS and `segRowHtml`'s inline
+   style — nothing reads it any more.
+2. **The indicator is positioned by MEASUREMENT, not arithmetic.**
+   `positionSegIndicator(seg: HTMLElement)` (controls.ts) reads the active
+   `.theme-seg-opt.is-on` button's real `offsetLeft`/`offsetWidth` and writes
+   them onto the container as `--ind-x`/`--ind-w` (both px):
+   ```ts
+   export function positionSegIndicator(seg: HTMLElement): void {
+     const on = seg.querySelector<HTMLElement>(".theme-seg-opt.is-on");
+     if (!on) return;
+     seg.style.setProperty("--ind-x", `${on.offsetLeft}px`);
+     seg.style.setProperty("--ind-w", `${on.offsetWidth}px`);
+   }
+   ```
+   `.theme-seg-ind` (styles.css) now reads those instead of `--seg-i`/`--seg-n`:
+   ```css
+   .theme-seg-ind {
+     position: absolute;
+     top: 3px; bottom: 3px; left: 0;
+     width: var(--ind-w, calc((100% - 6px) / 3));
+     border-radius: var(--radius-full);
+     transform: translateX(var(--ind-x, 3px));
+     transition: transform 480ms cubic-bezier(.34, 1.45, .36, 1),
+                 width 480ms cubic-bezier(.34, 1.45, .36, 1);
+     box-shadow: var(--shadow-sm);
+   }
+   ```
+   It is re-measured at every point the active segment or the container's own
+   box can change: `wireSegIndicators(root)` positions every `.theme-seg`
+   under `root` immediately (first paint), arms one `ResizeObserver` per pill
+   (re-armed, not accumulated, on every call — same convention as
+   `wireSegRowsKeyboard`), and wires a one-time `document.fonts.ready` hook;
+   the two in-place click handlers (settings-panel.ts, preview.ts's Ring
+   pill) call `positionSegIndicator(seg)` in place of the old
+   `seg.style.setProperty("--seg-i", …)` line, right after `.is-on` moves —
+   PROBLEM 157's in-place-update pattern is unchanged, only WHAT gets updated
+   changed, because the newly active button is not necessarily the same width
+   as the one it replaced.
+3. **The compact 280px popover gets one font-size step down.** Content-sizing
+   alone cannot invent room the popover doesn't have — measured, the four
+   labels at the normal 11.5px need ~235px and the popover's pill has ~234–240px
+   to give them, close enough that a slightly longer future label would clip.
+   `#settings-panel:not(.expanded) .theme-seg-opt { font-size: 10.5px; padding:
+   6px 5px; }` buys back the margin; `#settings-panel.expanded` (and
+   preview.ts's `?expand`) never applies it, matching CLAUDE.md's "compact
+   popover 280px vs expanded" framing exactly, because that is the one place
+   this pill's container width actually changes.
+
+**A bug found WHILE fixing this, not present before it: `ResizeObserver`
+alone does not cover the expand/collapse toggle.** `setPanelExpanded` (the one
+function both `settings-panel.ts` and `preview.ts` funnel every expand/collapse
+through) only toggles the `.expanded` class — it does not rebuild the DOM, so
+`wireSegIndicators`'s `ResizeObserver` was expected to catch the resulting
+width change on its own. Measured in the browser pane: after
+`document.getElementById("set-expand").click()`, the indicator sat 26px off
+the active label's left edge and 11px short of its width, and **stayed there
+for over a second** — the observer never fired in that window. The pane's tab
+reports `document.hidden === true` throughout (this Claude Browser pane always
+renders its tab backgrounded from Chromium's point of view), and Chromium
+throttles the whole requestAnimationFrame family, `ResizeObserver` included,
+for backgrounded pages — so this may not reproduce in a genuinely foregrounded
+Tauri window, but the fix does not rely on that distinction being safe to
+assume. `setPanelExpanded` now calls the module-private
+`positionAllSegIndicators()` directly, immediately after the class toggle:
+the toggle's width change is synchronous (`width: auto` takes effect at once;
+`animation: st-pop-in` only animates transform/opacity, never the number
+itself), so reading `offsetLeft`/`offsetWidth` in the very next statement is
+already correct — measured, `diffX`/`diffW` both `0` right after the click,
+with no wait. The `ResizeObserver` stays as a second line of defence for
+resizes `setPanelExpanded` does not cause (window resize, a DPI change from
+switching monitors). **Generalise this: a `ResizeObserver` is not proof a
+resize will be caught — verify the actual code path that changes the size,
+and drive the fix from there when one exists, the way `wireSegRowsKeyboard`
+drives its pills from the click handlers that already exist rather than a new
+listener.**
+
+**How it was verified.** `npx tsc --noEmit` clean. `npm run dev` (Vite dev
+server, no `dist2`/installer output — the explicit "no build/install" rule for
+this pass), preview.html loaded in the Claude Browser pane at `?gear` (280px
+popover) and `?gear&expand` (full panel), for all four themes
+(`?theme=auto|earthy|warcry|starry`). For every segment of both pills (Theme
+and Ring layout) in both panel states, a script clicked the segment and read
+`getComputedStyle`/`offsetLeft`/`offsetWidth` directly:
+- indicator `--ind-x`/`--ind-w` vs the active button's `offsetLeft`/
+  `offsetWidth`: **0px difference** in every case tested (never the ±1px the
+  brief allowed for).
+- no two `.theme-seg-opt` bounding rects overlapped, in either panel state,
+  for any of the four themes.
+- `scrollWidth <= offsetWidth` for every label in the compact state (10.5px)
+  and the expanded state (11.5px) — i.e. no label was ever clipped; measured
+  explicitly for "Starry night", the widest label and the one the bug report
+  named.
+- the expand/collapse toggle re-measures synchronously (see the bug above);
+  confirmed working in both directions (compact→expanded and back).
+Not exercised: the real Tauri `settings` window (this pass never builds or
+installs, by instruction), and the Theme pill's click path in `preview.ts`
+specifically, which has never been wired to a click handler in that harness
+(pre-existing, unrelated to this bug — it is driven by `?theme=` instead) and
+was therefore checked via that query param rather than by clicking.
+
+---
+
+# REVIEW FIXES 2026-09-05 (frontend/CI lane) — four findings from a code review of PROBLEMs 249 / 254 / 255
+
+Four fixes, one theme: **each one is a check, a guard or a rule that looked
+correct and could not fail.** A palette rule shared by two windows fed
+different inputs; a tag guard on every workflow step except the publishing
+one; a greyed row whose greying depended on a field meaning something it does
+not; a comment describing a build guard that was never written. That class —
+*a check that cannot produce a negative result is not a check* — is already
+CLAUDE.md's, learned from the ASCII-marker trap and the `%LOCALAPPDATA%`
+sandbox test. These are four more instances of it.
+
+Version unchanged at 1.0.100. Nothing installed, nothing tagged, nothing
+pushed.
+
+---
+
+## H4 — "Auto" showed Earthy in the dashboard and Starry night in the overlay, and then wrote the dashboard's wrong answer into config.json
+
+**Symptom.** With the theme pill on **Auto** on a machine whose Windows app
+mode is DARK, the dashboard renders Earthy (daylight) while the overlay's HUD
+and toasts render Starry night. Two windows of one app in two palettes at
+once — precisely what CLAUDE.md's "ONE setting drives everything" rule exists
+to prevent, and what PROBLEM 255's `theme-resolve.ts` was created to fix.
+Then, on the next press of the pill, `dark_mode: false` is persisted to
+`config.json` on a dark machine.
+
+**Root cause — and it is NOT the rule.** PROBLEM 255 correctly extracted the
+rule into one leaf module that both bundles import. What it did not notice is
+that the two bundles were feeding that one rule **different inputs**:
+
+```jsonc
+// src-tauri/tauri.conf.json, the `settings` window — line 29, BEFORE
+"skipTaskbar": false,
+"theme": "Light",          // <- this
+"dragDropEnabled": false
+```
+
+Tauri forwards a window's `theme` to WebView2 as
+`SetPreferredColorScheme(Light)`, and **`prefers-color-scheme` inside a
+webview reports the scheme the webview was told to prefer, not the scheme the
+user chose.** So:
+
+| | `matchMedia("(prefers-color-scheme: dark)")` on a DARK machine |
+| --- | --- |
+| dashboard (`settings`, pinned Light) | `false` — permanently, by configuration |
+| overlay (no pin) | `true` |
+
+`resolveTheme("auto")` therefore answered `"earthy"` in one window and
+`"starry"` in the other, from identical code.
+
+**The second-order failure is the one that outlives a restart.**
+`settings-panel.ts` resolves `"auto"` through the same call to decide
+`dark_mode`, and PERSISTS it:
+
+```ts
+// src/components/settings-panel.ts, the theme-pill handler
+const resolved = resolveTheme(next);
+appConfig.dark_mode = resolved !== "earthy";   // written to config.json
+await persistConfig();
+```
+
+So the dashboard's lied-to reading became the value Rust and the overlay were
+handed as fact. A wrong pixel is a bug; a wrong pixel written to disk is a
+bug that survives the fix.
+
+**Generalise this.** *Sharing a rule does not make two callers agree — they
+also have to be asked the same question.* When a "single source of truth" is a
+FUNCTION rather than a VALUE, its inputs are the thing to audit. And more
+narrowly: **`prefers-color-scheme` is not a reading of the user's OS setting
+inside an app that can set its own window theme.** It is a reading of what the
+app asked for. Anything that must reflect the user's actual preference has to
+come from outside the webview.
+
+### The fix — Rust reads the registry once; both windows consume the same bool
+
+Five files. One new Rust module, one new TypeScript module, two lines of
+config, and comment corrections where the old sentences were now false.
+
+**1. `src-tauri/src/theme_watch.rs` — NEW.** Polls
+`config::os_prefers_dark()` (which reads
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\AppsUseLightTheme`;
+it already existed and was already unit-tested) every 2 seconds on a dedicated
+`st-theme-watch` thread, and emits `os-theme-changed { dark }` with the
+**global `emit`** — never `emit_to`, which has never delivered in this app —
+when the answer MOVES. Plus the seed command:
+
+```rust
+#[tauri::command]
+pub fn get_os_prefers_dark() -> bool {
+    crate::config::os_prefers_dark().unwrap_or(false)
+}
+```
+
+The `unwrap_or(false)` is deliberate: it is the app's ONE fallback rule for an
+unanswerable registry read, already stated in `config::resolve_theme`, and now
+in three places that agree rather than two that might not.
+
+The decision itself is a small pure struct, so it can be tested:
+
+```rust
+pub(crate) struct Watcher { dark: bool }
+impl Watcher {
+    pub(crate) fn new(initial: Option<bool>) -> Self { Self { dark: initial.unwrap_or(false) } }
+    pub(crate) fn observe(&mut self, now: Option<bool>) -> Option<bool> {
+        let now = now.unwrap_or(false);
+        if now == self.dark { return None; }
+        self.dark = now;
+        Some(now)
+    }
+}
+```
+
+**WHY A POLL, AND NOT `WM_SETTINGCHANGE`.** The brief offered a message-only
+window receiving `WM_SETTINGCHANGE("ImmersiveColorSet")` as the first option.
+**That does not work in the shape it is usually written, and the failure is
+silent.** The theme change is BROADCAST, and a broadcast reaches top-level
+windows only — a message-only window (`HWND_MESSAGE`) is documented as not
+receiving broadcast messages at all. Such a watcher compiles, runs, logs
+"watching", and never fires: a check that cannot produce a positive result.
+Making it work needs a real top-level window with its own class and its own
+message pump, which is the version-fragile, input-adjacent thing
+`display_watch.rs` already refused to do for `WM_DISPLAYCHANGE` — in an app
+whose whole value depends on a `WH_KEYBOARD_LL` hook staying healthy.
+
+`RegNotifyChangeKeyValue` was the other candidate and is the tidy answer on
+paper. It was **not** taken, for one concrete reason: it cannot be verified
+from this machine's agent shell, whose HKCU is virtualised (PROBLEM 143), so a
+registry write made to test the notification lands in the container's private
+hive and proves nothing either way. Shipping a Win32 primitive whose only
+evidence is "it compiled" is what this project keeps paying for.
+
+The poll is this repository's own precedent, with the reasoning already
+written down in `display_watch.rs`: "a directory-free integer comparison every
+couple of seconds costs nothing measurable and cannot destabilise anything".
+Cost: one `RegOpenKeyEx` + one `RegQueryValueEx` per 2 s on a thread that does
+nothing else. Worst-case user-visible lag: 2 seconds.
+
+**2. `src/theme-resolve.ts` — the leaf keeps the rule and loses `matchMedia`.**
+It now holds the VALUE plus a small subscriber list; `setOsPrefersDark(dark)`
+records it and fires `onSystemThemeChange` callbacks **only on a real change**.
+`systemPrefersDark()` is a plain read. It still imports nothing — that property
+is load-bearing (PROBLEM 148) and is exactly why `preview.ts` can drive the
+whole mechanism with no backend at all.
+
+**3. `src/os-theme.ts` — NEW, the two lines of plumbing.** `initOsTheme()`
+registers the `os-theme-changed` listener FIRST and then seeds from
+`get_os_prefers_dark` — that order, so a flip happening between the two calls
+arrives as an event instead of vanishing into the gap. Idempotent under
+repetition AND under concurrency (it returns the in-flight promise), and silent
+on failure in both halves: an older backend and the harness both degrade to the
+documented daylight fallback, which is what the old `matchMedia` `try`/`catch`
+did.
+
+**4. Both entry points await it BEFORE their first paint.** `main.ts`'s
+`bootstrap()` calls `await initOsTheme()` above `applyLook()`; `overlay.ts`
+chains it ahead of its `get_config` seed. Fired and forgotten, a dark machine
+would paint Earthy and cross-fade a beat later.
+
+**5. `tauri.conf.json` — the pin is gone.**
+
+**What removing the pin exposes — audited, not assumed.** The pin said Light
+for a reason (a cream app under a dark webview default would look wrong), so
+every surface WebView2 themes from the preferred colour scheme was checked:
+
+| Surface | Exposed? | Why not |
+| --- | --- | --- |
+| Page background | No | `html, body { background: var(--st-bg) }` — explicit, `design-system.css:219` |
+| Scrollbars | No | Fully custom `::-webkit-scrollbar` rules, global + panel, all on theme tokens |
+| `alert`/`confirm`/`prompt` | No | **They do not render in this webview at all** (PROBLEM 106) — the app has `confirm-dialog.ts` for exactly that reason |
+| Checkboxes | No | `.toggle-switch input { opacity: 0; width: 0; height: 0 }` — the native control is invisible |
+| Range sliders | No | `appearance: none` with a custom track and thumb (`characters.css`) |
+| File / message dialogs | No | `@tauri-apps/plugin-dialog` is **not** installed on the JS side; the Rust side's are native Win32, which follow the OS regardless of the webview |
+| **Window title bar** | **YES** | `decorations: true`, so the Win32 chrome now follows the OS instead of being forced light |
+
+The title bar is the one real change, and it is left as-is deliberately: it is
+OS chrome, and on the configuration that matters most — a dark machine on
+"Auto", the default for every new install — a dark title bar above Starry night
+is better than the forced-light one it replaces. A user on a dark machine who
+picks Earthy explicitly gets a dark title bar over a cream app. **That is an
+owner decision, not a defect** — and if he wants the chrome to follow the APP's
+resolved palette rather than the OS, the call is `WebviewWindow::set_theme()`
+fed from the same resolved value, which is now safe to do precisely because
+nothing reads `prefers-color-scheme` any more.
+
+### How it was verified
+
+`preview.ts` gained `window.__previewThemeProbe()`, which runs the REAL wiring
+against the harness's real in-memory event bus — the same bus a real `listen()`
+reaches, the same path Rust's global `emit` takes:
+
+1. `initOsTheme()` against a stubbed `get_os_prefers_dark`;
+2. `__previewEmit("os-theme-changed", { dark })` for `false` then `true` then
+   `false`;
+3. both consumers asked what palette they are wearing — the dashboard's
+   `resolveTheme(raw)`, and the OVERLAY's real `applyThemeName(raw)` from
+   `toast.ts` (dynamically imported, so the harness's ordinary boot never loads
+   it), read back off `document.body`;
+4. plus: the `nocturne` base must track the resolved theme, and a FIXED
+   `"earthy"` must ignore the OS in both.
+
+Result in the live Vite harness: **`true`** — identical at every OS value.
+
+**And the probe was validated against a known-failing case**, because a
+comparison that cannot come out false is not a comparison. Replaying step 3
+with `toast.ts`'s OLD pre-PROBLEM-255 rule (*anything not warcry/starry is
+earthy*) at `dark: true` gives:
+
+```
+{"dashboard":"starry","overlay":"earthy","agreed":false}
+```
+
+Gates: `cargo test --lib` **491 passed / 0 failed / 5 ignored** (5 new in
+`theme_watch::tests`), `cargo clippy --lib --all-targets` **0 warnings**,
+`npx tsc --noEmit` clean, `npm run build` clean, `cargo build --release` clean
+in 2m 24s.
+
+**NOT verified, and it needs the owner.** No OS-level light/dark flip has been
+performed against a running, INSTALLED Spaceadom. The poll, the registry read
+and the emit are exercised only by unit tests and by a harness with a stubbed
+backend. The hand-test is one minute: run the app on **Auto**, open the
+dashboard, hold Space so the overlay is up, then flip Windows Settings then
+Personalisation then Colours then "Choose your mode" — both surfaces must
+change together within about 2 s, and `debug.log` must carry
+`theme: Windows' app mode changed - dark=`. Until that is done, treat this as
+built and unproven on the real machine.
+
+---
+
+## C2 — `release.yml` could publish a release from a branch, and made every release public before it was finished
+
+**Symptom (latent — no run has produced it).** Two independent defects in one
+file.
+
+1. Pressing **Run workflow** on the Actions tab — documented in that very file
+   as the way to "test the pipeline without tagging anything" — would create a
+   public GitHub release named **"Spaceadom main"**, tagged `main`, with both
+   installers attached and neither updater manifest beside them.
+2. A tagged release became public the moment `tauri-action` finished, and the
+   two steps that make it USABLE ran afterwards. In between, the release was
+   already `releases/latest`, so an installed copy polling
+   `releases/latest/download/latest.json` — which every copy does once a day
+   since 1.0.100 — got a **404**, and a human following the link found a page
+   with the portable download missing.
+
+**Root cause 1.** Every step in the file was gated on
+`startsWith(github.ref, 'refs/tags/v')` **except the publishing one**, and
+`tauri-action` CREATES the tag and release it is handed:
+
+```yaml
+      - name: Build and publish
+        uses: tauri-apps/tauri-action@v0     # <- no `if:`
+        with:
+          tagName: ${{ github.ref_name }}     # "main" on workflow_dispatch
+          releaseDraft: false
+```
+
+**Root cause 2.** Step order, plus `releaseDraft: false`. The comment defending
+that flag was about VISIBILITY (the owner wants a link he can send to friends)
+and had been read as being about TIMING.
+
+**Generalise this.** *A guard applied to every step but one is not a guard —
+and the one it misses will be the step with side effects, because that is the
+step people write last.* And: *"public" and "finished" are different moments;
+if a release is a production endpoint, it must not become `latest` until every
+asset that endpoint promises exists.*
+
+### The fix
+
+**One.** The publish is gated, and a separate **build-only leg** covers
+`workflow_dispatch` so the button still does what it claims:
+
+```yaml
+      - name: Build the installers only (no release) - workflow_dispatch
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Build and publish (as a DRAFT - flipped public by the last step)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: tauri-apps/tauri-action@v0
+        # ...
+          releaseDraft: true
+```
+
+Two steps rather than one conditional step, because "tauri-action publishes
+only when it is given a `tagName`" is somebody else's behaviour. It was **read,
+not assumed** (`tauri-action` `src/index.ts`, dev branch, checked 2026-09-05):
+the release path is `if (tagName && !releaseId) { ... getOrCreateRelease ... }`,
+uploads are `if (releaseId)`, and with neither set it logs *"No releaseId or
+tagName provided, skipping all uploads..."*. `GITHUB_TOKEN` is consulted only on
+those paths, which is why the rehearsal leg is not given one — a step with no
+token cannot create a release even if that reading is ever wrong. It still
+SIGNS, because an unsigned rehearsal would skip the `.sig` step the manifest
+writer depends on, which is exactly the gap a rehearsal exists to find.
+
+**Two.** Draft, then manifests, then the portable zip, then the asset check,
+then the flip — as the LAST step in the file:
+
+```yaml
+      - name: Publish the release (flip the draft public - MUST BE LAST)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          gh release edit $tag --draft=false
+          # ...then READ IT BACK, because `gh` exiting 0 is not the claim:
+          $draft = gh release view $tag --json isDraft --jq '.isDraft'
+          if ($draft -ne 'false') { Write-Host "::error::..."; exit 1 }
+```
+
+A run that dies anywhere in the middle now leaves a DRAFT — private,
+un-`latest`, recoverable, and obvious on the releases page.
+
+**Three — the `.msix` step can no longer take a release down with it.**
+`continue-on-error: true` (the severity that step's own comment already argued
+for and the YAML never implemented), and the exit code is CHECKED:
+
+```yaml
+          ./scripts/build-msix.ps1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::warning::build-msix.ps1 exited $LASTEXITCODE, so no Store package..."
+            exit $LASTEXITCODE
+          }
+          "built=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+```
+
+Both halves were needed. **`build-msix.ps1`'s "no Windows SDK" branch exited
+0** — a deliberate "stop here, the layout is fine" for a developer running
+`npm run msix` by hand — so `built=true` was written for a package that did not
+exist, and the upload step's `if-no-files-found: error` then failed the JOB
+after both installers had been built. It exits **2** now, and its header
+documents the codes (`0` packed, `1` Die, `2` no SDK). Separately: GitHub's
+pwsh sets `$ErrorActionPreference = 'stop'`, but **a non-zero exit from a
+called SCRIPT is not a PowerShell error** — execution carries on to the next
+line — so the explicit `$LASTEXITCODE` check is what makes `built=true` mean
+what it says.
+
+**Four — secrets arrive through `env:`, not `${{ }}` inside the script body.**
+`${{ secrets.X }}` in a `run:` is a TEXT substitution performed before the shell
+ever sees the script, so the secret's literal characters become part of the
+program. A DSN containing a `"`, a backtick or a `$(` stops being data and
+starts being PowerShell. It matters most for the signing key, which is base64
+**with embedded newlines** and does not survive as one value at all. Both steps
+were converted. (Two `Write-Host` hints in the same step were also switched to
+single quotes — their backticks around the `gh secret set ...` commands were
+being eaten as PowerShell escape characters, printing a mangled instruction to
+whoever hit the error.)
+
+**Five — `build-msix.ps1`'s TaskId check could not fail.**
+
+```powershell
+# BEFORE
+$rustTaskId = $null
+if (Test-Path $packagedRs) {
+  $m = [regex]::Match(..., 'STARTUP_TASK_ID:\s*&str\s*=\s*"([^"]+)"')
+  if ($m.Success) { $rustTaskId = $m.Groups[1].Value }
+}
+if ($rustTaskId -and $xmlTaskId -and ($rustTaskId -ne $xmlTaskId)) { Die ... }
+Say "startupTask id '$xmlTaskId' matches packaged.rs"
+```
+
+Every way of failing to READ the constant — `packaged.rs` moved, the constant
+reformatted across two lines, `&str` changed to `&'static str`, the regex
+simply not matching — satisfied the `-and` guard and printed **"matches
+packaged.rs"** about a value it had never read. The one thing the check exists
+to catch is a TaskId drift, and its failure mode was to report agreement. Each
+unreadable case is now a separate, named `Die`, because "the file is gone" and
+"the constant no longer looks like that" want different fixes. What it protects
+is expensive to find later: `StartupTask::GetAsync` answers `E_INVALIDARG` for
+an unknown id, which in a log is indistinguishable from "the WinRT API is
+unavailable".
+
+### How it was verified
+
+`npx js-yaml .github/workflows/release.yml` parses; the step table was then
+dumped from the parsed YAML and read back — the flip is step **15 of 15**, the
+`.msix` step is the only one carrying `continue-on-error`, and every
+release-touching step carries the tag guard. `actionlint` is not available on
+this machine (`npx actionlint` fails to resolve an executable);
+`gh workflow view Release` succeeds. `build-msix.ps1` parses clean under
+pwsh 7's own parser and is still 7-bit ASCII (asserted, per its own header
+rule).
+
+**NOT verified: no workflow run was triggered, on any ref.** These are
+CI-shaped changes and the only real proof is a run. The safe first proof is
+exactly the thing this fix makes safe — press **Run workflow** on `main` and
+confirm it builds both installers and creates NO release.
+
+---
+
+## H6 — the portable copy's "Run at startup" was greyed for the wrong reason, and toasted success for a write that never happened
+
+See the summary under PROBLEM 254 above for the symptom. The code, in full:
+
+**`commands.rs::get_packaged_startup`, the portable branch (UNCHANGED — read,
+not edited):**
+
+```rust
+if crate::portable::is_portable() {
+    return (
+        true,                 // "packaged" - a lie told to reuse the tuple shape
+        "portable".into(),
+        false,                // mayChange
+        "This is the portable copy, so it never writes to the registry or Task \
+         Scheduler. To start it with Windows, put a shortcut to spaceadom.exe in \
+         your Startup folder (Win+R, shell:startup)."
+            .into(),
+    );
+}
+```
+
+**`settings-panel.ts` — BEFORE:**
+
+```ts
+const inert = !!_pkgStartup?.packaged && !_pkgStartup.mayChange;   // startupRow + paintPackagedStartup
+// ...
+const refused = !!_pkgStartup?.packaged && startupShownAsOn(next) !== next;
+if (refused) { /* ... */ showToast("Windows decides this one..."); }
+else        { /* ... */ showToast(next ? "Starts with Windows" : "Won't start with Windows"); }
+```
+
+**`controls.ts` — AFTER (the leaf module, so `preview.ts` runs the identical
+decision):**
+
+```ts
+export function startupIsPortable(p: StartupOwnership): boolean {
+  return p?.state === PORTABLE_STARTUP_STATE;          // "portable"
+}
+export function startupRowIsInert(p: StartupOwnership): boolean {
+  return !!p && !p.mayChange;                          // NOT `packaged && !mayChange`
+}
+export function startupShownAsOn(p: StartupOwnership, fromConfig: boolean): boolean {
+  if (startupIsPortable(p)) return false;              // never starts with Windows, whatever config says
+  if (!p?.packaged) return fromConfig;
+  return p.state === "enabled" || p.state === "enabledbypolicy";
+}
+export function startupOutcome(p: StartupOwnership, wanted: boolean): StartupOutcome {
+  if (startupIsPortable(p)) return "nothing-written";  // THE POINT OF THIS FUNCTION
+  if (p?.packaged && startupShownAsOn(p, wanted) !== wanted) return "refused";
+  return "written";
+}
+```
+
+`p == null` is `"written"`, and that is not a shrug: it means the ownership
+query is unavailable, which is an ordinary NSIS/MSI install talking to a build
+without the command — and there `set_startup_enabled` genuinely DID flip the
+HKCU Run value. Claiming success is correct in that case and wrong in the
+portable one, which is the whole distinction.
+
+The `"nothing-written"` branch also plays **no switch sound**: the sound is the
+app saying "done", and nothing was done. Its toast is
+"Portable copy - put a shortcut in your Startup folder", and `run_at_startup`
+is put back, because a stored preference the app can never honour is one it
+would keep showing and never keep.
+
+**Two more holes closed in the same handler.** `refreshPackagedStartup()` runs
+when the panel OPENS, so between that and its answer `_pkgStartup` is `null`
+and the row is fully live — correctly, since a row that greys itself for a
+second on every open looks broken. But *live* must mean *clickable*, not
+*writable*. The handler now asks first, then re-checks:
+
+```ts
+if (_pkgStartup === null) await refreshPackagedStartup();
+if (startupRowIsInert(_pkgStartup)) {
+  showToast(startupIsPortable(_pkgStartup)
+    ? "Portable copy - see the note under the switch"
+    : "Windows decides this one - see the note under the switch");
+  paintPackagedStartup();
+  return;
+}
+```
+
+And `paintPackagedStartup` forces the switch's checked state from
+`_pkgStartup !== null` rather than `?.packaged`, so a `run_at_startup: true`
+carried over from an installed copy's config folder cannot draw a switch that
+is on, dead and lying.
+
+### How it was verified
+
+`preview.ts` gained `?portable` — which stubs `get_packaged_startup`'s portable
+tuple **byte-for-byte, `packaged: true` and all**, because a stub that quietly
+corrected it to `false` would have passed whatever the frontend did — and
+`window.__previewStartupProbe()`, a table over all five tuple shapes the
+backend can produce.
+
+Live in the harness at `preview.html?portable&gear`:
+
+```json
+{"wrapOpacity":"0.45","wrapPointerEvents":"none","inputDisabled":true,
+ "inputChecked":false,"rowAriaDisabled":"true","noteVisible":true,
+ "noteText":"This is the portable copy, so it never writes to the registry or Task "}
+```
+
+`inputDisabled: true` is the half that gets shipped broken (`pointer-events`
+does nothing for the keyboard). `inputChecked: false` against a harness config
+of `true` is the forced-OFF rule. Probe verdict: **`true`** — the portable
+tuple is inert, and NEITHER direction reports a write.
+
+**Negative control**, the same page without the flag: `wrapOpacity: ""`,
+`inputDisabled: false`, `rowAriaDisabled: "false"`, no note at all. The check
+discriminates.
+
+**NOT verified: no portable copy has been run.** PROBLEM 254's "still not
+exercised" stands unchanged — `is_portable()` has never returned `true` in any
+context anything has run in. What is proven is that the frontend behaves
+correctly when it does.
+
+---
+
+## The LOWs, and the two scripts
+
+**`controls.ts` — HTML-escaping in the About markup.** `aboutRowHtml` and
+`renderThirdPartyGroups` interpolate into `innerHTML`. Two of those holes are
+not written by this project: `updateStatusText` is `updater.rs`'s `message`
+field, which PROBLEM 249's own contract says is printed **VERBATIM for any
+state the listener does not recognise** — the property that makes an unescaped
+interpolation load-bearing, since the next state added upstream reaches this
+hole without anyone reading it; and `rollbackVersion` is read off a
+**directory name** on disk. `third-party.json` is generated from the dependency
+tree, so its `name`/`url`/`version`/`license` strings are written by hundreds of
+package authors — the `url` lands in an `href` AND in a `data-tp-link` the click
+handler feeds to `openUrl`, so one `"` in it breaks out of both attributes at
+once. Everything is escaped, including the two values that are safe today,
+because "safe today" is a property of the CURRENT producer and this is a
+template that outlives it — and because a template with three escaped holes and
+two bare ones invites the next person to copy the wrong one. `escapeHtml` is a
+deliberate local copy of `key-detail-panel.ts`'s: importing it would drag the
+whole key editor into a LEAF module and into the harness.
+
+Verified in the harness by feeding
+`</div><img src=x onerror="window.__PWNED=1"><b>bold` through every hole:
+`{"aboutImgs":0,"aboutBolds":0,"tpImgs":0,"statusTextIsLiteral":true,
+"rollbackAttrIsLiteral":true,"tpHrefIsLiteral":true,"pwned":false}`. Negative
+control, the same payload through the old unescaped shape: `oldImgs: 1,
+oldBolds: 1`.
+
+**`whats-new-sheet.ts` + `settings-panel.ts` — `auxclick`.** Both places keep a
+real `href` on an intercepted `<a>` (for the context menu and the status bar)
+and listened only for `click`. A middle-click does not fire `click`; it fires
+`auxclick`, **and the browser then follows the href itself**. In a Tauri webview
+there is no tab to open it in, so the DASHBOARD navigates away — no chrome, no
+back button, no way out but restarting the app. Both now bind the same handler
+to both events. *Generalise: an intercepted `<a>` needs both events, or the href
+it keeps for polish becomes an escape hatch out of the app.* Found in What's
+New; the third-party list had the identical hole and was fixed with it.
+
+**`settings-panel.ts` — the `update-status` listener flag.** It was set BEFORE
+`listen()` resolved, so one transient rejection — the window missing from
+`capabilities/default.json`, which CLAUDE.md names as the failure that makes a
+window silently deaf — left the About row's status line dead for the life of the
+process, including for the daily background check the listener exists to catch.
+It is set in `.then` and cleared in `.catch` now, plus a second
+`_updateStatusListenPending` flag, which is what makes that safe: this runs at
+the end of every `render()`, i.e. after every toggle, so a bare "not wired yet"
+guard would have registered a second and a third listener in the gap. In flight
+counts as taken; only a REJECTION frees it to be tried again. The same
+correction, in promise form, is in `os-theme.ts`.
+
+**`scripts/build-portable.mjs` — the guard its own comment promised.** The file
+carried a paragraph arguing that a dev-build guard "belongs here, at packing
+time", followed by a `statSync` that printed a size and checked nothing. *A
+comment describing a guard that does not exist is worse than no comment: it is
+the reason nobody writes one.* Three signals now, each catching a different
+mistake: SIZE (8-60 MB; a dev-profile binary is far larger), VERSION STAMP
+(`FileVersion` must equal `package.json`'s — this script compiles nothing, so
+after a version bump but before a rebuild it packs the PREVIOUS build into a zip
+NAMED for the new one), and FRESHNESS against `dist2` (Tauri embeds the frontend
+at compile time, so an older exe carries a stale UI while reporting the right
+version — CLAUDE.md's own proof chain). All three fail loudly with the command
+that fixes them, and all three run BEFORE anything is deleted.
+
+And the zip is opened and read back. "The file exists" could not distinguish the
+failure that matters here: `portable.txt` is
+`src-tauri/src/portable.rs::MARKER_FILE`, the ONLY signal the app looks for, and
+without it in the archive the "portable" build **silently stops being portable**
+— it writes config, `debug.log`, backups and the picker cache into
+`%APPDATA%\Spaceadom` like an installed copy, which is the exact thing its
+downloader chose it to avoid, and nothing about the running app looks wrong.
+Entries are checked by name AND by size (`System.IO.Compression.ZipFile` through
+PowerShell — no new dependency, the same reason `Compress-Archive` writes it).
+
+Verified by running it. **Negative control first**, with the exe older than
+`dist2`:
+
+```
+build-portable: ...spaceadom.exe (2026-09-05T03:51:45.346Z) is OLDER than the newest
+file in dist2 (2026-09-05T03:58:44.113Z). ... Run 'npm run tauri build' again.
+EXIT=1
+```
+
+— and the pre-existing zip was still there afterwards, confirming the guards run
+ahead of every destructive step. Then `cargo build --release` (2m 24s, clean)
+and a **positive control**:
+
+```
+build-portable: packing ...spaceadom.exe (20.9 MB, stamped 1.0.100, newer than dist2) as Spaceadom 1.0.100
+build-portable: wrote ...Spaceadom_1.0.100_x64-portable.zip (7.3 MB) - verified to contain
+spaceadom.exe, portable.txt, README-portable.txt, exe byte-for-byte the 1.0.100 release build
+EXIT=0
+```
+
+The zip check was itself given a negative control — a required member that is
+not there — and reported `does not contain NEGATIVE-CONTROL-DELETE-ME.txt.
+Present: portable.txt, README-portable.txt, spaceadom.exe.` before that change
+was reverted (confirmed byte-identical by hash).
+
+**Note for the next `npm run portable`:** the final gate run rebuilt `dist2`
+after that release build, so the freshness guard will fire until the next
+`npm run tauri build`. That is the guard working, not a defect.
+
+---
+
+### What this lane did NOT do
+
+- No version bump, no tag, no push, no install. The app was built
+  (`cargo build --release`) but never bundled into an installer and never run.
+- `commands.rs`, `updater.rs`, `safe_mode.rs`, `diagnostics.rs`,
+  `rival_install.rs`, `packaged.rs` and `wix/` were read and not edited.
+  `lib.rs` took exactly three additive lines (`mod theme_watch;`, the
+  `theme_watch::start` call, and the `generate_handler` registration) — another
+  agent owned that file concurrently.
+- No OS light/dark flip against a running app; no portable copy launched; no
+  workflow run triggered. All three are named above, each with its recipe.
+
+
+---
+
+## PROBLEM 250 FOLLOW-UP, FRONTEND HALF — the `store_copy` banner (1.0.101)
+
+**Symptom.** An ordinary (unpackaged) Spaceadom running beside a Microsoft
+Store copy showed the generic "second copy" banner with a working-looking
+**Remove the old copy** button. Pressing it called `repair_rival_install`,
+which returns `false` and logs a refusal, so the button went to
+"Removing…" and came back with *"Not removed — the permission prompt was
+declined"* — a sentence describing a prompt that was never shown.
+
+**Root cause.** `rival_install::status_kind()` gained a FOURTH value,
+`"store_copy"`, in the PROBLEM 250 follow-up lane (Rust only). `main.ts`'s
+`checkRivalInstall` knew three: `packaged_host`, `orphaned_entry`, and the
+default. A new backend verdict fell through to the default arm, which is the
+one arm that both offers the button and interpolates `path` as a filesystem
+location — and for this kind `path` is a SENTENCE naming the package, not a
+path. Two failures from one missing arm.
+
+The refusal itself is correct and is not the bug: `Program Files\WindowsApps`
+is ACL'd against the user by design, a Store package has no ProductCode and no
+`uninstall.exe`, so nothing an elevated helper could do would remove it. The
+bug is offering the action.
+
+**Exact file.** `src/main.ts`, `checkRivalInstall`.
+
+The kind flag, beside the existing `packagedHost`:
+
+```ts
+const packagedHost = kind === "packaged_host";
+const storeCopy    = kind === "store_copy";
+```
+
+The text arm, FIRST in the chain so it cannot fall through:
+
+```ts
+txt.textContent = storeCopy
+  ? "A Microsoft Store copy of Spaceadom is also installed. Keep one: " +
+    "uninstall the other from Settings > Apps."
+  : packagedHost
+  ? /* …unchanged… */
+```
+
+Neither `path` nor `version` is interpolated — that is deliberate and is
+covered by `rival_install.rs`'s own test
+`a_store_copy_finding_can_never_yield_a_deletable_directory`.
+
+And the button is not merely hidden — it is **never constructed**. The dismiss
+control was moved ABOVE the repair button so the arm can finish and return:
+
+```ts
+const close = document.createElement("button");
+close.className = "conflict-close";
+close.setAttribute("aria-label", "Dismiss for now");
+close.textContent = "✕";
+close.addEventListener("click", () => { el.hidden = true; });
+
+if (storeCopy) {
+  el.append(txt, close);
+  el.hidden = false;
+  return true;
+}
+
+const fix = document.createElement("button");
+// …unchanged…
+```
+
+**How it was verified.** `npx tsc --noEmit` clean; `npm run build` clean; the
+sentence is present in the shipped bundle and in the installed build —
+`install-check.txt` (2026-09-05, install of 1.0.101 through the
+explorer-launched `scripts/install-real.cmd`) records
+`bundle has A Microsoft Store copy of Spaceadom is also installed: True`
+alongside `exe is newer than the bundle it embedded: True` and
+`version: 1.0.101`, which is the three-link chain CLAUDE.md requires for a
+frontend change (a frontend string cannot be scanned inside the exe — Tauri v2
+compresses `dist2`).
+
+**NOT verified, and it cannot be from here:** the banner has never been SEEN,
+because seeing it needs a Store package installed beside the NSIS copy on this
+machine, and the packaged branches were exercised once on 2026-09-05 by
+installing and then removing the package. `detect_cross_kind`'s Path 4 (the
+WinRT `PackageManager` enumeration that produces this kind) has still never
+fired on a real machine.
+
+**Generalise this.** *When a backend enum grows a variant, the frontend's
+fall-through arm inherits it — and the fall-through arm is usually the one with
+the button on it.* A new verdict does not announce itself as unhandled; it
+quietly becomes the default, and the default is the most capable branch,
+because that is the one written first. The cheap guard is to make the arm that
+offers an irreversible action the LAST one reachable, never the first.
+
+**A second, smaller rule from the same edit.** *Do not build a control you
+intend not to show.* The first shape of this fix appended a disabled button;
+the shipped one hoists the dismiss control above the repair button so the
+`store_copy` arm returns before a repair button exists. A hidden-but-present
+control is one CSS mistake away from being pressable, and a disabled one still
+has its click handler attached.
+
+---
+
+## MEASUREMENT TRAP, 2026-09-05 — the stored updater password does not open the stored updater key
+
+> **RESOLVED THE SAME DAY, AND THE CONCLUSION BELOW IS WRONG.** The password
+> file was always correct. Everything from "Symptom" to "Generalise this" is
+> kept verbatim because the *reasoning* is the lesson — five careful controls,
+> every one of them run inside the one shell that corrupts the value. Read to
+> the end: **RESOLUTION — the leading `/` and MSYS argument conversion.**
+
+**Symptom.** `npm run tauri build` with `TAURI_SIGNING_PRIVATE_KEY` and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` set from the gitignored files builds both
+bundles and then ends with
+`failed to decode secret key: incorrect updater private key password: Wrong
+password for that key`. No `.sig` is written, so 1.0.101 cannot be published
+as an update.
+
+**What was ruled out, and how.** This is recorded because the obvious
+conclusions are all wrong and each one costs a round trip:
+
+1. *Not shell mangling.* The same failure from `npx tauri signer sign -f <key>
+   -p <pw>` directly, and from the env-var path inside `tauri build`.
+2. *Not base64 padding.* The file is 43 bytes with no newline; `pw + "="` and
+   `pw + "=="` both fail, and so does an empty password.
+3. *Not a broken CLI.* **Positive control:** a throwaway key generated into the
+   scratchpad with a known password signed a file on the first attempt. The
+   tool, the shell and the `-p` path all work.
+4. *Not an MSIX container shadow* (PROBLEM 143). Every file in
+   `src-tauri/.tauri/` has an identical SHA-256 read from the agent shell and
+   read through `explorer.exe`.
+5. *Not the wrong key.* `spaceadom.key.pub` is byte-identical to
+   `tauri.conf.json`'s `plugins.updater.pubkey`, so the on-disk pair is the
+   pair whose PUBLIC half is baked into every shipped exe.
+
+**Therefore:** `spaceadom.key.password.txt` is not the password for
+`spaceadom.key`. Both files are dated 2026-09-04 21:44, and
+`Spaceadom_1.0.100_x64_en-US.msi.sig` was written at 22:13 the same evening, so
+the correct password existed then.
+
+**What was NOT done, and must not be.** The key was not regenerated. The public
+key is compiled into every installed copy; a new pair means **no existing
+install can ever accept an update again**. This is an owner decision with the
+real password, not an agent's to route around.
+
+**Cost of the control experiment, recorded because it broke a rule.**
+`tauri signer sign` writes its signature beside its INPUT, and the input chosen
+for the control was the existing `src-tauri/.tauri/sign-probe.bin` — so the
+control OVERWROTE `sign-probe.bin.sig`, a file from the 2026-09-04 key
+generation that the agent did not create (SHA-256
+`F2DD8744…BEC7` → `821741B0…493F`, 400 bytes both). Nothing depends on it and
+the key material is untouched, but the rule is absolute and this is the
+correction: **a signing or packing tool writes beside its input — point a
+control experiment at a file you created, never at one you found.**
+
+**Generalise this.** *A positive control has a blast radius.* The reason to run
+one is that you do not yet know what is broken, which is exactly the state in
+which you cannot predict what the tool will write. Choose the inputs as
+carefully as you would for the real run.
+
+### RESOLUTION, 2026-09-05 — the password was never wrong; the SHELL rewrote it
+
+**The password in `spaceadom.key.password.txt` opens `spaceadom.key` on the
+first attempt.** Proved by signing a file created for the purpose in the
+scratchpad: `npx tauri signer sign -f <key> -p <pw> <scratchpad file>` →
+`sign exit: 0`, `.sig` written. Nothing was regenerated and nothing was
+rotated; `tauri.conf.json`'s `plugins.updater.pubkey` is still byte-identical
+to `spaceadom.key.pub`, so every 1.0.9x install can still be updated.
+
+**The one difference that decided it: the shell.** Every failing attempt ran
+from the **Bash tool (Git for Windows / MSYS2)**. The successful one ran from
+the **PowerShell tool** — which is also the shell the key was generated in on
+2026-09-04.
+
+**Root cause — MSYS2 POSIX-path conversion.** The password is
+`[Convert]::ToBase64String(32 random bytes).TrimEnd('=')`, so its alphabet is
+`A–Z a–z 0–9 + /` and **roughly one password in three starts with `/`**. This
+one does. MSYS2's runtime rewrites any value that looks like a POSIX absolute
+path into a Windows path when it hands it to a **native** Windows executable —
+and `tauri.exe`/`node.exe` are native. Measured, this session, with
+`node -e "console.log(process.argv[1])"` and `process.env`:
+
+| how the value was passed from Git-Bash | what the native exe actually received |
+| --- | --- |
+| `-p "$PW"` (argument, quoted **or** unquoted) | `C:/Program Files/Git` + the password |
+| `export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$PW"` | `C:/Program Files/Git` + the password (**63 chars, not 43**) |
+| the same value from PowerShell | the password, unchanged (43 chars) |
+
+So both failing routes — `signer sign -p` **and** the env-var route inside
+`npm run tauri build` — were fed a 63-character string that begins
+`C:/Program Files/Git`. `MSYS_NO_PATHCONV=1` does not save you either: it is
+honoured by the Git wrapper scripts, not by the MSYS2 runtime's argv/env
+conversion. The password bytes on disk were never touched.
+
+**Why five controls all missed it — the blind positive control.** The control
+was `signer generate -p "/abc123XYZ"` followed by `signer sign -p "/abc123XYZ"`,
+both from Bash. Both were mangled **identically**, so the throwaway key was
+generated with the mangled string and opened with the mangled string, and the
+control passed. *A positive control that pushes the suspect value through the
+same corrupting layer twice cannot see the corruption.* The control must vary
+the layer under suspicion — here, run one leg from the other shell — or use a
+value that cannot be transformed (no leading `/`).
+
+The other four controls were sound and remain true: it is not padding, not a
+container shadow, not a broken CLI, not the wrong key. They were simply
+answering a question that was never the question.
+
+**Rules that follow, both worth keeping.**
+
+1. **Never pass a secret to a native Windows exe through the Bash tool.**
+   Key material, passwords and tokens go through the **PowerShell** tool, which
+   passes bytes through unchanged. This applies to arguments *and* to exported
+   environment variables. The build that produces the `.sig` files must be
+   launched from PowerShell — as the 2026-09-04 build that produced 1.0.100's
+   signatures was.
+2. **When a value fails everywhere, suspect the transport before the value.**
+   The file's bytes were verified (43 bytes, ASCII, no BOM, no newline) at the
+   very start and that was read as "the file is fine, so the *content* must be
+   wrong". The unexamined constant was the shell every single test shared.
+
+**Generalise this.** *A control is only a control over the layers it varies.*
+Write down what every attempt had in common before writing down what they
+proved — the shared term is where the bug is, and it is invisible precisely
+because it never changed.
+
+## PROBLEM 256 — 1.0.102 owner review: two places to undo one profile delete, a profile popover full of mismatched control heights, and an About screen link that still hands out MIT off a stale GitHub copy
+
+Three owner reports on 1.0.102, bundled into one entry because two of them
+share a file (`profile-editor.ts` / `styles.css`'s profile-popover section)
+and the third is a metadata fix that belongs beside them chronologically.
+
+### 1. Two places to undo a profile delete
+
+**Symptom.** Owner: *"After deleting a profile there are two places to undo —
+one top-middle for seconds, another on the profile list — how long is that
+one?"*
+
+**Root cause.** PROBLEM 231 (1.0.96) built the inline "row" undo
+(`offerDeleteUndo`/`undoRow`, standing where the deleted row was) but ALSO
+kept calling `main.ts`'s `offerUndo()` — the PROBLEM 99 top-middle banner —
+right after, on the stated theory that the banner "is the surface that
+survives the popover being closed." Both read the SAME Rust undo stack
+(PROBLEM 106/107), so one delete put up two independent, differently-timed
+countdown offers for the one action — exactly the confusion the owner
+reported.
+
+**Decision (owner's).** One undo only: keep the inline row, drop the banner
+for a profile delete specifically, keep the banner for `clearActiveProfile`
+and `resetActiveProfileToDefaults` in `main.ts` ("keep toasts for other
+events" — those two are untouched), and put a visible ticking countdown on
+the inline row, since removing the banner also removed the only clock the
+user could see counting down.
+
+**Fix.** `src/components/profile-editor.ts`:
+
+```ts
+// confirmDeleteProfile() — AFTER the delete succeeds
+    // 1.0.96 — the Undo now stands WHERE THE ROW WAS, for ~10s.
+    offerDeleteUndo(name, index);
+    renderProfileList();
+    showToast(`🗑️ Deleted: ${name}`);
+    // PROBLEM 256 — this used to end with `void offerUndoBanner();`, which is
+    // exactly what put a second countdown in front of the user for the same
+    // action. The inline row above IS the undo for a delete now; the banner
+    // stays wired for clearActiveProfile/resetActiveProfileToDefaults only.
+```
+
+`offerDeleteUndo`/`undoRow` gained a ticking countdown:
+
+```ts
+const DELETE_UNDO_MS = 10_000;
+const DELETE_UNDO_S = DELETE_UNDO_MS / 1000;
+
+function offerDeleteUndo(name: string, index: number): void {
+  if (_pendingUndo) {
+    window.clearTimeout(_pendingUndo.timer);
+    window.clearInterval(_pendingUndo.tick);
+  }
+  _pendingUndo = {
+    name,
+    index: Math.max(0, index),
+    secondsLeft: DELETE_UNDO_S,
+    timer: window.setTimeout(() => {
+      if (_pendingUndo) window.clearInterval(_pendingUndo.tick);
+      _pendingUndo = null;
+      renderProfileList();
+    }, DELETE_UNDO_MS),
+    // Rewrites the button's OWN text node every second rather than calling
+    // renderProfileList(): a full re-render tears down and rebuilds every
+    // row just to change four characters.
+    tick: window.setInterval(() => {
+      if (!_pendingUndo) return;
+      _pendingUndo.secondsLeft -= 1;
+      const btn = document.getElementById("profile-undo-btn");
+      if (btn) btn.textContent = `Undo · ${Math.max(0, _pendingUndo.secondsLeft)}s`;
+    }, 1000),
+  };
+}
+```
+
+`undoRow()`'s button now starts at `Undo · ${pending.secondsLeft}s` (i.e.
+"Undo · 10s") and carries `id="profile-undo-btn"` so the tick above can find
+it; `undoDelete()` clears both the timeout AND the interval.
+
+`undoDelete()` still ends with `void offerUndoBanner();` — NOT to raise a new
+banner for the delete just undone, but because the banner and the inline row
+read the same Rust stack: if a `clearActiveProfile`/`resetActiveProfileToDefaults`
+undo was already stacked BEHIND this delete, undoing the delete must let that
+older entry's banner resurface rather than leave it stranded with nothing on
+screen offering it (the same reasoning PROBLEM 107 already put in `offerUndo`
+itself for the reverse case).
+
+**Verified.** `tsc --noEmit` clean; `npm run build` (`tsc && vite build`)
+clean, 0 errors. Live in the browser pane, `preview.html?profiles`: deleting
+"Professionals" showed ONLY the inline row — `document.getElementById(
+"undo-banner")` does not even exist in this harness (main.ts is never loaded
+by it), which is itself proof the removed call path was the only one that
+could have raised a banner here. The button's text was read twice, ~1.3s
+apart: `"Undo · 10s"` then `"Undo · 8s"` — ticking, not static. **Not
+re-tested:** `clearActiveProfile`/`resetActiveProfileToDefaults`'s own banner
+path — no code on that path changed, so this is a read of the diff, not a
+fresh verification.
+
+### 2. The profile popover's controls were a hodgepodge of five different heights
+
+**Symptom.** Owner: *"You made others appropriate size but why are these
+still so badly sized?"* — pointing at the profile popover next to PROBLEM
+239's Settings action grid (one height, 34px, everywhere). Measured before
+this fix: Edit/Done pill 26px, "+ New profile" 34px, "Import a profile"
+STRETCHED to the same full width as "+ New profile" despite being a
+secondary, edit-mode-only action (and measuring even shorter — 29px — from an
+ID-selector-vs-class specificity quirk), the delete-undo row content-driven
+at ~44px, and the emoji helper line's horizontal padding 4px off the rest of
+the popover's 14px left inset.
+
+**Root cause.** None of these were ever unified against a shared row height.
+PROBLEM 231 built each control's CSS in isolation as the edit-mode feature
+grew in stages (drag, emoji, export/import, undo), and `.profile-import`
+inherited `.dashed-btn`'s full-width stretch from `#profile-popover`'s flex-
+column default (`align-items: stretch`, meant for the ONE primary
+"+ New profile" action) simply because it reused the same class as a later
+addition, with nothing to opt it out.
+
+**Fix.** `src/styles.css`, all within the profile-popover section:
+
+```css
+.profile-editmode { height: 36px; padding: 0 14px; /* was 26px / 0 12px */ }
+#new-profile-input,
+#new-profile-add { height: 36px; /* was 34px */ }
+.dashed-btn {
+  height: 36px;        /* was 34px */
+  padding: 0 16px;     /* NEW — see below */
+}
+/* "+ New profile" is the single primary action and stays full-width (also
+   the only button visible outside edit mode). Import is secondary, edit-
+   mode-only, and no longer stretches to match it. */
+.profile-import { margin-top: 2px; align-self: flex-start; }
+.profile-undo-row {
+  height: 36px;             /* was content-driven, ~44px */
+  padding: 0 8px 0 14px;    /* was 7px 8px 7px 14px */
+}
+.profile-emoji-help { padding: 6px 14px 8px; }  /* was 6px 10px 8px */
+```
+
+The `.dashed-btn` padding is new because the class used to rely ENTIRELY on
+being stretched full-width by its flex-column parent plus
+`justify-content: center` for its own sizing — a content-sized dashed button
+with no padding hugs its label with no breathing room, which is exactly what
+`.profile-import` would have looked like the moment it stopped stretching.
+
+Every control in the popover is now either in the 36px row/button band or one
+of the small 22px on-row icon buttons (`.profile-row-act`, `.profile-row-del`
+— unchanged; they were never part of the complaint).
+
+**Measured**, `preview.html?profiles` (browser pane), edit mode, via
+`offsetWidth`/`offsetHeight`:
+
+| Control | Before | After |
+| --- | --- | --- |
+| Edit/Done pill | 53×26, pad `0 12px` | 57×36, pad `0 14px` |
+| ＋ New profile | 264×34, full width | 265×36, full width (kept — sole primary action) |
+| ⤓ Import a profile… | 225×29, **STRETCHED** full width | 139×36, content-sized |
+| Delete-undo row | ~264×44 (content-driven) | 240×36 |
+| Undo button | "Undo", 30px | "Undo · 10s" ticking, 30px |
+| Emoji helper padding | `6px 10px 8px` | `6px 14px 8px` |
+
+**Measurement trap, worth keeping.** The first pass of these measurements (via
+`getBoundingClientRect`) read LOW and inconsistent — `.dashed-btn` at
+26-30px instead of 36. Cause: `.dashed-btn` carries `animation: st-pop-in
+380ms var(--ease-spring) both`, whose 0% keyframe is `scale(.85)`, and
+`getBoundingClientRect` reports the POST-TRANSFORM box — so a read taken
+before the animation settles (or one that never progresses, because this
+session's browser pane shares one Vite dev server with other concurrently-
+running agents whose file saves each trigger a full HMR page reload,
+occasionally resetting the animation mid-flight) reports the shrunk,
+mid-entrance size. `offsetWidth`/`offsetHeight` are transform-invariant and
+were the only reliable read in this session; `getComputedStyle(el).height`
+also reads correctly (the CSS value, not the rendered box) and cross-checked
+every number above. **Generalise:** never trust `getBoundingClientRect` alone
+on an element carrying a `transform`-based CSS animation; confirm against
+`offsetWidth`/`offsetHeight` or `getComputedStyle` first.
+
+**A gap found, not fixed — flagged for a follow-up, out of scope for this
+pass.** `.dashed-btn`'s entrance animation is NOT covered by
+`:root.reduced-motion`'s override, which currently only silences
+`.profile-emoji-help` and `.profile-undo-row` (PROBLEM 47's contract). So
+"+ New profile" and "Import a profile" still play their pop-in scale/opacity
+animation with reduced motion switched on. Same class of gap PROBLEM 47
+exists to close; this instance was just never added to that rule.
+
+### 3. "Why MIT licence? I thought people could see but not copy"
+
+**Symptom.** Owner saw "MIT" somewhere despite `LICENSE` having been rewritten
+to the source-visible/proprietary text on 2026-09-05.
+
+**Audit — every "MIT" hit in the repo, grepped outside `node_modules`,
+`src-tauri/target`, `dist*` and `all-versions`, with a verdict:**
+
+| Location | Verdict |
+| --- | --- |
+| `package-lock.json`, `src/generated/third-party.json`, `THIRD-PARTY-NOTICES.md` | Legitimate — third-party dependency licences. Unrelated to Spaceadom's own licence. Unchanged. |
+| `src/components/controls.ts:1058` (About screen's third-party list) | Legitimate — names one specific dependency's licence. Unchanged. |
+| `CLAUDE.md`, `PROJECT_STATUS.md`, `_PROJECT_STATUS-pre-1.0.102-backup.md` | FALSE POSITIVE — plain-text `grep MIT` (no `-i`, no word boundary) also matches the substring inside `LIMITED`, `SUBMIT-CHECKLIST`, `COMMIT`, `OMITTED`. No real mention of the MIT licence in any of these. |
+| `config-copy.json`, `_config-live-copy-*.json` | FALSE POSITIVE — a base64-encoded PNG (`icon_override`) happens to contain the literal substring "MIT". Not a licence field. |
+| `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json` | Did not contain "MIT" — or any `license` field at all, before this fix. The belief did not come from these files. |
+| `src/components/controls.ts:873`/`1202` (About screen, `data-about-link="licence"`) | **THE ACTUAL SOURCE.** See below. |
+| `README.md` (lines 3, 216) | Already correct — "Source-visible, proprietary — see LICENSE". No change needed. |
+
+**The actual source: the About screen's "Licence" button linked straight to
+GitHub, and GitHub is still serving the OLD file.** CLAUDE.md already records
+that the repo tree has been UNCOMMITTED since 1.0.95. **Confirmed live this
+session** (`WebFetch` on
+`https://github.com/nur-arpon/Spaceadom/blob/main/LICENSE`): the page's first
+two lines are literally `"MIT License / Copyright (c) 2026 Nur Ifran Arpon"`
+— the pre-1.0.95 file, not the source-visible rewrite sitting in this working
+tree. The About screen's licence button (`ABOUT_LINKS.licence` in
+`controls.ts`) points at exactly that URL under the plain label "Licence", so
+clicking it in the app is how the owner most likely saw MIT.
+
+**This is a fact about the repo's commit state, not something a local file
+edit can fix.** Until someone commits and pushes the current `LICENSE`,
+`github.com/.../blob/main/LICENSE` will keep serving MIT to anyone who opens
+that link, About screen included. Said explicitly so nobody re-diagnoses this
+as a text bug a second time.
+
+**Fix — every metadata field set to an explicit, non-MIT identifier:**
+
+- `package.json` → added `"license": "SEE LICENSE IN LICENSE"` (npm's own
+  escape hatch for a non-SPDX licence; there was no `license` field at all
+  before this).
+- `src-tauri/Cargo.toml` → added `license = "LicenseRef-Spaceadom-Source-Visible"`
+  (SPDX's `LicenseRef-<idstring>` escape hatch for a non-standard licence;
+  Cargo treats `license` and `license-file` as mutually exclusive, so this was
+  chosen over pointing at the file directly; no `license` field existed
+  before).
+- `src-tauri/tauri.conf.json` → added `"bundle.license":
+  "LicenseRef-Spaceadom-Source-Visible"` (the field was absent; per Tauri's
+  schema it would otherwise default to Cargo.toml's value, which is now also
+  set the same way — this makes it explicit rather than inherited).
+- `src/components/controls.ts` → the About screen's licence button now reads
+  **"Source-visible, proprietary — see LICENSE"** instead of the bare
+  "Licence", so the label states the actual terms directly instead of
+  depending on the linked GitHub page being current. A comment beside
+  `ABOUT_LINKS` records the GitHub-uncommitted caveat for the next person who
+  wonders why the link itself was not changed (there is nowhere else in this
+  repo to point it — the file it names IS `LICENSE`, correctly).
+- `README.md`, `THIRD-PARTY-NOTICES.md` — re-read in full; already correct.
+  No change.
+
+**Verified.** `tsc --noEmit` clean. `npm run build` clean, 0 errors.
+`cargo check` clean (`src-tauri`, `D:\RUST-DOWNLOADED-HERE` toolchain,
+confirms the new Cargo.toml `license` line parses under the `spdx` crate
+tauri-build/cargo use for validation). About screen's new label confirmed
+live in `preview.html?gear&about-open`:
+`document.querySelector('[data-about-link="licence"]').textContent` =
+`"Source-visible, proprietary — see LICENSE"`, 242×34. GitHub's stale MIT
+copy confirmed live via `WebFetch` (above). **Not done, and not part of this
+task:** committing/pushing the repo so GitHub serves the current `LICENSE` —
+that is a repository-state decision for the owner, not a file this session
+owns.
+
+**Generalise this.** A licence audit that only checks metadata fields misses
+a source of truth the app itself LINKS TO. The About screen's "Licence"
+button pointed at a live external URL, not a bundled copy, so the local field
+could say anything and the app could still be handing users a stale answer
+through its own UI. Any in-app link to an external copy of a legal document
+needs the commit-and-push step tracked as part of "the fix," not assumed to
+follow automatically from editing the local working tree.
+
+
+---
+
+## PROBLEM 257 — with the dashboard focused, NO keystroke reaches ANY keyboard hook in this process (owner's hardware keys, installed 1.0.102, 2026-09-06): not a gate, not a blocked thread, not eviction — an OS-side drop this code cannot see, now made to PROVE itself and re-hook; and PROBLEM 243's "no own-window gate" audit was true and insufficient
+
+**Symptom (owner, 2026-09-06 ~00:50–01:05, installed 1.0.102).** *"When I hold
+Space I can't see the Space ring while in the app, nor does any app launch"* —
+while **"Check the ring"** and changing ring layouts DO draw the ring over the
+dashboard, and everything works over every other app. Separately: *"Win+H
+wasn't working, now Win+. isn't working either."*
+
+### The evidence, in the order it was read (all from the LIVE `%APPDATA%\Spaceadom\debug.log`, process started 19:02:21 on 2026-09-05)
+
+1. **Every `guide_hud: shown over own window` in the whole 1.0.102 session is a
+   PREVIEW.** Holds #133–#156, #291, #388, #389, #445 each sit under a
+   `guide_hud: PREVIEW #N — showing the real ring as …` line (the "Check the
+   ring" button / layout pill). Every REAL hold in the session reads `shown over
+   claude.exe` or `shown over brave.exe`. The PROBLEM 243 instrument was doing
+   its job — and the preview path prints the same sentence, which is why the
+   log *looked* healthy.
+2. **The 60-second counter never once saw an own-window key**: all 21
+   `saw N key event(s) … M of them while the Spaceadom window itself had focus`
+   lines in the session read `0 of them`, including windows where the watchdog
+   itself printed `Foreground: spaceadom.exe <- SPACEADOM'S OWN WINDOW`
+   (00:51:56, 00:55:11, 00:56:14, 01:04:12).
+3. **THE LINE THAT DECIDES IT — 00:54:52.071:**
+   ```
+   hook focus exposure — the Spaceadom window itself held the foreground for 60 of the last 60 one-second samples …
+   hook liveness split — primary_real:0 primary_injected:0 reference:0 mouse:2705 in the last 60s
+   ```
+   One thread. One minute. Our window in front for all of it. The MOUSE
+   low-level hook on that thread fired 2,705 times; the primary keyboard hook
+   fired 0 times; the reference (witness) keyboard hook fired 0 times. Then at
+   00:55:05 and 00:55:07 the owner held Space over `claude.exe` and the ring
+   showed twice (`hold #286`, `#288`) — no re-hook in between
+   (`watchdog-reinstalls:1` all session). So: the pump is alive, the hooks are
+   installed and not evicted, and keystrokes made while our window is
+   foreground reach NEITHER keyboard hook.
+4. **Same signature for injected keys** (PROBLEM 250's "Observation A", which the
+   agent then called a harness limitation): 00:41:01 and 00:41:14, the emoji
+   probe injected two Win+. chords (16 events, our cookie) with
+   `foreground=Tauri Window "Spaceadom"`; the 00:41:52 window reads
+   `primary_injected:0 reference:0`. The owner has now reproduced it with
+   hardware keys. It was never a harness limitation.
+5. **Every gate counter is 0 all session**: `fullscreen-suppressed:0
+   bypass-suppressed:0 … passed-to-os(ctrl/alt/win held):0 space-dropped:0
+   excluded-app:0 stale-holds-reaped:0 stuck-modifier-resets:0`. The hook was
+   not deciding anything about these keys; it was not being called. H1 (a stuck
+   LWIN from PROBLEM 248's injection) is dead on `passed-to-os:0` and
+   `stuck-modifier-resets:0`, and the emoji chord carries our cookie so
+   `track_modifier` never sees it (it sits below the cookie return).
+6. **Not our code**: `git diff 579177e -- src-tauri/src/hook` is diagnostics
+   only (PROBLEM 236's counters, verdict enums, hold deferral); nothing new
+   returns early before `KB_EVENTS_SEEN.fetch_add`, which is the first line of
+   the callback. The hook thread (`st-hook-supervisor`, ABOVE_NORMAL) was
+   sampled at 01:09 and 01:14–01:19: `Wait/UserRequest` (GetMessage) throughout.
+   `spaceadom.exe` and its WebView2 browser process are both Medium integrity,
+   no AppContainer, no package identity — UIPI does not apply.
+   `LowLevelHooksTimeout` is 1000 ms. All six enabled Windhawk mods live in
+   explorer/shell processes and none installs a keyboard hook (grepped).
+7. **The bracket.** `debug.log.0`: own-window keys WERE reaching the hook at
+   `2026-09-05 08:29:15` (146 of 148), `14:07:52` (11 of 11), `14:09:22`
+   (3 of 3) and `14:11:22` (2 of 4) — the last three in the PACKAGED 1.0.100
+   copy. First proven failure: `15:35` in the PACKAGED 1.0.101 copy (Observation
+   A), then every 1.0.101/1.0.102 run. The machine was not rebooted in between
+   (session up since 08:25). Inside the gap: 1.0.101 built and installed
+   (14:57–14:59), explorer.exe restarted (14:52), **claude.exe (Claude desktop
+   1.46388.4.0, the computer-use host that has been driving this dashboard by
+   injection) started 15:17:54**, the 1.0.101 MSIX was added (15:27). The
+   1.0.101 Rust diff adds nothing input-related (safe mode, portable root,
+   theme poll, updater UI, MSI leg); the frontend adds keyboard handlers in
+   the settings page (PROBLEM 255) — page-level `keydown` listeners cannot
+   stop a low-level hook, and `src/` contains no `keyboard.lock`,
+   `requestFullscreen` or `requestPointerLock`.
+
+### What this is, and what it is not
+
+A `WH_KEYBOARD_LL` chain is walked newest-first by the raw input thread; a hook
+that returns 1 ends the walk. Our two keyboard hooks receive nothing while our
+own WebView2 window has focus and everything otherwise, on a thread whose mouse
+hook keeps firing. The two mechanisms consistent with every line above are:
+(a) a keyboard hook installed AFTER ours, in some process, that swallows all
+keys while our window is focused; (b) the raw input thread skipping this
+process's keyboard hooks for a reason specific to input targeted at this
+process's own window. Nothing in the log distinguishes them, and **this entry
+does not claim either.** What it does is refuse to be blind again.
+
+**Win+H / Win+. — the exact answer.** Our hook returns `LRESULT(1)` for a
+non-Space key ONLY inside a latched hold (`MODIFIER_ACTIVE`, the combo branch)
+or for Space+`.` in bypass; both counters are 0 all session, and
+`MODIFIER_ACTIVE` cannot be latched by a Space the hook never saw. So our hook
+did not eat Win+H or Win+. — **but whatever is dropping keys while our window is
+focused drops them before the shell's hotkey processing too**, which is why
+Win+. from the emoji disc (our own text box has focus) and Win+H typed into our
+fields fail, and PROBLEM 248's injected Win+. "NO PANEL" verdicts are the same
+fault, not a shell fault. `TextInputHost.exe`, `ctfmon.exe` and
+`TextInputManagementService` were all alive at 01:10. **One test settles the
+scope: press Win+. with Notepad focused.** Works → only our window, this
+problem. Fails → system-wide, not us.
+
+### Exact code
+
+`src-tauri/src/hook/mod.rs`, `watchdog_check`, immediately after the UIPI
+early-return and before the cooldown logic — the proven-deaf test:
+
+```rust
+    let space_down = (GetAsyncKeyState(VK_SPACE as i32) as u16 & 0x8000) != 0;
+    …
+    if keyboard_deaf_with_space_down(space_down, MODIFIER_ACTIVE.load(..), stand_down,
+                                     other_modifier_down(), kb_cb_silence, OWN_DEAF_SILENCE_MS) {
+        … log::warn!("hook: KEYBOARD DEAF, PROVEN (PROBLEM 257) — Space is physically DOWN right now …");
+        let _ = UnhookWindowsHookEx(*kb); let _ = UnhookWindowsHookEx(*ms);
+        let (nkb, nms) = install_hooks(); …
+```
+
+and the pure seam it decides through:
+
+```rust
+pub(crate) fn keyboard_deaf_with_space_down(
+    space_physically_down: bool, modifier_active: bool, stand_down: bool,
+    other_modifier: bool, kb_callback_silence_ms: Option<u64>, threshold_ms: u64,
+) -> bool {
+    if !space_physically_down || modifier_active || stand_down || other_modifier { return false; }
+    matches!(kb_callback_silence_ms, Some(ms) if ms >= threshold_ms)
+}
+```
+
+Why `GetAsyncKeyState` is the right witness HERE and banned in the callback
+(law 3): it reports a key we SUPPRESS as up. A Space our hook intercepted never
+reaches the OS key state, so a Space the OS reports DOWN with no hold latched
+is a Space our callback let through — and a callback that let it through fired
+for it, and for its auto-repeats, inside 1000 ms (Windows' longest repeat
+delay; threshold 1500 ms). The three stand-down gates and law 4's modifier
+pass-through are the cases where the callback fired and chose to pass; they
+are excluded, not measured. `None` (never fired since install) is UNKNOWN, not
+proof (PROBLEM 236). Placed after the UIPI return so elevated-focus silence is
+never "repaired". One repair per 15 s; each is counted into the diagnostics
+line as `keyboard-deaf-rehooks(Space down, no callback):N`.
+
+The repair is the only one a process owns against a keyboard hook it cannot
+enumerate: re-installing puts ours at the HEAD of the chain. **It is an
+instrument first**: the WARN line tells the reader to read the next
+`hook liveness split` — `primary_real` above 0 with our window still focused
+means something installed after us was swallowing (mechanism a); still 0 means
+the drop is upstream of every hook here (mechanism b). Either outcome is a
+finding the log did not previously contain.
+
+`src-tauri/src/engine/mod.rs`, `HookEvent::SpaceDown` arm, right after
+`begin_hold()` — the per-hold line the brief asked for:
+
+```
+hold start (hold #N): the primary keyboard hook saw this Space-down and delivered it over own window (PROBLEM 257). …
+```
+
+`SpaceDown` has exactly one sender, so this line's existence is the proof the
+primary saw the Space, and its phrase is `shown_over_phrase` — the same
+normalisation PROBLEM 243 uses, so `over own window` means the same thing in
+both lines.
+
+### The rule (CLAUDE.md keyboard-hook law 6) and the script
+
+Law 6: hold Space with the dashboard focused before ANY ship and grep
+`guide_hud: shown over own window`; `scripts/install-proof.ps1` now ends with a
+REQUIRED MANUAL STEP that writes `own-window ring proof (law 6): PASS/FAIL` —
+PASS only when, after the proved build's banner, a `hold start … over own
+window` line is followed by `guide_hud: shown over own window`. The `hold
+start` half is what a PREVIEW cannot fake. A ship report without PASS says
+**UNPROVEN**.
+
+### How it was verified
+
+- `cargo test --lib` **517 passed, 0 failed** (511 before; the six new ones are
+  `keyboard_deaf_tests`). `cargo clippy --all-targets` finished with 0 warnings.
+  `npx tsc --noEmit` exit 0.
+- **NOT verified, and cannot be by an agent**: the WARN line firing and the
+  re-hook's outcome. Nothing was built or installed. The owner's first hold
+  inside the dashboard on the next build is the experiment; its result is the
+  next entry's first line.
+- A passive `WH_KEYBOARD_LL`/`WH_MOUSE_LL` probe from the agent shell
+  (01:14–01:19) received mouse and keyboard events over chrome/claude — its
+  positive control passed — but the dashboard was never foreground in those
+  five minutes, so it produced no verdict. Recorded so nobody re-runs it
+  expecting one without the owner at the keyboard.
+
+### What the owner must hand-test on the next build (in this order)
+
+1. Win+. with **Notepad** focused (scope of the shell-hotkey failure).
+2. Open the dashboard, click inside it, hold Space 2 s, release. Then
+   `grep -n "KEYBOARD DEAF, PROVEN\|hold start\|liveness split" debug.log | tail`.
+   Expected if mechanism (a): a PROVEN line, then within the same hold or the
+   next, a `hold start … over own window` line and the ring. Expected if (b):
+   PROVEN lines and still `primary_real:0` while focused — then the next step
+   is a foreign-process test, not more code here.
+3. Repeat step 2 with Claude desktop (claude.exe) CLOSED, then with PowerToys
+   closed — one variable at a time, one hold each, read the same greps.
+
+### Generalise this
+
+**An audit that finds no gate proves the code innocent, not the symptom
+absent.** PROBLEM 243 audited ten sites, found none, and closed the question
+with a 100-of-100 window from 1.0.96 — correct then, and worthless as a proof
+for any later build, because the failure lives outside the code the audit
+read. A requirement about a moment needs a witness at that moment, on every
+build: that is law 6. **And a counter that reads 0 needs a positive control in
+the same line** — `mouse:2705` beside `primary_real:0` is what turned a
+suspicion into a proof; without the mouse hook sharing the thread there would
+have been nothing to compare against.
+
+## PROBLEM 259 — the OWN-WINDOW FALLBACK: the dashboard page feeds the Space the keyboard hook cannot see, so the ring and Space+letter work inside Spaceadom again (built 2026-09-07 on 1.0.103; gates green, **NEVER RUN IN A REAL WEBVIEW — see "What was NOT exercised"**)
+
+**Symptom.** PROBLEM 257's, unchanged and unfixed: with the Spaceadom
+dashboard focused, holding Space shows no ring and Space+letter launches
+nothing, while everything works over every other app. The owner's requirement
+is unconditional — *with the Spaceadom dashboard focused, holding Space must
+show the ring and Space+letter must launch, exactly as elsewhere.*
+
+**Root cause (PROBLEM 257, not re-derived here).** While our own WebView2
+window holds the foreground, NEITHER `WH_KEYBOARD_LL` hook in this process is
+called. Measured over one 60-second window with the dashboard focused for all
+60 samples: `primary_real:0 primary_injected:0 reference:0 mouse:2705` — one
+thread, one minute, the MOUSE hook on that same thread firing 2,705 times.
+Re-hooking does not recover it. The drop is OS-side and outside anything this
+process can reach.
+
+**So this entry does not fix PROBLEM 257. It routes around it.** PROBLEM 257's
+instrument (`KEYBOARD DEAF, PROVEN` + the re-hook) stays exactly where it is
+and keeps asking the question; this is the second path that makes the feature
+work while the answer is still unknown.
+
+### The insight
+
+The dashboard PAGE still receives ordinary `keydown` / `keyup` for those keys.
+It is the focused window; the WebView2 input path is not what was lost. So the
+page can be the witness the hook cannot be.
+
+**And the same fact is what makes double-firing nearly impossible.** A healthy
+hook returns `LRESULT(1)` for Space-down and for every combo key, so those
+keystrokes never reach ANY window — including ours. *The page receiving a Space
+`keydown` at all is already evidence that no hook intercepted it.*
+
+### Exact files
+
+| File | What it gained |
+| --- | --- |
+| `src/own-window-keys.ts` (NEW) | The page-side tap/hold/combo state machine. Pure decision half + a thin DOM half. |
+| `src-tauri/src/hook/mod.rs` | `HookEvent::OwnWindowSpaceDown`; the `own_window_*` guards, statics and injector; `register_inject_sender` called from `spawn_hook_thread`; `own_window_fallback_tests`. **The callback is untouched.** |
+| `src-tauri/src/commands.rs` | The three IPC commands. No policy — they call `hook::`. |
+| `src-tauri/src/engine/mod.rs` | Normalises `OwnWindowSpaceDown` to `SpaceDown` at the top of `dispatch`, and prints a DIFFERENT per-hold line for it. No behaviour change. |
+| `src-tauri/src/lib.rs` | Three names in `generate_handler!`. |
+| `src/main.ts` | `initOwnWindowKeys(...)` after the config load; `setOwnWindowKeyTiming(...)` in the `config-updated` listener. |
+| `src/preview.ts` | `?ownwindow` — stub invokes, a text field and a button, so the DOM half can be driven without a backend. |
+| `scripts/own-window-keys.test.ts` (NEW) | 23 tests over the pure state machine. `npm run test:own-window-keys`. |
+
+### The actual code
+
+**1. The event, and why it is a separate variant** (`hook/mod.rs`):
+
+```rust
+    /// PROBLEM 259 — a Space-down that the DASHBOARD PAGE observed, not the
+    /// hook. The engine treats it exactly like `SpaceDown`; the ONLY
+    /// difference is the sentence it logs, and that difference is
+    /// load-bearing. [...] If the fallback reused `SpaceDown` it would print
+    /// *"the primary keyboard hook saw this Space-down"* about a Space the
+    /// hook never saw, and the one witness law 6 has would start lying.
+    OwnWindowSpaceDown,
+```
+
+**2. The channel.** `send_event` cannot be reused: its sender is a
+`thread_local!` that only the hook thread ever sets, so a Tauri command calling
+it silently does nothing. A second, global handle is registered from
+`spawn_hook_thread` — deliberately there and not at channel creation in
+`lib.rs`, because that placement gives the fallback the right lifetime for
+free: **in SAFE MODE (PROBLEM 253) the hook thread is never spawned, so no
+sender is registered and every fallback command declines.** Safe mode means
+"Space is an ordinary space", and a webview back-door into the engine would
+have quietly broken that promise. `safe_mode`'s "Turn back on" calls
+`spawn_hook_thread`, so the fallback returns with the hook and not before it.
+
+```rust
+static INJECT_TX: std::sync::Mutex<Option<Sender<HookEvent>>> = std::sync::Mutex::new(None);
+
+pub(crate) fn inject_hook_event(ev: HookEvent) -> bool {
+    let guard = INJECT_TX.lock().unwrap_or_else(|p| p.into_inner());
+    match guard.as_ref() { Some(tx) => tx.try_send(ev).is_ok(), None => false }
+}
+```
+
+**3. THE GUARD — the part that matters.** The failure worth engineering against
+is not "the fallback did nothing"; it is "the fallback and a recovered hook
+both fired", which is two rings, two launches and two spaces per press, on a
+machine where nothing looks wrong. Three guards, all pure, all tested:
+
+```rust
+pub(crate) fn own_window_space_down_accepted(
+    foreground_is_own_window: bool,
+    bypass_active: bool,
+    hook_hold_latched: bool,               // MODIFIER_ACTIVE
+    hook_space_down_age_ms: Option<u64>,   // None = the hook never stamped one
+    dedupe_ms: u64,                        // OWN_WINDOW_DEDUPE_MS = 100
+) -> bool {
+    if !foreground_is_own_window { return false; }   // 1. the only situation this exists for
+    if bypass_active { return false; }               //    bypass must mean bypass here too
+    if hook_hold_latched { return false; }           // 2a. the hook is mid-hold
+    !matches!(hook_space_down_age_ms, Some(age) if age < dedupe_ms) // 2b. same physical press
+}
+
+/// 3. A combo or a release only counts while the FALLBACK owns the hold.
+pub(crate) fn own_window_hold_is_ours(own_hold_age_ms: Option<u64>, max_hold_ms: u64) -> bool {
+    matches!(own_hold_age_ms, Some(age) if age <= max_hold_ms)  // 30_000
+}
+```
+
+`SPACE_DOWN_TS` and `MODIFIER_ACTIVE` are read, never written, by this path —
+both are stamped only by the callback, which is why they can arbitrate. Guard 3
+also bounds a page that is torn down mid-hold (navigation, reload, crash) and
+never sends its `keyup`.
+
+**4. The VK map is the hook's, NARROWED**, and every omission is a decision:
+
+```rust
+pub(crate) fn own_window_combo_for_vk(vk: u16) -> Option<KeyCombo> {
+    match vk {
+        VK_OEM_3 => Some(KeyCombo::Backtick),
+        VK_OEM_COMMA => Some(KeyCombo::Comma),
+        VK_OEM_PERIOD => Some(KeyCombo::Period),
+        v if is_alpha_vk(v) => vk_to_char(v).map(KeyCombo::Alpha),
+        _ => None,
+    }
+}
+```
+
+* **Escape, Enter, Tab** — how a user closes a popover, submits a profile name
+  and moves between fields. A fallback that ate them would break the dashboard
+  to add a shortcut. (Space+Esc / Space+Tab therefore do NOT work inside the
+  dashboard; they still work everywhere else.)
+* **Backspace, arrows, Right Alt** — the same, for a caret.
+* **F1-F12** — gated hook-side on `BOUND_SPECIALS`, state the page cannot read.
+* **DIGITS** — the hook's `vk_to_char` covers A-Z only, so Space+7 produces no
+  event there either. Intercepting one would cost a keystroke and buy nothing.
+
+**5. The engine change is a normalisation, not a branch** (`engine/mod.rs`):
+
+```rust
+async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
+    let via_own_window_page = matches!(event, HookEvent::OwnWindowSpaceDown);
+    let event = if via_own_window_page { HookEvent::SpaceDown } else { event };
+    match event { ... }
+```
+
+One `SpaceDown` arm, so the HUD / cascade / SpaceUp paths cannot drift into two
+behaviours. The `OwnWindowSpaceDown` arm further down is written as an EXPLICIT
+arm (never `_`) so the next variant added still fails the build there, and logs
+rather than panics if a future refactor breaks the normalisation.
+
+**6. THE LOG LINE, and the one thing it must not be able to do.** The fallback
+prints, once per hold:
+
+```
+own-window fallback: Space-down came from the dashboard page (PROBLEM 257 fallback), hook silent — fallback hold #N began (hud hold #M) over own window. ...
+```
+
+It deliberately does **not** contain the words `hold start`.
+`scripts/install-proof.ps1` matches `hold start \(hold #\d+\)` together with
+`over own window` and reads that pair as the proof the KEYBOARD HOOK is alive
+over our own window (CLAUDE.md law 6). A fallback hold must never be able to
+satisfy that assertion, or the fallback's success would erase the evidence that
+PROBLEM 257 is still happening. **The fallback's own proof pair is
+`own-window fallback:` followed by `guide_hud: shown over own window`.**
+
+### The frontend, and the tradeoff it cannot avoid
+
+The hook SUPPRESSES Space-down and types a space itself on release; that is
+what makes "tap Space always types a space" exact and repeat-free. A page
+cannot suppress a key it has already been handed without deciding, at keydown
+time, that this press is a hold — which is the one thing nobody can know yet.
+So:
+
+* **In a text field the Space keydown is NOT prevented.** The browser inserts
+  the space immediately, so a TAP is perfect for free: the browser's own space,
+  at the browser's own caret, in the browser's own undo stack.
+* **If the press becomes a hold** (past `guide_hud_delay_ms`, the same number
+  the engine uses to schedule the ring) **or a combo**, the inserted space —
+  and every auto-repeat space behind it — is taken back out, and further
+  repeats are `preventDefault`ed so none come back.
+* **Outside a text field the Space keydown IS prevented.** There, "space" means
+  *click the focused button*; holding Space with the gear focused would
+  otherwise open Settings on the way to the ring.
+* **The rollover rule is mirrored** (`config.rollover_ms`, PROBLEM 95/218): a
+  letter that lands within the rollover window is prose, so both characters go
+  through and the hold is cancelled with a `SpaceUp`.
+* **KNOWN DIVERGENCE FROM THE HOOK, stated so nobody files it as a bug:** the
+  hook types a space when a long no-combo hold is released; this path does not,
+  because it removed the one the browser had already put there. Holding Space
+  inside a dashboard text field and letting go leaves no space. Deliberate —
+  the alternative is re-inserting a character at a caret the user may have
+  moved, which is a worse failure than a missing space.
+* **Bypass mode switches the fallback off too**, in Rust. The escape hatch is
+  not Space+`.` (that needs a hold the guard just refused to start) — it is the
+  pause control in Settings, which is on screen.
+
+Blur is not an afterthought: a hold interrupted by an Alt+Tab would never get
+its `keyup`, and the ring would stay on screen with nothing left able to take
+it down — the same failure PROBLEM 218's reaper exists for, on a path the
+reaper cannot see. `detach()` feeds a `window-blur` input, which releases it.
+
+### How it was verified
+
+* `cargo test --lib` — **526 passed, 0 failed, 5 ignored** (517 before; the
+  nine new ones are `hook::own_window_fallback_tests`).
+* `cargo clippy --all-targets` — exit 0, **0 warnings**.
+* `npx tsc --noEmit` — exit 0.
+* `npm run test:own-window-keys` — **23 passed, 0 failed** over the pure state
+  machine (tap, hold, combo, rollover, auto-repeat, chords, IME, blur, the VK
+  map, `isTextEntry`).
+* **The DOM half, driven in a real browser** at `preview.html?ownwindow`
+  (Chromium via the Vite preview server, 2026-09-07). Synthetic-but-well-formed
+  `KeyboardEvent`s, because the automation harness's own `key` action produces
+  events with `key:""` and `code:""` — **that is a harness limitation, recorded
+  here so nobody reads it as a bug: our listener correctly ignores a keystroke
+  that names no key.** Measured, against a real `<input>` and a real caret:
+
+  | Scenario | Result |
+  | --- | --- |
+  | Tap in a text field | Space keydown `defaultPrevented=false`; value `" "` KEPT; calls `own_window_space_down`, `own_window_space_up{hadCombo:false}` |
+  | Hold past 300 ms | `"hello "` becomes **`"hello"`** at the threshold; the space does not come back on release |
+  | Space+K after 120 ms | K `defaultPrevented=`**`true`**; `"hi "` becomes **`"hi"`**; calls `space_down`, `own_window_key{vk:75}`, `space_up{hadCombo:true}` |
+  | Letter inside the 50 ms rollover | K `defaultPrevented=false`; NO `own_window_key`; `space_up{hadCombo:false}` cancels the ring |
+  | `blur` | positive control before: 2 calls. After: space keydown `defaultPrevented=false`, **0 calls** — the listeners really are gone |
+
+### What was NOT exercised, and what the owner must do
+
+* **NOTHING HAS RUN IN THE REAL WEBVIEW.** No build, no install (the brief
+  forbade both). Every Rust guard is unit-tested and every page decision is
+  unit-tested, and neither of those is the same as one hold inside the real
+  dashboard.
+* **The three `invoke` calls have never crossed a real IPC boundary.** The
+  preview harness stubs them. In particular the arg casing (`{ vk }`,
+  `{ hadCombo }` to `vk`, `had_combo`) is asserted only by convention
+  (`save_config`'s `{ newConfig }` to `new_config` is the precedent in this
+  codebase), not by a run.
+* **The foreground check has never returned `true` in anger**, because it needs
+  our window to actually be foreground on a machine running this build.
+* **On the next build, the owner's test is one hold**: open the dashboard,
+  click inside it, hold Space 2 s, release, then Space+K. Then
+  `grep -n "own-window fallback:\|guide_hud: shown over own window\|hold start" debug.log | tail`.
+  * `own-window fallback:` + `guide_hud: shown over own window` → **the
+    fallback is carrying it, and PROBLEM 257 is still real.**
+  * `hold start ... over own window` instead → the hook recovered; the fallback
+    correctly stood aside (guard 2), and PROBLEM 257 needs re-opening as
+    intermittent rather than permanent.
+  * **Both, for the same press** → the dedupe failed. That is the one outcome
+    this entry is engineered against; capture the two timestamps.
+
+### Generalise this
+
+**When a mechanism goes deaf in exactly one situation, look for a second
+observer that is only available in that same situation.** The hook cannot see
+these keys *because* our window has focus; the page can see them *because* our
+window has focus. The condition that breaks the primary path is the condition
+that enables the fallback — which is also why the two can be made mutually
+exclusive by construction rather than by timing luck.
+
+**And a workaround must never be able to satisfy the proof that the original
+fault is fixed.** The tempting shortcut here was to reuse `HookEvent::SpaceDown`
+and let the existing `hold start` line print. It would have worked, and law 6's
+install proof would have flipped to PASS on a machine where the keyboard hook
+was still receiving nothing at all — turning the one honest witness the app has
+into a rubber stamp. A fallback gets its own sentence, or it silently retires
+the instrument it was built to work around.
+
+### LIVE PROOF — 1.0.104, built and installed 2026-09-07 10:18-10:22
+
+The entry above ended with "the three `invoke` calls have never crossed a real
+IPC boundary … the foreground check has never returned true in anger." **Both
+are now false.** This section records the first real-WebView run, and it is
+also the cleanest measurement of PROBLEM 257 anyone has taken, because the two
+happened in the same minute on the same process.
+
+**How it was observed.** 1.0.104 was built signed (NSIS + MSI + `.sig`, key id
+`CB681C0559E04895`) and installed with `scripts/install-real.cmd` launched
+through `explorer.exe` (PROBLEM 143). The app came up as pid 6436 at
+10:21:39.026. `scripts/install-proof.ps1` was then re-run through `explorer.exe`
+once the 1.0.104 banner existed; raw counts are in
+`_probe/1.0.104/deaf-grep.txt`, taken from `%APPDATA%\Spaceadom\debug.log` from
+outside the container.
+
+**Counted in the 91 log lines after the `Spaceadom build — version 1.0.104`
+banner:**
+
+| Line | Count |
+| --- | --- |
+| `own-window fallback: Space-down came from the dashboard page …` | **3** |
+| `hold start (hold #N) … over own window` | **0** |
+| `guide_hud: shown over own window` | **2** |
+| `hook: KEYBOARD DEAF, PROVEN` | **1** |
+
+The fallback's own proof pair, in full:
+
+```
+10:21:42.042 [INFO] …::engine — own-window fallback: Space-down came from the
+  dashboard page (PROBLEM 257 fallback), hook silent — fallback hold #1 began
+  (hud hold #1) over own window. …
+10:21:42.540 [INFO] …::guide_hud::mod_impl — guide_hud: overlay window shown (hold #1)
+10:21:42.540 [INFO] …::guide_hud::mod_impl — guide_hud: shown over own window — …
+10:21:42.561 [INFO] …::commands — overlay_fit_hud: asked 1188x727 → clamped
+  1188x727 @ (366,176); … GOT size Ok((1188.0, 727.0)) pos Ok((366.0, 177.0));
+  visible Ok(true)
+```
+
+So the page's `own_window_space_down` crossed the IPC boundary, the Rust
+foreground guard returned true, `engine::dispatch`'s normalisation turned it
+into an ordinary `SpaceDown`, and a real 1188x727 ring composited on screen —
+the entire path, end to end, with the keyboard hook contributing nothing.
+
+**Three fallback holds produced two rings and zero double-fires.** The third
+hold was released inside the HUD delay, so no ring was owed. Critically, **no
+press produced both a fallback line and a `hold start` line** — the dedupe the
+whole design was built around held on its first real outing. (It was never
+seriously stressed, because the hook was deaf the whole time; the guard's
+hard case, a hook that recovers mid-session, is still untested.)
+
+**And PROBLEM 257 fired 33 seconds later, in the same process:**
+
+```
+10:22:15.226 [WARN] …::hook — hook: KEYBOARD DEAF, PROVEN (PROBLEM 257) —
+  Space is physically DOWN right now (GetAsyncKeyState, read on the watchdog
+  thread) with no hold latched and no pass-through gate active, yet our
+  keyboard callback has not fired for 5906ms (mouse callback 922ms ago; user
+  active 16ms ago). Foreground: spaceadom.exe <- SPACEADOM'S OWN WINDOW. …
+10:22:16.365 [INFO] …::hook — hook diagnostics — … watchdog-reinstalls:1 …
+  keyboard-deaf-rehooks(Space down, no callback):1
+```
+
+**PROBLEM 257 IS NOT FIXED AND IS NOT VERSION-CAUSED.** The owner bisected it
+the same morning: 1.0.91, 1.0.100 and 1.0.103 were each installed and each
+reproduced it, and 1.0.100 showed a healthy
+`guide_hud: shown over own window` at 10:12:48 before going deaf again minutes
+later. It is intermittent and environmental. A version bisect that reproduces
+on every version it tries has answered the question it was asked — "which
+release broke this" is the wrong question, and the record should say so rather
+than leave the next reader to run it again.
+
+**The ship report for 1.0.104 therefore says `own-window ring proof: UNPROVEN`,
+in capitals, and it is correct.** Law 6 wants the HOOK's line and the hook did
+not produce one. What is proven is the second row of law 6's table.
+
+**Generalise this (added by the ship run).** *A workaround shipping is not the
+same as the fault closing, and the log has to be able to say which one you are
+looking at.* Anyone opening the dashboard on 1.0.104 will see the ring work and
+reasonably conclude the deaf-hook bug is gone. It is not — it fired during this
+build's own install proof. The only reason that misreading is recoverable is
+that the two paths write different sentences. **If a workaround and a fix would
+produce identical evidence, the workaround has destroyed your ability to tell
+whether the fix ever lands.**
+
+---
+
+## PROBLEM 260 — the watchdog was WAITING FOR THE MOUSE TO STOP MOVING before it would notice the keyboard was dead: a timed-out `WH_KEYBOARD_LL` hook stays installed and is never called again, and `WH_MOUSE_LL` on the same thread keeps firing, so every candidate test the watchdog had was false for 130 seconds while the app was provably deaf (found 2026-09-07 on 1.0.103 with an independent LL-hook probe; fixed in `hook/mod.rs`, gates green)
+
+### SHIPPED IN 1.0.105 — 2026-09-07, and here is exactly what was and was NOT proved
+
+Gates: `cargo test --lib` **539 passed / 0 failed / 5 ignored**, `cargo clippy
+--all-targets` **0 warnings**, `tsc` clean, `vite build --outDir dist2` clean.
+
+**The bytes are on the machine.** Three markers were chosen from this
+problem's new code, all of them `&'static str` in `.rodata` (one `const`, two
+`format_args!` pieces) and all pure ASCII:
+
+1. `MECHANISM (PROBLEM 260): when a WH_KEYBOARD_LL callback overruns LowLevelHooksTimeout` — `TIMEOUT_EVICTION_DESC`.
+2. `the old line read a 60s counter and printed '#1' three times). Handles: keyboard ` — the forced-repair WARN, the piece carrying the old -> new HHOOK triple.
+3. ` consecutive forced repair(s) delivered no keyboard callback, so the backoff is engaged and the next repair waits ` — the backoff WARN.
+
+Each read **False in the installed 1.0.104** (21,942,272 bytes, read through
+`explorer.exe` — PROBLEM 143), **True in the freshly built 1.0.105 exe before
+the installer ran**, and **True in the installed 1.0.105** afterwards. Both
+halves, in that order, which is what makes the False evidence rather than an
+unmeasured guess. The readings are in `_probe/1.0.105/marker-precheck.txt`,
+`preinstall-probe.txt` and `install-check.txt`.
+
+**A control went stale, and the way it went stale is worth keeping.**
+`Space is physically DOWN right now (GetAsyncKeyState, read on the watchdog
+thread) with no hold latched` was PROBLEM 257's WARN sentence and had been a
+marker since 1.0.103. This fix folded that detector into
+`keyboard_deaf_with_space_down` and gave the verdict ONE voice, so the sentence
+now survives only as a doc comment on `ProvenDeaf::SpaceHeld` — and doc
+comments do not ship. Measured both ways before it was retired: **True in the
+installed 1.0.104, False in the freshly built 1.0.105**. GENERALISE: a control
+that is True in the old build and False in the new one is a string the release
+DELETED; only a control that is False in BOTH is a scan that broke. Its
+replacement, `callback-only counters (PROBLEM 236): nothing but a hook proc can
+move them` (the `hook liveness split` line this fix's own message tells the
+reader to read next), was measured True in 1.0.104 on the day it joined the
+list, so it was a control from its first use rather than a guess.
+
+**A SECOND COUNTER TRAP, same class as the one recorded for `KEYBOARD DEAF,
+PROVEN`, found while counting for this ship report.** `grep "hold start"` on
+`debug.log` matches every PROBLEM 259 FALLBACK line too — not because the
+fallback line starts a hold that way, but because its body QUOTES the advice
+`'hold start (hold #N) … over own window'` for the reader. On the live log that
+turned 0 real hook holds into 1,188 apparent ones. The discriminating pattern
+is `hold start` followed by `(hold #` and a DIGIT, not the letter N.
+`install-proof.ps1` already matches `hold start \(hold #\d+\)` and is
+unaffected; a hand-typed grep is not.
+
+**WHAT WAS NOT PROVED, IN CAPITALS. THE FORCED REPAIR HAS NEVER EXECUTED ON
+HARDWARE.** Since the 1.0.105 banner (`Spaceadom build — version 1.0.105
+(21943296 bytes ...)`, 10:45:31.974): `FORCED REPAIR #N this session` **0**,
+backoff-engaged **0**, `hook: KEYBOARD DEAF, PROVEN` **0** — and **0** for each
+of them in the entire log across every build, because those lines did not exist
+before this one. The detection path is unit-tested and installed; it has not
+been observed firing. Read the next `hook liveness split` line after the first
+one that does: `primary_real` above 0 means the re-install cured it, still 0
+means the drop is upstream of every hook in this process.
+
+**LAW 6 IS ALSO UNPROVEN ON 1.0.105**, and the control says why that number is
+real rather than a broken grep. Since the 1.0.105 banner: hook `hold start
+(hold #N) … over own window` **0**, `own-window fallback:` **0**, `guide_hud:
+shown over own window` **0** — nobody has held Space since the install. In the
+PREVIOUS window, the last 1.0.104 boot the owner actually used, the same three
+patterns read **0**, **10** and **9**. So on this machine every ring seen
+inside the dashboard in that session came from PROBLEM 259's fallback and the
+keyboard hook saw **not one** Space over our own window. **PROBLEM 257 is open
+and this release does not close it.**
+
+
+**Symptom.** PROBLEM 257's, again: Space+letter dead for a couple of minutes,
+nothing on screen, no restart, it comes back on its own. What is new is that
+this time a **separate process was watching the same hook chain**, so for the
+first time the app's silence could be checked against something the app did not
+write.
+
+### The measurement
+
+An independent `WH_KEYBOARD_LL` probe (`_probe/ll-probe/probe3.ps1`, output in
+`_probe/ll-probe/events-run3.txt`) was run beside the installed app. Against
+`%APPDATA%\Spaceadom\debug.log` for the same minutes:
+
+```
+10:10:19.237  WATCHDOG — user active 16ms ago but NEITHER hook saw anything
+              (kb 3844ms / mouse 15656ms …) … Re-hooking. reinstall ok: true
+10:10:24      the last keyboard callback of the episode  (implied by the two
+              lines below: 5344ms after the 10:10:19 repair, and 129672ms
+              before 10:12:34)
+10:10:59.236  WATCHDOG would re-hook (kb 4000ms / mouse 3109ms …) but the
+              cooldown test says the last repair delivered events — a genuine
+              keyboard callback arrived 5344ms after it. Holding off for the
+              rest of the 60s cooldown.
+10:11:49.248  hook liveness split — primary_real:0 primary_injected:0
+              reference:0 mouse:217 in the last 60s
+10:12:34.246  WATCHDOG — user active 391ms ago but NEITHER hook saw anything
+              (kb 17016ms / mouse 3032ms …; the reference hook last genuinely
+              fired 129672ms ago (32 total)). Foreground: WindowsTerminal.exe
+              … Re-hooking. reinstall ok: true
+10:12:34.551  PROBE START … HOOKS kb=0x1481051 err=0 mouse=0x9540FB9 err=0
+10:12:34.565  K msg=0x100 vk=32 …   (keys flowing to the probe, 14ms later)
+10:12:34.850  guide_hud: overlay window shown (hold #7)
+10:12:49.240  hook liveness split — primary_real:115 … mouse:2101
+```
+
+The `mouse:217` beside `primary_real:0 reference:0` is the whole diagnosis in
+one line: **the hook thread's pump was healthy and servicing mouse callbacks
+several times a second, while neither keyboard hook was called once in sixty
+seconds.** The probe's own counters confirm keys were reaching the OS.
+
+### Root cause of the DETECTION failure (this entry). Not of the deafness itself.
+
+Two facts about `WH_KEYBOARD_LL` that this codebase had never written down:
+
+1. When a low-level hook callback overruns `LowLevelHooksTimeout`
+   (`HKCU\Control Panel\Desktop`, 1000 ms by default), **Windows stops calling
+   it and leaves the handle valid.** No message, no error, no return code says
+   so. `UnhookWindowsHookEx` on it still succeeds. From inside the process, an
+   evicted hook and a hook nobody has typed into are the same observation.
+2. **`WH_MOUSE_LL` is a separate hook with its own timeout record**, even on the
+   same thread from the same pump. Evicting the keyboard hook does not touch it.
+
+So the failure shape is *keyboard hooks dead, mouse hook alive*. The watchdog
+had exactly two ways to raise a candidate alarm, and **neither of them can
+express that shape**:
+
+| Candidate | Code (`hook/mod.rs`) | Why it was false for 130 s |
+| --- | --- | --- |
+| `both_dead` | `let both_dead = kb_silence > BLIND_MS && ms_silence > BLIND_MS;` | the mouse hook was firing 3–4×/s, so `ms_silence` never crossed 3000 ms |
+| `kb_only_dead` | `let kb_only_dead = kb_silence > BLIND_MS && ref_seen > 0 && ref_silence < BLIND_MS;` | needs a **live reference hook**; the reference was dead too (`reference:0`) |
+
+and the tick therefore returned here without printing a word:
+
+```rust
+if !both_dead && !kb_only_dead {
+    BLIND_REINSTALLS.store(0, Ordering::Relaxed);
+    …
+    return;
+}
+```
+
+The alarm at `10:12:34.246` fired **only because the mouse happened to fall
+quiet for 3032 ms at that instant** (`ms_silence` finally crossed 3000). The
+repair was waiting on the user to stop moving the mouse.
+
+### The suppression map, and what it actually shows
+
+Every throttle in `watchdog_check` was read end to end. Verdict for each, against
+the log above:
+
+| Gate | Where | Can it block a repair while PROVABLY deaf? |
+| --- | --- | --- |
+| **the candidate tests themselves** (`both_dead` / `kb_only_dead`) | `hook/mod.rs` `watchdog_check` | **YES — and this is the fault.** 130 s of proven deafness with no candidate at all. |
+| idle early-return (`user_input_ms >= 2000`) | `watchdog_check`, above everything | Correctly, yes: idle time is not evidence (PROBLEM 101). Not implicated — the user was active 391 ms ago. |
+| NULL foreground / elevated foreground (UIPI) | `watchdog_check` | Correctly, yes; a re-hook cannot cure UIPI. Foreground was `WindowsTerminal.exe`, unelevated. Not implicated. |
+| 60 s cooldown + `previous_worked` | `if last != 0 && now.saturating_sub(last) < 60_000 { … if previous_worked { … return; } }` | Yes, structurally. It fired once here, at `10:10:59.236`, and on its own terms it was **correct**: a genuine keyboard callback really had arrived 5344 ms after the 10:10:19 repair. What it could not know is that the keyboard died again 35 s later. It was not the 130-second gap. |
+| blind-retry floor (`BLIND_RETRY_MS = 5_000`) | same block | Yes, for 5 s. Bounded and not implicated. |
+| escalation floor (`ESCALATE_EVERY_MS = 120_000`) | end of `watchdog_check` | It suppresses the *thread rebuild*, never the re-hook. Not implicated. |
+| install grace (`INSTALL_GRACE_MS = 10_000`) | `classify_callback_liveness` | Yes, by design; 10 s after an install nothing means anything. Not implicated (install was 135 s old). |
+| unknown bound (`UNKNOWN_MAX_MS = 30_000`) | `classify_callback_liveness` | Only admits alarms, never blocks one that has evidence. Not implicated. |
+| live-hold deferral (`MAX_HOLD_DEFER_MS = 10_000`) | `hold_defers_rehook` | Yes, for ≤10 s, deliberately (PROBLEM 236). Not implicated. |
+| `keyboard_deaf_with_space_down`'s 15 s floor (`OWN_DEAF_REHOOK_COOLDOWN_MS`) | PROBLEM 257 block | Yes in principle. **Not implicated**: the last such repair was at 10:06:53, far outside 15 s. The reason this path stayed silent is that it requires **Space to be physically held at the moment the watchdog ticks**, and the user was typing into a terminal. |
+
+### The two readings of the log that were WRONG, and the lines that disprove them
+
+Both came from the brief this work started from. Recording them because each is
+a trap the next reader will fall into as well.
+
+**1. "`watchdog-reinstalls` reads 1 at 10:10:23 and STILL 1 at 10:12:36, so
+Spaceadom did not reinstall during the recovery."** It did. `HOOK_REINSTALLS` is
+**drained** — `let rh = HOOK_REINSTALLS.swap(0, Ordering::Relaxed);` in
+`drain_hook_diagnostics` — so that line is a **per-window count, not a running
+total**. Two windows each reporting 1 means one reinstall in each. The
+`10:12:34.246` line itself is the proof: `Re-hooking. reinstall ok: true` is
+logged **after** `install_hooks()` returns, so its presence *is* the reinstall.
+
+**2. "`repair #1 this session` three times means that path never really
+reinstalled."** The number was right; the word *session* was the lie. The
+PROBLEM 257 line computed `#N` from `OWN_DEAF_REHOOKS`, which
+`drain_hook_diagnostics` also swaps to zero every 60 s. **A counter that is
+drained cannot also be a session total.**
+
+*Generalise both:* **a number printed beside the word "session" must read a
+counter nothing drains — and if a log line's meaning depends on whether its
+counter is cumulative or windowed, the line has to say which.**
+
+### The fix
+
+`src-tauri/src/hook/mod.rs`. A **third, independent candidate** — not a bypass
+bolted onto the old path — that reaches its verdict from callback-only clocks
+and repairs on it directly, above every throttle.
+
+* `proven_keyboard_deaf(…) -> Option<ProvenDeaf>` — the pure decision.
+  `ProvenDeaf::SpaceHeld` is PROBLEM 257's original test, delegated to
+  `keyboard_deaf_with_space_down` so the two can never disagree.
+  `ProvenDeaf::InputUnaccountedFor` is the generalisation: the keyboard callback
+  is silent past the threshold **and** the OS input clock moved inside 2000 ms
+  **and our own mouse callback cannot account for that input** (its last
+  callback is older than the input by more than a 250 ms attribution margin).
+* **Why that is not PROBLEM 101's deleted `kb_dead` branch.** That one read
+  `kb_silence > 120_000 && ms_silence < 8_000` — it fired *when the mouse WAS
+  delivering*, which is a description of reading a page, and it produced 95 of
+  255 false alarms. This one fires only when the mouse is demonstrably **not**
+  delivering while the OS says input happened anyway. The mouse test is the
+  other way up. A person reading a page moves the mouse, the mouse callback
+  accounts for the OS clock, and the verdict is `None`.
+* **The 60 s cooldown and the `previous_worked` test are bypassed on a proven
+  verdict, and the code comment says why:** they exist to stop churn on
+  UNEVIDENCED alarms (PROBLEM 236, where 6 of 16 alarms printed `4000/4000`
+  seeded clocks and each false repair killed a live hold). They keep that job in
+  full for the `both_dead`/`kb_only_dead` path, which is unchanged.
+* **What still suppresses, on purpose, and is inside the pure function so a test
+  can reach it:** the install grace; PROBLEM 228's never-fired-is-UNKNOWN law
+  (a keyboard callback that has not fired since the install is the failed-install
+  case and belongs to the unknown bound, not here); and **no forced repair ever
+  runs while a hold is latched**, so this path can never be "it dies mid-press".
+* **The repair is real.** `UnhookWindowsHookEx` on both primaries, then
+  `install_hooks()`, which unhooks and reinstalls the **reference hook first**
+  (law 5 — it must land at the tail) and then the primary and the mouse.
+  `nkb.is_invalid()` is checked and logged at ERROR.
+* **The log can no longer be ambiguous.** `FORCED_REPAIRS_TOTAL` is never
+  drained, and the line prints **old → new HHOOK values for all three hooks**:
+  a handle that did not change means the install failed.
+* **Rate limit:** `forced_repair_allowed` / `forced_repair_backoff_ms` — a 5 s
+  floor, doubling to a 60 s cap once repairs stop delivering keyboard callbacks,
+  reset to the fast cadence the moment one does. The backoff logs when it
+  engages.
+* **One line names the mechanism** for the next reader: `TIMEOUT_EVICTION_DESC`,
+  printed on every forced repair — timed-out LL keyboard hook stays installed
+  and is never called again, `WH_MOUSE_LL` is tracked separately, reinstalling
+  is the only cure.
+
+### Verification
+
+`cargo test --lib` **539 passed** (526 before, +13 in `proven_deaf_tests`),
+`cargo clippy --all-targets` **0 warnings**, `npx tsc --noEmit` clean.
+
+The tests are arithmetic on the measured shapes: the 10:11:20 tick that printed
+nothing; the 10:12:34.246 alarm's own numbers; a moving mouse never being
+deafness (both sides of the 250 ms margin, so it cannot be widened silently);
+the grace still suppressing; a latched hold still suppressing; never-fired still
+UNKNOWN; the backoff doubling and capping; and a repair that delivers events
+putting the fast cadence back.
+
+### What is NOT proven
+
+* **Which install restored delivery at 10:12:34.** Spaceadom re-hooked at
+  `.246` and the probe installed at `.551`; keys were flowing 14 ms after the
+  probe. 305 ms and no keystroke record separate the two, so the log cannot say
+  whether the app cured itself or the probe's chain change did. Either way the
+  cure was *a chain change*, which is what this fix delivers on time instead of
+  105 seconds late.
+* **The underlying deafness.** This entry fixes DETECTION and REPAIR LATENCY.
+  Whether the eviction is a `LowLevelHooksTimeout` overrun, something upstream
+  of every hook in the process, or a third party, is not claimed. The
+  `TIMEOUT_EVICTION_DESC` mechanism is documented Windows behaviour and it fits
+  every number in the log; it is not proven to be what happened here. The new
+  log line is what will tell: `primary_real` above 0 in the split after a forced
+  repair means the re-install cured it.
+* **Ring without `hold start`.** At `10:12:34.850` the log has
+  `guide_hud: overlay window shown (hold #7)` with **no** preceding
+  `hold start (hold #7)` engine line and no `own-window fallback:` line. On the
+  build running at that moment those are the only two documented producers of a
+  ring. Unresolved; noted so the next reader does not read that ring as proof the
+  hook was alive.
+* Nothing here was run against a real build. **No build or install was
+  performed** — another agent was shipping 1.0.104 during this work.
+
+---
+
+## PROBLEM 261 — a FALLBACK hold drew the ring and armed nothing: every gate pointer activation passes reads `MODIFIER_ACTIVE`, and the keyboard callback that writes it is the one thing a fallback hold never runs (found on installed 1.0.105, 2026-09-07; fixed in `hook/mod.rs` + `hook/pointer.rs`, gates green, **NEVER RUN IN A REAL WEBVIEW**)
+
+**Symptom, in the owner's words, on installed 1.0.105.** With the dashboard
+focused, holding Space **does** show the ring — PROBLEM 259's own-window
+fallback working exactly as designed — but *"it's not seeing my cursor movement
+and it's not opening apps when clicked"*. Outside the dashboard, pointer aiming
+and click-to-launch work normally. So: a fallback-owned hold draws the HUD and
+never arms pointer activation.
+
+### The precondition map — everything pointer activation needs, and who supplies it
+
+This is the table that was missing when PROBLEM 259 was written. Every row is a
+precondition; the last column is the answer for a FALLBACK hold on 1.0.105.
+
+| # | Precondition | Written by | file:line (1.0.105) | Fallback? |
+| --- | --- | --- | --- | --- |
+| 1 | `POINTER_HUD_ACTIVATION` — the "Point to launch" setting | `publish_pointer_hud_activation`, from the config funnel | `hook/mod.rs:1780` | **YES** — a setting, nothing to do with the witness |
+| 2 | `CHIP_KEYS` / `CHIP_KEY_COUNT` — which key each chip launches | `pointer::publish_keys(&payload.apps)` from `show_hud_payload` | `guide_hud/mod_impl.rs:512` → `hook/pointer.rs:351` | **YES** — the engine's `SpaceDown` arm runs for a fallback hold (`engine/mod.rs:200` normalises `OwnWindowSpaceDown` → `SpaceDown`), so the show, and the publish inside it, are the same code |
+| 3 | `CHIP_RECTS` / `CHIP_GEOM_COUNT` / `HUD_CENTER_*` / `DEAD_ZONE_PHYS` — the geometry | the OVERLAY PAGE's `publishHudChips` → `publish_hud_chips` → `pointer::publish_chips` | `src/components/toast.ts:3698` → `commands.rs:2768` → `hook/pointer.rs:402` | **YES** — the page publishes after layout, and it lays out because the ring was shown |
+| 4 | `HUD_VISIBLE && !OVERLAY_DISABLED` — guards 1 and 5 | `show_hud_payload` / `hide_guide_hud_pending` | `guide_hud/mod_impl.rs:694`, poller reads at `hook/pointer.rs:1052` | **YES** — same show path |
+| 5 | `CURSOR_X/Y/STAMP` — the only source of cursor truth | `pointer::note_cursor` from the MOUSE callback's `WM_MOUSEMOVE` branch | `hook/mod.rs:3922` → `hook/pointer.rs:260` | **NO** — the branch sits below `if !MODIFIER_ACTIVE { return CallNextHookEx }` at `hook/mod.rs:3909` |
+| 6 | `MODIFIER_ACTIVE` — the poller's `live` term | the KEYBOARD callback's Space-down branch | `hook/mod.rs:3624`, consumed at `hook/pointer.rs:1046` and in `HoldTracker::tick`'s `live` at `hook/pointer.rs:762` | **NO** — the callback is never called (PROBLEM 257) |
+| 7 | `SPACE_DOWN_TS` — WHICH hold a tick belongs to, and the floor `CURSOR_STAMP` must clear | the same Space-down branch | `hook/mod.rs:3626`, consumed at `hook/pointer.rs:989` | **NO** — a fallback hold reuses the last hook hold's stamp, or 0 at boot |
+| 8 | `ARMED_INDEX` / `HOLD_BLOCKED` reset for a fresh hold | `pointer::on_space_down()` from the Space-down branch | `hook/mod.rs:3636` → `hook/pointer.rs:269` | **NO** — same branch |
+| 9 | `SPACE_ABORTED` false at hold start, so `apply_to`'s CAS can claim it to arm | the same Space-down branch | `hook/mod.rs:3625`, claimed at `hook/pointer.rs:869` | **NO** — same branch |
+| 10 | THE CLICK (gesture B) — `WM_LBUTTONDOWN` → `take_armed_key` → `PointerActivate` | the MOUSE callback | `hook/mod.rs:3930` | **NO** — same early return as row 5 |
+| 11 | THE RELEASE (gesture A) — `take_armed_key` on Space-up → `PointerActivate` | the KEYBOARD callback's Space-up branch | `hook/mod.rs:3563` | **NO** — `own_window_space_up` injected a bare `SpaceUp` and never consulted the pointer |
+| 12 | Teardown — `pointer::reset_on_eviction()` | Space-up (implicitly, via `take_armed_key`), the PROBLEM 218 reaper, the watchdog repair | `hook/pointer.rs:324`, `hook/mod.rs:1272`, `hook/mod.rs:3173` | **NO** — the reaper keys on `MODIFIER_ACTIVE` + auto-repeat, neither of which a fallback hold produces |
+
+**Six of the twelve failed, and every one of them for the same reason.** Rows
+2–4 — the ones PROBLEM 259 might plausibly have broken, because they involve
+the page — were all fine: the engine's normalisation at `engine/mod.rs:200` is
+doing exactly what it was written to do, so the HUD path is genuinely one path.
+What failed is everything downstream of the keyboard CALLBACK, which is the one
+component a fallback hold is defined by not running.
+
+Rows 5 and 10 are the owner's two sentences, one each: no `note_cursor` is "not
+seeing my cursor movement", no `WM_LBUTTONDOWN` branch is "not opening apps when
+clicked". Row 6 means that even with a cursor, `HoldTracker::tick`'s
+`live = enabled && modifier_active && hud_visible && !blocked` could never be
+true. Row 7 is the quiet one nobody would have reported: it would have paired a
+fallback hold with a cursor position left over from a previous hold.
+
+### The fix, and the thing it deliberately does NOT do
+
+**It does not set `MODIFIER_ACTIVE`.** That is the obvious one-line fix and it
+is wrong four times over — the long comment above `OWN_HOLD_ACTIVE` in
+`hook/mod.rs` is the permanent record, summarised:
+
+1. **`MODIFIER_ACTIVE` IS guard 2.** `own_window_space_down_accepted` refuses a
+   fallback hold while it is latched, because a latched hook hold is the same
+   physical press. If the fallback set it, one fallback hold whose Space-UP was
+   lost would refuse *every later fallback hold, permanently* — the dashboard
+   would go silent until restart. PROBLEM 259 states the invariant outright:
+   `SPACE_DOWN_TS` and `MODIFIER_ACTIVE` are *read, never written* by this path,
+   *which is why they can arbitrate.* **An arbiter may not be a party.**
+2. **It is the deafness verdict.** `proven_keyboard_deaf` (`hook/mod.rs:2642`)
+   takes `MODIFIER_ACTIVE` as evidence a hold is in progress. A fallback hold
+   that set it would talk PROBLEM 260's instrument out of the verdict the
+   fallback exists because of.
+3. **It arms the keyboard callback.** `if MODIFIER_ACTIVE && is_down` is the
+   combo branch. Alt-Tab mid-hold into a window where the hook is *not* deaf and
+   the next letter typed there is eaten as a shortcut.
+4. **It breaks the hook's own Space-down branch**, which reads a latched
+   `MODIFIER_ACTIVE` as "this is an auto-repeat" and sends no `SpaceDown`.
+
+So the fallback gets **its own latch**, and every consumer that asked "is a hold
+latched?" is changed to ask **both**. Consequence worth stating plainly, because
+it is the brief's item 3 answered by construction rather than by a reaper:
+**a fallback hold can never leave `MODIFIER_ACTIVE` latched, because nothing on
+that path writes it.**
+
+#### The new state (`hook/mod.rs`)
+
+```rust
+/// `true` while the PROBLEM 259 fallback owns a Space-hold. The exact
+/// counterpart of `MODIFIER_ACTIVE` for the second witness, and read on the
+/// mouse callback (one relaxed load).
+static OWN_HOLD_ACTIVE: AtomicBool = AtomicBool::new(false);
+static OWN_HOLDS_REAPED: AtomicU32 = AtomicU32::new(0);
+pub(crate) const OWN_HOLD_FG_CHECK_MS: u64 = 250;
+```
+
+#### The four pure decisions
+
+```rust
+/// Is SOME Space-hold latched right now? `||`, not `^`: the two are mutually
+/// exclusive by guard 2 for one press, but a fallback hold torn down as the
+/// hook takes a fresh one is a legal transient, and during it a hold IS latched.
+#[inline(always)]
+pub(crate) fn hold_latched(hook_latched: bool, own_hold_active: bool) -> bool {
+    hook_latched || own_hold_active
+}
+
+/// WHICH hold a poller tick belongs to. The fallback's stamp WINS while it
+/// owns the hold; falling back to `SPACE_DOWN_TS` would hand the tracker a
+/// cursor position the user parked minutes ago.
+#[inline(always)]
+pub(crate) fn hold_ts_for(hook_ts: u64, own_hold_active: bool, own_ts: u64) -> u64 {
+    if own_hold_active && own_ts != 0 { own_ts } else { hook_ts }
+}
+
+pub(crate) enum OwnHoldReap { ForegroundLost, Expired }
+
+/// `foreground_is_own` is `None` on ticks between probes — "not checked", which
+/// can never be a reason to reap. Expiry is checked FIRST so a hold that is
+/// both expired and non-foreground reports the unrecoverable bound.
+pub(crate) fn own_hold_reap_reason(
+    active: bool,
+    own_hold_age_ms: Option<u64>,
+    max_hold_ms: u64,
+    foreground_is_own: Option<bool>,
+) -> Option<OwnHoldReap> {
+    if !active { return None; }
+    match own_hold_age_ms {
+        None => Some(OwnHoldReap::Expired),          // latched with no stamp = torn
+        Some(age) if age > max_hold_ms => Some(OwnHoldReap::Expired),
+        _ => if foreground_is_own == Some(false) { Some(OwnHoldReap::ForegroundLost) }
+             else { None },
+    }
+}
+```
+
+#### Arming — every line is a store of a constant, so it is idempotent (brief item 4)
+
+```rust
+fn arm_own_window_hold(now: u64) {
+    OWN_HOLD_TS.store(now, Ordering::Relaxed);      // stamp BEFORE the latch
+    OWN_HOLD_COMBO.store(false, Ordering::Relaxed);
+    SPACE_ABORTED.store(false, Ordering::Relaxed);  // or apply_to's CAS refuses every arm
+    pointer::on_space_down();                       // rows 8 and 9
+    OWN_HOLD_ACTIVE.store(true, Ordering::SeqCst);
+}
+
+fn disarm_own_window_hold() -> bool {
+    let owned = OWN_HOLD_ACTIVE.swap(false, Ordering::SeqCst);  // a CLAIM: exactly one caller
+    OWN_HOLD_TS.store(0, Ordering::Relaxed);
+    OWN_HOLD_COMBO.store(false, Ordering::Relaxed);
+    // ONLY WHEN WE OWNED ONE — `ARMED_INDEX` and `CLICK_EATEN` are SHARED with
+    // the hook path. `own_window_space_up` calls this on its not-ours branch
+    // too, and an unconditional reset there would let a stray release from a
+    // page with torn state disarm a chip a perfectly healthy HOOK hold had
+    // armed, or strand the up-half of a suppressed click.
+    if owned { pointer::reset_on_eviction(); }
+    owned
+}
+```
+
+**What is deliberately absent from `arm_own_window_hold`, each an argument:**
+
+* `MODIFIER_ACTIVE` — the four reasons above.
+* `SPACE_INTERCEPTED` — the hook did not swallow this Space-down, so it owes no
+  Space-up. Setting it would make the next real Space-up the hook *does* see
+  inject a phantom space the user never typed.
+* `SPACE_TICK_TS` / `SPACE_REPEATS` / `SPACE_COMBO_SEEN` — the auto-repeat
+  liveness signal `reap_stale_hold` measures. A fallback hold produces no hook
+  auto-repeats, so writing those would feed that reaper evidence it did not
+  observe. The fallback's bound is `own_hold_reap_reason` instead.
+
+`arm_own_window_hold` is called from `own_window_space_down` **before** the
+event goes to the engine, not after: the ring only appears after
+`guide_hud_delay_ms`, but the mouse callback must start recording cursor
+positions immediately, because guard 2's travel test measures from where the
+cursor was when the hold began. If the inject then fails (channel full or
+absent), the rollback is a full `disarm_own_window_hold()`, not just the stamp.
+
+#### The three gates, changed
+
+```rust
+// hook/mod.rs, ms_hook_proc — was `if !MODIFIER_ACTIVE.load(Relaxed) { pass }`
+if !hold_latched(
+    MODIFIER_ACTIVE.load(Ordering::Relaxed),
+    OWN_HOLD_ACTIVE.load(Ordering::Relaxed),
+) {
+    return CallNextHookEx(None, n_code, w_param, l_param);
+}
+```
+
+Cost: one extra relaxed load per mouse event when no hook hold is latched — no
+branch, no call, no allocation, and a hook hold pays nothing because `||` short-
+circuits. This single change restores rows 5 and 10 (and, as a by-product,
+Space+wheel opacity inside the dashboard, which shares the same gate).
+
+```rust
+// hook/pointer.rs, the st-hud-pointer poller
+let held = super::any_hold_latched();          // tick cadence: 16ms, not 40ms
+let hold_ts = super::current_hold_ts();        // row 7
+let input = TickIn { modifier_active: super::any_hold_latched(), .. };  // row 6
+```
+
+The `TickIn` field keeps its name because its *meaning* is unchanged — "a Space
+is held right now" — only the set of witnesses that can say so has grown.
+
+#### Gesture A, for a fallback release (row 11)
+
+```rust
+pub(crate) fn own_window_space_up(had_combo: bool) -> bool {
+    if !own_window_hold_is_ours(own_hold_age_ms(), OWN_WINDOW_MAX_HOLD_MS) {
+        disarm_own_window_hold();
+        return false;
+    }
+    let modifier_fired = had_combo || OWN_HOLD_COMBO.load(Ordering::Relaxed);
+    let ev = match pointer::take_armed_key() {
+        Some(ch) => HookEvent::PointerActivate(ch),
+        None => HookEvent::SpaceUp { modifier_fired },
+    };
+    disarm_own_window_hold();
+    inject_hook_event(ev)
+}
+```
+
+`take_armed_key` is the same function the callback calls and the only consumer
+of `ARMED_INDEX`, so a chip armed under a fallback hold launches on release
+exactly as it does under a hook hold. **No space is injected here**, and that is
+not an omission — the hook types the space on release because it swallowed the
+down-stroke, and this path never did (PROBLEM 259, "KNOWN DIVERGENCE FROM THE
+HOOK").
+
+**Double-activation is impossible by construction, and it is worth saying why:**
+gesture B (click) consumes the arm *and* sets `HOLD_BLOCKED`, so the release
+sees `ARMED_INDEX == -1` and sends a plain `SpaceUp`. And a fallback hold can
+never *also* be ended by the hook's Space-up branch, because that branch returns
+early unless `SPACE_INTERCEPTED` was set — which `arm_own_window_hold`
+deliberately does not set.
+
+#### The reaper (brief item 3)
+
+`reap_stale_hold` cannot see this shape: it measures the keyboard hook's
+auto-repeat and a fallback hold produces none. So there is a twin,
+`reap_own_window_hold(check_foreground: bool)`, with **two independent bounds**:
+
+* **The foreground.** Guard 1 admitted this hold *because our window was
+  foreground*, and that condition is continuously observable **from outside the
+  page** — which is the point: it catches the case the page's own `blur`
+  listener cannot, namely that the page is gone and its listener with it.
+  Re-asked at most every `OWN_HOLD_FG_CHECK_MS` = 250 ms, and only while a
+  fallback hold is live, so the probe (three Win32 calls and a `String`) runs
+  four times a second during a hold and never otherwise. It compares exe stems,
+  so our own overlay window counts as "own window".
+* **`OWN_WINDOW_MAX_HOLD_MS` = 30 s.** The remaining shape: a dead page inside a
+  window that is still foreground.
+
+Two homes, exactly like `reap_stale_hold`: the `st-hud-pointer` poller (the fast
+one, above the `enabled` bail-out for the same reason its twin is — a stranded
+ring is not a pointer feature) and the hook pump's `WM_TIMER` branch (for when
+the watcher failed to spawn, PROBLEM 124). Teardown is also wired into the
+watchdog's re-hook repair at `hook/mod.rs:3173`, beside
+`pointer::reset_on_eviction()`.
+
+**Ordering note, stated so it is not read as a race later.** On an ordinary
+Alt-Tab the page's `blur` → `detach()` → `window-blur` → `own_window_space_up`
+runs in milliseconds, and it *launches an armed chip* — the same thing the hook
+does for an armed release. The foreground reaper cannot beat it: it probes at
+most every 250 ms and only after the foreground has actually changed. The reaper
+therefore only ever fires when the blur handler did not run at all, and in that
+case there is no launch. Deliberate: a launch belongs to a release the page
+witnessed, never to a timeout.
+
+New diagnostics field, separate from `stale-holds-reaped` on purpose (two
+reapers, two witnesses; one number would make "which path stranded it?"
+unanswerable from a log):
+
+```
+hook diagnostics — … stale-holds-reaped(lost Space-UP):{sr} … own-window-holds-reaped(page stopped talking mid-hold):{fr}
+```
+
+### Exact files
+
+| File | What changed |
+| --- | --- |
+| `src-tauri/src/hook/mod.rs` | `OWN_HOLD_ACTIVE`, `OWN_HOLDS_REAPED`, `OWN_HOLD_FG_CHECK_MS`; `hold_latched`, `hold_ts_for`, `OwnHoldReap`, `own_hold_reap_reason`, `arm_own_window_hold`, `disarm_own_window_hold`, `own_hold_active`, `current_hold_ts`, `any_hold_latched`, `reap_own_window_hold`, `drain_own_holds_reaped`; the mouse-hook gate; gesture A in `own_window_space_up`; teardown in the watchdog repair; the reaper on the pump's `WM_TIMER`; the diagnostics field; 4 new tests in `own_window_pointer_tests` |
+| `src-tauri/src/hook/pointer.rs` | The poller: `any_hold_latched()` for the cadence and for `TickIn.modifier_active`, `current_hold_ts()` for the hold identity, the throttled `reap_own_window_hold` call beside `reap_stale_hold` |
+| — | **No frontend change.** The page half of PROBLEM 259 is untouched: it already publishes everything Rust needs, and the chip geometry has always come from the OVERLAY page, which does not know or care which witness owns the hold. |
+
+### How it was verified
+
+* `cargo test --lib` — **543 passed, 0 failed, 5 ignored** (539 before; the four
+  new ones are `hook::own_window_pointer_tests`).
+* `cargo clippy --all-targets` — exit 0, **0 warnings**.
+* `npx tsc --noEmit` — exit 0.
+* `npm run test:own-window-keys` — **23 passed, 0 failed**, unchanged, which is
+  the point: the page half needed nothing.
+
+The four new tests, and what each is for:
+
+| Test | What it pins |
+| --- | --- |
+| `a_fallback_hold_is_a_latched_hold_even_though_the_callback_never_ran` | The bug itself: `hold_latched(false, true)` must be true. It was the `MODIFIER_ACTIVE`-only read that made it false. |
+| `a_fallback_hold_is_identified_by_its_own_stamp_not_the_last_hook_holds` | Row 7 — including the boot case (`hook_ts == 0`), where every stale cursor stamp would otherwise qualify, and the torn case (`own_ts == 0`) |
+| `the_reaper_covers_a_fallback_hold_whose_release_never_came` | Brief item 3: inactive, healthy, unprobed, alt-tabbed, dead-page, exactly-at-the-bound (must agree with `own_window_hold_is_ours`'s `<=`), latched-with-no-stamp, and expiry-beats-foreground |
+| `arming_twice_for_one_press_is_the_same_state_as_arming_once` | Brief item 4: idempotence over the real statics, from poisoned latches, plus that teardown is a single-owner claim and a second call is a no-op |
+
+### What was NOT exercised, and what only the owner can confirm
+
+* **NOTHING HAS RUN IN THE REAL WEBVIEW.** No build, no install — the brief
+  forbade both; a ship follows.
+* **The mouse callback has never fired with `OWN_HOLD_ACTIVE` true.** Every
+  decision is unit-tested; none of them has met a real mouse.
+* **The foreground probe inside the reaper has never returned `false` in
+  anger**, because it needs a live fallback hold on a machine running this build.
+* **On the next build, the owner's test is two gestures.** Open the dashboard,
+  click inside it, hold Space until the ring appears, then:
+  1. **Move the mouse toward a chip.** The chip should highlight.
+     `grep "hud-pointer: ARMED chip" debug.log` — a line there is the proof row
+     5/6/7 are repaired.
+  2. **Left-click while it is highlighted.** The app should launch.
+     `grep "engine: pointer activation" debug.log` — that is row 10.
+  3. **Or release Space while it is highlighted** — the same launch, row 11.
+  * If the ring highlights but the click does nothing, the fault is the mouse
+    hook's `WM_LBUTTONDOWN` branch, not the arming.
+  * If nothing highlights, `grep "hud-pointer:" debug.log` and read the
+    `N chip rect(s) published` line: no such line means the geometry (row 3)
+    never arrived and the fault is page-side, not here.
+  * `grep "own-window-holds-reaped" debug.log` — a non-zero count means a
+    fallback hold was stranded and torn down. It should be 0 in normal use.
+
+### Generalise this
+
+**When a mechanism is given a second witness, audit every consumer of the FIRST
+witness's state — not just the ones the feature was about.** PROBLEM 259 routed
+the *event* around a deaf hook perfectly and shipped with the ring working. What
+it did not do was ask which other subsystems read the atomics the callback
+writes, and pointer activation reads four of them. The event path was one path;
+the *state* path was still two, and only one of them was being written.
+
+**And: a flag that arbitrates between two paths may not be written by either
+of them.** The tempting fix here was `MODIFIER_ACTIVE.store(true)` from the
+fallback. It would have worked on the first hold and deadlocked the feature on
+the first lost release, because that same flag is the guard deciding whether a
+fallback hold is allowed to start at all. Give the second path its own latch and
+teach the *consumers* to ask both — the arbiter stays outside the dispute.
+
+
+---
+
+## SHIPPED IN 1.0.106 (2026-09-07) — PROBLEM 261 and PROBLEM 239 §6, on the machine, and the ONE thing the install proved that no test could
+
+The ship pass for PROBLEM 261 (pointer activation on a fallback hold) and
+PROBLEM 239 §6 (the Conflicts grid). Gates re-run against the shipped tree:
+`cargo test --lib` **543 passed, 0 failed, 5 ignored**; `cargo clippy
+--all-targets` **0 warnings, exit 0**; `npx tsc --noEmit` exit 0; `npm run
+build` (tsc + `vite build --outDir dist2`) exit 0.
+
+### The marker evidence, both halves
+
+Four NEW markers, all `format_args!` literal pieces of `log::` calls in
+`hook/mod.rs` (so `&'static str` in `.rodata`, not the short-identifier
+immediate-store trap), all pure ASCII, each stopping short of the em dash in
+its sentence:
+
+1. `own-window fallback: the re-hook tore down a live fallback hold (PROBLEM 261) `
+   — the watchdog re-hook's teardown of a LIVE fallback hold.
+2. `own-window fallback: reaping a fallback Space-hold (` — the HEAD of
+   `reap_own_window_hold`, the foreground-probing twin of `reap_stale_hold`.
+3. `Left standing this is a ring on screen with the pointer still arming chips
+   behind it, which is PROBLEM 218's failure on the path PROBLEM 218's reaper
+   cannot see` — the TAIL of that same literal, after `{hud_was_up}`. Head and
+   tail are both listed so a True on both is evidence the WHOLE literal
+   shipped, not just its opening words.
+4. `own-window-holds-reaped(page stopped talking mid-hold):` — the new field on
+   the 60 s `hook diagnostics` line, fed by `drain_own_holds_reaped`.
+
+| | installed 1.0.105 (read through `explorer.exe`) | freshly built 1.0.106 exe | installed 1.0.106 |
+| --- | --- | --- | --- |
+| the 20 CONTROLS | **20/20 True** | **20/20 True** | **20/20 True** |
+| the 4 NEW markers | **0/4 True** | **4/4 True** | **4/4 True** |
+
+Readings: `_probe\1.0.106\marker-precheck.txt` (installed 1.0.105, via
+`explorer.exe`), `_probe\1.0.106\fresh-exe-markers.txt` (fresh exe, before the
+installer ran), `install-check.txt` (installed 1.0.106). Installed baseline
+**1.0.105, 21,943,296 bytes, 10:40:50**; installed after **1.0.106,
+21,945,856 bytes, 11:25:28**.
+
+**No control went stale this release.** PROBLEM 261 deleted no log string; it
+only added. 1.0.105's retirement of control #13 stands and its replacement
+(`callback-only counters (PROBLEM 236): nothing but a hook proc can move them`)
+is still True in both builds.
+
+**The frontend markers, and their honest limit.** `conflict-grid` and
+`conflict-row-why` were added to `install-proof.ps1`'s bundle list (30 entries,
+all True). **Neither could be measured ABSENT from anything**: Tauri v2
+compresses the embedded `dist2`, so a frontend string is never findable in an
+exe (CLAUDE.md records this as measured), and `npm run build` had already been
+run by the PROBLEM 239 second-pass agent before this ship task started, so no
+1.0.105-era bundle baseline survived either. The absent-then-present half of
+this release's evidence is carried entirely by the four Rust markers. What the
+bundle markers prove is the chain: newest `dist2` file 11:24:32, installed exe
+written 11:25:28, `exe is newer than the bundle it embedded: True`, version
+stamp 1.0.106.
+
+### THE THING THE INSTALL PROVED THAT NO TEST COULD: ARMING WORKS ON A FALLBACK HOLD, ON HARDWARE
+
+The section above this one says *"the mouse callback has never fired with
+`OWN_HOLD_ACTIVE` true"*. **That sentence is now false, and it was falsified
+within a minute of the install.** From the real `debug.log`, after the
+1.0.106 banner at 11:29:18.226:
+
+```
+11:29:25.484  own-window fallback: ... fallback hold #1 began (hud hold #1) over own window
+11:29:25.484  own-window fallback: ... fallback hold #2 began (hud hold #3) over own window
+11:29:25.983  guide_hud: overlay window shown (hold #3)
+11:29:25.983  guide_hud: shown over own window
+11:29:27.567  hud-pointer: ARMED chip 2  (key 'c')
+11:29:27.665  hud-pointer: ARMED chip 11 (key 'm')
+11:29:28.171  hud-pointer: ARMED chip 2  (key 'c')
+11:29:28.301  hud-pointer: ARMED chip 0  (key 'a')
+11:29:28.611  hud-pointer: ARMED chip 2  (key 'c')
+11:29:29.229  hud-pointer: ARMED chip 1  (key 'b')
+11:29:30.840  guide_hud: overlay window hidden (no action pending)
+```
+
+and the instrument panel for that same window:
+
+```
+11:30:48.253  hook liveness split — primary_real:0 primary_injected:0 reference:0 mouse:980 in the last 82s
+```
+
+**Read those two together, because that is the whole proof.** The keyboard
+callback fired **zero** times — there is no `hold start (hold #<digit>)` line
+anywhere after the banner, and `primary_real:0` is a counter nothing but a hook
+proc can move. The mouse callback fired **980** times. So the hold was carried
+by the page, `MODIFIER_ACTIVE` was false for its entire duration, and the mouse
+hook nevertheless ran `note_cursor` and the poller nevertheless armed **six**
+chips as the cursor moved between them. That is exactly the owner's reported
+symptom — *"it's not seeing my cursor movement"* — repaired, measured on
+hardware, on the shipped build. `hold_latched(MODIFIER_ACTIVE=false,
+OWN_HOLD_ACTIVE=true)` returning true is the single line of code that produced
+those six log entries.
+
+### WHAT IS STILL UNPROVEN, IN THE SAME BREATH
+
+* **ACTIVATION HAS NEVER RUN ON HARDWARE.** `engine: pointer activation` —
+  **0** occurrences since the 1.0.106 banner. The hold above ended
+  `hidden (no action pending)`: 1.6 s passed between the last ARMED line and
+  the hide, so the chip had been disarmed (that transition is `log::debug!`
+  and does not reach the shipped log level) before the release. Gesture A
+  (`own_window_space_up` → `take_armed_key` → `PointerActivate`) and the mouse
+  hook's `WM_LBUTTONDOWN` branch under `OWN_HOLD_ACTIVE` are both still
+  untested against real input. **The owner's test is unchanged and is now the
+  ONLY thing left:** hold Space in the dashboard, move to a chip until it
+  lights up, then click it — or release Space — and check
+  `grep "engine: pointer activation" debug.log`.
+* **The reaper has never fired.** `own-window fallback: reaping a fallback
+  Space-hold` — 0 occurrences; the diagnostics field
+  `own-window-holds-reaped(...)` printed **0** at 11:29:48.244, which is the
+  correct value and is also the proof the field ships. The foreground probe has
+  still never returned `false` in anger.
+* **The re-hook teardown has never fired.** `own-window fallback: the re-hook
+  tore down a live fallback hold` — 0 occurrences. There WAS a watchdog re-hook
+  at 11:29:48.229 (`reinstall ok: true`), but no fallback hold was latched at
+  that moment, so the branch was correctly skipped.
+* **LAW 6 IS UNPROVEN ON 1.0.106**, and for the worst reason: `hold start
+  (hold #<digit>)` since the banner = **0**, while the fallback carried the
+  hold. The keyboard hook saw nothing over our own window on this build either.
+  **PROBLEM 257 IS STILL OPEN.** 1.0.106 does not close it and does not claim
+  to; it makes the fallback path a complete one.
+
+### A NEW OBSERVATION, RECORDED RATHER THAN FIXED
+
+**Two `own-window fallback:` lines were logged in the SAME MILLISECOND for what
+can only be one physical press** — `fallback hold #1 (hud hold #1)` and
+`fallback hold #2 (hud hold #3)` at 11:29:25.484, with a single ring
+(`overlay window shown (hold #3)`) following. `own_window_space_down_accepted`
+guards on the foreground, bypass mode, `MODIFIER_ACTIVE` and the HOOK's
+Space-down age — **it does not ask whether a FALLBACK hold is already latched**,
+so two page-side Space-downs in the same millisecond both pass, and the second
+`arm_own_window_hold` re-stamps the first one's hold. It was harmless here (one
+ring, one teardown, no duplicate launch), and it is not a regression — 1.0.105
+had the same guard set. But it is a real hole in the "it cannot fire twice"
+claim, on the fallback-vs-fallback axis rather than the hook-vs-fallback axis
+that guard was designed for. **Not fixed in this release; recorded so the next
+agent does not have to rediscover it.** The natural fix is one more clause in
+`own_window_space_down_accepted` (a pure function with a test module already
+around it), plus finding out why the page emitted two Space-downs at all.
+
+### The law 6 / law 7 counts since the 1.0.106 banner
+
+| line | count since the banner |
+| --- | --- |
+| `own-window fallback:` | **2** |
+| `guide_hud: shown over own window` | **1** |
+| hook `hold start (hold #<DIGIT>)` | **0** |
+| bare `hold start` (the SELF-MATCH TRAP — the fallback line quotes the advice) | 2 |
+| `hook: KEYBOARD DEAF` | **0** |
+| `FORCED REPAIR` | **0** |
+| backoff engaged | **0** |
+| `hud-pointer: ARMED chip` | **6** |
+| `hud-pointer: N chip rect(s) published` | **0** — that line is `log::debug!`, below the shipped level; its absence is NOT evidence the geometry failed, and the six ARMED lines prove it did not |
+| `engine: pointer activation` | **0** |
+| `own-window-holds-reaped` (the diagnostics field, value 0) | **1** |
+
+Raw output: `_probe\1.0.106\law67-counts.txt`.
+
+**The self-match trap, restated because it caught the 1.0.105 agent's first
+grep and would catch anyone's:** a bare `hold start` matches the PROBLEM 259
+fallback line too, because that line QUOTES the advice
+`'hold start (hold #N) … over own window'` for the reader. A REAL hook hold
+reads `hold start (hold #` followed by a **DIGIT**; the quoted advice has the
+letter **N**. Here that is the difference between 2 and 0.
+
+
+
+---
+
+## PROBLEM 262 — a latched Space-hold made itself unfalsifiable: the reaper, the deafness verdict and the deferral bound were ALL keyed on a keyboard callback that had stopped running, and with `MODIFIER_ACTIVE` stuck the page-side fallback refused every new hold, so the ring stopped appearing at all (found on installed 1.0.106, 2026-09-07; fixed in `hook/mod.rs`, gates green, **NEVER RUN IN A REAL WEBVIEW**)
+
+### SYMPTOM
+
+The owner's words: **the ring stopped appearing entirely, and only an app
+restart cured it.** Not "a ring got stuck on screen" (that is PROBLEM 218) and
+not "shortcuts died mid-hold" (that is PROBLEM 236) — *no ring at all, from
+either witness, for minutes, until the process was restarted.*
+
+### THE MEASURED EPISODE — `%APPDATA%\Spaceadom\debug.log`, 1.0.106, banner 11:29:18
+
+```text
+11:37:31.157  engine: pointer activation → Space+l (armed chip on the guide HUD)   ← fallback ring, worked
+11:37:33.240  hold start (hold #11): the primary keyboard hook saw this Space-down ← a HOOK hold
+11:37:33.733  guide_hud: overlay window shown (hold #11)
+11:37:34.340  engine: combo Space+RightAlt received (profile cycle)                ← the LAST keyboard callback
+              ── nothing from the keyboard for 166 seconds ──
+11:38:33.351  WATCHDOG alarm confirmed, but a Space hold is LIVE — latched  60125ms … Holds protected this session: 1
+11:38:41.352  WATCHDOG alarm confirmed, but a Space hold is LIVE — latched  68125ms … Holds protected this session: 2
+11:38:48.251  hook liveness split — primary_real:0 primary_injected:0 reference:0 mouse:1247
+11:39:08.352  WATCHDOG alarm confirmed, but a Space hold is LIVE — latched  95125ms … Holds protected this session: 3
+11:39:30.352  WATCHDOG alarm confirmed, but a Space hold is LIVE — latched 117125ms … Holds protected this session: 4
+11:39:48.254  hook liveness split — primary_real:0 primary_injected:0 reference:0 mouse:1765
+              ── no Space-up, no reap, no forced repair, no ring, for the whole span ──
+11:41:28.350  hook: KEYBOARD DEAF, PROVEN … reason InputUnaccountedFor … **no hold latched** … FORCED REPAIR #2
+```
+
+Two readings decide everything below.
+
+* **`Holds protected this session: 1 / 2 / 3 / 4`, for ONE hold.**
+  `ALARM_DEFER_LOGGED` throttles that line to once per deferral EPISODE. Four
+  lines means four episodes — i.e. the episode clock was being thrown away
+  between alarms.
+* **`no hold latched` in the 11:41:28 repair line.** The forced repair fired the
+  instant `MODIFIER_ACTIVE` finally went false, and not one second earlier.
+  What cleared it was luck: `stuck-modifier-resets:1` appears in the 11:40:18
+  diagnostics, so a stray keyboard callback got through and hit the combo
+  branch's own 30 s bound. **The recovery was a callback the app had no reason
+  to expect.**
+
+### ROOT CAUSE — five links, each confirmed at a file:line
+
+Line numbers are the post-fix file unless marked "before".
+
+| # | Link | Where | Why it held |
+| --- | --- | --- | --- |
+| 1 | Hold #11's Space-UP was never seen. | — | The keyboard hook was evicted one callback after the 11:37:34 combo (`primary_real:0 … mouse:1247`, keyboard law 7's timeout eviction). `HookEvent::SpaceUp` can only be sent by a callback that is still being called. |
+| 2 | `MODIFIER_ACTIVE` stayed latched. | `hook/mod.rs:88` | Its only writers are the callback, `reap_stale_hold`, and the watchdog's eviction reset. None ran. |
+| 3 | `reap_stale_hold` did not clear it. | `hold_is_stale`, `hook/mod.rs:1258` | **BOTH halves of the diagnosis are right, and the second is the deeper one.** (a) `SPACE_COMBO_SEEN` was set by the 11:37:34 `Space+RightAlt` — PROBLEM 219's stand-down, `!combo_seen` in the predicate. (b) Even without it, `repeats >= MIN_OBSERVED_REPEATS` keys on Windows AUTO-REPEAT, and an auto-repeat is a keyboard callback: **a deaf hook can never produce one.** So the reaper had two independent reasons to stand down and no way to notice that neither was evidence any more. |
+| 4 | The watchdog's hold deferral refused its own repair indefinitely. | `hook/mod.rs:3277` and `:3366` (before: the two unconditional `ALARM_DEFERRED_AT.swap(0)` sites) | **The owner's diagnosis is confirmed exactly.** `MAX_HOLD_DEFER_MS` is measured from `ALARM_DEFERRED_AT`, the FIRST deferred alarm — but two early returns zeroed that stamp on any tick that did not alarm, and an alarm needs `both_dead`, which needs the MOUSE callback silent past `BLIND_MS` (3 s). The mouse fires at 30–60 Hz whenever a hand is on it (`mouse:1247`, `mouse:1765` per minute). So the bound required **ten CONSECUTIVE alarm seconds**, never got them, and every alarm restarted the clock at zero. A 10 s bound reset by every quiet tick is not a bound. |
+| 5 | With `MODIFIER_ACTIVE` latched, guard 2 refused every new fallback hold. | `own_window_space_down_accepted`, `hook/mod.rs:4650` | `if hook_hold_latched { return false; }` — correct in itself (a latched hook hold owns the press) and fatal when the latch is a lie. **This is why NO ring appeared, from either witness.** PROBLEM 261's note that `MODIFIER_ACTIVE` is "read, never written by the fallback" is unchanged and still right; the bug is that nothing bounded what it was reading. |
+
+And one link the owner named that the code shows is **not** part of the wedge:
+`proven_keyboard_deaf` (`hook/mod.rs:676`) has `if modifier_active { return None; }`
+— so the one repair path that BYPASSES every cooldown was itself held shut by
+the latch. That is a sixth link, and it makes the loop closed: the latch
+suppressed the verdict, the verdict would have driven the repair, and the repair
+would have cleared the latch.
+
+### GENERALISE THIS
+
+**An instrument that can only be read by the thing that has failed is not an
+instrument.** Every liveness test for a hold must have at least one term a dead
+hook cannot suppress. Three of this app's four hold bounds — auto-repeat, the
+combo stand-down, and the 30 s `MAX_MODIFIER_HOLD_MS` — lived entirely on the
+keyboard callback, which is the exact code that stops running in the failure
+they exist for. The fourth (`hold_defers_rehook`) had an off-callback clock and
+threw it away.
+
+Corollary, and it is the one worth grepping for elsewhere: **a bound whose start
+stamp is cleared by a condition unrelated to the thing it bounds is not a
+bound.** Ask of every timeout: *what resets this, and can that thing happen
+while the failure is in progress?*
+
+### THE FIX — five parts, all in `src-tauri/src/hook/mod.rs`
+
+**1 — the reaper gained a deafness-aware path (`hook/mod.rs:1366`, `:1405`).**
+PROBLEM 219's exemption is KEPT, and the comment now says what it is for:
+
+```rust
+/// A combo-seen hold that is STILL receiving auto-repeat has a small
+/// `kb_callback_silence_ms` and no proven-deaf verdict, so it stays protected
+/// exactly as PROBLEM 219 requires.
+pub(crate) fn hold_is_deaf_stale(
+    modifier_active: bool,
+    proven_deaf: bool,
+    kb_callback_silence_ms: Option<u64>,
+    min_silence_ms: u64,
+) -> bool {
+    if !modifier_active || !proven_deaf {
+        return false;
+    }
+    matches!(kb_callback_silence_ms, Some(ms) if ms >= min_silence_ms)
+}
+```
+
+`hold_reap_reason` runs the three bounds in order and names the winner:
+
+```rust
+pub(crate) fn hold_reap_reason(…) -> Option<HoldReap> {
+    if hold_is_stale(modifier_active, repeats, since_last_tick_ms, grace_ms, combo_seen) {
+        return Some(HoldReap::AutoRepeatStopped);           // PROBLEM 218, unchanged
+    }
+    if hold_is_deaf_stale(modifier_active, proven_deaf, kb_callback_silence_ms, deaf_silence_ms) {
+        return Some(HoldReap::KeyboardDeaf);                // PROBLEM 262 item 1
+    }
+    if modifier_latched_past_bound(modifier_active, hold_age_ms, kb_callback_silence_ms, max_hold_ms) {
+        return Some(HoldReap::LatchedPastBound);            // PROBLEM 262 item 4
+    }
+    None
+}
+```
+
+`proven_deaf` comes from `deaf_evidence_for_reap()` (`:1444`), which calls the
+EXISTING `proven_keyboard_deaf` with `modifier_active` forced to **`false`** —
+the single deliberate divergence, because the question here is *is this latch
+itself a lie?* and the latch may not be the thing that answers it. Threshold
+`HOLD_DEAF_SILENCE_MS = 3_000` (`:1315`), double `OWN_DEAF_SILENCE_MS`, because
+a false positive on this path costs a live press. The probe is throttled to
+250 ms (`HOLD_DEAF_CHECK_MS`) — `st-hud-pointer` polls at 62 Hz while a hold is
+latched and the bounds underneath are 3 s and 30 s.
+
+**2 — the deferral episode is bounded from the FIRST alarm (`:569`, `:3277`, `:3366`, `:3586`).**
+
+```rust
+pub(crate) fn defer_episode_ends_on_quiet_tick(hook_hold_latched: bool) -> bool {
+    !hook_hold_latched
+}
+```
+
+Both early returns now read:
+
+```rust
+if defer_episode_ends_on_quiet_tick(MODIFIER_ACTIVE.load(Ordering::Relaxed))
+    && ALARM_DEFERRED_AT.swap(0, Ordering::Relaxed) != 0
+{
+    ALARM_DEFER_LOGGED.store(false, Ordering::Relaxed);
+}
+```
+
+The top-of-`watchdog_check` reset (`!MODIFIER_ACTIVE` → clear) is unchanged and
+is now the ONLY way an episode ends other than the bound. Past the bound the
+warn line names the **episode duration** and the hold age, and the repair
+proceeds into the existing teardown a few lines below. Marker:
+`deferral-episode-bound-expired-proceeding-with-the-repair-spaceadom`.
+
+**3 — a hold may not survive a repair (`tear_down_hold_across_repair`, `:1524`; called at `:3138`).**
+The ordinary re-hook path always did this inline and is untouched (no log string
+was changed). The PROVEN-deaf FORCED repair had none of it — it could not latch
+a hook hold, but it could leave a live FALLBACK hold under a replaced chain, and
+since item 1 the reaper clears the hook latch on the same tick, so the ordering
+had to be stated rather than assumed. Idempotent: a second call with nothing
+latched counts and logs nothing. Marker:
+`repair-tore-down-a-hold-that-predated-it-spaceadom`.
+
+**4 — belt and braces (`modifier_latched_past_bound`, `:1391`).**
+`MAX_MODIFIER_HOLD_MS` was a `const` LOCAL to the callback's combo branch — so
+the only code that could enforce the 30 s bound was the code that had stopped
+running. Hoisted to module scope (`:1326`, same value) and now enforced by the
+reaper too, from the pump and from `st-hud-pointer`, neither of which needs the
+hook. It fires only when the latch AND the callback silence are both past the
+bound, i.e. no keyboard callbacks in that whole span. `None` (never fired since
+the install) is deliberately NOT accepted — PROBLEM 228, UNKNOWN is never proof;
+that case is item 3's. Loud WARN, marker
+`modifier-active-latched-past-the-bound-with-no-keyboard-callbacks-spaceadom`,
+counted in the diagnostics line.
+
+**5 — the fallback-vs-fallback dedupe the 1.0.106 ship noted (`:4697`).**
+
+```rust
+// Guard 2b — PROBLEM 262 item 5. THE FALLBACK-VS-FALLBACK DEDUPE, which
+// guard 2 never was: it asks about the HOOK, and the hook is the one
+// witness that cannot double-fire this path.
+if own_window_hold_is_ours(own_hold_age_ms, own_hold_max_ms) {
+    return false;
+}
+```
+
+The predicate is guard 3's, deliberately, so the two questions can never drift:
+*a Space-down arriving while the fallback still owns a hold IS that hold.* The
+BOUNDED form matters — a bare `OWN_HOLD_ACTIVE` would refuse every new ring for
+the full 30 s after a page was torn down mid-hold, which is this entry's own
+failure re-introduced. `own_window_space_down_accepted` gained two parameters
+(`own_hold_age_ms`, `own_hold_max_ms`) and the live call site passes
+`own_hold_age_ms()` / `OWN_WINDOW_MAX_HOLD_MS`.
+
+Three new drained counters on the 60 s `hook diagnostics` line:
+`deaf-holds-reaped(hook not called at all)`,
+`modifier-latch-bound-clears(latched past 30000ms with no callbacks)`,
+`repair-hold-teardowns(hold predated a re-hook)`.
+
+**No log string was deleted or reworded.** PROBLEM 218's reaper line is
+byte-identical; the two new reap reasons print their own lines.
+
+### HOW IT WAS VERIFIED
+
+**Gates (2026-09-07).** `cargo test --lib` **556 passed, 0 failed, 5 ignored**
+(baseline 543 — thirteen new). `cargo clippy --all-targets` **exit 0, 0
+warnings**. `npx tsc --noEmit` **exit 0**.
+
+**Tests, one per branch, in two new modules** (`deaf_hold_reaper_tests`,
+`repair_teardown_tests`). The four the brief named, by name:
+
+| Requirement | Test |
+| --- | --- |
+| a combo-seen hold IS still protected while auto-repeat arrives | `a_combo_seen_hold_is_still_protected_while_the_callback_is_alive` — the literal PROBLEM 219 numbers (5 repeats, 2016 ms of quiet) plus three long quiet reads |
+| the same hold IS reaped when the keyboard is proven deaf | `the_same_combo_hold_is_reaped_once_the_keyboard_is_proven_deaf` — the 11:38:33 numbers, `Some(58_922)` / `60_125` |
+| the deferral bound cannot be extended by new alarms | `the_deferral_bound_cannot_be_extended_by_new_alarms` — replays the MEASURED alarm seconds `[0, 8, 35, 57]` through the real `hold_defers_rehook` + `defer_episode_ends_on_quiet_tick`; 1.0.106's rule returns `None` (never repairs), the fix returns `Some(35)` |
+| a repair clears a pre-existing hold | `a_repair_clears_a_hold_that_predates_it` — sets the real statics, asserts all four clear and the counter increments once, then asserts idempotence |
+
+Plus: `a_contiguous_alarm_run_still_gets_its_full_ten_seconds` (PROBLEM 236's
+protection is not shortened), `a_silent_hold_with_no_combo_is_still_reaped_as_auto_repeat_stopped`
+(PROBLEM 218 still reports PROBLEM 218's reason), the UNKNOWN-is-never-proof
+cases for both new bounds, `a_long_hold_the_callback_is_still_feeding_is_never_cleared_by_the_bound`,
+and three for guard 2b including the same-millisecond shape and the
+expired-hold escape.
+
+### WHAT ONLY THE OWNER CAN CONFIRM
+
+**Nothing here has run in a real webview or against a real evicted hook.** No
+build, no install (a ship follows). The whole chain above is read from one live
+log and from the code; the tests exercise the DECISIONS, not the Win32.
+Specifically unproven until it is on the machine:
+
+1. That `proven_keyboard_deaf` actually returns `Some` during a stuck hold on
+   real hardware. It needs `InputUnaccountedFor`: the OS input clock inside
+   2 s and the mouse callback unable to account for it. The 11:41:28 line
+   proves that verdict fires on this machine **with no hold latched**; item 1
+   asks it the same question with one latched, which has never been observed.
+   If it does not fire, item 4's 30 s bound is the backstop, and its marker
+   appearing in the log is the tell.
+2. That the ring comes back WITHOUT a restart. The grep after the next episode:
+   `stale-hold-reaped-because-the-keyboard-is-proven-deaf-spaceadom` or
+   `modifier-active-latched-past-the-bound`, then a `hold start` or
+   `own-window fallback:` line after it.
+3. That `Holds protected this session:` never again prints more than once per
+   hold.

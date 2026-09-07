@@ -18,7 +18,23 @@ import { showToast } from "./toast";
 import { getKeyCell, animateKeyPop, cleanLabel } from "./keyboard-matrix";
 // The app grid is SHARED with the App-exceptions setting (2026-08-25). Do not
 // re-inline it here: two copies drift and only one gets the next fix.
-import { loadApps, cachedApps, drawAppGrid, paintAppDisc } from "./app-grid";
+import { loadApps, cachedApps, drawAppGrid, paintAppDisc, initPickerRefreshListener } from "./app-grid";
+// PROBLEM 242 — the first-run tour watches the editor from OUTSIDE. These five
+// calls are the whole integration: they are placed here, not in main.ts, because
+// this file is the one door both the real dashboard and preview.html go through,
+// and a hook wired at the caller would exist in only one of them. tour.ts is a
+// leaf and imports nothing back, so there is no cycle.
+//
+// The last two are the 2026-09-06 follow-up: the tour has a step 2b for the
+// browser-profile picker, and `openProfilePage`/`closeProfilePage` below are the
+// only two functions in the app that know page 2 exists.
+import {
+  tourEditorOpened,
+  tourBindingSaved,
+  tourEditorClosed,
+  tourProfilePickerOpened,
+  tourProfilePickerClosed,
+} from "./tour";
 // "Open this in a specific browser profile" (2026-08-26). Also a leaf module.
 import {
   warmBrowsers,
@@ -148,6 +164,17 @@ function warmPickerData(): void {
   // Rust side (one registry read plus the shared icon cache), so the disc
   // paints its real icon rather than swapping a placeholder for an icon later.
   warmDefaultBrowser();
+
+  // PROBLEM 237 wiring — the picker-refresh listener. Registered here rather
+  // than at main.ts bootstrap: `warmPickerData()` already only ever runs once
+  // per session (the `_pickerWarmed` guard above), so this is the earliest
+  // point the picker is known to be in use, and `initPickerRefreshListener`
+  // is itself idempotent besides. Re-renders just the app grid, and only if
+  // the panel is still open when a background refresh actually changes the
+  // list.
+  initPickerRefreshListener(() => {
+    if (_currentKey && _panel && !_panel.hidden) renderGrid();
+  });
 }
 
 export function openPanel(key: string, config: AppConfig, origin?: HTMLElement): void {
@@ -191,6 +218,14 @@ export function openPanel(key: string, config: AppConfig, origin?: HTMLElement):
   document.getElementById("stage")?.classList.add("editing");
 
   _panel.querySelector<HTMLInputElement>("#ed-search")?.focus();
+
+  // PROBLEM 242 — step 1 of the first-run tour is satisfied by the editor
+  // opening for ANY letter, so the report goes out unconditionally and the
+  // tour decides whether it cares. The bound/unbound flag is read from the
+  // SAME `getBinding` the panel itself paints from, so the tour's "this one's
+  // already set" copy can never disagree with what the editor is showing.
+  const had = getBinding(key);
+  tourEditorOpened(key, !!(had && (had.app || had.web_url)));
 }
 
 export function closePanel(): void {
@@ -219,6 +254,14 @@ export function closePanel(): void {
   }, 280);
 
   if (key && _onClosed) _onClosed();
+
+  // PROBLEM 242 — this fires for BOTH "closed after saving" and "closed
+  // without saving", because `closePanel` cannot tell them apart and should
+  // not have to try. The tour makes the distinction itself: a save has already
+  // moved it to step 3, so only a close that arrives while it is still waiting
+  // on step 2 counts as walking away. Getting that backwards would either nag
+  // after every successful bind or never pause at all.
+  if (key) tourEditorClosed();
 }
 
 export function getCurrentKey(): string | null {
@@ -289,6 +332,17 @@ function renderPanel(key: string): void {
       <div id="ed-grid"></div>
       <div class="ed-empty" id="ed-empty" hidden></div>
     </div>
+
+    <!-- The replace confirm (2026-09-04, OWNER'S FATHER TEST) + the 10s Undo
+         that follows it. One box, two uses in sequence: confirmReplace()
+         fills it with "Replace 'X' with this? Replace · Keep" the instant a
+         paste or an app-grid pick would overwrite an existing binding, and
+         offerReplaceUndo() reuses the same box afterwards for "Replaced 'X'
+         · Undo". See the doc comment on confirmReplace() for why this exists
+         and on paintPathPill() for the gate it replaces.
+         (No backticks anywhere in this block — it is inside a template
+         literal, and one would terminate the string. See the NOTE below.) -->
+    <div id="ed-replace-confirm" hidden></div>
 
     <div id="ed-conflict" hidden></div>
 
@@ -401,7 +455,12 @@ function renderPanel(key: string): void {
   // pill" to "holding the pill's value" is exactly the transition Assign and
   // the 4b disc both key off, and a second, hand-rolled copy of that rule in
   // the pill's click handler is how the two would drift.
-  path.addEventListener("input", syncPathRow);
+  path.addEventListener("input", () => {
+    syncPathRow();
+    // A stale "Replace 'X' with this?" for whatever was typed a moment ago
+    // must not linger once the field's contents have moved on from it.
+    hideReplaceConfirm();
+  });
   path.addEventListener("keydown", (e) => {
     if (e.key === "Enter") submitPathField(path.value.trim());
   });
@@ -441,20 +500,37 @@ function renderPanel(key: string): void {
   // pill can now put an ALREADY-SAVED value into the field this reads:
   //   · unbound key, nothing typed      -> pending "" -> falsy -> just closes
   //   · unbound key, something pasted   -> pending = the paste, seed null -> assigns (199 intact)
-  //   · bound key, PILL SHOWING         -> the input is hidden and its value is
-  //     "" (renderPanel builds it fresh and never assigns .value; the pill is a
-  //     separate element) -> pending "" -> NO commit, binding untouched
+  //   · bound key, PILL SHOWING, nothing typed -> the field sits beside the
+  //     pill, empty (paintPathPill sets it that way; renderPanel never
+  //     assigns .value either) -> pending "" -> NO commit, binding untouched
   //   · bound key, pill clicked, value UNCHANGED -> pending === _pathSeed ->
   //     skipped. Without this it would re-commit and, via assignFromPath's
   //     deliberate omission of the three browser fields, wipe the pin.
   //   · bound key, pill clicked and EDITED -> pending !== _pathSeed -> assigns
   //   · bound key, pill clicked then field emptied -> pending "" -> nothing.
   //     Emptying the field is not "clear the binding"; the pill's ✕ is.
+  //   · bound key, FRESH paste beside the pill (2026-09-04, `_pathSeed` still
+  //     null — this was never loaded from the pill) -> the replace gate:
+  //     `confirmReplace` asks first, and the panel stays open until the user
+  //     answers (see below) rather than closing out from under the confirm.
   _panel.querySelector("#ed-done")!.addEventListener("click", () => {
+    const pending = path.value.trim();
+    if (pending && isUnchangedPillValue(pending)) {
+      console.info("key-editor: Done with an unedited pill value — nothing committed");
+      closePanel();
+      return;
+    }
+    if (pending && key && _pathSeed === null) {
+      const existing = getBinding(key);
+      if (existing && (existing.app || existing.web_url)) {
+        confirmReplace(key, existing, () =>
+          void assignFromPath(pending, { keepOpen: true, onSaved: () => finishReplace(key, existing) }),
+        );
+        return;   // wait for Replace/Keep — Done does not close out from under it
+      }
+    }
     void (async () => {
-      const pending = path.value.trim();
-      if (pending && !isUnchangedPillValue(pending)) await assignFromPath(pending);
-      else if (pending) console.info("key-editor: Done with an unedited pill value — nothing committed");
+      if (pending) await assignFromPath(pending);
       closePanel();
     })();
   });
@@ -683,6 +759,140 @@ function offerPinUndo(
 }
 
 // ---------------------------------------------------------------------------
+// The replace confirm (2026-09-04) — OWNER'S FATHER TEST
+// ---------------------------------------------------------------------------
+
+/**
+ * ONE inline confirm, shown the instant a paste or an app-grid pick would
+ * REPLACE an existing binding — see the doc comment on `paintPathPill` for
+ * the full story of why. Every call site that can reach a bound key with a
+ * fresh (not click-to-edit) value goes through here before it ever calls
+ * `commit()`/`assignFromPath()`: `submitPathField`, the `#ed-done` handler,
+ * the 4b disc, and the app grid's `onPick`.
+ *
+ * `existing` MUST be the live binding read straight off `getBinding(key)`
+ * before anything changes — `offerReplaceUndo` hands it back to `commit()`
+ * verbatim if the user changes their mind, and `commit()` normalises
+ * whatever it is given to a COMPLETE seven-field `KeyBinding` (PROBLEM 204a),
+ * so there is no way for this to reproduce "the pin never saved" even though
+ * it is passing a snapshot around rather than re-deriving one.
+ *
+ * `onReplace` is the caller's own commit — this function never calls
+ * `commit()`/`assignFromPath()` itself, it only decides whether to ask first.
+ * That keeps every call site's own shape (which fields it commits, whether a
+ * multi-profile browser page follows) exactly as it already was; only the ONE
+ * new gate in front of it is shared.
+ */
+function confirmReplace(key: string, existing: KeyBinding, onReplace: () => void): void {
+  const box = _panel?.querySelector<HTMLElement>("#ed-replace-confirm");
+  // Fail OPEN, never silently block a bind the user already committed to by
+  // pasting or picking — the same principle as `commit`'s own early-exit
+  // logging (PROBLEM 199): a missing confirm box must not read as "nothing
+  // happened", it must still bind.
+  if (!box) { onReplace(); return; }
+
+  const label = replaceLabel(existing);
+  box.hidden = false;
+  box.innerHTML = `
+    <div class="ed-replace-box">
+      <span class="ed-replace-text">Replace "${escapeHtml(label)}" with this?</span>
+      <span class="ed-replace-btns">
+        <button class="btn btn-sm btn-primary" id="ed-replace-go">Replace</button>
+        <button class="btn btn-sm" id="ed-replace-no">Keep</button>
+      </span>
+    </div>
+  `;
+  box.querySelector("#ed-replace-go")!.addEventListener("click", () => {
+    hideReplaceConfirm();
+    console.info(`key-editor: replace confirmed — key=${key} was "${label}"`);
+    onReplace();
+  });
+  box.querySelector("#ed-replace-no")!.addEventListener("click", () => {
+    hideReplaceConfirm();
+    console.info(`key-editor: replace declined — key=${key} kept "${label}", nothing committed`);
+  });
+}
+
+/** Dismiss the box, whichever of its two uses (confirm or Undo) currently
+ *  occupies it. Safe to call when it is already empty. */
+function hideReplaceConfirm(): void {
+  const box = _panel?.querySelector<HTMLElement>("#ed-replace-confirm");
+  if (!box) return;
+  box.hidden = true;
+  box.innerHTML = "";
+}
+
+/** The name a binding reads by in the confirm/Undo copy — the same rule
+ *  `renderPanel`'s "Bound to …" sub-title uses, plus the browser-profile pin
+ *  when there is one, so "Replace 'Google Chrome — Arpon' with this?" names
+ *  the SPECIFIC thing being lost, not just the app. */
+function replaceLabel(binding: KeyBinding): string {
+  const base = binding.label ||
+    (binding.app ? cleanLabel(binding.app.split(/[\\/]/).pop() || "")
+                 : cleanLabel(binding.web_url || ""));
+  return binding.browser_profile_name ? `${base} — ${binding.browser_profile_name}` : base;
+}
+
+/**
+ * Repaint page 1 after a CONFIRMED replace actually commits, then offer the
+ * 10-second Undo. Only the replace path calls this — an ordinary bind onto an
+ * empty key still assigns and closes instantly, unchanged (the mockup's rule:
+ * no Save/Cancel pair). Replacing something that was already there is the one
+ * case that now stays open long enough to be walked back.
+ */
+function finishReplace(key: string, previous: KeyBinding): void {
+  if (_currentKey !== key) return;
+  renderPanel(key);
+  offerReplaceUndo(key, previous);
+}
+
+/**
+ * The 10-second inline Undo after a CONFIRMED replace, restoring the FULL
+ * previous binding — all seven fields, exactly as `previous` was read out of
+ * `getBinding()` before the replace touched anything.
+ *
+ * REUSES `offerPinUndo`'s precedent rather than reinventing it (owner's
+ * decision, 2026-09-04): same reason it cannot live in the toast
+ * (`#toast-container` is `pointer-events: none` — see `offerPinUndo`'s doc
+ * comment for the full explanation), same "sits where the action happened"
+ * placement. It lives in `#ed-replace-confirm`, the box the confirm itself
+ * just used — `finishReplace` has already repainted page 1 by the time this
+ * runs, so the box is empty again.
+ *
+ * 10s, not `offerPinUndo`'s 6s: replacing a whole binding (app AND label AND
+ * icon AND any browser pin) is a bigger thing to walk back than clearing one
+ * pin, and the owner's own wording for this feature asked for "~10 s".
+ */
+function offerReplaceUndo(key: string, previous: KeyBinding): void {
+  const box = _panel?.querySelector<HTMLElement>("#ed-replace-confirm");
+  if (!box) return;
+  const label = replaceLabel(previous);
+
+  box.hidden = false;
+  box.innerHTML = `
+    <div class="ed-replace-box ed-replace-undo-row">
+      <span class="ed-replace-text">Replaced "${escapeHtml(label)}"</span>
+      <span class="ed-replace-btns"><button class="btn btn-sm" id="ed-replace-undo">Undo</button></span>
+    </div>
+  `;
+  const timer = window.setTimeout(() => hideReplaceConfirm(), 10_000);
+  box.querySelector("#ed-replace-undo")!.addEventListener("click", () => {
+    window.clearTimeout(timer);
+    hideReplaceConfirm();
+    if (_currentKey !== key) return;
+    console.info(`key-editor: replace undo — restoring "${label}" for key=${key}`);
+    // The SAME commit() every other change goes through — PROBLEM 204a's
+    // normalisation guarantees all seven fields land, never a partial object
+    // that erases a browser-profile pin by omission.
+    void commit(previous, {
+      skipConflict: true,
+      keepOpen: true,
+      onSaved: () => { if (_currentKey === key) renderPanel(key); },
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Page 2 — the browser-profile page
 // ---------------------------------------------------------------------------
 
@@ -749,12 +959,19 @@ function openProfilePage(
           : "🌐  Open in my default browser")
       : null,
     onPick: (browserExe, dir, name) => {
+      // PROBLEM 242 follow-up — BEFORE the commit, not after, and the order is
+      // load-bearing: with `fromBind` the commit ends in `closePanel()`, which
+      // runs `closeProfilePage(true)` and so trips the catch-all dismissal at
+      // the bottom of that function. Reporting the PICK first means the
+      // informative call lands and the catch-all is the no-op it should be.
+      tourProfilePickerClosed();
       commitProfile(key, browserExe, dir, name, { keepOpen: !fromBind });
       if (fromBind) return;              // commit() closed the whole editor
       closeProfilePage();
       if (_currentKey === key) renderPanel(key);
     },
     onReset: () => {
+      tourProfilePickerClosed();         // "open it normally" — the skip shape
       commitProfile(key, null, null, null, { keepOpen: !fromBind });
       if (fromBind) return;
       closeProfilePage();
@@ -765,15 +982,42 @@ function openProfilePage(
       // or reverted here; whatever was saved on the way in stays saved.
       console.info("bp: page back — binding untouched");
       closeProfilePage();
+      // REGRESSION SWEEP 2026-09-07 — AND PAGE 1 HAS TO BE REBUILT, exactly as
+      // `onPick` and `onReset` above already do it.
+      //
+      // The bug: reaching this page through the app grid (`fromBind`) commits
+      // the browser binding and then slides page 2 over a page 1 that was
+      // rendered BEFORE that commit. Pressing ← put the user back on that
+      // stale page — measured in the harness on Space+K/Brave, which showed
+      // "Not bound yet", no assigned-value pill, no "Browser profile" row and
+      // **no "Remove binding" button** for a key the board behind it was
+      // already drawing as Brave. So the one exit that is supposed to leave
+      // you where you can keep editing was the one exit that took the editing
+      // controls away, and the only cure was to close the editor and reopen it.
+      //
+      // Generalise: a view that another view was layered on top of is stale by
+      // default — if anything under the layer could have changed while it was
+      // up, EVERY way back has to re-render, not just the ways that changed it.
+      if (_currentKey === key) renderPanel(key);
     },
-    onClose: () => closePanel(),
-    onDone: () => closePanel(),
+    // ✕ and Done are both "I am finished with this question" — the owner's
+    // "Skip this and Space + K opens Brave the way it always has". The tour
+    // treats them exactly as the skip row, and says so here rather than
+    // relying on the catch-all below to infer it.
+    onClose: () => { tourProfilePickerClosed(); closePanel(); },
+    onDone: () => { tourProfilePickerClosed(); closePanel(); },
   });
 
   console.info(
     `bp: page opened — key=${key} browser=${browser?.browser_name ?? "(all)"} ` +
     `profiles=${list.reduce((n, b) => n + b.profiles.length, 0)} fromBind=${fromBind}`,
   );
+
+  // PROBLEM 242 follow-up — LAST, once the page is really on screen and its
+  // handlers are wired. The tour dims to step 2b from here; announcing it
+  // before `renderProfilePage` had built anything would leave the step's ring
+  // hunting a `.bp-scroll` that did not exist yet.
+  tourProfilePickerOpened(key, browser?.browser_name ?? null);
 }
 
 /** Slide page 2 out. `instant` skips the tween — used when the panel itself is
@@ -784,6 +1028,21 @@ function closeProfilePage(instant = false): void {
   window.clearTimeout(_pageTimer);
   _panel?.classList.remove("bp-paged");
   if (!page) return;
+
+  // PROBLEM 242 follow-up — THE CATCH-ALL, and it is here rather than at the
+  // five call sites for the reason the tour hooks are in this file at all:
+  // page 2 has more ways to disappear than any list of them stays correct
+  // about. ← back, `renderPanel`'s teardown, `openProfilePage` replacing a
+  // page that was already up, and `closePanel` on Esc or a backdrop click all
+  // arrive here and NONE of them reports itself. `backToEditor` is the honest
+  // reading of every one: the picker is gone, the editor may not be, and the
+  // tour must not jump to "hold Space" on a guess.
+  //
+  // The informative exits (a pick, the skip row, ✕, Done) call the tour BEFORE
+  // reaching here, and `tourProfilePickerClosed` only acts in step 2b, so this
+  // is a no-op on all four. A second call cannot overwrite the first.
+  tourProfilePickerClosed(true);
+
   if (instant) { page.remove(); return; }
   page.classList.add("bp-page-out");
   // 195ms = ~65% of the 300ms entrance, the app's standing exit ratio.
@@ -978,15 +1237,32 @@ function isUnchangedPillValue(value: string): boolean {
  * Enter in the paste field, and the Assign button. Both used to be
  * `if (value) assignFromPath(value)`.
  *
- * The only thing added is the unchanged-pill case, and it is not a no-op: it
- * puts the pill back. Pressing Assign over a value you did not change is a
- * request to finish, and finishing means "the field goes back to showing what
- * is assigned" — which is the pill. Committing instead would be a save with
- * nothing to save that also clears the browser-profile pin (see `_pathSeed`).
+ * Two things added since, neither a no-op:
+ *  1. The unchanged-pill case — pressing Assign over a value you did not
+ *     change is a request to finish, and finishing means "the field goes
+ *     back to showing what is assigned", which is the pill. Committing
+ *     instead would be a save with nothing to save that also clears the
+ *     browser-profile pin (see `_pathSeed`).
+ *  2. The replace gate (2026-09-04) — `_pathSeed === null` means this value
+ *     was typed or pasted fresh, not loaded from the pill for a precise edit
+ *     (that path already skipped this function via case 1, or goes straight
+ *     through with `_pathSeed` set and is a deliberate small edit, not a
+ *     replace). A fresh value landing on an ALREADY-BOUND key asks first —
+ *     see `confirmReplace`.
  */
 function submitPathField(value: string): void {
   if (!value) return;
   if (isUnchangedPillValue(value)) { cancelPathEdit(); return; }
+  const key = _currentKey;
+  if (key && _pathSeed === null) {
+    const existing = getBinding(key);
+    if (existing && (existing.app || existing.web_url)) {
+      confirmReplace(key, existing, () =>
+        void assignFromPath(value, { keepOpen: true, onSaved: () => finishReplace(key, existing) }),
+      );
+      return;
+    }
+  }
   void assignFromPath(value);
 }
 
@@ -1061,6 +1337,9 @@ function renderPathValue(key: string, binding: KeyBinding | undefined): void {
     host.hidden = true;
     host.innerHTML = "";
     input.hidden = false;
+    // Back to the unbound placeholder — paintPathPill sets the "replace"
+    // wording, and nothing else restores this one.
+    input.placeholder = "…or paste a file path / URL";
   };
 
   const url = binding?.web_url ?? null;
@@ -1116,11 +1395,28 @@ function renderPathValue(key: string, binding: KeyBinding | undefined): void {
 }
 
 /**
- * Draw the pill and wire its two DIFFERENT intentions.
+ * Draw the pill and wire its THREE intentions — one more than before.
  *
- * ✕ means "clear this". The body means "let me change this". Conflating them
- * would make fixing one character of a long URL a retype, which is precisely
- * the thing the owner asked for the crossing option to avoid becoming.
+ * ✕ means "clear this". The body means "let me edit this one precisely"
+ * (loads the exact value back into the field, see the chip click handler
+ * below). And now, simply typing or pasting into the field that sits right
+ * beside the pill means "replace it with something new" — see
+ * OWNER'S FATHER TEST below for why that third path had to exist.
+ *
+ * OWNER'S FATHER TEST (2026-09-04). Until now this function did
+ * `o.input.hidden = true`, so a filled slot's paste field did not exist as
+ * far as a first-time user could see — only the pill and its ✕. The owner's
+ * father could assign an app to an EMPTY key, but on a key that already had a
+ * link bound, he could not see how to put a NEW link in: he did not realise
+ * the small ✕ had to be pressed first (which CLEARS the binding — not what
+ * he wanted) before he could paste. DECIDED: a filled slot offers replace
+ * DIRECTLY. The field stays visible and usable right alongside the pill —
+ * nothing to discover, nothing to clear first — and what used to be an
+ * unguarded overwrite is now guarded by ONE inline confirm instead
+ * (`confirmReplace`, wired at every call site that can reach this: `Enter` /
+ * `Assign` in `submitPathField`, `Done`, and the 4b disc). The pill itself is
+ * unchanged: click its body to load the exact value for a precise edit,
+ * click ✕ to clear — this function only stopped hiding the thing beside it.
  */
 function paintPathPill(o: {
   key: string;
@@ -1134,11 +1430,16 @@ function paintPathPill(o: {
 }): void {
   o.host.innerHTML = "";
   o.host.hidden = false;
-  o.input.hidden = true;
-  // The field BEHIND the pill must be empty, or `#ed-done` would read a value
-  // nobody typed and re-assign it. Stated here rather than relied upon: this is
-  // the invariant the whole `pending` trace above rests on.
+  // GATE REMOVED — see the doc comment above. The field stays visible so a
+  // paste lands the instant it happens, no click required first.
+  o.input.hidden = false;
+  // The field BEHIND the pill must be empty at rest, or `#ed-done` would read
+  // a value nobody typed and re-assign it. Stated here rather than relied
+  // upon: this is the invariant the whole `pending` trace above rests on —
+  // still true with the field visible, since "empty" is what makes a fresh
+  // paste distinguishable from a click-to-edit (`_pathSeed` stays null here).
   o.input.value = "";
+  o.input.placeholder = "Paste a new link or path to replace it…";
   _pathSeed = null;
   syncPathRow();
 
@@ -1283,6 +1584,30 @@ function wirePathDisc(key: string, path: HTMLInputElement, disc: HTMLButtonEleme
       openProfilePage(key, null);
       return;
     }
+    // The replace gate (2026-09-04) — a fresh URL beside an ALREADY-BOUND
+    // key's pill still asks first, same as every other path into a replace.
+    // `_pathSeed === null` because a click-to-edit already returned above via
+    // `isUnchangedPillValue`, or is a deliberate small edit that reaches the
+    // committing branch below unguarded — same reasoning as `submitPathField`.
+    if (_pathSeed === null) {
+      const existing = getBinding(key);
+      if (existing && (existing.app || existing.web_url)) {
+        confirmReplace(key, existing, () => {
+          console.info(`bp: 4b disc pressed — committing ${value} then opening the page`);
+          void assignFromPath(value, {
+            keepOpen: true,
+            onSaved: () => {
+              if (_currentKey !== key) return;
+              // Page 1 first, so the Undo row this offers is there waiting
+              // when the user backs out of the profile page with ←.
+              finishReplace(key, existing);
+              openProfilePage(key, null);
+            },
+          });
+        });
+        return;
+      }
+    }
     console.info(`bp: 4b disc pressed — committing ${value} then opening the page`);
     // The URL has to be BOUND before there is anything for the page to pin to,
     // so this commits first and turns the page from `onSaved` — the same
@@ -1331,34 +1656,49 @@ function renderGrid(): void {
         // choice to make — but the profile IS still written, so the launch is
         // explicit instead of relying on Chromium's last-used.
         const only = b && b.profiles.length === 1 ? b.profiles[0] : null;
-        void commit(
-          {
-            app: app.path,
-            web_url: null,
-            label: app.name,
-            icon_override: app.icon_base64 ?? null,
-            // `browser_exe` stays null on an app binding: the exe already IS
-            // `app`, and two sources of truth for one path is how this breaks
-            // later. The other two are nulled for a non-browser app by
-            // commit()'s normalisation, which is what clears a pin that
-            // described the target being replaced.
-            browser_exe: null,
-            browser_profile_dir: only?.directory ?? null,
-            // The ACCOUNT LABEL, exactly as a hand-picked tile would store it
-            // — never `display_name` directly, or a one-profile browser would
-            // label its HUD chip differently from every other pin.
-            browser_profile_name: only ? labelOf(only) : null,
-          },
-          {
-            // Keep the editor up ONLY to turn the page. Everything else about
-            // this press is unchanged, including the conflict check: the
-            // Space+<key> verdict is about a NEW binding and is still worth
-            // asking. `onSaved` fires after the save actually lands, so a
-            // conflict the user CANCELS leaves the page unopened.
-            keepOpen: multi,
-            onSaved: multi && key ? () => openProfilePage(key, b, true) : undefined,
-          },
-        );
+        const binding = {
+          app: app.path,
+          web_url: null,
+          label: app.name,
+          icon_override: app.icon_base64 ?? null,
+          // `browser_exe` stays null on an app binding: the exe already IS
+          // `app`, and two sources of truth for one path is how this breaks
+          // later. The other two are nulled for a non-browser app by
+          // commit()'s normalisation, which is what clears a pin that
+          // described the target being replaced.
+          browser_exe: null,
+          browser_profile_dir: only?.directory ?? null,
+          // The ACCOUNT LABEL, exactly as a hand-picked tile would store it
+          // — never `display_name` directly, or a one-profile browser would
+          // label its HUD chip differently from every other pin.
+          browser_profile_name: only ? labelOf(only) : null,
+        };
+        // The ordinary bind — unchanged byte-for-byte from before this
+        // feature. `keepOpen`/`onSaved` turn the page for a multi-profile
+        // browser exactly as they always did.
+        const bindNow = () => void commit(binding, {
+          keepOpen: multi,
+          onSaved: multi && key ? () => openProfilePage(key, b, true) : undefined,
+        });
+        // The replace gate (2026-09-04, OWNER'S FATHER TEST) — only for a key
+        // that already points somewhere ELSE. Re-pressing the tile that is
+        // already `.current` is a no-op in effect and asking about it would be
+        // noise, so that case still binds instantly like every empty key does.
+        const existing = key ? getBinding(key) : undefined;
+        const alreadyBound = !!(existing && (existing.app || existing.web_url));
+        const sameTarget = existing?.app === app.path;
+        if (alreadyBound && !sameTarget && key) {
+          confirmReplace(key, existing!, () => void commit(binding, {
+            keepOpen: true,
+            onSaved: () => {
+              if (_currentKey !== key) return;
+              finishReplace(key, existing!);
+              if (multi) openProfilePage(key, b, true);
+            },
+          }));
+          return;
+        }
+        bindNow();
       },
     },
     // Abandon a late scan result if the editor moved to another key or closed.
@@ -1550,6 +1890,25 @@ async function commit(binding: KeyBinding, opts: CommitOptions = {}): Promise<vo
     `browser_exe=${full.browser_exe ?? "null"} profile_dir=${full.browser_profile_dir ?? "null"}`,
   );
   _onSave(key, full);
+
+  // PROBLEM 242 — the ONE place a save is reported to the first-run tour, and
+  // it is deliberately here rather than at any of the seven call sites that
+  // reach `commit`. Both of this function's early exits (no key / no handler,
+  // and a pending conflict prompt) return above this line, so reaching it
+  // means a binding genuinely landed. A CLEAR does not count — `commit` is
+  // also how the ✕ empties a key, and step 3 goes on to ask the user to press
+  // the combo, which would then do nothing forever.
+  //
+  // The THIRD argument (2026-09-06) is `full`'s own profile name rather than
+  // anything the picker reported, and that is the point: `full` is the binding
+  // that is being written, so step 3 can never name a profile the key does not
+  // actually open. It arrives here for a profile pick too — `commitProfile`
+  // re-commits the whole binding with the pin attached and lands on this same
+  // line, which is why `tourBindingSaved` has to accept a second save for a key
+  // it is already showing.
+  if (full.app || full.web_url) {
+    tourBindingSaved(key, full.label ?? key.toUpperCase(), full.browser_profile_name ?? null);
+  }
 
   // The point of no return has passed, so the paste row must not still be
   // holding text that a later "Done" would re-assign over the top of what was

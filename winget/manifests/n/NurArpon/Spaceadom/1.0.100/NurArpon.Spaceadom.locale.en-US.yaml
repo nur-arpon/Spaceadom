@@ -1,0 +1,35 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
+
+PackageIdentifier: NurArpon.Spaceadom
+PackageVersion: 1.0.100
+PackageLocale: en-US
+Publisher: Nur Ifran Arpon
+PublisherUrl: https://github.com/nur-arpon
+PublisherSupportUrl: https://github.com/nur-arpon/Spaceadom/issues
+PackageName: Spaceadom
+PackageUrl: https://github.com/nur-arpon/Spaceadom
+License: Proprietary (source-visible) — see LICENSE in the repository
+LicenseUrl: https://github.com/nur-arpon/Spaceadom/blob/main/LICENSE
+PrivacyUrl: https://github.com/nur-arpon/Spaceadom/blob/main/PRIVACY.md
+Copyright: Copyright (c) 2026 Nur Ifran Arpon
+ShortDescription: >-
+  Hold Space and tap a key to launch, focus or minimise any app. Space alone
+  always types a space.
+Description: >-
+  Spaceadom turns your spacebar into a system-wide modifier key. Hold Space
+  and tap a letter to launch the app bound to it; tap the same combination
+  again to minimise it, and again to bring it back. Hold Space for a moment
+  and a radial guide appears showing every shortcut you've set. Tapping Space
+  on its own always types a space, exactly as it always has. No account, no
+  analytics, and its local settings and log never leave your computer.
+Moniker: spaceadom
+Tags:
+  - spacebar
+  - launcher
+  - keyboard
+  - productivity
+  - hotkey
+  - window-manager
+ReleaseNotesUrl: https://github.com/nur-arpon/Spaceadom/blob/main/all-versions/WHAT-CHANGED.md
+ManifestType: defaultLocale
+ManifestVersion: 1.9.0

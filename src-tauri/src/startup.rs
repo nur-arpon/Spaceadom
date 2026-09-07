@@ -73,6 +73,38 @@ const RUN_VALUE: &str = "Spaceadom";
 /// not be created, so the two mechanisms can never both fire.
 #[cfg(windows)]
 fn set_run_key(enabled: bool) {
+    // PROBLEM 250 — belt to the braces in ensure_startup_task/apply_task_enabled.
+    // A Run value in a packaged install is worse than useless: it would hold the
+    // absolute path of an exe under
+    // `…\WindowsApps\<Publisher>.Spaceadom_<VERSION>_x64__<hash>\`, and the
+    // Store rewrites that directory on every update — so the value would point
+    // at a folder that no longer exists, and the shell would fail silently at
+    // every logon. This guard is here as well as at the two call sites because
+    // set_run_key is reached from FOUR branches of ensure_startup_task, and a
+    // future fifth would otherwise inherit the bug with nothing to catch it.
+    if crate::packaged::is_packaged() {
+        log::info!(
+            "startup: PACKAGED — refusing to touch the HKCU Run value. Windows owns \
+             autostart for a Store install through the '{}' startupTask; a Run entry \
+             here would name a WindowsApps path that the next Store update deletes.",
+            crate::packaged::STARTUP_TASK_ID
+        );
+        return;
+    }
+    // PROBLEM 254 — a portable copy registers NOTHING with Windows. There is
+    // no install to point a Run value at that survives the user simply
+    // moving or deleting the folder, and "portable" is understood by anyone
+    // who reaches for it to mean "does not attach itself to my system" —
+    // writing an autostart entry would be exactly that. The Settings row
+    // goes inert with a note (see SETTINGS-PANEL LINES TO ADD in this
+    // feature's report) rather than silently doing nothing.
+    if crate::portable::is_portable() {
+        log::info!(
+            "startup: PORTABLE — refusing to touch the HKCU Run value. Portable copies don't \
+             start with Windows; put a shortcut in your Startup folder if you want that."
+        );
+        return;
+    }
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let Ok((key, _)) = hkcu.create_subkey(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run") else {
         log::error!("startup: cannot open HKCU Run key — autostart unavailable");
@@ -209,6 +241,60 @@ fn task_state() -> TaskState {
 /// and self-heals a task that points at a moved or uninstalled exe.
 #[cfg(windows)]
 pub fn ensure_startup_task(run_at_startup: bool) {
+    // PROBLEM 250 — the Store install takes none of this path.
+    //
+    // Neither of the two mechanisms below is available to a packaged app in any
+    // useful form: a Scheduled Task would point at a WindowsApps directory the
+    // next Store update replaces, and so would a Run value. Windows registers
+    // the package's `windows.startupTask` from the manifest at INSTALL time and
+    // re-points it on every update, which is exactly the thing this function
+    // exists to do by hand for an NSIS install.
+    //
+    // So this branch REGISTERS NOTHING. It reads what Windows already decided
+    // and says so in the log, and it deliberately does not force Windows to
+    // agree with `run_at_startup`: a user who switched Spaceadom off in Task
+    // Manager ▸ Startup apps has made a decision the app is not allowed to
+    // overturn (RequestEnableAsync documents that it will not), and one who
+    // switched it ON there should not have it taken away at the next launch by
+    // a stale config value. The Settings row reads the live state instead
+    // (`get_packaged_startup`), so the UI tells the truth without either side
+    // fighting the other.
+    if crate::packaged::is_packaged() {
+        let state = crate::packaged::startup_task_state();
+        let agrees = matches!(
+            (run_at_startup, state),
+            (true, crate::packaged::StartupState::Enabled)
+                | (true, crate::packaged::StartupState::EnabledByPolicy)
+                | (false, crate::packaged::StartupState::Disabled)
+                | (false, crate::packaged::StartupState::DisabledByUser)
+                | (false, crate::packaged::StartupState::DisabledByPolicy)
+        );
+        log::info!(
+            "startup: PACKAGED — no Scheduled Task and no Run key were touched. Windows \
+             registered the '{}' startupTask from AppxManifest.xml at install time and \
+             re-points it on every Store update. Its state is {state:?}; config says \
+             run_at_startup={run_at_startup} ({}). The user's switch is in Settings ▸ \
+             Apps ▸ Startup (or Task Manager ▸ Startup apps) and Spaceadom's own row \
+             follows it rather than overriding it.",
+            crate::packaged::STARTUP_TASK_ID,
+            if agrees { "they agree" } else { "THEY DISAGREE — Windows wins, see get_packaged_startup" }
+        );
+        return;
+    }
+
+    // PROBLEM 254 — a portable copy, same rule as `set_run_key`: no
+    // Scheduled Task, no Run key, nothing registered with Windows at all.
+    // Checked here too (not only inside `set_run_key`) so a future direct
+    // caller of the Scheduled-Task branch below cannot bypass it.
+    if crate::portable::is_portable() {
+        log::info!(
+            "startup: PORTABLE — no Scheduled Task and no Run key will be registered. A \
+             portable copy does not attach itself to the machine; put a shortcut in your \
+             Startup folder if you want it to launch at logon."
+        );
+        return;
+    }
+
     let Ok(exe) = std::env::current_exe() else {
         log::error!("startup: cannot read current exe path");
         return;
@@ -349,6 +435,31 @@ pub fn ensure_startup_task(run_at_startup: bool) {
 /// Run-key fallback is applied instead so the Settings toggle still works.
 #[cfg(windows)]
 pub fn apply_task_enabled(enabled: bool) {
+    // PROBLEM 250 — the Settings switch, packaged edition. This is the ONE
+    // place the app may ask Windows to change the startup state, and Windows
+    // may refuse (DisabledByUser / *ByPolicy). The resulting state is returned
+    // to the frontend by `get_packaged_startup`, which is what repaints the row
+    // — so a refusal is visible instead of a switch that flips back on its own.
+    if crate::packaged::is_packaged() {
+        let after = crate::packaged::set_startup_task(enabled);
+        log::info!(
+            "startup: PACKAGED — asked Windows to set the '{}' startupTask to \
+             enabled={enabled}; it is now {after:?}",
+            crate::packaged::STARTUP_TASK_ID
+        );
+        return;
+    }
+    // PROBLEM 254 — nothing for the Settings switch to flip in a portable
+    // copy: there is no task and `set_run_key` below already refuses, so
+    // this only saves a pointless registry round-trip and logs the reason
+    // at the point the user actually touched the control.
+    if crate::portable::is_portable() {
+        log::info!(
+            "startup: PORTABLE — 'Run at startup' has nothing to apply to (no Run key, no \
+             Scheduled Task, ever, for a portable copy)."
+        );
+        return;
+    }
     if !task_exists() {
         set_run_key(enabled);
         return;
@@ -418,6 +529,68 @@ pub fn repair_stale_task(run_at_startup: bool) -> bool {
     deleted
 }
 
+/// Does one `NotifyIconSettings` entry's `ExecutablePath` describe THIS copy of
+/// Spaceadom? Pure — no registry, no filesystem — so every case below is a
+/// unit test rather than something reasoned about over a live hive.
+///
+/// Two ways to match, in order:
+///
+///  1. **The exact path.** Once the shell has written our own entry, this is
+///     the only one that matters.
+///  2. **`spaceadom.exe` inside a directory with the SAME NAME as our own
+///     exe's directory.** The shell habitually spells a path with a
+///     KNOWNFOLDER GUID — `{6D809377-…}\Spaceadom\spaceadom.exe` for
+///     `C:\Program Files\Spaceadom\spaceadom.exe` — so the strings differ while
+///     the install does not. Comparing the last component of each parent is
+///     what survives that rewriting.
+///
+/// **PROBLEM 250 follow-up — why rule 2 is anchored on OUR directory name and
+/// not on the literal `spaceadom\spaceadom.exe`.** The literal is a claim about
+/// where this app installs, and it stopped being one install ago. On
+/// 2026-09-05 a packaged copy running from
+/// `…\WindowsApps\LOCALTEST.Spaceadom_1.0.100.0_x64__nj4cr7rfsqc4c\spaceadom.exe`
+/// matched, and promoted, two entries belonging to OTHER copies — the owner's
+/// per-user NSIS install and a leftover from the agent container. Anchoring on
+/// our own directory name makes the rule say what it means: *this* install's
+/// icon. A dev build (`…\target\release\spaceadom.exe`) is still excluded, by
+/// the same comparison and for the same reason it always was — "release" is
+/// not the directory the installed copy runs from.
+///
+/// Generalise: **a match rule written as a constant is a fact about the world
+/// frozen at the moment it was written.** Derive it from the running process
+/// where you can.
+#[cfg(windows)]
+pub(crate) fn notify_icon_entry_matches(entry_path: &str, current_exe: &str) -> bool {
+    let norm = |s: &str| s.trim().to_lowercase().replace('/', "\\");
+    let entry = norm(entry_path);
+    let me = norm(current_exe);
+    if entry.is_empty() || me.is_empty() {
+        return false;
+    }
+    if entry == me {
+        return true;
+    }
+    // Rule 2. Both sides must be a `spaceadom.exe`, and both parents must have
+    // the same final component. `rsplit` rather than `Path`: the entry string
+    // can carry a `{GUID}` first component that is not a real path element, and
+    // this only ever compares the tail.
+    let tail = |p: &str| -> Option<(String, String)> {
+        let mut it = p.rsplit('\\');
+        let file = it.next()?.to_string();
+        let parent = it.next()?.to_string();
+        if file.is_empty() || parent.is_empty() {
+            return None;
+        }
+        Some((parent, file))
+    };
+    match (tail(&entry), tail(&me)) {
+        (Some((entry_parent, entry_file)), Some((my_parent, my_file))) => {
+            entry_file == "spaceadom.exe" && my_file == "spaceadom.exe" && entry_parent == my_parent
+        }
+        _ => false,
+    }
+}
+
 /// PROBLEM 76 — surface the tray icon on the visible taskbar corner.
 ///
 /// Windows 11 puts every new tray icon into the hidden overflow flyout behind
@@ -431,19 +604,85 @@ pub fn repair_stale_task(run_at_startup: bool) -> bool {
 /// Called ONCE per install (the caller gates it): after that, whatever the
 /// user does with the icon — including hiding it again — is their choice and
 /// must stick. Returns true when an entry was found and promoted.
+///
+/// ## PROBLEM 250 follow-up — LIVE TEST 2026-09-05, FINDING D
+///
+/// **Under an MSIX package this function does nothing at all, deliberately.**
+/// The first real packaged launch on this machine produced two log lines that
+/// looked like success and were not:
+///
+/// ```text
+/// startup: tray icon promoted … (…\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Local\Spaceadom\spaceadom.exe)
+/// startup: tray icon promoted … (C:\Users\beamu\AppData\Local\Spaceadom\spaceadom.exe)
+/// ```
+///
+/// Neither is the packaged copy. Both are STALE entries the old suffix rule
+/// `norm.ends_with("spaceadom\\spaceadom.exe")` happily matched, because the
+/// packaged exe lives at
+/// `…\WindowsApps\<PFN>_<version>_x64__<hash>\spaceadom.exe` and cannot match
+/// that suffix. Returning `true` for them told the caller the job was done, so
+/// it wrote `tray_promoted_for = <WindowsApps path>` and closed the once-gate:
+/// **a Store install's icon would never be promoted, and the config recorded
+/// that it had been.**
+///
+/// And it could not have worked anyway. Registry writes from inside a package
+/// are copy-on-write into a private hive — measured the same day: the writes
+/// landed in `…\Packages\<PFN>\SystemAppData\Helium\User.dat`, and after the
+/// package was removed the real `NotifyIconSettings` entry for the WindowsApps
+/// exe still had `IsPromoted` **blank**. The shell reads the real hive. Nothing
+/// this function can write reaches it.
+///
+/// **Is there a non-virtualised route? No — researched 2026-09-05 and closed.**
+/// There is no supported API for an app to promote its own notification icon.
+/// `NOTIFYICONDATA`'s only visibility state is `NIS_HIDDEN`/`NIS_SHAREDICON`
+/// (there is no "promoted" flag); `Shell_NotifyIconGetRect` is read-only
+/// geometry; `Windows.UI.Shell` covers taskbar PINNING of app entries, not the
+/// notification area. Microsoft states the model outright on the "Notifications
+/// and the Notification Area" page: only the user promotes an icon, and the
+/// system may do so itself only as a sub-minute preview.
+/// `HKCU\Control Panel\NotifyIconSettings\<id>\IsPromoted` is real, is what the
+/// shell writes when the user drags an icon, and is an undocumented internal
+/// contract — which is exactly why it is unreachable from inside a package.
+/// **So Store users promote the icon themselves** (drag it out of the `^`
+/// overflow, or Settings ▸ Personalisation ▸ Taskbar ▸ Other system tray
+/// icons), and that belongs in the Store listing text, not in a retry loop.
+///
+/// Generalise: **a write you cannot read back is not a write.** This function
+/// returned `true` on the strength of `RegKey::set_value` returning `Ok(())` —
+/// which it did, into a hive nobody reads.
 #[cfg(windows)]
 pub fn promote_tray_icon_once() -> bool {
+    // PROBLEM 250 follow-up — the packaged early return, logged ONCE so a
+    // caller that retries cannot turn it into a log flood.
+    if crate::packaged::is_packaged() {
+        static SAID: std::sync::Once = std::sync::Once::new();
+        SAID.call_once(|| {
+            log::info!(
+                "startup: PACKAGED — NOT touching NotifyIconSettings. HKCU writes from inside \
+                 an MSIX package are copied into the package's private hive \
+                 (…\\Packages\\<PFN>\\SystemAppData\\Helium\\User.dat) and never reach the \
+                 hive the shell reads, so promoting the tray icon from here is a write nobody \
+                 can read back (measured 2026-09-05, LIVE TEST FINDING D). There is no \
+                 supported API for an app to promote its own notification icon — Microsoft's \
+                 documented model is that only the USER promotes one. A Store user drags the \
+                 icon out of the '^' overflow, or uses Settings > Personalisation > Taskbar > \
+                 Other system tray icons."
+            );
+        });
+        return false;
+    }
+
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let Ok(root) = hkcu.open_subkey(r"Control Panel\NotifyIconSettings") else {
         return false; // pre-Win11 shell — icons are visible by default there
     };
-    // PROBLEM 142 — match OUR OWN exe first. The suffix rule below is a
-    // fallback for the shell's KNOWNFOLDER-GUID spelling of the same path; on
-    // its own it also matches STALE entries for install locations we have since
-    // moved away from, which are harmless to promote but tell us nothing about
-    // whether the icon the user is actually looking at got promoted.
+    // PROBLEM 142 — match OUR OWN exe first. The fallback below is for the
+    // shell's KNOWNFOLDER-GUID spelling of the same path; see
+    // `notify_icon_entry_matches` for why it is anchored on our own directory
+    // NAME rather than on the literal string "spaceadom" (PROBLEM 250
+    // follow-up — the literal matched two installs that were not us).
     let me = std::env::current_exe()
-        .map(|p| p.to_string_lossy().to_lowercase().replace('/', "\\"))
+        .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
 
     let mut promoted = false;
@@ -454,12 +693,7 @@ pub fn promote_tray_icon_once() -> bool {
         let Ok(path) = entry.get_value::<String, _>("ExecutablePath") else {
             continue;
         };
-        // Suffix-match "spaceadom\spaceadom.exe": covers both the plain
-        // Program Files path and the shell's KNOWNFOLDER-GUID form
-        // ({6D809377-…}\Spaceadom\spaceadom.exe), while EXCLUDING dev builds
-        // (…\target\release\spaceadom.exe — wrong parent directory).
-        let norm = path.to_lowercase().replace('/', "\\");
-        if (!me.is_empty() && norm == me) || norm.ends_with(r"spaceadom\spaceadom.exe") {
+        if notify_icon_entry_matches(&path, &me) {
             match entry.set_value("IsPromoted", &1u32) {
                 Ok(()) => {
                     log::info!("startup: tray icon promoted to the visible taskbar corner ({path})");
@@ -607,11 +841,14 @@ pub fn maybe_relaunch_elevated() -> bool {
     false
 }
 
-/// Return the Spaceadom data directory (%APPDATA%\Spaceadom).
+/// Return the Spaceadom data directory: `%APPDATA%\Spaceadom` normally, or
+/// `<exe dir>\data` for a portable copy (PROBLEM 254) — see
+/// `portable::data_root`, the one resolver this now wraps. Every existing
+/// caller of `data_dir()` (config, the picker cache, release-notes cache,
+/// the updater's last-run-version + rollback archive, the overlay re-test
+/// marker) becomes portable-aware for free.
 pub fn data_dir() -> PathBuf {
-    std::env::var("APPDATA")
-        .map(|p| PathBuf::from(p).join("Spaceadom"))
-        .unwrap_or_else(|_| PathBuf::from("Spaceadom"))
+    crate::portable::data_root()
 }
 
 /// Data directory of the previous product identity, for one-time migration.
@@ -619,4 +856,100 @@ pub fn legacy_data_dir() -> PathBuf {
     std::env::var("APPDATA")
         .map(|p| PathBuf::from(p).join("SpaceToggleV14"))
         .unwrap_or_else(|_| PathBuf::from("SpaceToggleV14"))
+}
+
+// ─────────────────────────────── tests ───────────────────────────────────────
+//
+// PROBLEM 250 follow-up — LIVE TEST 2026-09-05, FINDING D. Every case here is
+// a real path taken from that run's log or from this machine's registry, not
+// an invented one: the whole defect was that a rule written against imagined
+// paths matched two installs that were not the running one.
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    const NSIS: &str = r"C:\Users\beamu\AppData\Local\Spaceadom\spaceadom.exe";
+    const PROGRAM_FILES: &str = r"C:\Program Files\Spaceadom\spaceadom.exe";
+    /// How the shell actually spells the line above in NotifyIconSettings.
+    const PROGRAM_FILES_KNOWNFOLDER: &str =
+        r"{6D809377-6AF0-444b-8957-A3773F02200E}\Spaceadom\spaceadom.exe";
+    /// The packaged copy, from the 2026-09-05 log.
+    const PACKAGED: &str =
+        r"C:\Program Files\WindowsApps\LOCALTEST.Spaceadom_1.0.100.0_x64__nj4cr7rfsqc4c\spaceadom.exe";
+    /// The stale entry the agent container left behind, and the second thing
+    /// the old rule wrongly promoted.
+    const CONTAINER: &str =
+        r"C:\Users\beamu\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Local\Spaceadom\spaceadom.exe";
+    const DEV_BUILD: &str = r"D:\Claude-Projects\SpaceToggle-V14\src-tauri\target\release\spaceadom.exe";
+
+    #[test]
+    fn our_own_exact_path_always_matches() {
+        assert!(notify_icon_entry_matches(NSIS, NSIS));
+        assert!(notify_icon_entry_matches(PACKAGED, PACKAGED));
+    }
+
+    /// Case and separator style are the shell's choice, not ours.
+    #[test]
+    fn case_and_forward_slashes_do_not_defeat_the_exact_match() {
+        assert!(notify_icon_entry_matches(
+            &NSIS.to_uppercase().replace('\\', "/"),
+            NSIS
+        ));
+    }
+
+    /// Rule 2, and the reason it exists: same install, two spellings.
+    #[test]
+    fn the_shells_knownfolder_spelling_matches_the_same_install() {
+        assert!(notify_icon_entry_matches(PROGRAM_FILES_KNOWNFOLDER, PROGRAM_FILES));
+    }
+
+    /// **FINDING D itself.** The packaged copy must not claim either of the
+    /// two entries the old `ends_with("spaceadom\\spaceadom.exe")` rule
+    /// matched — and it promoted BOTH on 2026-09-05, then recorded the job as
+    /// done.
+    #[test]
+    fn a_packaged_copy_matches_neither_stale_entry() {
+        assert!(!notify_icon_entry_matches(NSIS, PACKAGED));
+        assert!(!notify_icon_entry_matches(CONTAINER, PACKAGED));
+        assert!(!notify_icon_entry_matches(PROGRAM_FILES_KNOWNFOLDER, PACKAGED));
+    }
+
+    /// …and the reverse: the ordinary NSIS copy must not adopt the leftover
+    /// WindowsApps entry a removed package left behind.
+    #[test]
+    fn an_unpackaged_copy_does_not_adopt_a_leftover_windowsapps_entry() {
+        assert!(!notify_icon_entry_matches(PACKAGED, NSIS));
+    }
+
+    /// The rule PROBLEM 142 already had, kept: a `target\release` build is not
+    /// the installed copy and its icon is not the user's.
+    #[test]
+    fn a_dev_build_is_still_excluded() {
+        assert!(!notify_icon_entry_matches(DEV_BUILD, NSIS));
+        assert!(!notify_icon_entry_matches(NSIS, DEV_BUILD));
+    }
+
+    /// A different program that happens to end in `spaceadom.exe` is not us.
+    #[test]
+    fn an_unrelated_executable_never_matches() {
+        assert!(!notify_icon_entry_matches(
+            r"C:\Program Files\OtherApp\OtherApp.exe",
+            NSIS
+        ));
+        assert!(!notify_icon_entry_matches(
+            r"C:\Tools\NotSpaceadom\spaceadom.exe",
+            NSIS
+        ));
+    }
+
+    /// An unreadable `current_exe()` yields an empty string; matching
+    /// EVERYTHING at that point would promote every tray icon on the machine.
+    #[test]
+    fn an_empty_side_matches_nothing() {
+        assert!(!notify_icon_entry_matches("", NSIS));
+        assert!(!notify_icon_entry_matches(NSIS, ""));
+        assert!(!notify_icon_entry_matches("", ""));
+        assert!(!notify_icon_entry_matches("spaceadom.exe", NSIS));
+    }
 }

@@ -51,6 +51,25 @@ export interface Profile {
   name: string;
   /** Map of lowercase key character → binding. Keys: a–z. */
   bindings: Record<string, KeyBinding>;
+  /**
+   * One emoji standing in for this profile, or null/absent for none.
+   *
+   * **NULL IS THE NORMAL STATE AND EVERY SURFACE MUST KEEP ITS OLD LOOK FOR
+   * IT.** The popover row falls back to the name's initial, the top-right pill
+   * keeps its letter disc, and the Guide HUD's SPACE pill renders no extra
+   * element at all. Three readers, one rule.
+   *
+   * Optional in the TYPE because every `config.json` on disk predates the
+   * field — read it as `p.emoji ?? null`, never as `p.emoji!`.
+   *
+   * A single GRAPHEME CLUSTER, which is not a single JS character: "👨‍👩‍👧"
+   * has `.length === 8` and five code points. Never index into it, never
+   * `slice` it, never `maxLength`-cap an input to 1 — use `Array.from(s)` if
+   * you have to count anything. Rust's `schema::emoji_is_valid` is the check
+   * that is actually enforced (`set_profile_emoji`); anything here is a
+   * fail-fast before the round trip.
+   */
+  emoji?: string | null;
 }
 
 export interface AppConfig {
@@ -221,6 +240,21 @@ export interface AppConfig {
    * and absent must mean ON, which is what Rust's serde default also says.
    */
   send_logs?: boolean;
+  /**
+   * PROBLEM 242 — has the first-run "Guided first bind" tour been seen?
+   *
+   * **FALSE IS THE INTERESTING VALUE.** It is written `true` exactly once, on
+   * the run where the user finishes the walkthrough or skips it, and never
+   * read again after that. Absent from every config written before 1.0.97,
+   * and absent must mean "not yet seen" — so read it as `=== true`, like
+   * `hud_toast_flight` and NOT like `send_logs`: a config that predates the
+   * field belongs to someone who has never been offered the tour.
+   *
+   * Skipping writes it too. "Skip" means never nag again, not "ask me next
+   * time" — the Settings header's "Show me the walkthrough" is the way back,
+   * and it ignores this field entirely.
+   */
+  tour_done?: boolean;
 }
 
 // ---------------------------------------------------------------------------

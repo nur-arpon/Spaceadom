@@ -13,16 +13,42 @@
  * and must not be dropped to match a mockup.
  */
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+// Only for the THIRD-PARTY list's per-package links (`openAboutLink` in
+// controls.ts covers the four fixed ones); same leaf-safe import as there.
+import { openUrl } from "@tauri-apps/plugin-opener";
+// PROBLEM 242 — the header's second entry restarts the first-run walkthrough.
+// tour.ts is a leaf and imports nothing back, so there is no cycle here.
+import { startTour } from "./tour";
 import {
   appConfig, persistConfig, applySound, applyMotion,
-  applyLook, applySkyMode, knownConflicts, refreshConflicts,
+  applyLook, applySkyMode, knownConflicts, refreshConflicts, resolveTheme,
 } from "../main";
 import { sfx } from "../sfx";
 import { openConflictPrompt } from "./conflict-prompt";
 import {
   toggleSwitchHtml, sliderShell, segRowHtml, paintInert,
-  SPECIALS_INERT_NOTE, ROWS_INERT_NOTE,
+  SPECIALS_INERT_NOTE, RING_OPTS, ringLayoutFor, ringConfigFor,
+  groupHeadingHtml, filterSettings, setPanelExpanded,
+  showRingPreview, refreshRingPreview, clearRingPreview,
+  wireSegRowsKeyboard, wireSegIndicators, positionSegIndicator, aboutRowHtml, renderThirdPartyGroups,
+  fetchAboutInfo, requestUpdateCheck, openAboutLink,
+  // PROBLEM 249 — the About row's two update controls and the one rule they
+  // share: act on the `update-status` EVENT, never on the command's return.
+  updateStateIsBusy, fetchRollbackTarget, requestRollback,
+  // REVIEW FIXES 2026-09-05 (H6) — "Run at startup"'s ownership rules, moved
+  // into the leaf so `preview.ts` exercises the identical decision. The panel
+  // no longer decides any of this for itself; see controls.ts for what the
+  // old `packaged && !mayChange` got wrong about a portable copy.
+  startupRowIsInert, startupShownAsOn as ownershipShownAsOn, startupOutcome,
+  startupIsPortable, type StartupOwnership,
+  type RingLayout, type ThirdPartyEntry, type AboutLinkKind,
 } from "./controls";
+// ABOUT (feature 1) — a plain data import. resolveJsonModule (tsconfig.json)
+// makes this a typed array literal at compile time; Vite bundles it into
+// dist2 like any other imported asset, so it ships with the app rather than
+// being read from disk at runtime.
+import thirdPartyRaw from "../generated/third-party.json";
 import { showToast } from "./toast";
 // The SAME grid the key editor uses - the owner asked for exactly that
 // picker here. Shared leaf module, never a fork (see app-grid.ts).
@@ -43,9 +69,96 @@ let _armTimer: number | undefined;
 /** PROBLEM 213 follow-up — the exit timer for closeSettingsPanel's animated
  *  close, so a reopen mid-exit can cancel it instead of racing it. */
 let _closeTimer: number | undefined;
+/**
+ * `renderConflicts`'s inner `draw()`, published so the Maintenance group's
+ * "Re-check now" can repaint the list it just re-scanned.
+ *
+ * A FUNCTION REFERENCE, not a re-entry into `renderConflicts()`: `draw` is a
+ * closure over the `#set-conflicts` box that exists RIGHT NOW, and calling
+ * `renderConflicts()` again would attach a second set of listeners to the same
+ * section. Re-set on every `renderConflicts`, so it always points at the live
+ * box; null before the section has ever been drawn, which is why every call
+ * site is optional.
+ */
+let _redrawConflicts: (() => void) | null = null;
 
 let _onResetDefaults: (() => void) | null = null;
 let _onClearAll: (() => void) | null = null;
+
+/**
+ * 2026-09-01 redesign — the search text and the expanded state.
+ *
+ * BOTH LIVE AT MODULE SCOPE for the same reason the app-exceptions picker's
+ * query does: `render()` replaces the panel's whole `innerHTML` after every
+ * toggle, so anything held only in the DOM is destroyed by the next flip of
+ * any switch. A user who typed "sound", flipped the switch they found and
+ * watched the filter reset itself would be right to call that a bug.
+ */
+let _query = "";
+let _expanded = false;
+/** Which descriptions were open at the top of the current render() — see the
+ *  assignment there, and `renderRingFixRow`, which is built too late to be
+ *  reached by that function's own restore loop. */
+let _openDescSnapshot: string[] = [];
+/** Registered once; collapses an expanded panel on Escape (see `wireExpandEscape`). */
+let _expandEscWired = false;
+
+/**
+ * PROBLEM 250 — who owns "Run at startup" in THIS install.
+ *
+ * `null` until the backend has been asked, and `packaged: false` for every
+ * NSIS and MSI install, which is every install that exists today — so the row
+ * behaves exactly as it always has unless this app is running from the
+ * Microsoft Store's MSIX package.
+ *
+ * MODULE SCOPE, like `_query` and `_expanded` above, and for the same reason:
+ * `render()` replaces the panel's entire innerHTML on every toggle, so the
+ * greying has to be re-applied from a value that survives that. It is fetched
+ * ONCE when the panel opens (and again right after the switch is used), never
+ * per render — an `invoke` on the render path would make every unrelated
+ * toggle round-trip to Rust.
+ */
+let _pkgStartup: StartupOwnership = null;
+
+// ---------------------------------------------------------------------------
+// ABOUT (feature 1) — module-scope state, same reasoning as `_pkgStartup`
+// above: `render()` replaces the panel's entire innerHTML on every toggle, so
+// anything that must survive a render (what was fetched, whether the
+// third-party list is expanded) has to live outside the DOM.
+// ---------------------------------------------------------------------------
+const THIRD_PARTY = thirdPartyRaw as ThirdPartyEntry[];
+/** `null` until `fetchAboutInfo()` answers once, or forever in a harness with
+ *  no Tauri runtime behind it — `aboutRowHtml` renders that state as the bare
+ *  app name, never as a blank row. */
+let _aboutInfo: { version: string; installKind: string } | null = null;
+/** Whether the third-party list is expanded. Survives render() like every
+ *  other "is this open" flag in this file (`_expanded`, `_excPickerOpen`). */
+let _thirdPartyOpen = false;
+/** The line under "Check for updates" — the last status text, so a check
+ *  started and a render triggered by something else (any toggle) do not wipe
+ *  it back to blank. */
+let _updateStatusText = "";
+/** Wired once: the `update-status` event fires for background checks too
+ *  (the daily poller), not only for a press of this row's own button, so this
+ *  is a top-level listener rather than something re-wired per render. */
+let _updateStatusListenerWired = false;
+/** REVIEW FIXES 2026-09-05 (LOW) — a `listen()` for it is in flight. See
+ *  `wireUpdateStatusListener`: `_updateStatusListenerWired` now flips only
+ *  when the registration RESOLVES, so this covers the window in between,
+ *  which `render()` walks through on every toggle. */
+let _updateStatusListenPending = false;
+/** PROBLEM 249 — the version this copy can go back to, or `null` when there
+ *  is none (a dev build, a Store package, a portable copy, or the very first
+ *  auto-update this machine has taken). Fetched with `_aboutInfo`, on every
+ *  panel open rather than once per session: an update installed by the daily
+ *  background check while the panel was shut changes the answer. */
+let _rollback: { version: string; path: string; kind: string } | null = null;
+/** One-tap confirm for the rollback button, local to that button rather than
+ *  going through `arm()`/`disarm()` — those re-render the whole panel, which
+ *  would replay its entrance wave and, worse, rebuild the very button whose
+ *  armed state is being tracked. */
+let _rollbackArmed = false;
+let _rollbackArmTimer: number | undefined;
 
 export function initSettingsPanel(
   onResetDefaults: () => void,
@@ -55,6 +168,7 @@ export function initSettingsPanel(
   _onResetDefaults = onResetDefaults;
   _onClearAll = onClearAll;
   if (!panelEl) return;
+  wireExpandEscape();
   render();
 }
 
@@ -110,6 +224,17 @@ export function openSettingsPanel(): void {
   render();
   panelEl.hidden = false;
   document.getElementById("gear-btn")?.setAttribute("aria-expanded", "true");
+  // PROBLEM 250 — ask, every open, who owns "Run at startup". Deliberately
+  // NOT awaited and deliberately not inside render(): the panel must appear at
+  // once, and for the packaged case the answer arrives a few milliseconds later
+  // and repaints one row in place. The user can change this in Task Manager
+  // while the panel is shut, so a value cached from the first open would go
+  // stale — hence every open, not once per session.
+  void refreshPackagedStartup();
+  // ABOUT (feature 1) — same shape, same reason: fetch every open (the daily
+  // updater can have changed the version since the last one), repaint one
+  // corner of the row in place rather than blocking the panel's appearance.
+  void refreshAboutInfo();
 }
 
 /**
@@ -128,7 +253,33 @@ export function openSettingsPanel(): void {
 export function closeSettingsPanel(): void {
   if (!panelEl || panelEl.hidden) return;
   document.getElementById("gear-btn")?.setAttribute("aria-expanded", "false");
+  // A closed panel is never left in the full-screen state. The expand is a
+  // "look at it now" gesture, not a preference (see `setPanelExpanded`), and a
+  // panel that reopened full-screen minutes later — from the gear, from the
+  // tray, from anywhere — would read as the app having got stuck rather than
+  // as something the user chose. Collapse BEFORE the exit animation so the
+  // fade plays on the shape it was actually shown at.
+  if (_expanded) { _expanded = false; setPanelExpanded(panelEl, false); }
+  // 1.0.96 review fix — same reasoning as the expand collapse just above: a
+  // filter is a "look at it now" gesture too, not a preference. `_query` is
+  // module scope, so without this it survived the popover closing and the
+  // NEXT open reopened still filtered on whatever was last typed, with no
+  // visible search box open to explain why rows were missing. `render()`
+  // rebuilds the panel's HTML on every open (unfiltered) and `wireSearch`
+  // only re-applies a filter when `_query` is non-empty, so clearing it
+  // here is what makes a reopen start clean; the input clear is just so a
+  // still-mounted box (the animated exit keeps the DOM around briefly)
+  // doesn't flash the stale query first.
+  _query = "";
+  const searchBox = panelEl.querySelector<HTMLInputElement>("#set-search");
+  if (searchBox) searchBox.value = "";
   disarm();
+  // The ring-preview clock, forgotten with the panel. It is only ever read to
+  // decide whether a CHANGE should re-project, and every control that can make
+  // that change lives in this panel — so a clock still ticking after it closes
+  // can only ever be wrong. Clearing never fires a command; the ring on screen
+  // takes itself down on Rust's own timer exactly as before.
+  clearRingPreview();
 
   // :root.reduced-motion is the in-app setting (config.motion), deliberately
   // not the OS media query alone — PROBLEM 47. No lingering transition: skip
@@ -167,6 +318,43 @@ export function setPausedState(paused: boolean): void {
   if (isSettingsPanelOpen()) render();
 }
 
+/**
+ * Escape peels ONE layer: an expanded panel returns to the popover, and only a
+ * second Escape closes it.
+ *
+ * IT HAS TO BE A CAPTURE-PHASE LISTENER, and that is the whole reason this
+ * function exists rather than a line in main.ts. Two bubble-phase document
+ * listeners already answer Escape — bootstrap's (`closeAllPopovers`, which
+ * closes this panel outright) and `wireSkyEscape`'s (which leaves sky mode) —
+ * and neither can be taught about a state they do not know exists without
+ * editing main.ts. Capture runs first, so stopping propagation here means the
+ * expanded panel collapses and NOTHING else happens on that press. Exactly the
+ * peel rule `wireSkyEscape`'s own comment describes, applied one layer higher.
+ *
+ * Wired once, from `initSettingsPanel`. It is a no-op on every press while the
+ * panel is not expanded, which is nearly all of them.
+ */
+function wireExpandEscape(): void {
+  if (_expandEscWired) return;
+  _expandEscWired = true;
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || !_expanded || !panelEl || panelEl.hidden) return;
+    e.preventDefault();
+    e.stopPropagation();
+    toggleExpanded(false);
+  }, true);
+}
+
+/** The one place the expanded state changes, so the flag and the DOM cannot
+ *  disagree. `sfx.bloomOpen/Close` because this IS a bloom — the same surface
+ *  growing and shrinking, which is what those two sounds are for. */
+function toggleExpanded(on: boolean): void {
+  if (!panelEl || _expanded === on) return;
+  _expanded = on;
+  setPanelExpanded(panelEl, on);
+  if (on) sfx.bloomOpen(); else sfx.bloomClose();
+}
+
 // ---------------------------------------------------------------------------
 // Render
 // ---------------------------------------------------------------------------
@@ -203,6 +391,11 @@ function render(): void {
   const openDescs = Array.from(
     panelEl.querySelectorAll<HTMLElement>(".set-desc.is-open"),
   ).map((b) => b.dataset.descFor ?? "").filter(Boolean);
+  // Published for the rows that do not exist yet when the restore loop below
+  // runs — `renderConflicts` builds the ring tool's description box after
+  // this function has already replaced the panel's markup, so it has to
+  // restore its own open state from the same snapshot.
+  _openDescSnapshot = openDescs;
 
   const sound = !!appConfig.sound_enabled;
 
@@ -219,12 +412,17 @@ function render(): void {
   // machine is exactly where a tester saw a motionless app (PROBLEM 47).
   const effects = !document.documentElement.classList.contains("reduced-motion");
 
-  // PROBLEM 92 — the escape hatch for the invisible-overlay bug. This is
-  // normally set BY the app (the pixel self-test measures that this machine's
-  // driver cannot composite the transparent overlay and writes "software"),
-  // but it must be reachable by hand: the verdict is never reverted
-  // automatically, so a false positive would otherwise be permanent.
-  const software = appConfig.overlay_compositing === "software";
+  // PROBLEM 92's "Software overlay" switch USED TO BE READ HERE.
+  //
+  // It is gone (2026-09-01, owner). It asked the user to hold an opinion about
+  // GPU compositing, and `overlay_compositing` is a MEASUREMENT rather than a
+  // preference — a switch is the wrong shape for a measurement. What the user
+  // actually has is a symptom ("the ring isn't showing"), so the control now
+  // lives in the Conflicts area as a TOOL that re-runs the measurement and
+  // reports what it found: `renderRingFixRow` below, `run_overlay_fix` in
+  // commands.rs. Nothing was lost — the escape hatch from a false-positive
+  // verdict is still reachable, and it no longer requires the user to know
+  // what compositing is.
 
   // PROBLEM 144 — the new settings. `theme` is the 3-way look; `fun` gates the
   // personality layer AND (per the owner) whether Starry night is the new sky
@@ -253,33 +451,19 @@ function render(): void {
   // read, different argument — check the field's default before copying
   // either of these lines onto a new setting.
   const hudSpecials = appConfig.hud_show_specials !== false;
-  // How many rings of app chips the HUD lays out. A STRING ENUM, so neither
-  // `=== true` nor `!== false` applies: anything that is not exactly "one" or
-  // "two" means "auto", which covers `undefined` (every config written before
-  // 1.0.89) and any value a hand-edited file might carry. Never write a
-  // comparison chain that can land somewhere else — falling through to "two"
-  // would hide the specials ring for a user who never opened this panel.
-  // The new Magnetic Sector ring, or the classic 1.0.88 one. `!== false`,
-  // NEVER `=== true`, and for the same reason as `hudPointer` above: the key
-  // is absent from every config written before 1.0.89, and absent must read
-  // ON. The owner asked for the new ring to be what the app OPENS with and
-  // for this switch to be the way back, so `=== true` here would show the
-  // switch off for every existing user while the overlay drew the new ring.
-  const hudLayout = appConfig.hud_magnetic_layout !== false;
-  const band = appConfig.hud_band_count === "one" ? "one"
-    : appConfig.hud_band_count === "two" ? "two"
-    : "auto";
-  // THE DEPENDENCY, in one line: at two rows the inner ring is spoken for, so
-  // the specials switch has nothing to do and must SAY so (see `specialsRow`).
-  // Presentation only — `hud_show_specials` itself is never touched here.
-  const specialsInert = band === "two";
-  // THE SECOND DEPENDENCY, and it points the other way: the rows pill only
-  // means anything for the NEW ring. The classic ring has its own fixed
-  // shape, so with the layout off the pill has nothing to do and must SAY so
-  // (see `bandRow` / `paintRowsInert`). Presentation only, exactly like
-  // `specialsInert` above — `hud_band_count` itself is never written here, so
-  // turning the layout back on restores the row the user picked.
-  const rowsInert = !hudLayout;
+  // THE SPACE RING'S SHAPE — one 3-way pill since 2026-09-01, replacing the
+  // "New ring layout" switch AND the "Shortcut rows" pill. The mapping onto
+  // the two config fields is a pure function in controls.ts so the harness
+  // reads it the same way; see `RING_OPTS` there for the table and for why
+  // `hud_band_count: "one"` is retired rather than shown.
+  const ring = ringLayoutFor(appConfig.hud_magnetic_layout, appConfig.hud_band_count);
+  // THE ONE REMAINING DEPENDENCY, in one line: Double gives both rings to
+  // apps, so the specials switch has nothing to do and must SAY so (see
+  // `specialsRow`). Presentation only — `hud_show_specials` itself is never
+  // touched here, so coming back to Compact or Wide restores what the user
+  // picked. The rows pill's OWN inert state is gone with the pill: three
+  // named shapes have no dead state left to explain.
+  const specialsInert = ring === "double";
   // PROBLEM 195 — "Don't send logs" is the NEGATION of the config field.
   //
   // `send_logs: true` means SENDING IS HAPPENING, and that is the default. So
@@ -294,75 +478,195 @@ function render(): void {
   const dontSendLogs = appConfig.send_logs === false;
   document.body.classList.toggle("show-around", showAround);
 
+  // THE 2026-09-01 REDESIGN, and the order is the owner's, not a convenience.
+  //
+  //   header  — the name, the link that opens every description, the expand
+  //   engine  — STICKY, so the main switch is reachable from any scroll depth
+  //   search  — directly above the first group heading, as specified
+  //   groups  — Appearance · Behaviour · The Space ring
+  //   sections— App exceptions · Conflicts (which now carries the ring tool)
+  //   actions — reset / clear / presets / logs
+  //   privacy — LAST, exactly where PROBLEM 195 put it
+  //
+  // "Privacy stays last" is why its group sits BELOW the action buttons rather
+  // than beside the other three: the instruction is about the bottom of the
+  // panel, which is where the crash-report opt-out has lived since 1.0.82, and
+  // moving it up to join a tidy row of groups would quietly relocate the one
+  // control here that concerns what leaves the machine.
   panelEl.innerHTML = `
-    <div class="set-title">Settings</div>
-
-    <div class="set-rows">
-      ${toggleRow("around",  "Show me around", showAround, 0)}
-      ${themeRow(theme, 1)}
-      ${toggleRow("engine",  "Engine active",  !_paused, 2)}
-      ${toggleRow("fun",     "Fun mode",       fun,      3)}
-      ${toggleRow("sound",   "Sound ticks",    sound,    4)}
-      ${toggleRow("startup", "Run at startup", startup,  5)}
-      ${toggleRow("motion",  "Visual effects", effects,  6)}
-      ${toggleRow("hideboard", "Hide the keyboard", hideBoard, 7)}
-      ${toggleRow("software", "Software overlay", software, 8)}
-      ${toggleRow("flight",   "Guide-to-toast motion", flight, 9)}
-      ${toggleRow("hudpointer", "Point to launch", hudPointer, 10)}
-      <!-- ONE GROUP, IN THIS ORDER, AND DO NOT SEPARATE THEM. Each row gates
-           the one below it: the layout switch decides whether the rows pill
-           can do anything, and the rows pill decides whether the specials
-           switch can. Put another row between any two of them and the reason
-           a control is greyed out stops being visible from the control. -->
-      ${toggleRow("hudlayout", "New ring layout", hudLayout, 11)}
-      ${bandRow(band, 12)}
-      ${specialsRow(hudSpecials, specialsInert, 13)}
+    <div class="set-head">
+      <div class="set-title">Settings</div>
+      <button type="button" class="set-head-link" id="set-help-descs"
+              aria-pressed="${showAround}">What do these do?</button>
+      <button type="button" class="set-head-link" id="set-help-tour"
+              title="Replay the first-run walkthrough">Show me the walkthrough</button>
+      <button type="button" class="set-expand" id="set-expand"
+              aria-pressed="${_expanded}"
+              aria-label="${_expanded ? "Shrink settings" : "Expand settings"}"
+              title="${_expanded ? "Back to the small panel (Esc)" : "Fill the window"}">⤢</button>
     </div>
 
-    <div class="divider" style="margin:14px 0 10px;"></div>
+    ${engineRow(!_paused)}
 
-    ${typingSpeedRow(appConfig.typing_wpm ?? DEFAULT_WPM)}
-    ${sliderRow("huddelay", "Guide HUD delay", appConfig.guide_hud_delay_ms, 100, 1000, 50, "ms")}
-    ${sliderRow("opacity",  "Opacity floor",   appConfig.opacity_floor_pct, 10, 90, 5, "%")}
+    <!-- THE SCROLLER, and it is a DIFFERENT element from the panel ONLY in
+         the expanded state. ".set-scroll { display: contents }" is the base
+         rule, so in the 280px popover this wrapper is not in the layout at
+         all and every measurement, every margin and the panel's own scrollbar
+         are byte-identical to what they were before it existed.
 
+         Expanded, it becomes the flex child that scrolls, which is what makes
+         the Engine bar RESERVE its height instead of floating over the grid
+         (owner, 1.0.96 review: "the sticky bar covers the first row of columns
+         2 and 3"). A sticky header inside the scroller can only ever overlay
+         the content that scrolls under it — that is what sticky IS — so the
+         fix is to stop the top of the panel being part of the scroll at all.
+         See #settings-panel.expanded in styles.css. -->
+    <div class="set-scroll">
 
-    <div class="divider" style="margin:14px 0 10px;"></div>
-    <button type="button" class="set-title set-row-label" data-desc="appexceptions"
-            aria-expanded="false" style="font-size:13px; margin-bottom:8px;">App exceptions</button>
-    ${descBox("appexceptions")}
-    <div id="set-app-exceptions"></div>
+    <input class="input set-search" id="set-search" type="text"
+           placeholder="Search settings…" autocomplete="off" spellcheck="false"
+           aria-label="Search settings" />
+    <!-- ACCESSIBILITY PASS (feature 3) — a live region so a screen-reader user
+         typing into the search box hears "Nothing here matches that" the
+         moment it appears, the same way a sighted user sees it without having
+         to go looking. role=status plus aria-live=polite announces a CHANGE
+         to this element's content; it says nothing while hidden is true,
+         because there is no content change to announce yet. -->
+    <div class="set-note" id="set-search-empty" role="status" aria-live="polite" hidden>Nothing here matches that.</div>
 
-    <div class="divider" style="margin:14px 0 10px;"></div>
-    <button type="button" class="set-title set-row-label" data-desc="conflicts"
-            aria-expanded="false" style="font-size:13px; margin-bottom:8px;">Conflicts</button>
-    ${descBox("conflicts")}
-    <div id="set-conflicts"></div>
+    <div id="set-groups">
+      <div class="set-group">
+        ${groupHeadingHtml("appearance", "Appearance")}
+        <div class="set-rows">
+          ${themeRow(theme, 0)}
+          ${toggleRow("fun",       "Fun mode",          fun,       1)}
+          ${toggleRow("sound",     "Sound ticks",       sound,     2)}
+          ${toggleRow("motion",    "Visual effects",    effects,   3)}
+          ${toggleRow("hideboard", "Hide the keyboard", hideBoard, 4)}
+        </div>
+      </div>
 
-    <div class="set-actions">
-      <button class="btn" id="set-reset">${_armed === "def" ? "Confirm" : resetLabel()}</button>
-      <button class="btn btn-danger" id="set-clear">${_armed === "clr" ? "Confirm clear" : "Clear all"}</button>
+      <div class="set-group">
+        ${groupHeadingHtml("behaviour", "Behaviour")}
+        <div class="set-rows">
+          ${startupRow(startupShownAsOn(startup), 5)}
+          ${typingSpeedRow(appConfig.typing_wpm ?? DEFAULT_WPM)}
+          ${sliderRow("opacity", "Opacity floor", appConfig.opacity_floor_pct, 10, 90, 5, "%")}
+        </div>
+      </div>
+
+      <div class="set-group">
+        ${groupHeadingHtml("ring", "The Space ring")}
+        <div class="set-rows">
+          ${toggleRow("hudpointer", "Point to launch", hudPointer, 6)}
+          <!-- THE PILL AND THE SPECIALS SWITCH STAY ADJACENT. Double is the
+               state in which the specials switch has nothing to do, and a
+               reason a control is greyed out has to be visible FROM that
+               control — put another row between these two and it stops
+               being. (The old three-row chain this replaced needed the same
+               rule for two dependencies; there is only one left.) -->
+          ${ringRow(ring, 7)}
+          ${specialsRow(hudSpecials, specialsInert, 8)}
+          ${toggleRow("flight", "Guide-to-toast motion", flight, 9)}
+          ${sliderRow("huddelay", "Guide HUD delay", appConfig.guide_hud_delay_ms, 100, 1000, 50, "ms")}
+        </div>
+      </div>
     </div>
-    ${descBox("reset")}
-    ${descBox("clear")}
-    <button class="btn" id="set-presets" style="width:100%; justify-content:center; margin-top:7px; height:34px; font-size:12px;">Restore preset profiles</button>
-    ${descBox("presets")}
-    <button class="btn" id="set-logs" style="width:100%; justify-content:center; margin-top:7px; height:34px; font-size:12px;">Open log folder</button>
-    ${descBox("logs")}
-    <!-- The four action buttons cannot BE their own description trigger: their
-         press already does something destructive or irreversible. Their
-         descriptions ride the "Show me around" convoy and the ⓘ row below
-         instead, which is why they have a box but no data-desc label. -->
-    <button type="button" class="set-help-all sma-note" id="set-help-all">
-      ⓘ What do these buttons do?
-    </button>
+
+    <div class="set-section set-filterable">
+      <div class="divider" style="margin:14px 0 10px;"></div>
+      <button type="button" class="set-title set-row-label" data-desc="appexceptions"
+              aria-expanded="false" style="font-size:13px; margin-bottom:8px;">App exceptions</button>
+      ${descBox("appexceptions")}
+      <div id="set-app-exceptions"></div>
+    </div>
+
+    <div class="set-section set-filterable">
+      <div class="divider" style="margin:14px 0 10px;"></div>
+      <button type="button" class="set-title set-row-label" data-desc="conflicts"
+              aria-expanded="false" style="font-size:13px; margin-bottom:8px;">Conflicts</button>
+      ${descBox("conflicts")}
+      <div id="set-conflicts"></div>
+    </div>
+
+    <!-- THE ACTION BUTTONS, 1.0.97 (owner: "unnaturally long pills, stretched
+         for no reason").
+         They used to be a stack of full-width pills — two side-by-side on a
+         flex row, then two more at width:100% — which is what made a 1200px
+         window draw a 1100px "Open log folder". They are now two named groups
+         with the same small uppercase headings the settings groups carry, and
+         the buttons inside are sized to their own text in a responsive grid.
+         The GROUPING is the part that does the real work: pressing "Re-check
+         now" and pressing "Clear all" had exactly the same weight on screen,
+         and one of them empties a profile. See .set-act-* in styles.css. -->
+    <div class="set-section set-filterable">
+      <div class="divider" style="margin:14px 0 10px;"></div>
+
+      <div class="set-act-group">
+        ${groupHeadingHtml("maintenance", "Maintenance")}
+        <div class="set-act-grid">
+          <!-- MOVED HERE from the foot of the Conflicts list, where it was
+               the third full-width pill in a row of them. It re-runs the
+               conflict scan; it is NOT the same action as "Check the ring"
+               in the Conflicts area, which runs run_overlay_fix against
+               the graphics driver. Both are kept, neither is duplicated. -->
+          <button class="btn" id="set-recheck">Re-check now</button>
+          <button class="btn" id="set-logs">Open log folder</button>
+        </div>
+        ${descBox("logs")}
+      </div>
+
+      <div class="set-act-group is-danger">
+        ${groupHeadingHtml("danger", "Danger zone")}
+        <div class="set-act-grid">
+          <button class="btn${_armed === "def" ? " is-armed" : ""}" id="set-reset">${_armed === "def" ? "Confirm" : resetLabel()}</button>
+          <button class="btn${_armed === "clr" ? " is-armed" : ""}" id="set-clear">${_armed === "clr" ? "Confirm clear" : "Clear all"}</button>
+          <button class="btn" id="set-presets">Restore preset profiles</button>
+        </div>
+        ${descBox("reset")}
+        ${descBox("clear")}
+        ${descBox("presets")}
+      </div>
+
+      <!-- The action buttons cannot BE their own description trigger: their
+           press already does something destructive or irreversible. Their
+           descriptions ride the header link's convoy and the ⓘ row below
+           instead, which is why they have a box but no data-desc label. -->
+      <button type="button" class="set-help-all sma-note" id="set-help-all">
+        ⓘ What do these buttons do?
+      </button>
+    </div>
 
     <!-- PROBLEM 195 — the crash-reporting opt-out, at the VERY BOTTOM of the
          panel by the owner's instruction: below every switch, every slider and
          every button. It is the only control here that concerns what leaves
-         the machine, so it gets its own divider and its own space rather than
+         the machine, so it gets its own group and its own space rather than
          sitting in the convoy of ordinary preferences. -->
-    <div class="divider" style="margin:14px 0 10px;"></div>
-    ${toggleRow("sendlogs", "Don't send logs", dontSendLogs, 11)}
+    <div class="set-group">
+      <div class="divider" style="margin:14px 0 10px;"></div>
+      ${groupHeadingHtml("privacy", "Privacy")}
+      <div class="set-rows">
+        ${toggleRow("sendlogs", "Don't send logs", dontSendLogs, 10)}
+      </div>
+    </div>
+
+    <!-- ABOUT (feature 1) — after Privacy, before nothing: the last thing in
+         the panel, by the owner's placement. Reference information (version,
+         install kind, links, the third-party list), not a preference, so it
+         gets its own group rather than joining the convoy of switches above
+         it. aboutRowHtml() is the SAME leaf function preview.ts renders —
+         see controls.ts for why that matters (PROBLEM 148). -->
+    <div class="set-group">
+      <div class="divider" style="margin:14px 0 10px;"></div>
+      ${groupHeadingHtml("about", "About")}
+      <div class="set-rows">
+        <div class="set-item set-filterable" id="set-about">
+          ${aboutRowHtml(_aboutInfo, THIRD_PARTY.length, _thirdPartyOpen, _updateStatusText, _rollback?.version ?? null)}
+        </div>
+      </div>
+    </div>
+
+    </div><!-- /.set-scroll -->
   `;
 
   // One render, one animation. Anything after this point sees a clean slate,
@@ -370,17 +674,22 @@ function render(): void {
   // the user pressed minutes ago.
   _flipped = null;
 
-  // THE ROWS PILL'S INERT STATE, APPLIED IN ONE PLACE AND ONLY ONE.
-  //
-  // `bandRow` deliberately renders the pill LIVE and its note hidden; this
-  // call is what greys it out. That is not an oversight — the specials row
-  // above carries its inert state in its own markup AND in
-  // `paintSpecialsInert`, because the rows pill updates in place and there is
-  // no re-render to rebuild it. The layout switch DOES re-render, so the pill
-  // needs only one path, and one path cannot drift from itself. Nothing is
-  // visible in between: this runs in the same synchronous task as the
-  // `innerHTML` above, so the browser never paints the live state.
-  paintRowsInert(rowsInert);
+  // THE SEARCH BOX, restored to whatever the user had typed before this
+  // render. `render()` re-runs after every toggle, so without this a filtered
+  // panel would clear itself the moment the user flipped the switch they had
+  // just searched for. The filter is re-applied in the SAME synchronous task
+  // as the innerHTML above, so the browser never paints the unfiltered list.
+  wireSearch();
+
+  // The expand button. `_expanded` survives a render (module scope), so the
+  // class has to be re-applied here — innerHTML replaced the header, not the
+  // panel, but `setPanelExpanded` also stamps the new #set-expand button's
+  // aria state, which the fresh markup cannot know.
+  setPanelExpanded(panelEl, _expanded);
+  panelEl.querySelector("#set-expand")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleExpanded(!_expanded);
+  });
 
   wireToggle("engine", async () => {
     try {
@@ -402,11 +711,28 @@ function render(): void {
       const next = b.dataset.themeSet ?? "earthy";
       if (next === appConfig.theme) return;
       appConfig.theme = next;
+      // FEATURE 2 — "auto" is stored literally (schema.rs keeps it, never
+      // resolves it away), but every consumer below this line — the theme
+      // CHORD, and `dark_mode` for the overlay — needs one of the three real
+      // palettes. `resolveTheme` is the one place that decision is made, so
+      // the pill and `applyLook()` can never disagree about what "auto" means
+      // right now.
+      //
+      // REVIEW FIXES 2026-09-05 (H4) — THIS LINE IS WHY THE SPLIT PALETTE WAS
+      // MORE THAN COSMETIC. `dark_mode` is PERSISTED from this resolution two
+      // lines down, and `resolveTheme` used to answer from this webview's
+      // `prefers-color-scheme` — which `tauri.conf.json` had pinned to Light.
+      // So picking "Auto" on a dark machine wrote `dark_mode: false` into
+      // config.json, and Rust and the overlay were then handed the dashboard's
+      // wrong reading as fact. It resolves against Rust's own registry read
+      // now (theme-resolve.ts ← os-theme.ts ← theme_watch.rs), so what gets
+      // written is what Windows actually says.
+      const resolved = resolveTheme(next);
       // sounds.js names the middle theme "war", not "warcry".
-      sfx.theme(next === "warcry" ? "war" : next);
+      sfx.theme(resolved === "warcry" ? "war" : resolved);
       // dark_mode stays the single source of truth for body.nocturne on BOTH
       // windows — the overlay has no idea themes exist (CLAUDE.md theme rule).
-      appConfig.dark_mode = next !== "earthy";
+      appConfig.dark_mode = resolved !== "earthy";
       applyLook();
 
       // PROBLEM 157 — update the pill IN PLACE. render() rebuilds the panel,
@@ -418,75 +744,125 @@ function render(): void {
       // There are TWO pills in this panel now, so the theme pill can no longer
       // be found as "the .theme-seg". Scope to the one this button lives in.
       const seg = b.closest<HTMLElement>(".theme-seg");
-      const idx = THEME_OPTS.findIndex(([v]) => v === next);
-      if (seg && idx >= 0) seg.style.setProperty("--seg-i", String(idx));
       seg?.querySelector<HTMLElement>(".theme-seg-ind")?.setAttribute("data-seg", next);
       seg?.querySelectorAll<HTMLElement>("[data-theme-set]").forEach((o) => {
         const on = o.dataset.themeSet === next;
         o.classList.toggle("is-on", on);
         o.setAttribute("aria-checked", String(on));
       });
+      // PROBLEM 255 follow-up — `.is-on` just moved to a DIFFERENT-WIDTH
+      // button ("Auto" and "Starry night" are not the same size), so the
+      // indicator's rect has to be re-measured, not just re-indexed.
+      if (seg) positionSegIndicator(seg);
       await persistConfig();
+      // The ring wears the app's palette, so a theme changed while a
+      // projection is up leaves it in the OLD one until it hides.
+      refireRingPreview();
     });
   });
 
-  // "Shortcut rows" — the 3-way pill, same in-place update as the theme pill
-  // above and for the same reason (PROBLEM 157): render() would destroy the
-  // indicator and build a new one already at the destination, which has
-  // nothing to transition FROM, and the owner noticed the moment that
-  // happened. So this handler moves the pill by hand and then repaints ONLY
-  // the row whose meaning changed.
+  // THE SPACE RING PILL — Compact · Wide · Double. Same in-place update as the
+  // theme pill above and for the same reason (PROBLEM 157): render() would
+  // destroy the indicator and build a new one already at the destination,
+  // which has nothing to transition FROM, and the owner noticed the moment
+  // that happened. So this handler moves the pill by hand and then repaints
+  // ONLY the row whose meaning changed.
   //
   // The whole feature lives in the OVERLAY page (band count falls out of
   // measured label widths) plus one deterministic gate in Rust, and both learn
   // about the change through config::save — so persistConfig() is the entire
   // backend wiring. Same shape as "flight" and "hudpointer".
-  panelEl?.querySelectorAll<HTMLElement>("[data-hudrows-set]").forEach((b) => {
+  panelEl?.querySelectorAll<HTMLElement>("[data-hudring-set]").forEach((b) => {
     b.addEventListener("click", async () => {
       if (!appConfig) return;
-      // The belt to `paintRowsInert`'s braces, and the same guard the
-      // specials switch carries. Every segment is `disabled` and the wrapper
-      // is `pointer-events:none` while the classic layout is selected, so
-      // this should be unreachable — but "should be unreachable" is how a
-      // control that silently does something gets shipped, and the cost of
-      // the guard is one comparison.
-      if (appConfig.hud_magnetic_layout === false) return;
-      const next = b.dataset.hudrowsSet ?? "auto";
-      if (next === appConfig.hud_band_count) return;
-      appConfig.hud_band_count = next as "auto" | "one" | "two";
+      const next = (b.dataset.hudringSet ?? "compact") as RingLayout;
+      const { magnetic, band } = ringConfigFor(next);
+
+      // PRESSING THE OPTION YOU ARE ALREADY ON IS NOT ALWAYS A NO-OP HERE, and
+      // that is the difference from the theme pill directly above.
+      //
+      // `hud_band_count: "one"` is retired: the UI never writes it again, but
+      // a config written between 1.0.89 and 1.0.95 can still hold it, and such
+      // a config shows COMPACT (forced-one and auto are indistinguishable
+      // whenever the labels fit). A bare `if (next === current) return;` would
+      // make Compact permanently unpressable for exactly those users and leave
+      // the retired value in their file forever. So the guard compares the
+      // CONFIG this press would write, not the label it would light up.
+      const settled = appConfig.hud_magnetic_layout === magnetic
+        && (band === null || appConfig.hud_band_count === band);
+      if (settled) return;
+
+      appConfig.hud_magnetic_layout = magnetic;
+      // `null` means "leave the row count alone" — Wide has no opinion about
+      // it, so a detour through Wide and back returns Double intact.
+      if (band !== null) appConfig.hud_band_count = band;
+
       // No dedicated sound in sounds.js for this pill, and sfx.theme() is the
       // THEME's chord — playing it here would tell the user the look changed.
       // The switch-family tick is the honest one: this is a preference row.
-      sfx.toggleOn("hudrows");
+      sfx.toggleOn("hudring");
 
       const seg = b.closest<HTMLElement>(".theme-seg");
-      const idx = BAND_OPTS.findIndex(([v]) => v === next);
-      if (seg && idx >= 0) seg.style.setProperty("--seg-i", String(idx));
       seg?.querySelector<HTMLElement>(".theme-seg-ind")?.setAttribute("data-seg", next);
-      seg?.querySelectorAll<HTMLElement>("[data-hudrows-set]").forEach((o) => {
-        const on = o.dataset.hudrowsSet === next;
+      seg?.querySelectorAll<HTMLElement>("[data-hudring-set]").forEach((o) => {
+        const on = o.dataset.hudringSet === next;
         o.classList.toggle("is-on", on);
         o.setAttribute("aria-checked", String(on));
       });
+      // PROBLEM 255 follow-up — same reasoning as the theme pill above: the
+      // three Ring-layout labels are not equal width either, so the indicator
+      // has to be re-measured on every selection, not re-indexed.
+      if (seg) positionSegIndicator(seg);
 
-      // THE VISIBLE HALF OF THE DEPENDENCY. At 2 rows the specials switch has
-      // nothing to do, and a control that does nothing is worse than a missing
-      // one — so it greys out and says why, here, in the same gesture.
-      paintSpecialsInert(next === "two");
+      // THE VISIBLE HALF OF THE DEPENDENCY. Under Double both rings belong to
+      // apps, so the specials switch has nothing to do — and a control that
+      // does nothing is worse than a missing one, so it greys out and says why
+      // in the same gesture.
+      paintSpecialsInert(next === "double");
+      // LIVE PREVIEW — show the shape being chosen, in the real overlay.
+      // Fire-and-forget and fully optional: `previewRing` swallows everything,
+      // so a build where the command does not exist yet still gets a pill that
+      // saves correctly. A settings panel must never break because a preview
+      // could not be drawn.
+      void previewRing(next);
       await persistConfig();
     });
   });
 
-  // "Show me around" — open or close every description as a convoy.
-  wireToggle("around", async () => {
+  // "What do these do?" — the header link, which inherited the removed "Show
+  // me around" row's entire behaviour (owner, 2026-09-01). Same config field,
+  // same convoy, same two sounds; only the control changed shape. The field is
+  // still written because it does two jobs: it is what `body.show-around`
+  // gates every `.sma-note` on, and it is what makes the convoy re-open by
+  // itself the next time the panel is opened.
+  panelEl.querySelector("#set-help-descs")?.addEventListener("click", async (e) => {
+    e.stopPropagation();
     if (!appConfig) return;
     const on = !(appConfig.show_me_around === true);
     appConfig.show_me_around = on;
     document.body.classList.toggle("show-around", on);
+    (e.currentTarget as HTMLElement).setAttribute("aria-pressed", String(on));
     convoyAll(on);
     if (on) sfx.convoyOn(); else sfx.convoyOff();
     await persistConfig();
     // deliberately NOT render() — a re-render would wipe the convoy mid-flight
+  });
+
+  // PROBLEM 242 — the second header entry, sitting beside "What do these do?"
+  // because they answer the same question at two different sizes: one explains
+  // the switches you are looking at, the other explains the app you are
+  // holding. It does NOT touch `show_me_around` and does not disturb the
+  // convoy — the handler above is unchanged.
+  //
+  // It restarts at STEP 1 regardless of `tour_done`: someone who asks for the
+  // walkthrough wants the doing part, not the pitch they have already read.
+  // And it closes the panel first, because step 1 dims everything except the
+  // keyboard and a lit settings popover sitting over it would be the one thing
+  // the user is told not to look at.
+  panelEl.querySelector("#set-help-tour")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeSettingsPanel();
+    startTour();
   });
 
   wireToggle("fun", async () => {
@@ -559,20 +935,102 @@ function render(): void {
 
   wireToggle("startup", async () => {
     if (!appConfig) return;
-    const next = !(appConfig.run_at_startup !== false);
+
+    // REVIEW FIXES 2026-09-05 (H6) — ASK BEFORE WRITING, IF NOBODY HAS ASKED
+    // YET.
+    //
+    // `refreshPackagedStartup()` runs when the panel OPENS, so between that
+    // open and its answer arriving `_pkgStartup` is null and the row is fully
+    // live — `startupRowIsInert(null)` is false, and it has to be, because a
+    // row that greys itself for a second on every open would look broken. But
+    // "live" must mean "clickable", not "writable": a press landing in that
+    // window used to go straight through to `set_startup_enabled` on a copy
+    // that may own nothing at all.
+    //
+    // One awaited question closes it. It is the same call the panel makes on
+    // open, so on the ordinary path (the answer already in hand) this costs
+    // nothing and does not run.
+    if (_pkgStartup === null) await refreshPackagedStartup();
+
+    // And if the answer is "you do not own this", stop here. `paintInert` has
+    // already disabled the input and taken it out of the tab order, so
+    // reaching this line means something got past that — a stale DOM node, a
+    // synthesised event, a future keyboard path. The note under the row is
+    // already on screen and already says who is holding it; a toast points at
+    // it rather than repeating it.
+    if (startupRowIsInert(_pkgStartup)) {
+      showToast(
+        startupIsPortable(_pkgStartup)
+          ? "📦 Portable copy — see the note under the switch"
+          : "🔒 Windows decides this one — see the note under the switch",
+      );
+      paintPackagedStartup();
+      return;
+    }
+
+    // PROBLEM 250 — flip away from what is SHOWN, not from what config says.
+    // For a packaged install those can differ (the user changed it in Task
+    // Manager while the panel was shut), and flipping from a stale config value
+    // would make the first press appear to do nothing.
+    const next = !startupShownAsOn(appConfig.run_at_startup !== false);
     appConfig.run_at_startup = next;
     try {
-      // ONE command persists config AND flips the Scheduled Task, so the two
-      // can never drift apart. Not persistConfig() — that path doesn't touch
-      // the task.
+      // ONE command persists config AND applies it — the Scheduled Task / Run
+      // key for a normal install, the package's startupTask for a Store one
+      // (startup.rs branches). Not persistConfig(): that path doesn't apply it.
       await invoke("set_startup_enabled", { enabled: next });
-      if (next) sfx.toggleOn("startup"); else sfx.toggleOff("startup");
-      showToast(next ? "🚀 Starts with Windows" : "🚀 Won't start with Windows");
+
+      // PROBLEM 250 — Windows is allowed to say no. `RequestEnableAsync` will
+      // not override a user who switched Spaceadom off in Task Manager, so a
+      // packaged install has to be ASKED what actually happened rather than
+      // told. Re-reading also repaints the row inert with the reason, which is
+      // the whole difference between "the switch bounced back" and "Windows is
+      // holding this off, and here is where to change it".
+      await refreshPackagedStartup();
+
+      // REVIEW FIXES 2026-09-05 (H6) — THREE OUTCOMES, NOT TWO, AND A
+      // COMMAND THAT RETURNED `Ok` IS NOT ONE OF THEM ON ITS OWN.
+      //
+      // This used to be a two-way `refused` bool computed from
+      // `_pkgStartup?.packaged`, which is `true` for a PORTABLE copy —
+      // `get_packaged_startup` answers `(true, "portable", false, …)`. So the
+      // portable case fell into `refused` when switching ON ("Windows decides
+      // this one", about a copy Windows has no opinion on) and into SUCCESS
+      // when switching OFF ("Won't start with Windows"), announcing a
+      // completed action for a write that never happened:
+      // `startup.rs::apply_task_enabled` returns early for a portable copy
+      // having touched no Run key and no Scheduled Task, and
+      // `set_startup_enabled` still returns `Ok(())`.
+      //
+      // `startupOutcome` (controls.ts) separates the two, and the config is
+      // put back for both non-writes — a stored `run_at_startup: true` on a
+      // copy that can never honour it is a preference the app would keep
+      // showing and never keep.
+      switch (startupOutcome(_pkgStartup, next)) {
+        case "nothing-written":
+          appConfig.run_at_startup = !next;
+          // NO `sfx.toggleOn/Off` either: the switch sound is the app saying
+          // "done", and nothing was done.
+          showToast("📦 Portable copy — put a shortcut in your Startup folder");
+          break;
+        case "refused":
+          appConfig.run_at_startup = !next;
+          showToast("🔒 Windows decides this one — see the note under the switch");
+          break;
+        case "written":
+          if (next) sfx.toggleOn("startup"); else sfx.toggleOff("startup");
+          showToast(next ? "🚀 Starts with Windows" : "🚀 Won't start with Windows");
+          break;
+      }
     } catch (_) {
       appConfig.run_at_startup = !next;   // revert on failure
       showToast("⚠️ Could not change the startup task");
     }
     render();
+    // render() rebuilt the row from scratch, so the inert treatment and the
+    // note have to be re-applied to the NEW element. Cheap and synchronous —
+    // `_pkgStartup` is already in hand.
+    paintPackagedStartup();
   });
 
   wireToggle("motion", async () => {
@@ -586,29 +1044,6 @@ function render(): void {
     applyMotion(appConfig.motion);
     await persistConfig();
     showToast(nowReduced ? "✨ Visual effects on" : "🪶 Visual effects reduced");
-    render();
-  });
-
-  // PROBLEM 92 — goes through its OWN command, not persistConfig(). The
-  // dashboard's config is a snapshot taken at bootstrap; if the pixel
-  // self-test flips this field while the panel is open, a normal save would
-  // write the stale value straight back over the app's own measurement.
-  wireToggle("software", async () => {
-    if (!appConfig) return;
-    const next = appConfig.overlay_compositing === "software" ? "auto" : "software";
-    try {
-      await invoke("set_overlay_compositing", { mode: next });
-      appConfig.overlay_compositing = next;
-      if (next === "software") sfx.toggleOn("software"); else sfx.toggleOff("software");
-      showToast(
-        next === "software"
-          ? "🖥️ Software overlay on — restart Spaceadom to apply"
-          : "⚡ Software overlay off — restart Spaceadom to apply",
-      );
-    } catch (e) {
-      console.error("set_overlay_compositing failed:", e);
-      showToast("⚠️ Could not change overlay rendering");
-    }
     render();
   });
 
@@ -639,30 +1074,16 @@ function render(): void {
     if (appConfig.pointer_hud_activation) sfx.toggleOn("hudpointer");
     else sfx.toggleOff("hudpointer");
     await persistConfig();
+    refireRingPreview();
     render();
   });
 
-  // 2026-08-27 — "New ring layout". The owner's brief was one sentence:
-  // *"give an option to use this new HUD layout or old layout — in settings,
-  // toggle."* The whole feature is a config field the OVERLAY page reads
-  // (`components/hud-layout.ts`, seeded from `get_config` and updated by the
-  // `hud-layout-changed` event `save_config` emits), so persistConfig() is
-  // the entire backend wiring. Same shape as "hudpointer" and "hudspecials".
-  //
-  // `render()` and NOT `paintRowsInert()` on its own: flipping this changes
-  // the switch AND the rows pill's reachability AND whether the pill's note
-  // is showing, and render() is the one path that computes all three from the
-  // config. The pill's indicator is rebuilt at the position it already had,
-  // so there is no PROBLEM 157 transition to lose here — that rule is about
-  // the pill's OWN value changing, which this never does.
-  wireToggle("hudlayout", async () => {
-    if (!appConfig) return;
-    appConfig.hud_magnetic_layout = !(appConfig.hud_magnetic_layout !== false);
-    if (appConfig.hud_magnetic_layout) sfx.toggleOn("hudlayout");
-    else sfx.toggleOff("hudlayout");
-    await persistConfig();
-    render();
-  });
+  // 2026-08-27's "New ring layout" SWITCH USED TO BE WIRED HERE. It is gone;
+  // `hud_magnetic_layout` is now one of the two fields the Compact/Wide/Double
+  // pill writes (see the `[data-hudring-set]` handler above). The config field
+  // itself is untouched, so `components/hud-layout.ts` in the overlay and the
+  // `hud-layout-changed` event `save_config` emits both keep working exactly
+  // as they did — only the control that writes it changed shape.
 
   // PROBLEM 209 — show the specials on the HUD's inner ring. Same shape as
   // "hudpointer" above and for the same reason: the whole feature is a
@@ -672,14 +1093,20 @@ function render(): void {
   wireToggle("hudspecials", async () => {
     if (!appConfig) return;
     // The belt to `specialsRow`'s braces. The input is `disabled` and its
-    // wrapper is `pointer-events:none` at 2 rows, so this should be
+    // wrapper is `pointer-events:none` under Double, so this should be
     // unreachable — but "should be unreachable" is how a control that does
     // nothing gets shipped, and the cost of the guard is one comparison.
-    if (appConfig.hud_band_count === "two") return;
+    // Asked through the SAME pure mapping the row is painted from, so the
+    // guard cannot drift from the greying.
+    if (ringLayoutFor(appConfig.hud_magnetic_layout, appConfig.hud_band_count) === "double") return;
     appConfig.hud_show_specials = !(appConfig.hud_show_specials !== false);
     if (appConfig.hud_show_specials) sfx.toggleOn("hudspecials");
     else sfx.toggleOff("hudspecials");
     await persistConfig();
+    // AFTER persistConfig, never before: `preview_hud_layout` builds its
+    // payload from ConfigState, so a re-fire sent first would project the old
+    // specials list and look like the bug it exists to fix.
+    refireRingPreview();
     render();
   });
 
@@ -716,6 +1143,19 @@ function render(): void {
 
   renderAppExceptions();
   renderConflicts();
+  wireAboutSection();
+  // ACCESSIBILITY PASS (feature 3) — arrow-key navigation for every segmented
+  // pill in the panel (Theme, Ring layout). One call for the whole subtree,
+  // safe on every render for the same reason `wireDescriptions` is: render()
+  // just rebuilt the DOM these listeners attach to.
+  wireSegRowsKeyboard(panelEl);
+  // PROBLEM 255 follow-up — measures the Theme and Ring-layout pills' active
+  // segment and writes `--ind-x`/`--ind-w` (styles.css) so the indicator
+  // matches the real label rect instead of an assumed equal fraction. Safe on
+  // every render for the same reason as the call above: it re-finds `.theme-
+  // seg` fresh and re-arms its own ResizeObserver rather than accumulating one
+  // per render.
+  wireSegIndicators(panelEl);
 
   // PROBLEM 109 — the way back from deleting a preset. Additive: it restores
   // only the presets that are MISSING and never overwrites one the user still
@@ -749,6 +1189,26 @@ function render(): void {
   panelEl.querySelector("#set-logs")!.addEventListener("click", () => {
     sfx.tick();
     void invoke("open_log_folder").catch(() => showToast("⚠️ Could not open the log folder"));
+  });
+
+  // MAINTENANCE — "Re-check now". Same body it had at the foot of the
+  // Conflicts list; only its home changed. The label is restored in a
+  // `finally` so a `refreshConflicts` that throws cannot leave the button
+  // reading "Checking…" for the rest of the session.
+  const recheck = panelEl.querySelector<HTMLButtonElement>("#set-recheck");
+  recheck?.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    sfx.tick();
+    recheck.disabled = true;
+    recheck.textContent = "Checking…";
+    try {
+      await refreshConflicts();
+      sfx.confirm();
+      _redrawConflicts?.();
+    } finally {
+      recheck.disabled = false;
+      recheck.textContent = "Re-check now";
+    }
   });
 
   wireTypingSpeed();
@@ -956,10 +1416,19 @@ function renderAppExceptions(): void {
       box.appendChild(grid);
     }
 
+    // PROBLEM 239 follow-up — this used to be `btn btn-sm` stretched with an
+    // inline `width:100%`, which is exactly the "full-width stretched pill"
+    // the owner flagged on the Settings review screenshot ("Add an app" is
+    // still a full-width stretched pill while everything else in Settings
+    // was compacted). `.exc-add-btn` (styles.css) gives it the same
+    // content-sized, 13px-radius, secondary-style language as the action
+    // grid's `.set-act-inline` buttons — 36px high, `0 16px` padding — and
+    // ordinary block flow left-aligns it under the note/tile grid with no
+    // centring rule to fight, the same way `.dashed-btn`'s `align-self:
+    // flex-start` opted "Import a profile" out of a stretch in PROBLEM 256.
     const add = document.createElement("button");
     add.type = "button";
-    add.className = "btn btn-sm";
-    add.style.cssText = "width:100%; justify-content:center; margin-top:8px;";
+    add.className = "btn exc-add-btn";
     add.textContent = _excPickerOpen ? "Done adding" : "Add an app";
     add.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1071,6 +1540,16 @@ function renderConflicts(): void {
       ok.textContent = "Nothing else is remapping your keyboard.";
       box.appendChild(ok);
     } else {
+      // PROBLEM 239 second follow-up (2026-09-07) — the owner's complaint
+      // repeated because the first follow-up compacted padding/disc/CTA but
+      // left every row FULL PANEL WIDTH, one per line. This wrapper is what
+      // turns them into a responsive grid of cards (`.conflict-grid`, same
+      // `repeat(auto-fit, minmax(...))` language as `.set-act-grid`), so two
+      // conflicts sit side by side in the expanded panel instead of stacking
+      // as two tall bars.
+      const grid = document.createElement("div");
+      grid.className = "conflict-grid";
+
       knownConflicts.forEach((c, i) => {
         const row = document.createElement("div");
         row.className = "conflict-row";
@@ -1124,6 +1603,9 @@ function renderConflicts(): void {
         const proc = document.createElement("span");
         proc.className = "conflict-row-proc";
         proc.textContent = c.process;
+        // The chip is ellipsised at card widths as low as 240px (CSS); the
+        // full exe name still reaches the user via the native tooltip.
+        proc.title = c.process;
 
         // The one-liner is back UNGATED (owner, 2026-08-20: "the previous
         // small one-liner description of the app, what it does and what it
@@ -1132,25 +1614,41 @@ function renderConflicts(): void {
         const why = document.createElement("span");
         why.className = "conflict-row-why";
         why.textContent = c.detail;
+        // Clamped to 2 lines in CSS (`-webkit-line-clamp`) so a compact card
+        // can't be forced tall by a long description; the title carries the
+        // full text past the clamp.
+        why.title = c.detail;
 
-        // PROBLEM 157 — the ROW is the button now. Two permanent buttons per
-        // conflict was clutter for something you act on once ("this thing
-        // always staying there in the settings isn't worth it"); pressing the
-        // program raises the offer at the top of the screen instead.
-        row.setAttribute("role", "button");
-        row.tabIndex = 0;
-        const open = (e: Event) => { e.stopPropagation(); openConflictPrompt(c, draw); };
-        row.addEventListener("click", open);
-        row.addEventListener("keydown", (e) => {
-          if (e.key === "Enter" || e.key === " ") open(e);
+        // PROBLEM 239 follow-up — the ROW goes back to being a CONTAINER, not
+        // the control. PROBLEM 157 made the whole row the click target to cut
+        // two permanent buttons down to one; the owner's 1.0.10x Settings
+        // review flagged the result as an "extended pill, still not made
+        // proper shaped" and asked for the same "rows, not pills — and rows
+        // are not buttons" language the App-exceptions tiles already carry
+        // (a tile isn't a button either; its ✕ is). This undoes only the
+        // "whole row" half of PROBLEM 157 — `openConflictPrompt` and its
+        // two-step confirm are untouched — onto ONE real `<button>`, so a
+        // keyboard user gets a single focus stop per conflict instead of the
+        // row AND a same-purpose control both claiming Tab.
+        const close = document.createElement("button");
+        close.type = "button";
+        close.className = "conflict-row-close";
+        close.textContent = "Close it";
+        // Matches `openConflictPrompt`'s own dialog aria-label ("Close
+        // spacedesk") one line away in conflict-prompt.ts — same wording,
+        // so a screen reader announces the same target twice, not two names
+        // for one thing.
+        close.setAttribute("aria-label", `Close ${c.product}`);
+        close.addEventListener("click", (e) => {
+          e.stopPropagation();
+          openConflictPrompt(c, draw);
         });
 
-        const hint = document.createElement("span");
-        hint.className = "conflict-row-cta";
-        hint.textContent = "Press to close it →";
-        row.append(disc, name, proc, why, hint);
-        box.appendChild(row);
+        row.append(disc, name, proc, why, close);
+        grid.appendChild(row);
       });
+
+      box.appendChild(grid);
 
       const hint = document.createElement("div");
       hint.className = "set-note sma-note";
@@ -1163,20 +1661,24 @@ function renderConflicts(): void {
 
     void drawHookHealth(box, draw);
 
-    const again = document.createElement("button");
-    again.className = "btn btn-sm";
-    again.style.cssText = "width:100%; justify-content:center; margin-top:8px;";
-    again.textContent = "Re-check now";
-    again.addEventListener("click", async () => {
-      sfx.tick();
-      again.textContent = "Checking…";
-      await refreshConflicts();
-      sfx.confirm();
-      draw();
-    });
-    box.appendChild(again);
+    // THE RING TOOL — always here, always quiet (owner, 2026-09-01).
+    //
+    // It is drawn whether or not anything is wrong, unlike the hook-health
+    // block above it, which appears only when there is a fault to report. That
+    // asymmetry is deliberate: hook health is an ALARM (Windows has cut us off
+    // N times), and an alarm that is always on screen stops being read. This
+    // is a TOOL — the answer to "the ring isn't showing" — and a tool you can
+    // only find while the thing is already broken is a tool nobody finds.
+    renderRingFixRow(box);
+
+    // "Re-check now" USED TO BE APPENDED HERE, as a fourth full-width pill
+    // under the ring tool. It moved to the Maintenance group in the action
+    // section (1.0.97) — same action, same `refreshConflicts`, no second copy.
+    // What it needs from here is the redraw, which is a closure over `box`,
+    // so `draw` is published to module scope on the way past.
   };
 
+  _redrawConflicts = draw;
   draw();
 
   // The exceptions section (rendered just before this one) already warms the
@@ -1188,6 +1690,154 @@ function renderConflicts(): void {
   if (_settingsEverOpened) {
     void loadApps().then(() => { if (panelEl && !panelEl.hidden) draw(); });
   }
+}
+
+/**
+ * "The ring isn't showing?" — the Conflicts-area tool that replaced the
+ * "Software overlay" switch (owner, 2026-09-01).
+ *
+ * WHY IT IS NOT A SWITCH ANY MORE. `overlay_compositing` is a MEASUREMENT the
+ * app takes about this machine's graphics driver (PROBLEM 80/92/93/122/171),
+ * not a preference — and a switch asks the user to hold an opinion about GPU
+ * compositing, which nobody outside this repo has. What a user HAS is the
+ * symptom: the ring does not appear. So the row asks the symptom, the button
+ * re-runs the measurement, and the app says what it found and what it did.
+ * The escape hatch PROBLEM 92 added is intact — a false-positive "software"
+ * verdict is still reversible from the UI — it just no longer requires the
+ * user to know what it is reversing.
+ *
+ * WHY IT LIVES IN THE CONFLICTS AREA. That section is already the place this
+ * app puts "something on this machine is interfering with Spaceadom", and
+ * people who have hunted for the ring have already looked there. It is drawn
+ * QUIETLY: no colour, no badge, no note until the button is pressed.
+ *
+ * Built with createElement rather than an innerHTML string because it renders
+ * into `#set-conflicts`, which `draw()` rebuilds on its own schedule — the
+ * same reason every other row in this section is built this way.
+ */
+function renderRingFixRow(box: HTMLElement): void {
+  const wrap = document.createElement("div");
+  wrap.className = "ring-fix";
+
+  const row = document.createElement("div");
+  row.className = "set-row";
+
+  const label = document.createElement("button");
+  label.type = "button";
+  label.className = "set-row-label";
+  label.dataset.desc = "ringfix";
+  label.setAttribute("aria-expanded", "false");
+  label.textContent = "The ring isn't showing?";
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "btn btn-sm";
+  btn.textContent = "Check the ring";
+  row.append(label, btn);
+  wrap.appendChild(row);
+
+  // The description box, by hand: `descBox()` returns markup for an innerHTML
+  // assignment and this subtree is built node by node. Same shape, so
+  // `setDescOpen` / `convoyAll` / the CSS all reach it unchanged.
+  const desc = document.createElement("div");
+  desc.className = "set-desc";
+  desc.dataset.descFor = "ringfix";
+  const descIn = document.createElement("div");
+  descIn.className = "set-desc-in";
+  const descBody = document.createElement("div");
+  descBody.className = "set-desc-body";
+  descBody.textContent = DESC.ringfix;
+  descIn.appendChild(descBody);
+  desc.appendChild(descIn);
+  wrap.appendChild(desc);
+
+  const out = document.createElement("div");
+  out.className = "set-note";
+  out.style.cssText = "margin-top:8px; white-space:pre-line;";
+  out.hidden = true;
+
+  const restart = document.createElement("button");
+  restart.type = "button";
+  // NOT width:100% any more (1.0.97). It stays HERE rather than moving to the
+  // Maintenance group with the other actions, and that is a decision, not an
+  // oversight: it appears only after "Check the ring" has changed a setting,
+  // and it is the second half of the sentence `out` just wrote above it. A
+  // conditional button that explains itself through the paragraph it sits
+  // under cannot be filed somewhere else without becoming unexplained.
+  restart.className = "btn btn-sm set-act-inline";
+  restart.style.cssText = "margin-top:8px;";
+  restart.textContent = "Restart now";
+  restart.hidden = true;
+
+  wrap.append(out, restart);
+  box.appendChild(wrap);
+
+  // `wireDescriptions()` has already run by the time this section is built
+  // (render() wires the panel's own markup, THEN calls renderConflicts), so
+  // this label has to be wired by hand — through the same function, never a
+  // second copy of the hover/click behaviour.
+  wireDescLabel(label);
+  // …and re-opened if it was open before the render that rebuilt it. render()
+  // restores the boxes it can see at the moment it runs, which is before this
+  // one exists. See `_openDescSnapshot`.
+  if (_openDescSnapshot.includes("ringfix")) setDescOpen("ringfix", true);
+
+  btn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    sfx.tick();
+    btn.disabled = true;
+    btn.textContent = "Checking…";
+    out.hidden = false;
+    restart.hidden = true;
+    out.textContent = "Drawing the ring and watching the screen…";
+
+    // THE BEFORE VALUE, read from the config the panel already holds, and the
+    // AFTER value read back from Rust. `run_overlay_fix` returns the human
+    // sentence; whether the stored verdict actually CHANGED is a fact about
+    // the config, and asking the config is the only way to be sure of it —
+    // parsing the sentence for a keyword would be a second source of truth
+    // that drifts the first time the copy is edited.
+    const before: "auto" | "software" = appConfig?.overlay_compositing ?? "auto";
+    try {
+      const msg = await invoke<string>("run_overlay_fix");
+      let after = before;
+      try {
+        // `set_overlay_compositing` in Rust rejects anything that is not
+        // exactly "auto" or "software", so narrowing here is a re-statement of
+        // a rule the backend already enforces — not a guess about the data.
+        const fresh = await invoke<{ overlay_compositing?: string }>("get_config");
+        after = fresh?.overlay_compositing === "software" ? "software" : "auto";
+        if (appConfig) appConfig.overlay_compositing = after;
+      } catch (_) { /* keep `before`; the message still stands on its own */ }
+
+      out.textContent = msg;
+      if (after !== before) {
+        sfx.confirm();
+        restart.hidden = false;
+        showToast("🔎 The ring check changed a setting — restart to apply");
+      } else {
+        sfx.tick();
+      }
+    } catch (err) {
+      console.error("run_overlay_fix failed:", err);
+      out.textContent = "The check could not run just now. Try again in a moment.";
+      showToast("⚠️ Could not check the ring");
+    }
+    btn.disabled = false;
+    btn.textContent = "Check again";
+  });
+
+  restart.addEventListener("click", (e) => {
+    e.stopPropagation();
+    sfx.confirm();
+    restart.disabled = true;
+    restart.textContent = "Restarting…";
+    void invoke("restart_app").catch(() => {
+      restart.disabled = false;
+      restart.textContent = "Restart now";
+      showToast("⚠️ Could not restart — close and reopen Spaceadom");
+    });
+  });
 }
 
 /**
@@ -1310,8 +1960,13 @@ async function drawHookHealth(box: HTMLElement, redraw: () => void): Promise<voi
   container.appendChild(caveat);
 
   const btn = document.createElement("button");
-  btn.className = "btn btn-sm";
-  btn.style.cssText = "width:100%; justify-content:center; margin-top:8px;";
+  // Sized to its own label (1.0.97), and kept HERE for the same reason the
+  // ring tool's "Restart now" is: the three paragraphs above it are what the
+  // owner asked for when he said "(recommended)" was not good enough, and a
+  // consent control filed away from the consent text is a control nobody
+  // consented to.
+  btn.className = "btn btn-sm set-act-inline";
+  btn.style.cssText = "margin-top:8px;";
   // The label says what it CHANGES, with the numbers in it. "Give shortcuts
   // more time (recommended)" told the owner nothing — he could not tell what
   // it did, what it cost, or why he should trust "(recommended)".
@@ -1369,30 +2024,32 @@ const DESC: Record<string, string> = {
     "Spaceadom opens quietly in the background when your PC turns on, so your shortcuts work from the first minute.",
   motion:
     "All the movement — keys popping, panels gliding. Turn off if the app ever feels heavy on your machine.",
-  software:
-    "A backup way of drawing the pop-ups. Turn on only if the guide or toasts stop appearing while sounds still play. Applies at the next launch.",
+  // 2026-09-01 — the "Software overlay" switch is gone and so is its entry.
+  // Its replacement is `ringfix` further down: the same escape hatch, asked as
+  // the symptom the user actually has.
   flight:
     "When a shortcut fires while the Space ring is open, the little message flies out of the ring instead of simply appearing. It looks good and it takes about a second. Off is quicker and quieter.",
   hudpointer:
     "While the Space guide is open, move your cursor out towards an app — you don't have to reach it, just point that way — and it lights up. Let go of Space, or click, and that app opens. Stay near the middle of the ring and nothing is picked, so letting go there types a space as usual.",
-  // The rows pill and the specials switch are ONE system, so their two
+  // The ring pill and the specials switch are ONE system, so their two
   // descriptions have to tell the same story from both ends — each says the
   // inner ring is the shared resource, and each says what to change to get the
-  // other outcome. Written to the owner's own wording (2026-08-27), which he
-  // asked for explicitly; same plain-spoken rule as everything above.
-  // 2026-08-27 — the layout switch. Written to the same rule as `flight` and
-  // `sound` above: say what each side actually looks like, say it in the
-  // second person, and end on what to do to get the other outcome. It is the
-  // gate on the two rows below it, so it also has to promise that turning it
-  // off costs nothing else.
-  hudlayout:
-    "Switches the Space ring between the new layout — a tighter ring that clips long names until you aim at one — and the classic ring you've been using. Everything else works the same either way; if the new one doesn't suit you, turn this off and nothing else changes.",
-  hudrows:
-    "How many rings of app shortcuts the Space ring uses. One ring keeps everything close but fits fewer names; two rings hold more, further out. Auto picks whichever actually fits what you've bound. Special keys need the inner ring, so they only appear when one ring is in use.",
+  // other outcome. Same plain-spoken rule as everything above.
+  //
+  // 2026-09-01 — this ONE entry replaces `hudlayout` and `hudrows`, which
+  // described a switch and a pill that had to be read together. Three named
+  // shapes can be described in three sentences, which is the point.
+  hudring:
+    "The shape of the ring you see while Space is held. Compact keeps everything close and clips long names until you aim at one. Wide is the roomier ring this app used before, with the names written out. Double adds a second ring of apps for when you have bound a lot of keys — it uses all the room, so the special keys step aside.",
   hudspecials:
-    "Puts Boss Key, PiP and the rest on the Space ring as a reminder — the keys themselves work either way. They sit in the inner ring, so they can only show when apps are using a single row. Choose two rows, or let Auto pick two, and they step aside.",
+    "Puts Boss Key, PiP and the rest on the Space ring as a reminder — the keys themselves work either way. They sit in the inner ring, so they can only show when the apps are using a single ring. Choose Double and they step aside.",
+  // The Conflicts-area tool that replaced the "Software overlay" switch. It
+  // says what the button will DO, in the order a worried person needs it: what
+  // it checks, what it might change, and that nothing happens without them.
+  ringfix:
+    "Draws the ring once and watches whether anything actually reaches the screen. Some graphics drivers stop drawing the pop-ups while everything else keeps working — sounds play, apps launch, and nothing appears. If that is what is happening, Spaceadom switches to a backup way of drawing and asks you to restart. If the backup is already on and the ring is fine, it hands drawing back to your graphics card and re-checks by itself. Nothing changes unless the check finds something.",
   theme:
-    "Three looks for the whole app, pop-ups included: Earthy daylight, a Warcry of iron and war-banners, or a Starry night sky.",
+    "Four looks for the whole app, pop-ups included: Auto follows Windows' own light/dark setting (Earthy in light mode, Starry night in dark), or pick a fixed look yourself — Earthy daylight, a Warcry of iron and war-banners, or a Starry night sky.",
   // Not in the spec — this setting is new, so the copy is written to match its
   // voice: what you get, and how to come back.
   hideboard:
@@ -1441,15 +2098,30 @@ let _hoverTimer: number | undefined;
 /** @param openByDefault  starts expanded and stays expanded through renders —
  *  only Conflicts uses it, because a live fault should explain itself without
  *  being asked (owner, 2026-08-20). */
+/**
+ * `id="desc-${id}"` — accessibility pass. It is what lets the row's control
+ * (the switch, the slider, the pill) carry `aria-describedby="desc-${id}"`
+ * and have a screen reader read this text as the control's description,
+ * whether or not it is visually expanded — the sighted "press the label to
+ * reveal it" interaction and the screen-reader description are two different
+ * audiences and do not have to wait on each other.
+ */
 function descBox(id: string, openByDefault = false): string {
   const copy = DESC[id];
   if (!copy) return "";
   if (openByDefault) {
-    return `<div class="set-desc is-open" data-desc-for="${id}"><div class="set-desc-in"><div class="set-desc-body">${copy}</div></div></div>`;
+    return `<div class="set-desc is-open" id="desc-${id}" data-desc-for="${id}"><div class="set-desc-in"><div class="set-desc-body">${copy}</div></div></div>`;
   }
   // The visual box is a CHILD of the clipped wrapper, never the wrapper
   // itself — see the .set-desc-in note in styles.css for why.
-  return `<div class="set-desc" data-desc-for="${id}"><div class="set-desc-in"><div class="set-desc-body">${copy}</div></div></div>`;
+  return `<div class="set-desc" id="desc-${id}" data-desc-for="${id}"><div class="set-desc-in"><div class="set-desc-body">${copy}</div></div></div>`;
+}
+
+/** `aria-describedby` value for a row's DESC box, or `undefined` when the id
+ *  has no copy — pointing a control at a description box that will never
+ *  render would be worse than pointing at nothing. */
+function descId(id: string): string | undefined {
+  return DESC[id] ? `desc-${id}` : undefined;
 }
 
 function setDescOpen(id: string, open: boolean): void {
@@ -1506,35 +2178,43 @@ function convoyAll(open: boolean): void {
  * subtree — the old listeners go with the old nodes.
  */
 function wireDescriptions(): void {
-  panelEl?.querySelectorAll<HTMLElement>("[data-desc]").forEach((label) => {
-    const id = label.dataset.desc ?? "";
-    if (!id || !DESC[id]) return;
+  panelEl?.querySelectorAll<HTMLElement>("[data-desc]").forEach(wireDescLabel);
+}
 
-    label.addEventListener("click", (e) => {
-      // A label inside a <label for=…> would otherwise flip the switch too.
-      e.preventDefault();
-      e.stopPropagation();
-      const next = !isDescOpen(id);
-      setDescOpen(id, next);
-      if (next) sfx.bloomOpen(); else sfx.bloomClose();
-      if (!next) _hoverOpened.delete(id);
-    });
+/**
+ * ONE label's worth of that wiring, split out so the rows built LATER — the
+ * ring tool inside `#set-conflicts`, which `renderConflicts` draws on its own
+ * schedule after `wireDescriptions` has already run — get the identical
+ * behaviour instead of a second copy that forgets the hover half.
+ */
+function wireDescLabel(label: HTMLElement): void {
+  const id = label.dataset.desc ?? "";
+  if (!id || !DESC[id]) return;
 
-    label.addEventListener("pointerenter", () => {
-      if (isDescOpen(id)) return;
-      window.clearTimeout(_hoverTimer);
-      _hoverTimer = window.setTimeout(() => {
-        setDescOpen(id, true);
-        sfx.whisper();                 // barely-there: it opened by itself
-        _hoverOpened.add(id);          // opened by hover -> closes on leave
-      }, HOVER_LINGER_MS);
-    });
+  label.addEventListener("click", (e) => {
+    // A label inside a <label for=…> would otherwise flip the switch too.
+    e.preventDefault();
+    e.stopPropagation();
+    const next = !isDescOpen(id);
+    setDescOpen(id, next);
+    if (next) sfx.bloomOpen(); else sfx.bloomClose();
+    if (!next) _hoverOpened.delete(id);
+  });
 
-    label.addEventListener("pointerleave", () => {
-      window.clearTimeout(_hoverTimer);
-      // Only retract what hover opened. Anything the user clicked open stays.
-      if (_hoverOpened.has(id)) setDescOpen(id, false);
-    });
+  label.addEventListener("pointerenter", () => {
+    if (isDescOpen(id)) return;
+    window.clearTimeout(_hoverTimer);
+    _hoverTimer = window.setTimeout(() => {
+      setDescOpen(id, true);
+      sfx.whisper();                 // barely-there: it opened by itself
+      _hoverOpened.add(id);          // opened by hover -> closes on leave
+    }, HOVER_LINGER_MS);
+  });
+
+  label.addEventListener("pointerleave", () => {
+    window.clearTimeout(_hoverTimer);
+    // Only retract what hover opened. Anything the user clicked open stays.
+    if (_hoverOpened.has(id)) setDescOpen(id, false);
   });
 }
 
@@ -1578,12 +2258,13 @@ function toggleRow(id: string, label: string, on: boolean, i: number): string {
   // button and the track carries the `for=`. The CSS keeps working because
   // `input:checked + .toggle-track` is still an adjacent sibling.
   return `
-    <div class="set-item" style="animation-delay:${60 + i * 45}ms">
+    <div class="set-item set-filterable" style="animation-delay:${60 + i * 45}ms">
       <div class="set-row">
         <button type="button" class="set-row-label" data-desc="${id}"
-                aria-expanded="false">${label}</button>
+                aria-expanded="false" aria-controls="desc-${id}">${label}</button>
         ${toggleSwitchHtml(id, on,
-          _flipped?.id === id && _flipped.on === on ? (on ? "on" : "off") : undefined)}
+          _flipped?.id === id && _flipped.on === on ? (on ? "on" : "off") : undefined,
+          label, descId(id))}
       </div>
       ${descBox(id)}
     </div>`;
@@ -1603,69 +2284,111 @@ function themeRow(theme: string, i: number): string {
   // segments are coloured per theme by CSS (`.theme-seg-ind[data-seg=...]`),
   // which is meaningful for this control and for no other.
   return `
-    <div class="set-item" style="animation-delay:${60 + i * 45}ms">
+    <div class="set-item set-filterable" style="animation-delay:${60 + i * 45}ms">
       <div class="set-row set-row-stack">
         <button type="button" class="set-row-label" data-desc="theme"
-                aria-expanded="false">Theme</button>
-        ${segRowHtml("theme", THEME_OPTS, theme, "", "Theme")}
+                aria-expanded="false" aria-controls="desc-theme">Theme</button>
+        ${segRowHtml("theme", THEME_OPTS, theme, "", "Theme", descId("theme"))}
       </div>
       ${descBox("theme")}
     </div>`;
 }
 
-/** The theme pill's three segments, in order. Also drives the in-place index
- *  update in the click handler, so the two cannot disagree. */
+/**
+ * The theme pill's segments, in order. Also drives the in-place index update
+ * in the click handler, so the two cannot disagree.
+ *
+ * "Auto" is FIRST (owner decision, feature 2) — it is the new-install default
+ * (schema.rs), so it is the option a first-time user meets before any of the
+ * three fixed looks. It resolves to Earthy or Starry night via
+ * `resolveTheme()` in main.ts (never Warcry — see that function's doc
+ * comment for why); the pill itself just stores and shows the literal string
+ * "auto", exactly like it shows "earthy"/"warcry"/"starry" for the other
+ * three.
+ */
 const THEME_OPTS: ReadonlyArray<readonly [string, string]> = [
+  ["auto", "Auto"],
   ["earthy", "Earthy"],
   ["warcry", "Warcry"],
   ["starry", "Starry night"],
 ];
 
-/** The band-count pill's three segments, in order. */
-const BAND_OPTS: ReadonlyArray<readonly [string, string]> = [
-  ["auto", "Auto"],
-  ["one", "1 row"],
-  ["two", "2 rows"],
-];
-
 /**
- * "Shortcut rows" — how many rings of app chips the Space HUD lays out.
+ * THE SPACE RING — Compact · Wide · Double, one pill (owner, 2026-09-01).
  *
- * A 3-WAY PILL, NOT A SWITCH, and it follows `themeRow` above because that is
- * the precedent this panel already has for a three-state setting. It is
- * rendered IMMEDIATELY BEFORE the "Show special keys" switch on purpose: the
- * two are one system — the specials occupy the inner band, so they can only
- * exist when the apps need just the outer one — and a dependency the user
- * cannot see is a dependency they will read as a bug.
+ * A 3-WAY PILL, NOT A SWITCH PLUS A PILL, and it follows `themeRow` above
+ * because that is the precedent this panel already has for a three-state
+ * setting. It is rendered IMMEDIATELY BEFORE the "Show special keys" switch on
+ * purpose: the two are one system — under Double both rings belong to apps, so
+ * the specials have nowhere to sit — and a dependency the user cannot see is a
+ * dependency they will read as a bug.
+ *
+ * NO ALWAYS-VISIBLE DESCRIPTION, by explicit instruction. The old pair of rows
+ * carried permanent notes explaining why one of them was dead; three named
+ * shapes have no dead state, so the explanation goes where every other row in
+ * this panel keeps it — behind the LABEL, which expands `DESC.hudring` when
+ * pressed. The only note that survives is the specials one, and it appears
+ * only in the state it explains.
  *
  * The indicator takes `var(--st-accent)` inline rather than a new CSS rule:
  * the accent is already themed, so the pill re-tints in Warcry and Starry for
  * free, and no token is introduced for a control that needs one colour.
  */
-function bandRow(band: string, i: number): string {
-  // The wrapper span and the note are ALWAYS in the markup, and always in the
-  // LIVE state; `paintRowsInert`, called once per render() right after the
-  // markup lands, is what greys them. One path, so the two cannot disagree —
-  // see the note beside that call. The span is a flex item of
-  // `.set-row-stack`, so it is blockified and stretched exactly as the pill
-  // was on its own: no CSS, no layout change.
+function ringRow(ring: RingLayout, i: number): string {
   return `
-    <div class="set-item" style="animation-delay:${60 + i * 45}ms">
+    <div class="set-item set-filterable" style="animation-delay:${60 + i * 45}ms">
       <div class="set-row set-row-stack">
-        <button type="button" class="set-row-label" data-desc="hudrows"
-                aria-expanded="false">Shortcut rows</button>
-        <span id="set-hudrows-wrap">${
-          segRowHtml("hudrows", BAND_OPTS, band, "background:var(--st-accent);", "Shortcut rows")
-        }</span>
+        <button type="button" class="set-row-label" data-desc="hudring"
+                aria-expanded="false" aria-controls="desc-hudring">Ring layout</button>
+        ${segRowHtml("hudring", RING_OPTS, ring, "background:var(--st-accent);", "Ring layout", descId("hudring"))}
       </div>
-      <div class="set-note" id="set-hudrows-note" style="margin-top:6px; display:none;">${ROWS_INERT_NOTE}</div>
-      ${descBox("hudrows")}
+      ${descBox("hudring")}
+    </div>`;
+}
+
+/**
+ * THE ENGINE ROW, which is the only row in this panel that is not in a group.
+ *
+ * It is STICKY (`.set-engine` in styles.css) so the main switch stays on
+ * screen at any scroll depth — the owner's instruction, and the right one: the
+ * panel is now long enough that "turn it off for a minute" could mean
+ * scrolling back up past four groups to find the switch that does it.
+ *
+ * The one-liner under the label is NOT an `.sma-note`. Every other piece of
+ * teaching prose here hides unless "What do these do?" is on, and that is
+ * correct for prose that explains a preference — but this switch turns the
+ * whole app off, and a user who is about to press it should not have to have
+ * asked for help first to learn what it does. The copy is the owner's own.
+ */
+function engineRow(on: boolean): string {
+  // 1.0.96 review fix — NOT `set-filterable`. This row is `.set-engine`
+  // sticky (pinned on screen at any scroll depth, see the doc comment
+  // above), so it never needed to be foundable by search in the first
+  // place — but being `.set-filterable` meant a query that didn't match it
+  // got `filterSettings` to hide it anyway, defeating the whole point of
+  // pinning it: the one row that must always be reachable was the one row
+  // search could take off screen.
+  return `
+    <div class="set-item set-engine">
+      <div class="set-row">
+        <button type="button" class="set-row-label" data-desc="engine"
+                aria-expanded="false" aria-controls="desc-engine">Engine active</button>
+        ${toggleSwitchHtml("engine", on,
+          _flipped?.id === "engine" && _flipped.on === on ? (on ? "on" : "off") : undefined,
+          "Engine active", `set-engine-note${descId("engine") ? ` ${descId("engine")}` : ""}`)}
+      </div>
+      <div class="set-engine-note" id="set-engine-note">Off means Space is just a space again.</div>
+      ${descBox("engine")}
     </div>`;
 }
 
 /**
  * "Show special keys" — the switch that CANNOT be a plain `toggleRow`, because
- * at "2 rows" it has nothing to do.
+ * on **Double** it has nothing to do.
+ *
+ * (This used to say "at 2 rows". The rows pill that phrase named was retired on
+ * 2026-09-01 into the Compact · Wide · Double pill; the condition is the same
+ * config state — `hud_band_count: "two"` — under the name the user now sees.)
  *
  * CLAUDE.md: *"A control that does nothing is worse than a missing control."*
  * With two app bands the inner ring is spoken for and Rust sends an empty
@@ -1682,21 +2405,25 @@ function bandRow(band: string, i: number): string {
  *     is on and would make the explanation invisible to exactly the user who
  *     needs it;
  *   · the LABEL stays live, because pressing it opens the description that
- *     explains the whole rows/specials system.
+ *     explains the whole ring-shape/specials system.
  *
  * **THE STORED VALUE IS NOT TOUCHED.** This is presentation, not a config
  * mutation: the switch keeps rendering the user's own preference, so choosing
- * "1 row" or "Auto" again restores exactly what they had. Writing `false` here
+ * Compact or Wide again restores exactly what they had. Writing `false` here
  * to "make the UI honest" would silently destroy a preference the user never
  * asked to change — and they would only find out much later.
  *
  * `toggleSwitchHtml` is still the source of the markup, so this row cannot
- * drift from the other eleven or lose its Fun-mode character.
+ * drift from the other nine switches or lose its Fun-mode character. (Nine, not
+ * eleven: "Show me around" became the header link and "Software overlay" became
+ * the Conflicts-area tool on 2026-09-01. `TOGGLE_CHAR` in controls.ts is the
+ * list that has to agree with this number.)
  */
 function specialsRow(on: boolean, inert: boolean, i: number): string {
   const sw = toggleSwitchHtml(
     "hudspecials", on,
     _flipped?.id === "hudspecials" && _flipped.on === on ? (on ? "on" : "off") : undefined,
+    "Show special keys", `set-hudspecials-note${descId("hudspecials") ? ` ${descId("hudspecials")}` : ""}`,
   );
   // The wrapper and the note are ALWAYS in the markup, shown or hidden by
   // inline style. That is what lets `paintSpecialsInert` flip this row without
@@ -1705,10 +2432,10 @@ function specialsRow(on: boolean, inert: boolean, i: number): string {
   // hand would drop the description listeners, which are wired per element
   // (`wireDescriptions`).
   return `
-    <div class="set-item" style="animation-delay:${60 + i * 45}ms">
+    <div class="set-item set-filterable" style="animation-delay:${60 + i * 45}ms">
       <div class="set-row" aria-disabled="${inert}">
         <button type="button" class="set-row-label" data-desc="hudspecials"
-                aria-expanded="false">Show special keys</button>
+                aria-expanded="false" aria-controls="desc-hudspecials">Show special keys</button>
         <span id="set-hudspecials-wrap"${inert ? ' style="opacity:.45; pointer-events:none;"' : ""}>${
           inert ? sw.replace("<input ", "<input disabled ") : sw
         }</span>
@@ -1733,35 +2460,148 @@ function paintSpecialsInert(inert: boolean): void {
   paintRow("set-hudspecials-wrap", "set-hudspecials-note", inert);
 }
 
+// ---------------------------------------------------------------------------
+// PROBLEM 250 — "Run at startup" when Windows owns it
+// ---------------------------------------------------------------------------
+
 /**
- * Flip the "Shortcut rows" pill between live and inert WITHOUT rebuilding it.
+ * The "Run at startup" row. Identical to `toggleRow("startup", …)` for an
+ * ordinary NSIS or MSI install, and greyed with a reason for the two copies
+ * that do not own their own autostart: a Microsoft Store package (Windows
+ * owns it) and the PORTABLE zip (nothing owns it — there is no Run key and no
+ * Scheduled Task, by design).
  *
- * The rows pill is to "New ring layout" what the specials switch is to the
- * rows pill: at the CLASSIC layout the ring has its own fixed shape, so a row
- * count cannot mean anything and the pill must not pretend otherwise —
- * CLAUDE.md, *"a control that does nothing is worse than a missing control"*.
+ * REVIEW FIXES 2026-09-05 (H6) — that second case is the correction. This
+ * comment used to say "for every install that exists today" the row was
+ * ordinary, which stopped being true when PROBLEM 254 shipped the portable
+ * build, and the code agreed with the comment rather than with the build: the
+ * greying rode on `get_packaged_startup` reporting `packaged: true` for a
+ * portable copy, which it only does to reuse a tuple. The decision lives in
+ * `controls.ts::startupRowIsInert` now and asks the honest question.
  *
- * ONE PATTERN, NOT TWO. Both rows share `paintInert` (controls.ts) rather than each
- * carrying its own opacity/pointer-events/disabled trio, because two copies
- * of an inert treatment drift and then one of them starts leaving a control
- * reachable by Tab.
+ * WHY THIS ROW NEEDED ITS OWN FUNCTION. In an MSIX package the app does not
+ * own autostart — Windows does. The user can switch Spaceadom off in Task
+ * Manager ▸ Startup apps at any moment and the app is never told, and
+ * `RequestEnableAsync` is documented to refuse to override that choice. So
+ * there are states in which this switch genuinely cannot do anything, and
+ * CLAUDE.md's rule applies exactly as it does to "Show special keys": *a
+ * control that does nothing is worse than a missing control.* The treatment is
+ * the same one, from the same leaf module (`paintInert`), so the two cannot
+ * drift and `preview.ts` can draw either.
  *
- * **THE STORED VALUE IS NOT TOUCHED.** `hud_band_count` keeps whatever the
- * user picked, so turning the new layout back on restores their row exactly.
- * Writing "auto" here to "make the UI honest" would silently destroy a
- * preference they never asked to change.
+ * The wrap span and the note div are ALWAYS in the markup, hidden by inline
+ * style, for the reason `specialsRow` gives: the state arrives from an async
+ * `invoke` AFTER this markup exists, so the paint has to be able to flip the
+ * row without rebuilding it — rebuilding would drop the per-element
+ * description listeners.
+ *
+ * **THE STORED VALUE IS NOT TOUCHED.** Greying is presentation. `run_at_startup`
+ * keeps whatever the user chose, so an install that later stops being packaged
+ * (they move to the setup.exe) finds their preference intact.
  */
-function paintRowsInert(inert: boolean): void {
-  paintRow("set-hudrows-wrap", "set-hudrows-note", inert);
+function startupRow(on: boolean, i: number): string {
+  const sw = toggleSwitchHtml(
+    "startup", on,
+    _flipped?.id === "startup" && _flipped.on === on ? (on ? "on" : "off") : undefined,
+    "Run at startup", `set-startup-note${descId("startup") ? ` ${descId("startup")}` : ""}`,
+  );
+  // REVIEW FIXES 2026-09-05 (H6) — `startupRowIsInert`, not
+  // `packaged && !mayChange`. The old expression made the PORTABLE copy's
+  // greying depend on `get_packaged_startup` claiming `packaged: true` for it,
+  // which it only does to reuse a tuple shape; the honest question is "may
+  // this app change it", and `mayChange` is the field that answers it. See
+  // controls.ts for the full account.
+  const inert = startupRowIsInert(_pkgStartup);
+  const note = _pkgStartup?.note ?? "";
+  return `
+    <div class="set-item set-filterable" style="animation-delay:${60 + i * 45}ms">
+      <div class="set-row" aria-disabled="${inert}">
+        <button type="button" class="set-row-label" data-desc="startup"
+                aria-expanded="false" aria-controls="desc-startup">Run at startup</button>
+        <span id="set-startup-wrap"${inert ? ' style="opacity:.45; pointer-events:none;"' : ""}>${
+          inert ? sw.replace("<input ", "<input disabled ") : sw
+        }</span>
+      </div>
+      <div class="set-note" id="set-startup-note" style="margin-top:6px;${inert ? "" : "display:none;"}">${note}</div>
+      ${descBox("startup")}
+    </div>`;
 }
 
 /**
- * Both wrappers above are one line each on purpose: the treatment itself is
- * `paintInert` in `controls.ts`, the LEAF module, so `preview.ts` renders the
- * identical dead control without a backend. A second copy here would drift
- * from the harness the first time either was edited — and the half that goes
- * missing is always `disabled`, which looks perfect and leaves the control
- * fully operable from the keyboard.
+ * Is the switch showing ON?
+ *
+ * A one-line binding of this panel's `_pkgStartup` to the shared rule in
+ * `controls.ts` — REVIEW FIXES 2026-09-05 (H6). The rule itself moved out so
+ * `preview.ts` can exercise it, and because the portable case it now covers
+ * (always OFF, whatever config holds — a portable copy has no Run key and
+ * never will) is the kind of thing that gets fixed in one file and not the
+ * other.
+ */
+function startupShownAsOn(fromConfig: boolean): boolean {
+  return ownershipShownAsOn(_pkgStartup, fromConfig);
+}
+
+/**
+ * Ask Rust who owns the switch, then repaint the row in place.
+ *
+ * Called when the panel opens and again after the switch is used — NOT on the
+ * render path. Silent on failure: an older backend has no `get_packaged_startup`
+ * command, and an unpackaged install is the answer "nothing to do", so neither
+ * case deserves a toast. `_pkgStartup` simply stays null and the row is the row
+ * it has always been.
+ */
+async function refreshPackagedStartup(): Promise<void> {
+  try {
+    const [packaged, state, mayChange, note] =
+      await invoke<[boolean, string, boolean, string]>("get_packaged_startup");
+    _pkgStartup = { packaged, state, mayChange, note };
+  } catch (_) {
+    _pkgStartup = null;
+    return;
+  }
+  paintPackagedStartup();
+}
+
+/**
+ * Apply `_pkgStartup` to the live row without rebuilding it: the note's text,
+ * the inert treatment, and the switch's own checked state — which for a
+ * packaged install is Windows' answer, so a change made in Task Manager while
+ * the panel was shut is visible the next time it opens.
+ */
+function paintPackagedStartup(): void {
+  if (!panelEl) return;
+  // REVIEW FIXES 2026-09-05 (H6) — the shared rule, not a second copy of
+  // `packaged && !mayChange`. This was the OTHER half of the same expression
+  // and it had to move with it: two places computing "is this row dead"
+  // independently is how a row ends up greyed but writable, or writable but
+  // greyed.
+  const inert = startupRowIsInert(_pkgStartup);
+  const noteEl = panelEl.querySelector<HTMLElement>("#set-startup-note");
+  if (noteEl) noteEl.textContent = _pkgStartup?.note ?? "";
+  const input = panelEl.querySelector<HTMLInputElement>("#set-startup");
+  // `_pkgStartup !== null`, not `?.packaged`: the portable tuple's `packaged`
+  // is a fiction, and a portable copy is the case that most needs the switch
+  // forced OFF — a `run_at_startup: true` carried over from a config folder
+  // copied out of an installed copy would otherwise draw a switch that is on,
+  // dead, and wrong. `startupShownAsOn` decides; this only asks.
+  if (input && _pkgStartup) input.checked = startupShownAsOn(input.checked);
+  paintRow("set-startup-wrap", "set-startup-note", inert);
+}
+
+/**
+ * `paintRowsInert` USED TO LIVE HERE, greying the "Shortcut rows" pill
+ * whenever "New ring layout" was off. Both controls are gone (2026-09-01) and
+ * so is it: the Compact/Wide/Double pill has no state in which it means
+ * nothing, which is the whole reason the owner asked for one pill instead of
+ * two dependent rows. `paintSpecialsInert` above is the only inert treatment
+ * this panel still needs.
+ *
+ * The wrapper is one line on purpose: the treatment itself is `paintInert` in
+ * `controls.ts`, the LEAF module, so `preview.ts` renders the identical dead
+ * control without a backend. A second copy here would drift from the harness
+ * the first time either was edited — and the half that goes missing is always
+ * `disabled`, which looks perfect and leaves the control fully operable from
+ * the keyboard.
  */
 function paintRow(wrapId: string, noteId: string, inert: boolean): void {
   paintInert(
@@ -1769,6 +2609,296 @@ function paintRow(wrapId: string, noteId: string, inert: boolean): void {
     panelEl?.querySelector<HTMLElement>(`#${noteId}`),
     inert,
   );
+}
+
+// ---------------------------------------------------------------------------
+// ABOUT (feature 1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Ask for the version/install-kind once, then repaint the row IN PLACE.
+ *
+ * Called from `openSettingsPanel()`, not from `render()` — same rule as
+ * `refreshPackagedStartup`: the panel must appear at once, and the answer
+ * (a Tauri round trip) arrives a few milliseconds later and repaints one
+ * corner of one row rather than blocking the open. Every open, not once per
+ * session: an update installed by the daily background check changes the
+ * version this row should show the next time the user looks.
+ */
+async function refreshAboutInfo(): Promise<void> {
+  _aboutInfo = await fetchAboutInfo();
+  paintAboutInfo();
+  // PROBLEM 249 — the way back, asked for in the same pass and for the same
+  // reason: the answer changes when the daily background check installs
+  // something while this panel is shut. `render()` is what actually puts the
+  // button on screen (`aboutRowHtml` takes the version), so a change from
+  // "none" to "1.0.99" needs one — but only when it is a CHANGE, because a
+  // render here would otherwise replay the panel's entrance wave on every
+  // single open, a few milliseconds after it had already played.
+  const before = _rollback?.version ?? null;
+  _rollback = await fetchRollbackTarget();
+  if ((_rollback?.version ?? null) !== before) render();
+}
+
+/** Apply `_aboutInfo` to the live row without rebuilding it. */
+function paintAboutInfo(): void {
+  if (!panelEl) return;
+  const verEl = panelEl.querySelector<HTMLElement>("#set-about-version");
+  if (verEl) verEl.textContent = _aboutInfo?.version ? `Spaceadom · v${_aboutInfo.version}` : "Spaceadom";
+  let kindEl = panelEl.querySelector<HTMLElement>("#set-about-kind");
+  const idEl = panelEl.querySelector<HTMLElement>("#set-about-id") ?? verEl?.parentElement;
+  if (_aboutInfo?.installKind) {
+    if (!kindEl && idEl) {
+      kindEl = document.createElement("div");
+      kindEl.className = "set-note";
+      kindEl.id = "set-about-kind";
+      kindEl.style.marginTop = "2px";
+      idEl.appendChild(kindEl);
+    }
+    if (kindEl) kindEl.textContent = _aboutInfo.installKind;
+  } else {
+    kindEl?.remove();
+  }
+}
+
+/**
+ * Wire everything in the About row: the update-check button, the four
+ * external links, and the third-party list's expand/collapse. Called once
+ * per `render()`, exactly like `wireDescriptions()` and the other per-render
+ * wiring functions in this file — safe, because `render()` just replaced the
+ * whole subtree these listeners attach to.
+ */
+function wireAboutSection(): void {
+  if (!panelEl) return;
+
+  // PROBLEM 249 — DISARM ON EVERY RENDER. `render()` rebuilds this subtree,
+  // so the armed button ("Confirm — go back to 1.0.99") is destroyed and a
+  // fresh one reading "Roll back to 1.0.99" takes its place — while
+  // `_rollbackArmed`, which lives at module scope precisely so it can survive
+  // a render, would still say `true`. The next click would then skip the
+  // confirm the label is still promising and roll the machine back on one
+  // press. This is the same class of bug `disarm()` was given its own
+  // `render()` for in 2026-08-20 ("after confirming it still shows Confirm"),
+  // arriving from the opposite direction: there the state outlived the label,
+  // here the label outlives the state.
+  _rollbackArmed = false;
+  window.clearTimeout(_rollbackArmTimer);
+
+  const checkBtn = panelEl.querySelector<HTMLButtonElement>("#set-about-check-update");
+  checkBtn?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (!checkBtn) return;
+    sfx.tick();
+    // Paint the busy state BEFORE the call, and let the `update-status`
+    // listener take it from here.
+    //
+    // THE BUTTON IS NOT RE-ENABLED IN A `finally`, and that is the fix rather
+    // than an oversight. `check_for_updates_now` does not resolve when an
+    // update actually installs: PROBLEM 233's sequence is stop the hook, run
+    // Tauri's exit cleanup, spawn the installer, exit — the process is gone
+    // before any continuation runs. A `finally` there executes in exactly the
+    // case where nothing happened and never in the case that matters, which
+    // makes it a re-enable that lies about the app's state. `setUpdateBusy`
+    // is driven by the event instead, and `emit_always` guarantees a terminal
+    // status arrives once `downloading` has been emitted, manual or daily.
+    setUpdateBusy(true);
+    _updateStatusText = "Checking…";
+    paintUpdateStatus();
+    // Not awaited: the promise is a bonus, not the mechanism. When it does
+    // resolve it carries the same `message` the event already carried, and
+    // repainting it costs nothing; when it never resolves the event has
+    // already said everything there is to say.
+    void requestUpdateCheck().then((msg) => {
+      _updateStatusText = msg;
+      paintUpdateStatus();
+    });
+  });
+
+  // PROBLEM 249 — the way back. Present only when `rollback_available()`
+  // answered with a version, so there is no disabled state to explain.
+  const rollBtn = panelEl.querySelector<HTMLButtonElement>("#set-about-rollback");
+  rollBtn?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const version = rollBtn.dataset.rollbackVersion ?? _rollback?.version ?? "";
+    // ONE-TAP CONFIRM, the same shape "Reset to defaults" and "Clear all"
+    // use, and for a stronger reason than either: this one replaces the
+    // running program with a different build of it, and on the NSIS leg it
+    // does so by killing this process. A `window.confirm()` over this stage
+    // looks like a different app (the rule this panel has followed since
+    // 2026-08-20), so the button arms itself and disarms after a moment.
+    if (!_rollbackArmed) {
+      _rollbackArmed = true;
+      rollBtn.textContent = `Confirm — go back to ${version}`;
+      sfx.arm();
+      window.clearTimeout(_rollbackArmTimer);
+      _rollbackArmTimer = window.setTimeout(() => {
+        _rollbackArmed = false;
+        if (rollBtn.isConnected) rollBtn.textContent = `Roll back to ${version}`;
+      }, 2600);
+      return;
+    }
+    _rollbackArmed = false;
+    window.clearTimeout(_rollbackArmTimer);
+    sfx.confirm();
+    // Painted BEFORE the call for the same reason the update button is:
+    // `rollback_to_previous` normally never returns either — it stops the
+    // hook, exits, and lets the archived installer replace the exe. A
+    // resolved promise here means the rollback did NOT happen, and its string
+    // is the explanation.
+    rollBtn.disabled = true;
+    rollBtn.textContent = "Going back…";
+    setUpdateBusy(true);
+    _updateStatusText = `Going back to ${version}… Spaceadom will restart itself.`;
+    paintUpdateStatus();
+    void requestRollback().then((msg) => {
+      _updateStatusText = msg;
+      paintUpdateStatus();
+      setUpdateBusy(false);
+      if (rollBtn.isConnected) {
+        rollBtn.disabled = false;
+        rollBtn.textContent = `Roll back to ${version}`;
+      }
+    });
+  });
+
+  panelEl.querySelectorAll<HTMLButtonElement>("[data-about-link]").forEach((b) => {
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const kind = b.dataset.aboutLink as AboutLinkKind | undefined;
+      if (!kind) return;
+      sfx.tick();
+      void openAboutLink(kind).catch(() => showToast("⚠️ Could not open that link"));
+    });
+  });
+
+  const tpToggle = panelEl.querySelector<HTMLButtonElement>("#set-about-tp-toggle");
+  const tpList = panelEl.querySelector<HTMLElement>("#set-about-tp-list");
+  tpToggle?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    _thirdPartyOpen = !_thirdPartyOpen;
+    tpToggle.setAttribute("aria-expanded", String(_thirdPartyOpen));
+    if (tpList) {
+      tpList.hidden = !_thirdPartyOpen;
+      // LAZY, per the owner's instruction: the grouped markup for several
+      // hundred packages is built once, on first expand, and cached in the
+      // DOM from then on — never at panel-open time, when nobody has asked
+      // for it yet.
+      if (_thirdPartyOpen && !tpList.dataset.built) {
+        tpList.dataset.built = "1";
+        tpList.innerHTML = renderThirdPartyGroups(THIRD_PARTY);
+        tpList.querySelectorAll<HTMLAnchorElement>("[data-tp-link]").forEach((a) => {
+          // REVIEW FIXES 2026-09-05 (LOW) — `auxclick` as well as `click`,
+          // the same correction made in `whats-new-sheet.ts` and for the same
+          // reason. These anchors carry a real `href` (so the context menu's
+          // "Copy link address" works), and a middle-click or Ctrl+click does
+          // not fire `click` — it fires `auxclick`, and the webview then
+          // follows the href itself. There is no tab to open it in, so the
+          // DASHBOARD navigates to the package's homepage and the app is gone
+          // until it is restarted. Found here while fixing the What's New
+          // sheet; the class is "an intercepted <a> needs both events, or the
+          // href it keeps for polish becomes an escape hatch out of the app".
+          const openInBrowser = (ev: Event) => {
+            ev.preventDefault();
+            void openUrl(a.dataset.tpLink!).catch(() => {});
+          };
+          a.addEventListener("click", openInBrowser);
+          a.addEventListener("auxclick", openInBrowser);
+        });
+      }
+    }
+    if (_thirdPartyOpen) sfx.bloomOpen(); else sfx.bloomClose();
+  });
+
+  wireUpdateStatusListener();
+}
+
+/** Paint just the update-status line, without touching anything else in the
+ *  row — the button click handler above calls this twice (immediately, and
+ *  again when the check settles) and a full `render()` for either would
+ *  replay the whole panel's entrance wave for one line of text. */
+function paintUpdateStatus(): void {
+  const el = panelEl?.querySelector<HTMLElement>("#set-about-update-status");
+  if (el) el.textContent = _updateStatusText;
+}
+
+/**
+ * The `update-status` event fires for the DAILY background check too, not
+ * only for a press of this row's own button — a check that starts on its own
+ * schedule while the panel happens to be open should still move this line.
+ * Wired ONCE (module scope survives `render()`'s teardown of the DOM it
+ * reads from — the query at listener time always finds whatever the CURRENT
+ * row is, since it re-queries `panelEl` on every event rather than closing
+ * over a node).
+ */
+function wireUpdateStatusListener(): void {
+  // TWO flags, and the second is what makes the first one's move safe. This
+  // function is called at the end of every `render()`, i.e. after every
+  // toggle, so between the `listen()` call and its resolution there can be
+  // several more calls — and a bare "not wired yet" guard would register a
+  // second, third and fourth listener, each of which would repaint the status
+  // line on every event. `_updateStatusListenPending` covers exactly that gap:
+  // in flight counts as taken, resolved counts as done, and only a REJECTION
+  // frees it to be tried again.
+  if (_updateStatusListenerWired || _updateStatusListenPending) return;
+  _updateStatusListenPending = true;
+  // REVIEW FIXES 2026-09-05 (LOW) — THE FLAG IS SET WHEN `listen()` RESOLVES,
+  // NOT WHEN IT IS CALLED.
+  //
+  // `listen()` returns a promise and the registration is not live until it
+  // settles. Setting the flag first meant that if the first call REJECTED —
+  // the window missing from `capabilities/default.json`, which CLAUDE.md
+  // records as the failure that makes a window silently deaf, or a plugin not
+  // yet initialised when the panel is opened very early — every later call
+  // returned at the line above without trying again. One transient rejection
+  // and the About row's status line was dead for the life of the process,
+  // including for the DAILY background check this listener exists to catch.
+  //
+  // Set in `.then` and cleared in `.catch`, so a failure is retried the next
+  // time the panel is opened. The `void` is deliberate: nothing awaits this,
+  // exactly as before.
+  void listen<{ state?: string; message?: string }>("update-status", (e) => {
+    // THE CONTRACT (updater.rs, PROBLEM 249): switch on the states you
+    // handle, and show `message` VERBATIM for everything else. `message` is
+    // always a finished English sentence, never a code and never a fragment,
+    // which is what makes that rule safe — a state added in a later build
+    // shows its own sentence here instead of producing a blank line.
+    //
+    // So this listener switches on exactly one thing, "is the app still
+    // working on it", and prints the sentence for all seven states.
+    _updateStatusText = e.payload?.message || _updateStatusText;
+    setUpdateBusy(updateStateIsBusy(e.payload?.state));
+    paintUpdateStatus();
+  })
+    .then(() => {
+      _updateStatusListenerWired = true;
+      _updateStatusListenPending = false;
+    })
+    .catch(() => {
+      // Both left FALSE, so the next panel open tries again. An older build
+      // without the updater emits nothing and this simply never succeeds —
+      // which costs one rejected promise per open and no toast, the same
+      // silence it had before.
+      _updateStatusListenerWired = false;
+      _updateStatusListenPending = false;
+    });
+}
+
+/**
+ * Enable or disable the About row's two update controls together.
+ *
+ * Together, because they are two directions of one journey and neither is
+ * safe while the other is running: a rollback started mid-download would race
+ * two installers over the same exe.
+ *
+ * Re-queried from `panelEl` on every call rather than closed over, exactly
+ * like `paintUpdateStatus` — `render()` replaces this subtree, and the
+ * `update-status` listener outlives any particular button node.
+ */
+function setUpdateBusy(busy: boolean): void {
+  const check = panelEl?.querySelector<HTMLButtonElement>("#set-about-check-update");
+  if (check) check.disabled = busy;
+  const roll = panelEl?.querySelector<HTMLButtonElement>("#set-about-rollback");
+  if (roll) roll.disabled = busy;
 }
 
 // ---------------------------------------------------------------------------
@@ -1832,23 +2962,34 @@ function typingSpeedRow(wpm: number): string {
               style="left:${pct.toFixed(1)}%">${t.name}</span>`;
   }).join("");
 
+  // WRAPPED IN `.set-item.set-filterable` since 2026-09-01. The slider rows
+  // were the only rows in this panel that were a bare `.set-row`, which meant
+  // the search would have filtered every switch and skipped all three
+  // sliders — the kind of half-working filter that reads as "search is
+  // broken" rather than "these three are special". The wrapper also moves the
+  // entrance animation from `.set-row` to `.set-item`, matching every other
+  // row (`#settings-panel.pop .set-item`, and `.set-item .set-row` cancels
+  // the inner one).
   return `
+    <div class="set-item set-filterable">
     <div class="set-row" style="flex-direction:column; align-items:stretch; gap:4px; cursor:default; margin-bottom:10px;">
       <div style="display:flex; align-items:baseline; gap:8px;">
         <button type="button" class="set-row-label" data-desc="wpm"
-                aria-expanded="false">Typing speed</button>
+                aria-expanded="false" aria-controls="desc-wpm">Typing speed</button>
         <span style="font-size:11px; font-weight:700; color:var(--st-accent-deep);"
               id="set-wpm-val">${typingTierName(wpm)} · ${wpm} wpm</span>
       </div>
       <div class="wpm-ticks" id="set-wpm-ticks">${ticks}</div>
       ${sliderShell("wpm", `
-        <input type="range" id="set-wpm" min="${WPM_MIN}" max="${WPM_MAX}" step="5" value="${wpm}" />`,
+        <input type="range" id="set-wpm" min="${WPM_MIN}" max="${WPM_MAX}" step="5" value="${wpm}"
+               aria-label="Typing speed"${descId("wpm") ? ` aria-describedby="${descId("wpm")}"` : ""} />`,
         WPM_MIN, WPM_MAX, wpm)}
       <span class="sma-note" style="font-size:10.5px; color:var(--st-ink-soft); line-height:1.35; margin-top:2px;">
         If apps launch by accident while you type, choose a SLOWER speed —
         Spaceadom then waits longer before treating Space+key as a shortcut.
       </span>
       ${descBox("wpm")}
+    </div>
     </div>`;
 }
 
@@ -1856,18 +2997,112 @@ function sliderRow(
   id: string, label: string, value: number,
   min: number, max: number, step: number, unit: string,
 ): string {
+  const desc = descId(id);
   return `
+    <div class="set-item set-filterable">
     <div class="set-row" style="flex-direction:column; align-items:stretch; gap:4px; cursor:default; margin-bottom:10px;">
       <div style="display:flex; align-items:baseline; gap:8px;">
         <button type="button" class="set-row-label" data-desc="${id}"
-                aria-expanded="false">${label}</button>
+                aria-expanded="false" aria-controls="desc-${id}">${label}</button>
         <span style="font-size:11px; font-weight:700; color:var(--st-accent-deep);" id="set-${id}-val">${value}${unit}</span>
       </div>
       ${sliderShell(id, `
         <input type="range" id="set-${id}" min="${min}" max="${max}" step="${step}" value="${value}"
-               data-unit="${unit}" />`, min, max, value)}
+               data-unit="${unit}" aria-label="${label}"${desc ? ` aria-describedby="${desc}"` : ""} />`, min, max, value)}
       ${descBox(id)}
+    </div>
     </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// SEARCH + LIVE RING PREVIEW (2026-09-01)
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire the search box and re-apply whatever was already typed.
+ *
+ * ZERO COST WHEN UNUSED, and that is the constraint the owner set. Nothing
+ * here walks the DOM unless the box has text: `filterSettings` is called from
+ * this function only when `_query` is non-empty, and thereafter only from the
+ * `input` event. The per-row haystack is built lazily inside `filterSettings`
+ * and cached on the element, so an untouched panel never reads a single
+ * `textContent`.
+ *
+ * `keydown` is stopped for the same reason the app-exceptions search stops it:
+ * this panel reacts to stray keys (Escape collapses the expand, Space blurs
+ * buttons), and typing "space" into a search box must not trigger any of it.
+ */
+function wireSearch(): void {
+  const box = panelEl?.querySelector<HTMLInputElement>("#set-search");
+  if (!box || !panelEl) return;
+  box.value = _query;
+  if (_query) filterSettings(panelEl, _query);
+
+  box.addEventListener("input", () => {
+    _query = box.value;
+    if (panelEl) filterSettings(panelEl, _query);
+  });
+  box.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    // Escape inside the box clears the filter first — one more peel, and the
+    // one a person reaches for while looking at a filtered list.
+    if (e.key === "Escape" && _query) {
+      e.preventDefault();
+      _query = "";
+      box.value = "";
+      if (panelEl) filterSettings(panelEl, "");
+    }
+  });
+  box.addEventListener("click", (e) => e.stopPropagation());
+}
+
+/**
+ * Show the ring shape being chosen, in the real overlay, as it is chosen.
+ *
+ * THE BODY MOVED TO `controls.ts` (1.0.97) and this is now a one-line
+ * forward. It had to move because the thing the owner asked for is not "fire
+ * the command" but "fire it only while one is already on screen", and that
+ * needs a piece of STATE — when the last projection is due to hide — which
+ * `render()` would destroy if it lived on an element here. Putting the state
+ * and both entry points in the leaf module also means `preview.ts` exercises
+ * the real gate rather than a copy of it; a harness that owns a second copy of
+ * a decision can only ever agree with itself.
+ *
+ * Every failure is still swallowed, for the reason it always was: a settings
+ * panel that threw because a preview command was missing would be a worse
+ * outcome than no preview at all.
+ */
+function previewRing(layout: RingLayout): Promise<void> {
+  return showRingPreview(layout);
+}
+
+/**
+ * The current ring shape, read through the SAME pure mapping every other
+ * caller uses — never re-derived from the two config fields by hand.
+ */
+function currentRingLayout(): RingLayout {
+  return ringLayoutFor(appConfig?.hud_magnetic_layout, appConfig?.hud_band_count);
+}
+
+/**
+ * PROBLEM — the preview that would not re-fire (owner, 2026-09-04):
+ *
+ *   *"while the ring preview is showing, toggling 'Show special keys' leaves
+ *   the old preview up; the change only appears next time."*
+ *
+ * Rust builds the projection ONCE, at `preview_hud_layout` time, and nothing
+ * re-sends it — so a setting changed while the ring is up is a setting the
+ * ring cannot know about. Every control that feeds the payload calls this
+ * after its own `persistConfig()`, so the command reads the NEW config:
+ * "Show special keys", the Compact/Wide/Double pill, the theme pill (the ring
+ * wears the app's palette) and "Point to launch".
+ *
+ * `refreshRingPreview` fires NOTHING when no projection is on screen. That is
+ * the half of this that matters: a switch flipped in a quiet settings panel
+ * must not throw a full-screen overlay up in front of the user.
+ */
+function refireRingPreview(): void {
+  void refreshRingPreview(currentRingLayout());
 }
 
 function wireToggle(id: string, onChange: () => void | Promise<void>): void {

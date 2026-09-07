@@ -15,6 +15,31 @@
 # util:CloseApplication - the fix for the silent-update failure it always had
 # (PROBLEM 127). Stock tauri CLI; no forked bundler, no suppressed validation.
 #
+# SINCE 1.0.100 THE APP UPDATES ITSELF (PROBLEM 245). Every installed copy
+# checks this repository's "latest" release once a day and installs a newer
+# version silently. That changes what a tag push means: it is no longer
+# "a download is available", it is "every user will be running this within
+# 24 hours". Two things make that safe, and BOTH live in this file:
+#
+#   1. SIGNING. The installers are signed with the updater key, and the app
+#      refuses anything whose signature does not verify against the public
+#      key baked into it (tauri.conf.json plugins.updater.pubkey). The
+#      private key is NOT in the repo (src-tauri/.tauri/ is gitignored); it
+#      arrives as the TAURI_SIGNING_PRIVATE_KEY and
+#      TAURI_SIGNING_PRIVATE_KEY_PASSWORD secrets, exactly like the Sentry
+#      DSN. Lose that key and no existing install can ever update again.
+#
+#   2. TWO MANIFESTS, ONE PER INSTALLER KIND. latest.json points at the
+#      setup.exe and latest-msi.json at the .msi. An install must only ever
+#      be updated by the kind of installer that made it: feeding the .msi to
+#      a per-user setup.exe install is PROBLEM 129 (two copies) or PROBLEM
+#      244 (the .msi adopts the live folder, a later uninstall deletes the
+#      running app). The app works out how it was installed at runtime
+#      (src-tauri/src/updater.rs) and reads the matching manifest. Both are
+#      written by scripts/write-updater-manifests.ps1 — the same script the
+#      local end-to-end proof used — NOT by tauri-action, which writes one
+#      latest.json for whichever installer it prefers.
+#
 # HOW TO RELEASE:
 #   1. bump the version in package.json, src-tauri/tauri.conf.json and
 #      src-tauri/Cargo.toml (all three must match)
@@ -24,7 +49,33 @@
 # The release appears at /releases within about ten minutes.
 #
 # You can also run it by hand from the Actions tab (workflow_dispatch) to test
-# the pipeline without tagging anything.
+# the pipeline without tagging anything. REVIEW FIXES 2026-09-05 (C2) — that
+# sentence used to be a lie, and an expensive one. Every step below EXCEPT the
+# tauri-action publish was already gated on `startsWith(github.ref,
+# 'refs/tags/v')`; the publish itself was not. So a workflow_dispatch run from
+# `main` handed tauri-action `tagName: main`, and tauri-action CREATES the tag
+# and the release it is given — a public, non-draft release literally called
+# "Spaceadom main", with installers attached and no manifests beside them,
+# produced by the button whose whole purpose is "test without publishing".
+# Worse than the mess: `releases/latest` could then resolve to it, and every
+# installed copy polls that URL once a day.
+#
+# The publish is gated now. A workflow_dispatch run BUILDS AND VERIFIES ONLY:
+# it compiles the frontend, both installers and (if the identity secrets are
+# set) the .msix, and publishes nothing anywhere. That is what makes it a
+# usable rehearsal.
+#
+# REVIEW FIXES 2026-09-05 (C2), the second half — A RELEASE IS BUILT AS A
+# DRAFT AND FLIPPED PUBLIC LAST. tauri-action used to publish immediately, and
+# the two steps that make a release USABLE — the updater manifests and the
+# portable zip — ran after it. Between those steps the release was public and
+# incomplete: `latest.json` did not exist yet, so an installed copy polling
+# `releases/latest/download/latest.json` in that window got a 404, and a human
+# following the link found a release page missing the portable download. The
+# order is now: build -> draft release -> manifests -> portable zip -> verify
+# every asset -> `gh release edit --draft=false` as the very LAST step. A run
+# that dies anywhere in the middle leaves a DRAFT, which nobody polls and
+# nobody can download by accident.
 
 name: Release
 
@@ -92,16 +143,64 @@ jobs:
       # shipping installers that can never report a crash. An installer that
       # cannot phone home is exactly the artifact this project must never
       # publish unknowingly.
+      #
+      # REVIEW FIXES 2026-09-05 (C2) — THE SECRET ARRIVES THROUGH `env:`, NOT
+      # THROUGH `${{ }}` INSIDE THE SCRIPT. `${{ secrets.X }}` in a `run:` body
+      # is a TEXT substitution performed before the shell ever sees the script,
+      # so the secret's literal characters become part of the program. A DSN
+      # containing a `"`, a backtick, a `$(`, or a newline stops being data and
+      # starts being PowerShell — at best a parse error on a build nobody can
+      # debug (the log is masked), at worst arbitrary code chosen by whoever
+      # can set the secret. Through `env:` the value is handed to the process
+      # as an environment variable and never parsed as script.
       - name: Write Sentry DSN from secret
         shell: pwsh
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
         run: |
-          $dsn = "${{ secrets.SENTRY_DSN }}"
+          $dsn = $env:SENTRY_DSN
           if ([string]::IsNullOrWhiteSpace($dsn)) {
             Write-Host "::error::The SENTRY_DSN repository secret is not set. Add it (Settings > Secrets and variables > Actions) with the contents of src-tauri/src/sentry_dsn.txt from the dev machine. No installer was built."
             exit 1
           }
           Set-Content -Path src-tauri/src/sentry_dsn.txt -Value $dsn -NoNewline -Encoding ascii
           Write-Host "sentry_dsn.txt written ($($dsn.Length) chars — value masked by Actions)."
+
+      # PROBLEM 245 — the updater signing key, same rule and same shape as the
+      # DSN step above. tauri build reads TAURI_SIGNING_PRIVATE_KEY from the
+      # environment (key CONTENT, not a path — that is what `gh secret set
+      # TAURI_SIGNING_PRIVATE_KEY < spaceadom.key` uploaded) and writes a .sig
+      # beside each installer. FAIL LOUDLY if either secret is missing: without
+      # this guard `tauri build` would simply not sign, the manifest step below
+      # would then fail on the missing .sig — or worse, a future change could
+      # let an unsigned release through, which every installed copy would
+      # refuse, silently, forever.
+      #
+      # Through `env:`, for the reason spelled out on the DSN step above — and
+      # here it matters more: an ed25519 private key is base64 with embedded
+      # newlines, and a multi-line `${{ }}` substitution into a double-quoted
+      # PowerShell string does not survive as one value at all.
+      - name: Check the updater signing secrets
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $key = $env:TAURI_SIGNING_PRIVATE_KEY
+          $pw  = $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+          # The command hints below are single-quoted so PowerShell does not
+          # eat the backticks as escape characters — the old double-quoted
+          # versions printed "gh secret set ..." with the opening backtick
+          # swallowed and the closing one stranded.
+          if ([string]::IsNullOrWhiteSpace($key)) {
+            Write-Host '::error::The TAURI_SIGNING_PRIVATE_KEY repository secret is not set. Upload it with: gh secret set TAURI_SIGNING_PRIVATE_KEY < src-tauri/.tauri/spaceadom.key  (from the dev machine). No installer was built.'
+            exit 1
+          }
+          if ([string]::IsNullOrWhiteSpace($pw)) {
+            Write-Host '::error::The TAURI_SIGNING_PRIVATE_KEY_PASSWORD repository secret is not set. Upload it with: gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD < src-tauri/.tauri/spaceadom.key.password.txt  (from the dev machine). No installer was built.'
+            exit 1
+          }
+          Write-Host "signing key present ($($key.Length) chars) and password present ($($pw.Length) chars) — values masked by Actions."
 
       - name: Set up Node
         uses: actions/setup-node@v5
@@ -128,17 +227,66 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      - name: Build and publish
+      # REVIEW FIXES 2026-09-05 (C2) — THE REHEARSAL LEG. A workflow_dispatch
+      # run used to reach the publishing step with `github.ref_name` = the
+      # BRANCH ("main"), and tauri-action creates the tag and the release it is
+      # handed — see the header comment for what that produced. Every other
+      # step in this file already carried a `refs/tags/v` condition; the
+      # publish was the one that did not.
+      #
+      # Split into two steps rather than made conditional INSIDE one, because
+      # "tauri-action publishes only when it is given a tagName" is a behaviour
+      # of somebody else's action, and this repository has been bitten before
+      # by relying on an implicit default. Two `if:`s that are each other's
+      # negation cannot both be wrong. This leg passes no release inputs at
+      # all, so there is nothing for it to publish TO.
+      #
+      # That behaviour was READ, not assumed (tauri-action `src/index.ts`, dev
+      # branch, checked 2026-09-05): the release path is gated on
+      # `if (tagName && !releaseId) { … getOrCreateRelease … }`, uploads on
+      # `if (releaseId)`, and with neither set it logs "No releaseId or tagName
+      # provided, skipping all uploads…". GITHUB_TOKEN is only consulted on
+      # those paths, which is why this step is not given one — a step with no
+      # token cannot create a release even if that reading is ever wrong.
+      #
+      # It still builds everything and it still SIGNS: an unsigned rehearsal
+      # would not exercise the one step (`.sig` files) that the manifest writer
+      # depends on, which is exactly the kind of gap a rehearsal exists to find.
+      - name: Build the installers only (no release) — workflow_dispatch
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Build and publish (as a DRAFT — flipped public by the last step)
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PROBLEM 245 — signs both installers (bundle.createUpdaterArtifacts).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
+          # PROBLEM 245 — tauri-action would write ONE latest.json for the
+          # installer it prefers. This project needs one manifest PER
+          # installer kind, so the step after this one writes both and
+          # tauri-action's is switched off: two writers of one asset is how a
+          # manifest ends up pointing at the wrong installer. The .sig files
+          # are still uploaded (uploadUpdaterSignatures defaults to true) so
+          # anyone can verify a download by hand.
+          uploadUpdaterJson: false
           releaseName: "Spaceadom ${{ github.ref_name }}"
           # Written into the release page. Point people at the installer and
           # at the changelog rather than making them read commits.
           releaseBody: |
             Hold **Space** and tap a key to launch, focus or minimise any app.
+
+            **Already installed? Nothing to do.** Since 1.0.100 Spaceadom
+            updates itself: it checks here once a day and installs a newer
+            version silently, then comes back on its own. The dashboard shows
+            a small "Updated to …" the next time you open it.
 
             ### Install
             **Most people: download `Spaceadom_*_x64-setup.exe`** and run it.
@@ -158,12 +306,235 @@ jobs:
             See [WHAT-CHANGED.md](https://github.com/${{ github.repository }}/blob/main/all-versions/WHAT-CHANGED.md).
           # PUBLIC from 1.0.52 (2026-08-18), at the owner's request: he wants a
           # link he can send to friends. Every release before this was a draft
-          # and visible only to him.
+          # and visible only to him. THAT IS STILL TRUE — the release ends this
+          # workflow public and downloadable, with no further click.
           #
-          # What this means in practice: pushing a tag now publishes a
-          # downloadable release to anyone, with no further click. The version
-          # guard above is the only thing standing between a mistyped tag and a
-          # public artifact, which is why it checks all three version files.
-          # Set back to true if you ever want to review before shipping.
-          releaseDraft: false
+          # REVIEW FIXES 2026-09-05 (C2) — but it is BORN a draft and flipped
+          # by the last step, because "public" and "finished" were not the same
+          # moment. Two steps run AFTER this one and both add assets the
+          # release is useless without: the updater manifests (every installed
+          # copy polls `releases/latest/download/latest.json` once a day) and
+          # the portable zip. While they ran, the release was already public
+          # and already `latest` — so a poll landing in that window got a 404
+          # on the manifest, and a person following the link found a page with
+          # a download missing. Since 1.0.100 that window is not cosmetic:
+          # `releases/latest` is a production endpoint this app depends on.
+          #
+          # A draft is invisible to `releases/latest` and to anonymous
+          # downloads, so nothing can observe the half-built state. If any step
+          # between here and the flip fails, the run leaves a DRAFT — which is
+          # also the right failure: recoverable, private, and obvious on the
+          # releases page.
+          #
+          # The version guard at the top of this file is still what stands
+          # between a mistyped tag and a public artifact, which is why it
+          # checks all three version files.
+          releaseDraft: true
           prerelease: false
+
+      # PROBLEM 245 — the two updater manifests. See the header comment for
+      # why there are two. `releases/latest/download/latest.json` is the URL
+      # every installed copy polls (src-tauri/src/updater.rs::NSIS_MANIFEST),
+      # and GitHub resolves "latest" to the newest non-prerelease release, so
+      # the app never needs to know a version number to find the next one.
+      #
+      # The URLs INSIDE the manifests are this release's own
+      # releases/download/<tag>/<file> links — a manifest that pointed at
+      # "latest" instead would, for the minutes between two releases, send a
+      # user the newer installer with the older signature and be refused.
+      #
+      # Verified at the end: every asset the app could ask for is on the
+      # release, by name, or this step fails and the release page says so.
+      - name: Publish the updater manifests (latest.json + latest-msi.json)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $ver = $tag -replace '^v',''
+          $base = "https://github.com/${{ github.repository }}/releases/download/$tag"
+          ./scripts/write-updater-manifests.ps1 -BundleDir src-tauri/target/release/bundle -BaseUrl $base -Version $ver -OutDir updater-manifests -Notes "Spaceadom $tag - see all-versions/WHAT-CHANGED.md"
+          gh release upload $tag updater-manifests/latest.json updater-manifests/latest-msi.json --clobber
+          $assets = (gh release view $tag --json assets --jq '.assets[].name') -split "`n"
+          foreach ($need in @("Spaceadom_${ver}_x64-setup.exe", "Spaceadom_${ver}_x64_en-US.msi", "latest.json", "latest-msi.json")) {
+            if ($assets -notcontains $need) {
+              Write-Host "::error::Release $tag is missing asset $need — installed copies polling latest.json would find nothing. Assets present: $($assets -join ', ')"
+              exit 1
+            }
+          }
+          Write-Host "release $tag carries both installers and both manifests."
+
+      # PROBLEM 254 — the no-installer, self-contained zip. Packs the SAME
+      # release exe tauri-action already built above (`npm run portable`
+      # does not compile anything itself — see scripts/build-portable.mjs),
+      # then uploads it to the release page like the two installers. Unlike
+      # the .msix below, a portable copy is meant for anyone to download
+      # directly, so it belongs on the release, not in workflow artifacts.
+      #
+      # NEVER referenced by latest.json / latest-msi.json, and never will be:
+      # a portable copy's in-app updater is inert by design (updater.rs) —
+      # it has no installer of its own to silently re-run, so it must never
+      # be offered anything to "update" to.
+      - name: Build and publish the portable zip
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npm run portable
+          $tag = "${{ github.ref_name }}"
+          $ver = $tag -replace '^v',''
+          $zip = "src-tauri/target/release/bundle/portable/Spaceadom_${ver}_x64-portable.zip"
+          if (-not (Test-Path $zip)) {
+            Write-Host "::error::'npm run portable' did not produce $zip — no zip was uploaded."
+            exit 1
+          }
+          gh release upload $tag $zip --clobber
+          Write-Host "uploaded $zip to release $tag"
+
+      # -----------------------------------------------------------------
+      # PROBLEM 250 - THE MICROSOFT STORE PACKAGE (.msix).
+      #
+      # THIS UPLOADS TO WORKFLOW ARTIFACTS ONLY, NEVER TO THE RELEASE.
+      # That is a deliberate distribution decision, not an oversight:
+      #
+      #   - The Store owns MSIX distribution. A user gets the packaged
+      #     Spaceadom by pressing Get in the Store, and the Store both
+      #     re-signs the package and delivers every future update to it.
+      #     There is no scenario in which somebody should download a .msix
+      #     from this repository's releases page.
+      #   - Worse, if they did, they would end up with a SECOND copy beside
+      #     the setup.exe they already have, and two Spaceadoms install two
+      #     keyboard hooks and fight over the spacebar - PROBLEM 129/141,
+      #     which the app now has a whole banner to apologise for.
+      #   - An artifact expires and is only reachable from the Actions run,
+      #     which is exactly the audience: whoever is doing the submission.
+      #
+      # The .msix is also NOT signed here. The Store re-signs on ingestion,
+      # so a CI signature would be thrown away, and there is no certificate
+      # in this repository to sign with. build-msix.ps1 leaves it unsigned
+      # unless -Sign is passed, which nothing here does.
+      #
+      # A MISSING IDENTITY IS A SKIP, NOT A FAILURE, and this is the one
+      # place in this workflow where that is the right severity. The two
+      # signing-key steps above fail the whole build because an unsigned
+      # release is one no installed copy can ever accept. Here the opposite
+      # is true: the .exe and .msi are what users receive, and refusing to
+      # publish them because a Store-only extra could not be built would
+      # break the thing that works to protect the thing that does not exist
+      # yet. It says so loudly in the log instead.
+      # -----------------------------------------------------------------
+      # REVIEW FIXES 2026-09-05 (C2) — `continue-on-error: true`, which is the
+      # severity the comment above ALREADY argued for and the YAML did not
+      # implement. The step could fail in ways the identity check does not
+      # cover — MakeAppx missing from the runner image, a manifest placeholder
+      # left unfilled, a TaskId mismatch — and every one of them would have
+      # failed the whole job AFTER the installers were built, taking the
+      # release down with the Store-only extra. That is precisely the
+      # "breaking the thing that works to protect the thing that does not exist
+      # yet" outcome the comment names. The run is marked with a yellow tick
+      # and the release is unaffected.
+      - name: Build the Microsoft Store package (.msix)
+        id: msix
+        continue-on-error: true
+        shell: pwsh
+        env:
+          MSIX_IDENTITY_NAME: ${{ secrets.MSIX_IDENTITY_NAME }}
+          MSIX_IDENTITY_PUBLISHER: ${{ secrets.MSIX_IDENTITY_PUBLISHER }}
+          MSIX_PUBLISHER_DISPLAY_NAME: ${{ secrets.MSIX_PUBLISHER_DISPLAY_NAME }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:MSIX_IDENTITY_NAME) -or
+              [string]::IsNullOrWhiteSpace($env:MSIX_IDENTITY_PUBLISHER)) {
+            Write-Host "::notice::No MSIX identity secrets, so no Store package was built. The .exe and .msi are unaffected and this release is complete without it. To turn this on, add the three repository secrets MSIX_IDENTITY_NAME, MSIX_IDENTITY_PUBLISHER and MSIX_PUBLISHER_DISPLAY_NAME from Partner Center > Product management > Product identity (see src-tauri/msix/identity.example.json)."
+            "built=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            exit 0
+          }
+          # Written, not committed: src-tauri/msix/identity.json is gitignored
+          # for the same reason the Sentry DSN and the updater key are.
+          $identity = [ordered]@{
+            name                 = $env:MSIX_IDENTITY_NAME
+            publisher            = $env:MSIX_IDENTITY_PUBLISHER
+            publisherDisplayName = $env:MSIX_PUBLISHER_DISPLAY_NAME
+          }
+          $identity | ConvertTo-Json | Set-Content -Path src-tauri/msix/identity.json -Encoding ascii
+          # REVIEW FIXES 2026-09-05 (C2) — THE EXIT CODE IS CHECKED, AND THE
+          # SCRIPT NOW HAS ONE TO GIVE.
+          #
+          # This used to run the script and write `built=true` on the next
+          # line unconditionally, which was wrong twice over. build-msix.ps1's
+          # "no Windows SDK" branch exited **0** — a deliberate "stop here, the
+          # layout is fine" for a developer running `npm run msix` by hand —
+          # so a runner image without MakeAppx produced `built=true` with no
+          # .msix anywhere, and the upload step's `if-no-files-found: error`
+          # failed the JOB, after the installers were built. The comment that
+          # used to sit here said that outcome "says so rather than passing
+          # quietly"; it did say so, by breaking the release.
+          #
+          # Two halves, and both were needed. The script exits **2** for a
+          # missing SDK now (see its own header), so the failure is reportable
+          # at all; and this checks `$LASTEXITCODE` explicitly rather than
+          # trusting the shell to stop. GitHub's pwsh sets
+          # `$ErrorActionPreference = 'stop'`, but a non-zero exit from a
+          # called SCRIPT is not a PowerShell error — execution would carry on
+          # to the next line and write `built=true` over the top of a failure.
+          # Exiting here means `built=true` is written if and only if a .msix
+          # was actually packed, and `continue-on-error` above keeps the
+          # release intact either way.
+          ./scripts/build-msix.ps1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::warning::build-msix.ps1 exited $LASTEXITCODE, so no Store package was produced. The .exe, .msi and portable zip are unaffected and this release is complete without it — the .msix goes to workflow artifacts only and the Store is not fed from this workflow. Read this step's log for the reason (a missing Windows SDK on the runner exits 2)."
+            exit $LASTEXITCODE
+          }
+          "built=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Upload the .msix to the workflow artifacts (NOT to the release)
+        if: steps.msix.outputs.built == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: spaceadom-msix-${{ github.ref_name }}
+          path: src-tauri/target/release/bundle/msix/*.msix
+          if-no-files-found: error
+          retention-days: 30
+
+      # -----------------------------------------------------------------
+      # REVIEW FIXES 2026-09-05 (C2) — THE LAST STEP IN THE FILE, AND IT HAS
+      # TO STAY THAT WAY. Nothing may be added after it.
+      #
+      # Everything above this line built a DRAFT release: invisible to
+      # `releases/latest`, undownloadable by anyone but the owner. This is the
+      # single moment it becomes the thing every installed copy polls. Since
+      # 1.0.100 that is not a figure of speech — publishing here means "every
+      # user is running this within 24 hours" (see the header), so the release
+      # must be COMPLETE before this runs and complete means: both installers
+      # (tauri-action), both manifests, the portable zip, and the asset check
+      # in the manifests step that refuses to pass if any of them is missing.
+      #
+      # Deliberately NOT `if: success()` on its own. A step that runs after a
+      # failure is exactly the bug this whole reordering removes; the default
+      # `if` already means "only if every previous step succeeded", and the
+      # `.msix` step's `continue-on-error` is the one thing that cannot fail
+      # the job — which is right, because it contributes nothing to the
+      # release.
+      #
+      # `--draft=false` is idempotent: re-running a workflow over a release
+      # that is already public leaves it public and exits 0.
+      # -----------------------------------------------------------------
+      - name: Publish the release (flip the draft public — MUST BE LAST)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release edit $tag --draft=false
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::Could not publish release $tag. Everything was built and uploaded, but the release is still a DRAFT — nobody can download it and installed copies polling releases/latest will not see it. Flip it by hand: gh release edit $tag --draft=false"
+            exit 1
+          }
+          $draft = gh release view $tag --json isDraft --jq '.isDraft'
+          if ($draft -ne 'false') {
+            Write-Host "::error::gh reported success but release $tag still says isDraft=$draft. Do not assume it published; check the releases page."
+            exit 1
+          }
+          Write-Host "release $tag is PUBLIC. Installed copies will pick it up within 24 hours (src-tauri/src/updater.rs)."

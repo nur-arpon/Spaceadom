@@ -1,7 +1,53 @@
 /// config/schema.rs — Canonical data structures for config.json
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
+
+/// Every key→binding map in `config.json`, in ONE named type.
+///
+/// **It is a `BTreeMap`, and the ordering is the whole point (PROBLEM 250
+/// follow-up — LIVE TEST 2026-09-05).** It was a `HashMap`, whose iteration
+/// order is randomised per process by design, so `serde_json` wrote the keys
+/// in a different order on every save. Measured on 2026-09-05, comparing the
+/// config before the MSIX test with the config after it:
+///
+/// ```text
+///   77,912 bytes  sha256 9ADE0FDE…   (before)
+///   77,912 bytes  sha256 4CE86B44…   (after)
+///   full JSON diff: NO semantic difference — every key and value identical
+///   first differing byte: 491 — "z" first vs "h" first inside a bindings map
+/// ```
+///
+/// Two things that costs, and the second is the expensive one:
+///
+///  1. **A config hash is not a change detector.** Anything comparing two
+///     saves — a backup deduplicator, a "did the user change anything?" check,
+///     a diff in a bug report — sees every save as a change. During the MSIX
+///     test this cost a real diagnostic step: proving the packaged copy had
+///     changed nothing required a full semantic JSON diff, because the hashes
+///     said otherwise.
+///  2. **Every save rewrites the whole file's byte layout.** The rolling
+///     backups (PROBLEM 94) therefore differ from each other for no reason,
+///     and a user's `config.json` never settles.
+///
+/// `BTreeMap` fixes it by construction rather than by remembering to sort at
+/// each serialisation site: the keys are single lowercase characters and
+/// special-key names, so lexicographic order is also the order a human would
+/// expect to read them in. `serde_json`'s `preserve_order` (IndexMap) was the
+/// alternative and is worse here — it is a Cargo feature that would change how
+/// EVERY map in the dependency tree serialises to preserve *insertion* order,
+/// which for a map rebuilt from disk on every load is not a stable order at
+/// all, only a different unstable one. And IndexMap is not already a
+/// dependency of this crate.
+///
+/// The API is a strict superset of what this codebase used (`new`, `insert`,
+/// `get`, `remove`, `clear`, `len`, `is_empty`, `values`, `iter`, indexing) —
+/// checked by grep across `src-tauri/src` before the switch, not assumed.
+/// `String` is `Ord`, so nothing else was needed.
+///
+/// Generalise: **if two runs that did the same thing must produce the same
+/// bytes, that has to be a property of the type, not a habit of the caller.**
+pub type BindingMap = BTreeMap<String, KeyBinding>;
 
 /// Root configuration file schema (version 1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,16 +159,30 @@ pub struct AppConfig {
     /// Each maps to a KeyBinding action identical to alpha bindings.
     /// Empty by default (user opts in via Settings).
     #[serde(default)]
-    pub special_keys: HashMap<String, KeyBinding>,
+    pub special_keys: BindingMap,
 
     /// Whether Nocturne (dark) mode is enabled. Drives body.nocturne on both
     /// the dashboard and overlay windows. Defaults to false (Earthy/light).
     #[serde(default)]
     pub dark_mode: bool,
 
-    /// PROBLEM 144 — which of the three looks the app wears:
-    /// `"earthy"` (daylight), `"warcry"` (iron and war-banners) or
-    /// `"starry"` (night sky). Replaces the old two-state dark toggle.
+    /// PROBLEM 144 — which of the four looks the app wears:
+    /// `"auto"` (follows Windows' own light/dark setting — feature 2, added
+    /// 2026-09-05), `"earthy"` (daylight), `"warcry"` (iron and war-banners)
+    /// or `"starry"` (night sky). Replaces the old two-state dark toggle.
+    ///
+    /// `"auto"` IS STORED LITERALLY, ON PURPOSE. Rust never resolves it —
+    /// there is no reliable, dependency-free way for THIS process to read
+    /// Windows' AppsUseLightTheme signal that is worth adding for one string,
+    /// and the frontend already has to own the resolution for a LIVE
+    /// `matchMedia` listener regardless (an OS theme flip while the app is
+    /// running has no Rust-side event to hang a resave on). So this field can
+    /// contain a value none of `dark_mode`, the overlay, or any Rust code
+    /// understands as a real palette; `resolveTheme()` in `main.ts` is the
+    /// one place "auto" becomes "earthy" or "starry", and it is a TypeScript
+    /// file specifically because only the frontend has a theme media query to
+    /// ask. See that function's doc comment for the corollary this leaves
+    /// open for the OVERLAY window specifically.
     ///
     /// `dark_mode` above is KEPT and kept in sync, because it is what drives
     /// `body.nocturne` on BOTH windows and the overlay has no idea themes
@@ -130,10 +190,14 @@ pub struct AppConfig {
     /// so every rule that already works in the dark keeps working and each
     /// theme only re-tints on top. Migrated from `dark_mode` on first load, so
     /// an existing config keeps the look it had.
-    /// Serde default is the EMPTY string, deliberately, not "earthy": an
-    /// absent key must be distinguishable from a deliberate choice, or the
-    /// migration in `config/mod.rs` cannot tell an upgrading dark-mode user
-    /// from a new install and would silently flip them into daylight.
+    /// Serde default is the EMPTY string, deliberately, not "earthy" (and
+    /// UNCHANGED by feature 2 — this is the per-field default `serde` applies
+    /// when an OLD config on disk lacks the key entirely, never what a NEW
+    /// config is created with; see `impl Default for AppConfig` below for
+    /// that): an absent key must be distinguishable from a deliberate choice,
+    /// or the migration in `config/mod.rs` cannot tell an upgrading
+    /// dark-mode user from a new install and would silently flip them into
+    /// daylight.
     #[serde(default)]
     pub theme: String,
 
@@ -176,6 +240,27 @@ pub struct AppConfig {
     /// never parsed back).
     #[serde(default = "default_true")]
     pub run_at_startup: bool,
+
+    /// PROBLEM 237 — "Warm up the app picker at startup": warm up the app
+    /// picker after startup so the first open is instant — costs one
+    /// background scan per boot.
+    ///
+    /// When true, a few seconds after the windows exist the picker worker
+    /// validates the on-disk app-list cache and refreshes it in the
+    /// background (PowerShell + icons, 6-17 s measured, on a below-normal-
+    /// priority STA thread — never the main thread, never before the hook,
+    /// the engine or the tray). When false, nothing runs until the first
+    /// picker open, which is served from the disk cache when it is fresh and
+    /// scans off the main thread when it is not — the window stays alive
+    /// either way; only the first open of a session may show "Scanning…".
+    ///
+    /// `default = "default_true"`, NOT a bare `#[serde(default)]`: every
+    /// config on disk predates this key, and the owner asked for the picker
+    /// to "start working as fast as Raycast" — ON is the behaviour that
+    /// delivers that, so the upgrade path must land there. `Default` agrees;
+    /// `first_install_tests` holds both paths to it.
+    #[serde(default = "default_true")]
+    pub warm_picker_at_startup: bool,
 
     /// Visual-effects level: "auto" (follow the OS reduced-motion signal),
     /// "full" (all effects even if the OS asks for less), or "reduced".
@@ -393,6 +478,37 @@ pub struct AppConfig {
     /// the startup load and `config::save`.
     #[serde(default = "default_true")]
     pub send_logs: bool,
+
+    /// PROBLEM 242 — has the first-run "Guided first bind" tour been seen?
+    ///
+    /// Bare `#[serde(default)]`, NOT `default_true`, and that is the whole
+    /// point: `false` is what every config written before 1.0.97 must read
+    /// as, because those users have never been offered the walkthrough and
+    /// the tour is meant to reach them. This is the opposite case from
+    /// `send_logs` directly above, where absent had to mean ON.
+    ///
+    /// Written `true` exactly once — by the frontend, through `save_config`,
+    /// on the run the user finishes OR skips the tour. Rust never reads it;
+    /// it exists only so the dashboard can ask "has this happened before?"
+    /// across restarts. Skipping counts as done: "Skip" means never nag
+    /// again, and Settings' "Show me the walkthrough" is the way back in,
+    /// which ignores this field entirely.
+    #[serde(default)]
+    pub tour_done: bool,
+
+    /// PROBLEM 245 — the in-app updater's ONLY switch, and it is not in the
+    /// UI. Owner's decision: updates install themselves, silently, for
+    /// everyone, with no Settings row. This field is the config-file escape
+    /// hatch for the one person who needs to pin a version: set it to
+    /// `false` in `%APPDATA%\Spaceadom\config.json` and `updater::run_check`
+    /// logs that it skipped. Nothing in the app ever writes it.
+    ///
+    /// `default_true`, same reasoning as `send_logs`: a bare
+    /// `#[serde(default)]` would read as `false` for every config written
+    /// before this field existed, i.e. every existing user would silently
+    /// stop receiving updates. `first_install_tests` holds both paths to it.
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
 }
 
 /// PROBLEM 105 — the profile every OTHER profile silently falls back to.
@@ -520,14 +636,27 @@ impl Default for AppConfig {
             // Empty by default. Nobody gets an app excluded without asking.
             excluded_apps: Vec::new(),
             profiles: Vec::new(),
-            special_keys: HashMap::new(),
+            special_keys: BindingMap::new(),
             dark_mode: false,
-            theme: "earthy".to_string(),
+            // FEATURE 2 (2026-09-05) — NEW installs default to "auto", not
+            // "earthy". This is `AppConfig::default()`, used ONLY when there
+            // is genuinely no config on disk to read (`generate_defaults()`
+            // in config/mod.rs) — an EXISTING config missing the key still
+            // gets the untouched `#[serde(default)]` empty string above,
+            // which `config/mod.rs`'s migration turns into "earthy"/"starry"
+            // from `dark_mode`, exactly as before. Those are two different
+            // code paths on purpose: an upgrading user's prior choice must
+            // never be silently replaced with "auto", but a first-time user
+            // has no prior choice for "auto" to override.
+            theme: "auto".to_string(),
             fun_mode: false,
             hide_keyboard: false,
             show_me_around: false,
             sound_enabled: false,
             run_at_startup: true,
+            // PROBLEM 237 — ON. Must agree with the `default = "default_true"`
+            // on the field; first_install_tests holds both to it.
+            warm_picker_at_startup: true,
             motion: default_motion(),
             hud_toast_flight: false,
             // PROBLEM 209 — ON, by the owner's explicit decision on
@@ -555,11 +684,24 @@ impl Default for AppConfig {
             // default; the opt-out is one switch at the bottom of Settings and
             // PRIVACY.md says exactly what it sends.
             send_logs: true,
+            // PROBLEM 242 — FALSE on a fresh install, which is what makes the
+            // first-run tour appear at all. Must agree with the bare
+            // `#[serde(default)]` on the field; first_install_tests holds
+            // both to it.
+            tour_done: false,
+            // PROBLEM 245 — ON. Must agree with `default = "default_true"` on
+            // the field; first_install_tests holds both to it.
+            auto_update: true,
         }
     }
 }
 
 /// A named shortcut profile containing per-key bindings.
+///
+/// **THE VEC ORDER IS FUNCTIONAL, NOT COSMETIC.** `AppConfig::profiles` is the
+/// order RAlt cycles in, so `reorder_profiles` (commands.rs) is a behaviour
+/// change every time it is called, not a display preference. Nothing may sort
+/// this vec for presentation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
     /// Unique profile name (1–24 chars, any printable text — see
@@ -568,7 +710,156 @@ pub struct Profile {
 
     /// Map of lowercase key character → binding.
     /// Keys present in V11: a–z.
-    pub bindings: HashMap<String, KeyBinding>,
+    pub bindings: BindingMap,
+
+    /// One emoji standing in for this profile — on the popover row's disc, on
+    /// the dashboard's top-right pill, and on the Guide HUD's SPACE pill.
+    ///
+    /// `None` is the normal state, and every surface must render its EXISTING
+    /// look when it is None (the pill keeps its initial letter). Optional in
+    /// serde too: every config on disk predates this field, and a bare
+    /// `#[serde(default)]` on an `Option` is exactly right here — the absent
+    /// value and the "no emoji" value are the same thing, unlike the bools in
+    /// `AppConfig` where absence had to be told apart from a chosen `false`.
+    ///
+    /// Validated by `emoji_is_valid` below — ONE grapheme cluster, which is
+    /// not the same as one `char` and not the same as a byte budget.
+    #[serde(default)]
+    pub emoji: Option<String>,
+}
+
+/// The longest a valid single-cluster emoji may be, counted in `char`s.
+///
+/// A cap is still needed even though the cluster count below is the real rule:
+/// a pathological string could be one cluster and thousands of code points
+/// (combining marks stack without limit), and that string would be written to
+/// `config.json` and rendered into a 30px disc. 16 clears every real sequence
+/// — the longest emoji in Unicode 15 is the seven-code-point tag flag
+/// (🏴󠁧󠁢󠁥󠁮󠁧󠁿), and a four-person family with skin tones reaches 15.
+pub const EMOJI_MAX_CHARS: usize = 16;
+
+/// How many grapheme CLUSTERS a string contains, near enough for this field.
+///
+/// **DO NOT REPLACE THIS WITH `chars().count() == 1`.** That was the obvious
+/// first version and it rejects almost every emoji a person would pick:
+/// 👨‍👩‍👧 is five code points, 👍🏽 is two, ❤️ is two, 🇧🇩 is two. A byte
+/// budget is worse still — 👨‍👩‍👧 is 18 bytes.
+///
+/// This is a deliberate approximation of UAX #29, not an implementation of it:
+/// no `unicode-segmentation` dependency is pulled in for one config field. It
+/// counts a new cluster for every code point EXCEPT the ones that by
+/// definition attach to the one before:
+///
+/// * ZWJ (U+200D) and whatever follows it — emoji ZWJ sequences;
+/// * variation selectors (U+FE00–FE0F) — the ️ in ❤️;
+/// * skin-tone modifiers (U+1F3FB–1F3FF);
+/// * tag characters (U+E0020–E007F) — the subdivision flags;
+/// * the keycap mark (U+20E3);
+/// * the common combining-mark blocks;
+/// * the SECOND regional indicator of a pair — a country flag is two.
+///
+/// Where it differs from the real algorithm (an unpaired regional indicator, a
+/// lone combining mark) it errs toward ACCEPTING, which is the right direction
+/// for a field whose only consequence is a glyph in a disc.
+pub fn cluster_count(s: &str) -> usize {
+    let mut clusters = 0usize;
+    let mut after_zwj = false;
+    let mut regional_open = false;
+
+    for c in s.chars() {
+        let cp = c as u32;
+        let joins_previous = matches!(cp,
+            0xFE00..=0xFE0F        // variation selectors
+            | 0x1F3FB..=0x1F3FF    // emoji skin-tone modifiers
+            | 0xE0020..=0xE007F    // tag characters (subdivision flags)
+            | 0x20E3               // combining enclosing keycap
+            | 0x0300..=0x036F      // combining diacritical marks
+            | 0x1AB0..=0x1AFF
+            | 0x1DC0..=0x1DFF
+            | 0x20D0..=0x20FF
+            | 0xFE20..=0xFE2F
+        );
+        let is_regional = (0x1F1E6..=0x1F1FF).contains(&cp);
+
+        if cp == 0x200D {
+            after_zwj = true;
+            regional_open = false;
+            continue;
+        }
+        if joins_previous {
+            after_zwj = false;
+            continue;
+        }
+        if is_regional && regional_open {
+            // Second half of a flag pair — closes it, so a third indicator
+            // starts a new cluster rather than extending this one forever.
+            regional_open = false;
+            after_zwj = false;
+            continue;
+        }
+        if after_zwj {
+            after_zwj = false;
+            regional_open = is_regional;
+            continue;
+        }
+        clusters += 1;
+        regional_open = is_regional;
+    }
+    clusters
+}
+
+/// Is this an acceptable value for `Profile::emoji`?
+///
+/// One cluster, at most `EMOJI_MAX_CHARS` code points, no control characters
+/// and no internal whitespace. Deliberately NOT "is this in an emoji block":
+/// the owner asked for a slot the user fills from Windows' own emoji panel,
+/// and that panel serves kaomoji and symbols alongside emoji. Anything that
+/// renders as one glyph is a legitimate answer.
+pub fn emoji_is_valid(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().count() <= EMOJI_MAX_CHARS
+        && !s.chars().any(|c| c.is_control() || c.is_whitespace())
+        && cluster_count(s) == 1
+}
+
+/// ONE profile on its own, as a `.json` file.
+///
+/// Three things write and read this shape and they must not drift apart:
+/// Export (the save dialog), Import (the open dialog), and the silent backup
+/// `delete_profile` drops into `%LOCALAPPDATA%\SpaceadomBackups` before it
+/// destroys anything. `config::profile_export_json` and
+/// `config::parse_profile_export` are the only two functions that touch it.
+///
+/// **`spaceadom_profile` IS LOAD-BEARING, NOT DECORATION.** The backups folder
+/// already holds whole-config files, and `config::newest_valid_backup_in`
+/// walks every `*.json` in there trying to parse each as an `AppConfig`. The
+/// marker (plus a required `bindings` map) is what makes "is this a profile or
+/// a config?" a decision rather than a guess — and what stops Import from
+/// cheerfully accepting an arbitrary JSON file whose keys happen to overlap.
+/// `profile_export_is_not_a_config` asserts the other half of that.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileExport {
+    /// Format version of THIS file, not of `config.json`. 1 today.
+    pub spaceadom_profile: u32,
+    pub name: String,
+    #[serde(default)]
+    pub emoji: Option<String>,
+    pub bindings: BindingMap,
+}
+
+impl ProfileExport {
+    /// The current format version. Bump only if the shape changes
+    /// incompatibly; `parse_profile_export` accepts anything <= this.
+    pub const VERSION: u32 = 1;
+
+    pub fn of(p: &Profile) -> Self {
+        Self {
+            spaceadom_profile: Self::VERSION,
+            name: p.name.clone(),
+            emoji: p.emoji.clone(),
+            bindings: p.bindings.clone(),
+        }
+    }
 }
 
 /// A single key's action binding.
@@ -835,7 +1126,7 @@ mod key_binding_upgrade_tests {
     /// JSON round-trips unchanged.
     #[test]
     fn a_profile_round_trip_carries_every_binding_across_a_rename() {
-        let mut bindings = HashMap::new();
+        let mut bindings = BindingMap::new();
         bindings.insert(
             "a".to_string(),
             KeyBinding { app: Some("brave.exe".into()), ..Default::default() },
@@ -844,7 +1135,7 @@ mod key_binding_upgrade_tests {
             "g".to_string(),
             KeyBinding { web_url: Some("https://github.com".into()), ..Default::default() },
         );
-        let profile = Profile { name: "Old Name".into(), bindings };
+        let profile = Profile { name: "Old Name".into(), bindings, emoji: None };
 
         // Round-trip once, as an ordinary save/load would.
         let json = serde_json::to_string(&profile).expect("serialise");
@@ -871,6 +1162,83 @@ mod key_binding_upgrade_tests {
     }
 }
 
+/// `Profile::emoji` — the validator and the two paths a config travels.
+///
+/// This is here rather than in `commands.rs` because the rule is a SCHEMA
+/// rule: what may be stored, not what a particular command does with it.
+#[cfg(test)]
+mod profile_emoji_tests {
+    use super::*;
+
+    /// The whole reason `cluster_count` exists. Every one of these is a single
+    /// glyph on screen and NONE of them is a single `char` — a naive
+    /// `chars().count() == 1` (or any byte budget) rejects the lot, which is
+    /// how an emoji picker ends up accepting only the ASCII-adjacent ones.
+    #[test]
+    fn multi_codepoint_emoji_are_one_cluster() {
+        // The case named in the brief: a ZWJ family. Five code points,
+        // 18 bytes, one glyph.
+        assert_eq!("👨‍👩‍👧".chars().count(), 5, "fixture check: this IS multi-codepoint");
+        assert_eq!("👨‍👩‍👧".len(), 18, "fixture check: bytes are not the unit either");
+        assert!(emoji_is_valid("👨‍👩‍👧"), "a ZWJ family must be accepted");
+
+        assert!(emoji_is_valid("👍🏽"), "an emoji with a skin-tone modifier is one cluster");
+        assert!(emoji_is_valid("❤️"), "a variation selector does not start a cluster");
+        assert!(emoji_is_valid("🇧🇩"), "a flag is a REGIONAL INDICATOR PAIR, still one");
+        assert!(emoji_is_valid("🏴󠁧󠁢󠁥󠁮󠁧󠁿"), "a tag-sequence flag is one cluster");
+        assert!(emoji_is_valid("1️⃣"), "a keycap is one cluster");
+        assert!(emoji_is_valid("🚀"), "and the simple case still works");
+        assert!(emoji_is_valid("é"), "a letter is a legitimate answer too");
+    }
+
+    #[test]
+    fn two_glyphs_a_blank_or_a_control_character_are_refused() {
+        assert!(!emoji_is_valid("AB"), "two clusters is not one");
+        assert!(!emoji_is_valid("🚀🚀"), "nor is two emoji");
+        assert!(
+            !emoji_is_valid("🇧🇩🇧🇩"),
+            "four regional indicators are TWO flags — the pair must close"
+        );
+        assert!(!emoji_is_valid(""), "empty means 'no emoji', which is None, not \"\"");
+        assert!(!emoji_is_valid("🚀 "), "a trailing space would break the row's layout");
+        assert!(!emoji_is_valid("a\nb"), "a control character must never reach the disc");
+        // The cap is a backstop against a pathological single cluster, not the
+        // main rule: 17 combining marks on one base is still one cluster.
+        let stacked: String = std::iter::once('a')
+            .chain(std::iter::repeat('\u{0301}').take(EMOJI_MAX_CHARS))
+            .collect();
+        assert_eq!(cluster_count(&stacked), 1, "it really is one cluster…");
+        assert!(!emoji_is_valid(&stacked), "…and the length cap is what refuses it");
+    }
+
+    /// The round trip, both directions, because this field is written to
+    /// `config.json` and read back on every launch.
+    #[test]
+    fn an_emoji_survives_a_save_and_load_and_absence_reads_as_none() {
+        let p = Profile {
+            name: "Founders".into(),
+            bindings: BindingMap::new(),
+            emoji: Some("👨‍👩‍👧".into()),
+        };
+        let json = serde_json::to_string(&p).expect("serialise");
+        let back: Profile = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(
+            back.emoji.as_deref(),
+            Some("👨‍👩‍👧"),
+            "a ZWJ sequence must come back byte-identical, not re-encoded"
+        );
+
+        // THE PATH EVERY EXISTING USER TRAVELS: their config.json has no
+        // `emoji` key at all. It must parse, and it must read as None — the
+        // value that makes every surface keep its current look.
+        let mut v = serde_json::to_value(&p).expect("serialise");
+        v.as_object_mut().expect("object").remove("emoji");
+        let old: Profile = serde_json::from_value(v)
+            .expect("a profile written before this field existed must still parse");
+        assert!(old.emoji.is_none(), "an absent emoji must read as None");
+    }
+}
+
 #[cfg(test)]
 mod first_install_tests {
     use super::*;
@@ -882,18 +1250,35 @@ mod first_install_tests {
     /// accident: three bools/strings among thirty fields, changed by anyone
     /// adding a feature that "should obviously be on".
     ///
+    /// **UPDATED 2026-09-05 for feature 2 ("Follow system theme"):** a new
+    /// install's `theme` is now `"auto"`, not `"earthy"` — the owner's
+    /// decision for THIS pass, superseding the PROBLEM 157 sentence quoted
+    /// above without erasing why that sentence existed (it is still true that
+    /// a stranger's very first look must not be a random coin flip of a
+    /// palette; "auto" answers that by following the one preference — light
+    /// or dark — the stranger has ALREADY told Windows). `resolveTheme()` in
+    /// `main.ts` is what turns "auto" into "earthy" for a light-mode user,
+    /// which this Rust-only test cannot exercise — it can only prove the
+    /// field Rust hands the frontend is what feature 2 decided it should be.
+    ///
     /// Both paths are checked, because they can drift APART: `Default` is what
     /// a fresh install writes, and the serde defaults are what an OLD config
-    /// missing the field falls back to. A mismatch means the same user gets a
-    /// different app depending on when they installed.
+    /// missing the field falls back to (still `""`, migrated by `config/mod.rs`
+    /// — untouched by this pass; see that field's doc comment). A mismatch
+    /// between the two would mean the same user gets a different app
+    /// depending on when they installed.
     #[test]
     fn first_install_is_quiet_and_earthy() {
         let d = AppConfig::default();
         assert!(!d.fun_mode, "fun_mode must be OFF at first install");
         assert!(!d.show_me_around, "show_me_around must be OFF at first install");
         assert!(!d.hide_keyboard, "the keyboard must be visible at first install");
-        assert_eq!(d.theme, "earthy", "first install opens in Earthy");
-        assert!(!d.dark_mode, "Earthy is the light theme");
+        assert_eq!(d.theme, "auto", "first install follows the system theme (feature 2)");
+        assert!(
+            !d.dark_mode,
+            "dark_mode itself still starts false — it is resolved live from \"auto\" by the \
+             frontend's matchMedia check, which this Rust-only default cannot perform",
+        );
         // PROBLEM 174 — the owner's testers found the ring→toast flight
         // "disturbing, too much time consuming". Off is where everyone lands,
         // and both paths must agree on that.
@@ -938,6 +1323,33 @@ mod first_install_tests {
             d.hud_magnetic_layout,
             "the new ring layout must be ON at first install (owner's decision, 2026-08-27)"
         );
+        // 1.0.96 — `Profile::emoji`. A shipped profile with an emoji nobody
+        // chose is the same failure as fun_mode being on: a stranger's first
+        // screen, decided by whoever added a feature rather than by the owner.
+        // The rule the three readers depend on ("None keeps the look this app
+        // has always had") only has a subject if a fresh install produces None.
+        assert!(
+            d.profiles.iter().all(|p| p.emoji.is_none()),
+            "no profile may ship WITH an emoji — the disc must open on its initial letter"
+        );
+        // PROBLEM 237 — the picker pre-warm is ON at first install: the owner
+        // asked for the picker to open as fast as Raycast, and a fresh install
+        // is exactly the machine with no disk cache yet.
+        assert!(
+            d.warm_picker_at_startup,
+            "warm_picker_at_startup must be ON at first install (PROBLEM 237)"
+        );
+        // PROBLEM 242 — the whole first-run tour hangs off this one bool being
+        // FALSE on a fresh install. If a later change ever gives it a
+        // `default_true` (by copying the field above it, which is exactly how
+        // this class of mistake happens), the walkthrough silently stops
+        // existing for every new user and nothing else breaks — no error, no
+        // log line, no failing test but this one.
+        assert!(
+            !d.tour_done,
+            "tour_done must be FALSE at first install — it is what makes the \
+             guided first-bind tour appear at all (PROBLEM 242)"
+        );
     }
 
     #[test]
@@ -956,7 +1368,26 @@ mod first_install_tests {
         obj.remove("hud_show_specials");
         obj.remove("hud_band_count");
         obj.remove("hud_magnetic_layout");
+        obj.remove("warm_picker_at_startup");
+        obj.remove("tour_done");
+        // 1.0.96 — `emoji` is on PROFILE, not on AppConfig, so removing it here
+        // means walking into the profiles array. That is the whole point: this
+        // is the only test that exercises a NESTED absent field, and a nested
+        // `Option` without `#[serde(default)]` fails the WHOLE parse rather
+        // than defaulting — the config would not load at all, for everybody,
+        // on the first run of 1.0.96.
+        for p in obj
+            .get_mut("profiles")
+            .and_then(|p| p.as_array_mut())
+            .expect("a config always has profiles")
+        {
+            p.as_object_mut().expect("a profile is an object").remove("emoji");
+        }
         let c: AppConfig = serde_json::from_value(v).expect("a config without the new fields must still parse");
+        assert!(
+            c.profiles.iter().all(|p| p.emoji.is_none()),
+            "a profile written before the emoji field must read as None, not fail to parse"
+        );
         assert!(!c.fun_mode, "a missing fun_mode must read as OFF");
         assert!(!c.show_me_around, "a missing show_me_around must read as OFF");
         // theme's serde default is deliberately EMPTY so migration can tell
@@ -1015,6 +1446,42 @@ mod first_install_tests {
             c.hud_magnetic_layout,
             "a config predating hud_magnetic_layout must read as ON - this is the path the owner's 2026-08-27 default actually travels"
         );
+        // PROBLEM 237 — same path, same reason: every config on disk predates
+        // this key, and the pre-warm is what makes the first picker open of a
+        // session instant, so an ABSENT field must read ON.
+        assert!(
+            c.warm_picker_at_startup,
+            "a config predating warm_picker_at_startup must read as ON (PROBLEM 237)"
+        );
+        // PROBLEM 242 — and the OPPOSITE direction of the same rule, which is
+        // why it sits directly under the three assertions that go the other
+        // way. Everyone whose config predates `tour_done` is by definition
+        // someone the tour has never been offered to, so an ABSENT field must
+        // read FALSE. `default_true` here would suppress the walkthrough for
+        // exactly the people it was built for.
+        assert!(
+            !c.tour_done,
+            "a config predating tour_done must read as FALSE — an absent field \
+             means the tour has never been seen, so it must still be offered"
+        );
+    }
+
+    /// PROBLEM 245 — `auto_update` is the third default-TRUE bool, and the one
+    /// whose silent inversion would be the least visible of all: an app that
+    /// simply never updates again looks exactly like an app with no updates
+    /// to offer. Both paths, and an explicit `false` must be honoured — it
+    /// is the only way a user can pin a version.
+    #[test]
+    fn auto_update_defaults_to_true_on_both_paths_and_honours_an_explicit_false() {
+        assert!(AppConfig::default().auto_update, "a fresh install must self-update");
+        let mut v = serde_json::to_value(AppConfig::default()).expect("serialise");
+        v.as_object_mut().expect("object").remove("auto_update");
+        let c: AppConfig = serde_json::from_value(v.clone())
+            .expect("a config without auto_update must parse");
+        assert!(c.auto_update, "a config predating auto_update must read as ON");
+        v.as_object_mut().expect("object").insert("auto_update".into(), false.into());
+        let c: AppConfig = serde_json::from_value(v).expect("parse");
+        assert!(!c.auto_update, "an explicit false is the escape hatch and must survive");
     }
 
     /// PROBLEM 195 — `send_logs` is the one bool in this struct whose default
@@ -1083,4 +1550,126 @@ mod first_install_tests {
              gives false for a bool and would silently opt every existing user out"
         );
     }
+
+    // ── PROBLEM 250 follow-up (LIVE TEST 2026-09-05) — determinism ────────────
+    //
+    // The defect these pin: `profiles[].bindings` was a `HashMap`, so
+    // `serde_json` wrote its keys in a different order on every save and two
+    // saves of IDENTICAL content never produced identical bytes. Measured that
+    // day on the owner's real config — 77,912 bytes both times, sha256
+    // 9ADE0FDE… before and 4CE86B44… after, no semantic difference anywhere,
+    // first differing byte at 491 ("z" first vs "h" first inside a bindings
+    // map). See `BindingMap`.
+
+    /// A fresh install serialises to the SAME BYTES every time, in the same
+    /// process and across processes.
+    ///
+    /// The in-process half would pass for a `HashMap` too — one `RandomState`
+    /// per map instance means one order per map — so the assertion that
+    /// actually catches the bug is the second one: two INDEPENDENTLY BUILT
+    /// maps holding the same pairs. That is what two launches of the app do,
+    /// and it is what was failing.
+    #[test]
+    fn a_fresh_config_serialises_to_identical_bytes_every_time() {
+        let a = serde_json::to_string_pretty(&AppConfig::default()).expect("serialise");
+        let b = serde_json::to_string_pretty(&AppConfig::default()).expect("serialise");
+        assert_eq!(a, b, "two default configs must serialise byte-identically");
+
+        // Independently built maps, inserted in DELIBERATELY OPPOSITE orders —
+        // the shape a HashMap cannot survive.
+        let mk = |reverse: bool| {
+            let mut keys: Vec<&str> = "abcdefghijklmnopqrstuvwxyz".split("").filter(|s| !s.is_empty()).collect();
+            if reverse {
+                keys.reverse();
+            }
+            let mut m = BindingMap::new();
+            for k in keys {
+                m.insert(
+                    k.to_string(),
+                    KeyBinding { label: Some(k.to_uppercase()), ..Default::default() },
+                );
+            }
+            Profile { name: "Founders".into(), bindings: m, emoji: None }
+        };
+        assert_eq!(
+            serde_json::to_string(&mk(false)).expect("serialise"),
+            serde_json::to_string(&mk(true)).expect("serialise"),
+            "insertion order must not reach the file — this is the 2026-09-05 defect"
+        );
+    }
+
+    /// The round trip a running app performs on every save: load what is on
+    /// disk, hand it back, write it out. The bytes must not move.
+    ///
+    /// Runs over the REAL seed profiles (26 bindings each) plus a populated
+    /// `special_keys` map, because `special_keys` had the identical defect and
+    /// is empty in `AppConfig::default()` — a test built only from defaults
+    /// would have passed while it was still a `HashMap`.
+    #[test]
+    fn deserialising_and_reserialising_a_config_is_byte_identical() {
+        let mut cfg = AppConfig::default();
+        cfg.profiles = vec![
+            crate::config::defaults::founders_profile(),
+            crate::config::defaults::gamers_profile(),
+            crate::config::defaults::professionals_profile(),
+        ];
+        for (k, url) in [
+            ("f1", "https://one.example"),
+            ("enter", "https://two.example"),
+            ("up", "https://three.example"),
+            ("esc", "https://four.example"),
+            ("tab", "https://five.example"),
+        ] {
+            cfg.special_keys.insert(
+                k.to_string(),
+                KeyBinding { web_url: Some(url.into()), ..Default::default() },
+            );
+        }
+
+        let first = serde_json::to_string_pretty(&cfg).expect("serialise");
+        let reloaded: AppConfig = serde_json::from_str(&first).expect("parse what we just wrote");
+        let second = serde_json::to_string_pretty(&reloaded).expect("re-serialise");
+        assert_eq!(
+            first, second,
+            "a load→save round trip must not change one byte; a config hash that moves \
+             on its own is not a change detector"
+        );
+
+        // Third pass, from a fresh parse of the SECOND string: proves the
+        // fixed point is the file, not one lucky pair of runs.
+        let again: AppConfig = serde_json::from_str(&second).expect("parse");
+        assert_eq!(second, serde_json::to_string_pretty(&again).expect("serialise"));
+
+        // And the order really is sorted, not merely stable — that is what
+        // makes a hand-read diff of two configs legible.
+        let founders = &cfg.profiles[0];
+        let keys: Vec<&str> = founders.bindings.keys().map(String::as_str).collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(keys, sorted, "bindings must serialise in sorted key order");
+    }
+
+    /// A `config.json` written before this change — keys in whatever order the
+    /// old `HashMap` happened to produce — must still parse, and must come out
+    /// sorted afterwards. Every existing user's file is exactly this.
+    #[test]
+    fn a_config_written_in_the_old_random_order_still_parses_and_is_normalised() {
+        let json = r#"{
+            "spaceadom_profile": 1,
+            "name": "Founders",
+            "bindings": {
+                "z": { "app": "Zoom.exe" },
+                "a": { "web_url": "https://gemini.google.com" },
+                "m": { "web_url": "https://cinemaos.live/" }
+            }
+        }"#;
+        let p: ProfileExport = serde_json::from_str(json).expect("an old-order file must parse");
+        assert_eq!(p.bindings.len(), 3);
+        assert_eq!(
+            p.bindings.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["a", "m", "z"],
+            "whatever order it arrives in, it leaves sorted"
+        );
+    }
+
 }

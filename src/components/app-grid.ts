@@ -13,6 +13,7 @@
  * still render either one.
  */
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { AppInfo } from "../types.ts";
 
 /** Detected apps, fetched once per session and reused by every caller. */
@@ -72,13 +73,42 @@ export function paintAppDisc(
  */
 const RENDER_CAP = 500;
 
-/** Kick off (or reuse) the Start-Menu scan. Never rejects. */
+/**
+ * Kick off (or reuse) the Start-Menu scan. Never rejects — callers render an
+ * empty grid — but a failure is never CACHED.
+ *
+ * REVIEW FIX 2026-09-04, the frontend half of `picker_worker.rs`'s. Two bugs,
+ * one shape:
+ *
+ *   * `if (_apps)` treated `[]` as a cache hit, because an empty array is
+ *     truthy in JS. Rust used to answer a failed scan with `Ok([])`, so ONE bad
+ *     PowerShell run made the picker permanently empty for the rest of the
+ *     session — every later open short-circuited on the cached `[]` and never
+ *     asked again.
+ *   * the `.catch` then wrote `_apps = []` itself, which did the same thing to
+ *     a genuine rejection (the new request timeout, or a dead worker).
+ *
+ * So: a hit needs `_apps.length`, and the failure path leaves BOTH `_apps` and
+ * `_appsPromise` null — the promise too, or the memoised empty result would be
+ * handed back forever without a retry.
+ */
 export function loadApps(): Promise<AppInfo[]> {
-  if (_apps) return Promise.resolve(_apps);
+  if (_apps && _apps.length) return Promise.resolve(_apps);
   if (!_appsPromise) {
     _appsPromise = invoke<AppInfo[]>("list_start_menu_apps")
-      .then((list) => { _apps = list; return list; })
-      .catch(() => { _apps = []; return []; });
+      .then((list) => {
+        if (list && list.length) { _apps = list; return list; }
+        // An empty OK is the same non-answer as a rejection — do not memoise it.
+        _apps = null;
+        _appsPromise = null;
+        return [];
+      })
+      .catch((e) => {
+        console.warn("[app-grid] the app scan failed; it will be retried on the next open:", e);
+        _apps = null;
+        _appsPromise = null;
+        return [];
+      });
   }
   return _appsPromise;
 }
@@ -86,6 +116,30 @@ export function loadApps(): Promise<AppInfo[]> {
 /** The cached list, or null if the scan has not finished yet. */
 export function cachedApps(): AppInfo[] | null {
   return _apps;
+}
+
+/**
+ * PROBLEM 237 §"Frontend contract" — `picker_worker.rs` fires the global
+ * `picker-data-updated` event (`{ count, previous }`) ONLY when a background
+ * refresh actually CHANGED the Start-Menu app list. This registers ONE
+ * listener for the whole session: the guard below makes a second call a
+ * harmless no-op, so a caller does not have to track whether it already
+ * wired one. On the event: drop the cached list/promise so `loadApps()`
+ * re-scans (in practice it answers from the worker's own in-memory serve
+ * path within milliseconds — see PROBLEM 237's "Serving order"), then call
+ * `onChanged` so a caller with an open grid can re-render it. `onChanged` is
+ * only ever invoked after the fresh `loadApps()` has resolved, so a re-render
+ * triggered from it always sees the new list.
+ */
+let _refreshListenerStarted = false;
+export function initPickerRefreshListener(onChanged?: () => void): void {
+  if (_refreshListenerStarted) return;
+  _refreshListenerStarted = true;
+  void listen<{ count: number; previous: number }>("picker-data-updated", () => {
+    _apps = null;
+    _appsPromise = null;
+    void loadApps().then(() => onChanged?.());
+  });
 }
 
 export interface AppGridOptions {
@@ -171,7 +225,9 @@ export function drawAppGrid(
   opts: AppGridOptions,
   stillValid: () => boolean = () => true,
 ): void {
-  if (_apps) {
+  // `_apps.length` for the same reason as `loadApps` — see the note there. An
+  // empty cached list here would draw an empty grid and never re-scan.
+  if (_apps && _apps.length) {
     renderAppGrid(grid, empty, _apps, opts);
     return;
   }

@@ -223,7 +223,7 @@ pub fn start_exclusion_watcher() {
 /// `QueryFullProcessImageNameW` — but it RETURNS the name instead of comparing
 /// it, so the comparison can live in the pure, testable `is_excluded`.
 #[cfg(windows)]
-unsafe fn foreground_stem() -> String {
+pub(crate) unsafe fn foreground_stem() -> String {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
     let hwnd = GetForegroundWindow();

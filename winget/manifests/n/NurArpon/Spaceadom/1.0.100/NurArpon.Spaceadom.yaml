@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.9.0.schema.json
+
+# Version manifest — the top-level pointer winget reads first. See
+# NurArpon.Spaceadom.installer.yaml and NurArpon.Spaceadom.locale.en-US.yaml
+# for the actual installer and listing data.
+PackageIdentifier: NurArpon.Spaceadom
+PackageVersion: 1.0.100
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.9.0

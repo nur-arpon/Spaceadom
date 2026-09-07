@@ -10,7 +10,13 @@ import {
   applySound,
   applyFlight,
   markOverlayWindow,
+  reapplyResolvedTheme,
 } from "./components/toast";
+import { onSystemThemeChange } from "./theme-resolve";
+// REVIEW FIXES 2026-09-05 (H4) — the shared OS light/dark value, seeded from
+// Rust and kept current by the `os-theme-changed` event. The dashboard takes
+// the identical import; that is the point.
+import { initOsTheme } from "./os-theme";
 
 // THIS is the overlay window. Only here may toast.ts resize/hide the overlay
 // via overlay_fit / overlay_toasts_done — the dashboard shares this module for
@@ -42,6 +48,42 @@ document.body.classList.add("st-overlay");
 // flood. This REPLACES the pair — there is still exactly one `error` and one
 // `unhandledrejection` listener on this window.
 installJsErrorReporter("overlay_error");
+
+/**
+ * PROBLEM 255 — FOLLOW SYSTEM THEME, the overlay's own half.
+ *
+ * The theme pill can store the literal `"auto"`, and this window has to
+ * resolve it exactly the way the dashboard does — `applyThemeName` now does,
+ * through the shared `theme-resolve.ts`. But a setting that follows Windows
+ * and only notices at launch is wrong for most of the day, so the overlay
+ * needs a listener of its own as well as the seed above.
+ *
+ * **REVIEW FIXES 2026-09-05 (H4) — IT IS A CROSS-WINDOW SIGNAL NOW, AND THAT
+ * IS THE FIX.** This used to say "its own, and deliberately not a cross-window
+ * signal … a separate webview with a separate `matchMedia` that answers the
+ * same question". The two webviews did NOT answer the same question:
+ * `tauri.conf.json` pinned the DASHBOARD to `"theme": "Light"`, and
+ * `prefers-color-scheme` reports the scheme a webview was told to prefer, so
+ * the dashboard read "light" on a dark machine while this window read "dark" —
+ * `"auto"` in Earthy here and Starry night there, on one screen. Rust now
+ * reads the registry once (`theme_watch.rs`) and emits `os-theme-changed` to
+ * every window; `os-theme.ts` feeds it into the shared value both
+ * `onSystemThemeChange` listeners hang off. The dashboard registers the
+ * identical listener in `main.ts` against the identical helper.
+ *
+ * At module scope, not inside `DOMContentLoaded`: it touches no DOM of its
+ * own (`applyThemeName` writes to `document.body`, which exists as soon as
+ * this module runs — `document.body.classList.add("st-overlay")` above
+ * already depends on that), and registering it here means an OS flip during
+ * the window's first paint is not silently missed.
+ *
+ * A no-op for a fixed theme: `reapplyResolvedTheme` re-runs the resolution on
+ * the RAW value, and a raw `"starry"` resolves to `"starry"` whatever Windows
+ * says.
+ */
+onSystemThemeChange(() => {
+  reapplyResolvedTheme();
+});
 
 window.addEventListener("DOMContentLoaded", () => {
   // This webview is the ONLY registered listener for backend toast/HUD events.
@@ -86,22 +128,47 @@ window.addEventListener("DOMContentLoaded", () => {
     invoke("overlay_log", { msg: `hud-layout listen FAILED: ${e}` }).catch(() => {}),
   );
 
-  invoke<{
-    dark_mode?: boolean;
-    theme?: string;
-    sound_enabled?: boolean;
-    motion?: string;
-    hud_toast_flight?: boolean;
-    hud_band_count?: string;
-    hud_magnetic_layout?: boolean;
-  }>("get_config")
+  // REVIEW FIXES 2026-09-05 (H4) — ASK WINDOWS FIRST, THEN SEED THE PALETTE.
+  //
+  // `applyThemeName` below resolves the raw theme — which may be the literal
+  // `"auto"` — through the shared rule, and that rule needs the OS value the
+  // dashboard is using. Chained AHEAD of `get_config` rather than fired
+  // alongside it so this window cannot paint Earthy and correct itself a
+  // moment later, and so the two windows cannot be seeding from different
+  // answers during the seconds after a launch.
+  //
+  // `.catch(() => {})` between the two: `initOsTheme` already swallows its own
+  // failures, and this guarantees that even a future change to it can never
+  // stop the config seed — the palette matters, but the sound, motion, band
+  // count and ring layout below matter as much and have nothing to do with
+  // the theme.
+  initOsTheme()
+    .catch(() => {})
+    .then(() => invoke<{
+      dark_mode?: boolean;
+      theme?: string;
+      sound_enabled?: boolean;
+      motion?: string;
+      hud_toast_flight?: boolean;
+      hud_band_count?: string;
+      hud_magnetic_layout?: boolean;
+    }>("get_config"))
     .then((cfg) => {
       applyTheme(!!cfg?.dark_mode);
       // PROBLEM 185 — seeded here for the same reason as the theme bool:
       // "theme-name-changed" only fires on a CHANGE, so a freshly created
       // overlay (first launch, or after a display-change rebuild) would
       // otherwise wear the wrong palette until the user next switched theme.
-      applyThemeName(cfg?.theme ?? "earthy");
+      // PROBLEM 255 — the fallback is `dark_mode`, not the bare string
+      // "earthy", and it mirrors `main.ts::applyLook()`'s first line exactly:
+      // `appConfig?.theme || (appConfig?.dark_mode ? "starry" : "earthy")`.
+      // `applyThemeName` now also owns the nocturne class (it has to, so an
+      // OS flip under `"auto"` can move it with nothing from Rust), which
+      // means it runs AFTER the `applyTheme` seed above and gets the last
+      // word. A `?? "earthy"` here would give a config with an EMPTY theme
+      // string the last word as daylight and quietly undo the dark seed one
+      // line up. `||` catches the empty string; `??` does not.
+      applyThemeName(cfg?.theme || (cfg?.dark_mode ? "starry" : "earthy"));
       applySound(!!cfg?.sound_enabled);
       // PROBLEM 174 — seed the guide-to-toast motion from the saved config for
       // the same reason the theme is seeded here: "flight-changed" only fires

@@ -63,6 +63,21 @@ pub enum HookEvent {
     /// overlay page to a launch: `handle_alpha` is private and `EngineState`
     /// is never `.manage()`d, so no `#[tauri::command]` could reach it.
     PointerActivate(char),
+    /// PROBLEM 259 — a Space-down that the DASHBOARD PAGE observed, not the
+    /// hook (`own_window_keys` fallback). The engine treats it exactly like
+    /// `SpaceDown`; the ONLY difference is the sentence it logs, and that
+    /// difference is load-bearing.
+    ///
+    /// `SpaceDown`'s per-hold line (PROBLEM 257) says *"the primary keyboard
+    /// hook saw this Space-down"*, and CLAUDE.md keyboard-hook law 6 /
+    /// `scripts/install-proof.ps1` read that line as the PROOF the hook is
+    /// alive over our own window. If the fallback reused `SpaceDown` it would
+    /// print that sentence about a Space the hook never saw, and the one
+    /// witness law 6 has would start lying. Hence a separate variant whose
+    /// line carries the `own-window fallback:` marker instead and deliberately
+    /// does NOT contain `hold start (hold #N)` — a fallback hold can never
+    /// satisfy the install proof.
+    OwnWindowSpaceDown,
 }
 
 // ---------------------------------------------------------------------------
@@ -108,11 +123,32 @@ static UNMAPPED_KEYS: AtomicU32 = AtomicU32::new(0);
 /// and a hook that fires and passes everything through look identical — both
 /// leave zeros everywhere. This is incremented on entry, before any branch,
 /// so a still-zero value is proof the callback is not being invoked.
+///
+/// PROBLEM 230 — "before any branch" now includes the injected-cookie test, so
+/// this counts our OWN synthetic keys too. That is deliberate and required:
+/// this number is subtracted from `REF_KB_EVENTS`, which has always counted
+/// them, and two counters compared against each other must count the same
+/// events or the difference is an artefact rather than a measurement.
 static KB_EVENTS_SEEN: AtomicU32 = AtomicU32::new(0);
 /// Of those, how many arrived while OUR OWN window held the foreground. If
 /// this stays 0 while the total climbs, Windows is not delivering our own
 /// window's keystrokes to our hook — which is the user's exact symptom.
 static KB_EVENTS_OWN_FG: AtomicU32 = AtomicU32::new(0);
+/// PROBLEM 236 — of `KB_EVENTS_SEEN`, how many carried OUR OWN cookie.
+///
+/// `KB_EVENTS_SEEN` has counted this app's injections since PROBLEM 230 moved
+/// its `fetch_add` above the `dwExtraInfo == MAGIC_INJECTED` test, and that was
+/// right: the subtraction in `classify_hook_window` is only a measurement while
+/// both sides count the same population. But it made the number PRINTED in
+/// `saw N key event(s)` ambiguous in the other direction — "the primary is
+/// seeing keys" and "the primary is seeing nothing but Spaceadom typing to
+/// itself" became the same line, and the second one is a dead keyboard.
+///
+/// One relaxed add on a branch that is already taken (the cookie early return),
+/// so the PROBLEM 58 envelope is unchanged. Subtract it from `KB_EVENTS_SEEN`
+/// to get the REAL keyboard traffic; never subtract it before
+/// `classify_hook_window`, which needs the whole population.
+static KB_EVENTS_INJECTED: AtomicU32 = AtomicU32::new(0);
 /// PROBLEM 218 — how many 1s watchdog ticks happened in this window, and how
 /// many of them found OUR OWN window in the foreground. The denominator
 /// `KB_EVENTS_OWN_FG` never had. See the sampling site in `watchdog_check`.
@@ -156,6 +192,23 @@ pub(crate) enum HookWindow {
 /// produced. A count that only the hook can increment cannot be forged by the
 /// repair, which is the entire fix: **the instrument must not be writable by
 /// the thing it is measuring.**
+///
+/// ═══ PROBLEM 230 — AND THE TWO ARGUMENTS MUST COUNT THE SAME POPULATION ═══
+///
+/// This is a subtraction between two counters, so it is a measurement only
+/// while both sides count the same events. Two ways that broke, both fixed at
+/// the counter rather than by a correction applied here:
+///
+///   * `primary_seen` skipped this app's OWN injected keys — the callback's
+///     `dwExtraInfo` cookie test sat ABOVE the add — while
+///     `genuine_ref_events` counted them. A window whose only keyboard traffic
+///     was Spaceadom injecting to itself therefore read DEAF.
+///   * the reference hook was installed in FRONT of the primary, which made it
+///     the first hook Windows evicts, so the side of the subtraction that is
+///     supposed to prove keys are flowing died BEFORE the side being tested.
+///
+/// Keep this function pure. Anything that has to be corrected for belongs
+/// where the counter is written.
 pub(crate) fn classify_hook_window(primary_seen: u32, genuine_ref_events: u32) -> HookWindow {
     if primary_seen > 0 {
         HookWindow::Working
@@ -163,6 +216,579 @@ pub(crate) fn classify_hook_window(primary_seen: u32, genuine_ref_events: u32) -
         HookWindow::Deaf
     } else {
         HookWindow::Quiet
+    }
+}
+
+/// PROBLEM 236 — THE LINE THAT TELLS THE FOUR HYPOTHESES APART.
+///
+/// The 1.0.96 log could not answer the one question that separates them,
+/// because the only per-window number it printed was `saw N key event(s)` — a
+/// single total, covering real keys and this app's own injections, with no
+/// mouse or reference figure beside it. Reading the 2026-09-04 16:59:32–17:02:30
+/// episode took a point-in-time watchdog clock (`the reference hook last
+/// genuinely fired 178968ms ago`) and an aggregate from a DIFFERENT, earlier
+/// window (`saw 60 key event(s) in the last 79s`), and those two do not overlap:
+/// the 60 keys all landed before 16:59:32, which the log only reveals via a
+/// third line 12 minutes away (`kb 7922ms` equalling `ref 7922ms` at
+/// 16:59:39.641). Four counters, one window, one line — so the next reader
+/// subtracts nothing.
+///
+/// All four numbers are CALLBACK-ONLY. Nothing but a hook proc can move them,
+/// which is PROBLEM 228's law applied to the whole instrument panel rather than
+/// to the reference hook alone.
+///
+///   * `primary_real` > 0 and `reference` == 0 — the primary is alive and the
+///     witness is not: PROBLEM 230's inversion is back (check install order).
+///   * `primary_real` == 0 and `primary_injected` > 0 — the keyboard is dead
+///     and `saw N key event(s)` was counting Spaceadom typing to itself.
+///   * `primary_real` == 0, `reference` > 0 — real deafness (see
+///     `classify_hook_window`).
+///   * all four 0 — nobody touched anything. Not evidence about the hooks.
+///   * `mouse` > 0 with everything else 0 — the thread's pump is fine, so a
+///     `both_dead` alarm raised in this window was measuring silence, not death.
+pub(crate) fn format_liveness_split(
+    primary_real: u32,
+    primary_injected: u32,
+    reference: u32,
+    mouse: u32,
+) -> String {
+    format!(
+        "primary_real:{primary_real} primary_injected:{primary_injected} \
+         reference:{reference} mouse:{mouse}"
+    )
+}
+
+/// PROBLEM 236 — does a `both_dead` alarm have any evidence behind it?
+///
+/// `both_dead` is `kb_silence > BLIND_MS && ms_silence > BLIND_MS`, and both of
+/// those clocks are SEEDED — `install_hooks()` and the watchdog's own idle
+/// early-return write them, so the alarm's premise can be, and demonstrably is,
+/// satisfied by the repair and by the watchdog itself. In the owner's 1.0.96
+/// session **6 of 16 alarms printed the pair as exactly equal round numbers**
+/// (4000/4000 ×4, 5000/5000, 4000/4000) — the documented fingerprint of one
+/// non-hook writer setting both, i.e. those alarms measured nothing at all
+/// about the hooks.
+///
+/// This asks the same question of the clocks NOTHING but a callback may write.
+/// An alarm is EVIDENCED only when all three unforgeable instruments — the
+/// keyboard callback, the mouse callback and the reference hook — have each
+/// been silent at least as long as the threshold the alarm is using. A hook
+/// that has NEVER fired (`None`) can never make an alarm evidenced: never
+/// having fired is not the same fact as having stopped, and PROBLEM 228 is the
+/// record of what conflating those two costs.
+///
+/// **It deliberately does not change the decision.** Whether to re-hook on an
+/// unevidenced alarm is a behaviour question, and this file's own law (PROBLEM
+/// 228) is to fix the instrument in one pass and settle the behaviour with a
+/// fortnight of honest data in the next. Grep `UNEVIDENCED` to collect it.
+pub(crate) fn alarm_is_evidenced(
+    kb_callback_silence_ms: Option<u64>,
+    ms_callback_silence_ms: Option<u64>,
+    ref_callback_silence_ms: Option<u64>,
+    threshold_ms: u64,
+) -> bool {
+    match (kb_callback_silence_ms, ms_callback_silence_ms, ref_callback_silence_ms) {
+        (Some(kb), Some(ms), Some(rf)) => {
+            kb >= threshold_ms && ms >= threshold_ms && rf >= threshold_ms
+        }
+        _ => false,
+    }
+}
+
+// ═══ PROBLEM 236, DECISION CHANGED (2026-09-04) ═══════════════════════════
+//
+// `alarm_is_evidenced` above deliberately gated NOTHING — it only worded the
+// log, and the entry said to collect a fortnight of `EVIDENCED` vs
+// `UNEVIDENCED` before touching the behaviour. The owner cannot wait a
+// fortnight: every one of those alarms re-hooks, and the re-hook clears
+// `MODIFIER_ACTIVE` / `SPACE_*`, calls `pointer::reset_on_eviction()` and
+// hides the ring — so at one alarm every 2.4 minutes it kills a live Space
+// hold roughly whenever he holds one. The data keeps accruing (the
+// "would have alarmed" line below), but the DECISION moves now.
+//
+// The rule the decision uses from here on:
+//
+//   **An alarm may fire only when the keyboard, mouse and reference CALLBACK
+//   clocks are ALL silent past the threshold, after each of them has fired at
+//   least once since the last install.**
+//
+// Nothing that `install_hooks()` or this watchdog's own idle early-return
+// writes may take part in it. `LAST_KB_EVENT` / `LAST_MS_EVENT` keep their
+// re-stamps and keep raising the CANDIDATE alarm — removing those re-opens
+// PROBLEM 101's 260 false alarms — but they can no longer authorise the
+// destructive repair on their own.
+
+/// The rule, in one sentence, printed on every line that acts on it AND on
+/// every line that declines to. Nobody reading `debug.log` should have to open
+/// this file to find out what decided.
+///
+/// It carries no numbers deliberately: the threshold, the grace and the unknown
+/// bound are printed beside it from the constants themselves, so the sentence
+/// can never drift away from the arithmetic.
+const RULE_DESC: &str = "RULE (PROBLEM 236, decision changed 2026-09-04; reference vote corrected \
+     on review the same day): only the PRIMARY keyboard callback or the mouse callback can prove \
+     the hooks are alive. The REFERENCE hook cannot — \"the reference fires while the primary is \
+     silent\" IS an evicted primary (PROBLEM 181/230), so a live reference only narrows the \
+     verdict from both-hooks-dead to keyboard-only-dead; it never cancels the alarm. An alarm \
+     fires when those callback clocks have been silent past the threshold, after each has fired \
+     at least once since the last install; a hook that has never fired since the install is \
+     UNKNOWN, not dead, until the unknown bound expires.";
+
+/// How long after an install nothing said here means anything.
+///
+/// Chosen at 10 s, against a 3 s threshold and a 1 s tick. The alarm at
+/// `16:28:53.412` in the owner's 1.0.96 session fired **6 seconds after
+/// launch**, before any hook had been called once, and still printed "NEITHER
+/// hook saw anything" — true, and about nothing. A grace shorter than that
+/// window would have let the same line through again. Ten seconds is also
+/// under the 5 s blind-retry floor doubled, so it costs at most one skipped
+/// repair attempt on a genuinely dead install, which the bound below then
+/// picks up.
+const INSTALL_GRACE_MS: u64 = 10_000;
+
+/// How long "no hook has fired since the install" is allowed to stay UNKNOWN
+/// before it becomes a fact.
+///
+/// **This bound is not optional, and it is the reason the rule above is safe.**
+/// Read literally, "never fired since install ⇒ unknown ⇒ no alarm" hands the
+/// app a hole it can never climb out of: if `SetWindowsHookExW` returns a
+/// handle that never fires (PROBLEM 132's wedged pump, or a failed install the
+/// `is_invalid()` check missed), no callback can ever move, so the state stays
+/// UNKNOWN forever and the watchdog never retries. That converts intermittent
+/// deafness into permanent deafness, which is this file's standing definition
+/// of the fix being worse than the bug.
+///
+/// So the "unknown" state is bounded. Every tick that reaches this decision has
+/// already passed `millis_since_last_input() < 2000` (the user is demonstrably
+/// active), a NULL foreground (UAC secure desktop), and the UIPI elevation
+/// test. Thirty seconds of a demonstrably-present user producing not one
+/// callback on ANY of the three hooks is not an absence of evidence — it is
+/// evidence. At 30 s the retry cadence for that case is ten times quieter than
+/// 1.0.96's, and it still self-heals.
+const UNKNOWN_MAX_MS: u64 = 30_000;
+
+/// What the CALLBACK-ONLY clocks say about the hooks. Three states, because
+/// "we have not been told" and "we have been told nothing is happening" are
+/// different facts and PROBLEM 228 is the record of what conflating them costs.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum DeadKind {
+    /// The PRIMARY keyboard callback is silent past the threshold while the
+    /// REFERENCE hook is still being called. Keys are demonstrably reaching the
+    /// chain and ours is no longer among them — PROBLEM 181's shape, and the
+    /// exact fingerprint of an evicted primary. A re-hook is the right repair.
+    KbOnly,
+    /// Every callback clock that can speak has gone quiet, the reference
+    /// included. Nothing here says keys are reaching the chain at all.
+    Both,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum CallbackLiveness {
+    /// A PRIMARY callback-only clock — keyboard or mouse — moved inside the
+    /// threshold. One of the hooks this app installed is demonstrably being
+    /// called. **No alarm.**
+    ///
+    /// The reference hook is deliberately NOT among the clocks that can produce
+    /// this; see `classify_callback_liveness`.
+    Alive,
+    /// Not enough has happened for anything here to mean anything: still inside
+    /// the post-install grace, or a hook has not yet had its first callback
+    /// since the install and the install is young enough that this is ordinary.
+    /// **No alarm** — and this is the state that 6 of the owner's 16 alarms were
+    /// really in when they printed `4000/4000`.
+    Unknown,
+    /// The callback-only clocks that can decide have been silent past the
+    /// threshold — or the install has now had `UNKNOWN_MAX_MS` of a
+    /// demonstrably-active user and produced no callback at all. **Alarm.**
+    /// The payload says WHICH failure, because "our keyboard hook alone was
+    /// evicted while keys kept flowing" and "nothing is being called at all"
+    /// have different causes and only the first is certain to be repairable by
+    /// re-hooking.
+    Dead(DeadKind),
+}
+
+/// PROBLEM 236 — THE DECISION. One pure function; the watchdog does no
+/// arithmetic of its own.
+///
+/// Every input is either a CALLBACK-ONLY clock or a wall-clock age. Note which
+/// direction the one non-callback input can push: `since_install_ms` can only
+/// ever SUPPRESS an alarm (through `grace_ms`) or, past `unknown_max_ms`, admit
+/// one that no callback could have contradicted. A writer that can only
+/// suppress is not the defect PROBLEM 228 named — that was a writer that
+/// MANUFACTURED evidence.
+///
+/// `None` means "this hook has not fired since the last install". It is not
+/// "this hook is dead": PROBLEM 228 is the twenty days of reports that
+/// conflating those two produced. So a `None` can never, on its own, make an
+/// alarm fire — only the `unknown_max_ms` bound can, and only after the user
+/// has been continuously present for that long.
+///
+/// The caller supplies the user-activity premise, not this function: by the
+/// time `watchdog_check` reaches here it has already returned early on an idle
+/// user, a NULL foreground and an elevated foreground.
+pub(crate) fn classify_callback_liveness(
+    kb_callback_silence_ms: Option<u64>,
+    ms_callback_silence_ms: Option<u64>,
+    ref_callback_silence_ms: Option<u64>,
+    since_install_ms: u64,
+    threshold_ms: u64,
+    grace_ms: u64,
+    unknown_max_ms: u64,
+) -> CallbackLiveness {
+    // 1. Inside the grace, the hooks have not had a fair chance to speak.
+    if since_install_ms < grace_ms {
+        return CallbackLiveness::Unknown;
+    }
+    let recent = |v: Option<u64>| matches!(v, Some(ms) if ms < threshold_ms);
+
+    // 2. ONLY A PRIMARY HOOK CAN VOTE "ALIVE" — REVIEW FIX, 2026-09-04.
+    //
+    //    This branch used to accept the REFERENCE clock as proof of life
+    //    alongside the two primaries, and that single `||` made the whole
+    //    `kb_only_dead` repair unreachable. The reference hook exists to
+    //    witness that keys are reaching the chain; "the witness fires while our
+    //    primary keyboard callback stays silent" is not evidence of health, it
+    //    is the LITERAL DEFINITION of the fault this watchdog was built for
+    //    (PROBLEM 181: 24 of 46 alarms; PROBLEM 230: the eviction the reorder
+    //    fixed). So a live reference vetoed the alarm for exactly the shape the
+    //    alarm was supposed to catch.
+    //
+    //    Generalise: **an instrument installed to witness a failure must never
+    //    be allowed to vote that the failure did not happen.** Its reading is a
+    //    premise of the diagnosis, not a rebuttal of it.
+    if recent(kb_callback_silence_ms) || recent(ms_callback_silence_ms) {
+        return CallbackLiveness::Alive;
+    }
+
+    // 3. The reference IS being called, and neither primary is. Keys are
+    //    reaching the chain; ours is no longer among the hooks called for
+    //    them. That is `kb_only_dead`, and it is repairable by re-hooking.
+    //
+    //    The reference may only ever narrow `Both` to `KbOnly` here — it can
+    //    never cancel the verdict.
+    if recent(ref_callback_silence_ms) {
+        // PROBLEM 228's law still holds over the top of it: a primary that has
+        // NEVER fired since the install is UNKNOWN, not dead, and only the
+        // bound may promote that silence to a fact.
+        if kb_callback_silence_ms.is_some() {
+            return CallbackLiveness::Dead(DeadKind::KbOnly);
+        }
+        return if since_install_ms >= unknown_max_ms {
+            CallbackLiveness::Dead(DeadKind::KbOnly)
+        } else {
+            CallbackLiveness::Unknown
+        };
+    }
+
+    // 4. All three have fired since the install and all three have now been
+    //    silent past the threshold. That is the alarm's own premise, stated
+    //    from instruments the repair cannot write.
+    if let (Some(_), Some(_), Some(_)) =
+        (kb_callback_silence_ms, ms_callback_silence_ms, ref_callback_silence_ms)
+    {
+        return CallbackLiveness::Dead(DeadKind::Both);
+    }
+    // 5. A hook has never fired since the install. Unknown — until the install
+    //    is old enough that the silence is itself the observation (see
+    //    `UNKNOWN_MAX_MS`; without this branch a failed install is permanent).
+    if since_install_ms >= unknown_max_ms {
+        CallbackLiveness::Dead(DeadKind::Both)
+    } else {
+        CallbackLiveness::Unknown
+    }
+}
+
+/// How long a live Space hold may hold off the watchdog's repair.
+///
+/// Ten seconds. Justification, in the order it matters:
+///
+///   * `reap_stale_hold()` runs at the TOP of `watchdog_check`, above every
+///     early return, so a hold whose auto-repeat has stopped is already reaped
+///     before this deferral is ever consulted. What is left to defer for is
+///     therefore a hold that is still auto-repeating — i.e. one the keyboard
+///     hook is still being called for — or one that has fired a combo, where
+///     PROBLEM 219 stood the reaper down on purpose.
+///   * the combo branch's own `MAX_MODIFIER_HOLD_MS` is 30 s, so 10 s cannot
+///     be the longest thing latching this state.
+///   * the blind-retry floor is 5 s and the escalation floor is 120 s, so a
+///     10 s deferral perturbs neither cadence.
+///   * a hold longer than ten seconds is not a shortcut; if the hook really is
+///     dead the repair is only ten seconds late, and the alarm is re-evaluated
+///     from scratch on the very next 1 s tick after the bound expires.
+const MAX_HOLD_DEFER_MS: u64 = 10_000;
+
+/// PROBLEM 236 — may this alarm's repair wait for the hold to finish?
+///
+/// The repair is destructive BY DESIGN: it clears `MODIFIER_ACTIVE`,
+/// `SPACE_INTERCEPTED`, `SPACE_ABORTED`, `SPACE_COMBO_SEEN`, calls
+/// `pointer::reset_on_eviction()` and hides the ring. Those resets are correct
+/// for a REAL eviction — the Space-UP is genuinely lost and PROBLEM 177/218 are
+/// what happens without them. Landing the same set on a hold that is still
+/// being fed by the keyboard hook is the owner's *"it dies mid-press"*.
+///
+/// `primary_saw_key_within_hold` is `LAST_KB_CALLBACK >= SPACE_DOWN_TS`: the
+/// keyboard callback was demonstrably entered at or after this hold began, so
+/// the hook was not dead when the hold started. Callback-only on both sides —
+/// nothing off the hook path writes either value.
+pub(crate) fn hold_defers_rehook(
+    modifier_active: bool,
+    primary_saw_key_within_hold: bool,
+    deferred_for_ms: u64,
+    max_defer_ms: u64,
+) -> bool {
+    modifier_active && primary_saw_key_within_hold && deferred_for_ms < max_defer_ms
+}
+
+/// PROBLEM 262 item 2 — may a tick that did NOT alarm end the deferral episode?
+///
+/// ONLY when the hold that episode belongs to is over. This one-line predicate
+/// is the whole of the 2026-09-07 wedge, so it is worth stating plainly.
+///
+/// `ALARM_DEFERRED_AT` is the start of the episode and `MAX_HOLD_DEFER_MS` is
+/// measured from it, so the bound is only reachable if that stamp survives the
+/// ticks in between. It did not. Three sites cleared it, and two of them fired
+/// on ticks where nothing was wrong with the hold at all:
+///
+///   * `!both_dead && !kb_only_dead` — "events are arriving". `both_dead`
+///     requires the MOUSE callback to have been silent past `BLIND_MS`, and the
+///     mouse fires at 30-60 Hz whenever the user's hand is on it. So on every
+///     tick the owner moved the mouse, the episode was thrown away.
+///   * the `!Dead(_)` verdict return, for the same reason.
+///
+/// Measured consequence, installed 1.0.106 at 11:38:33 / 11:38:41 / 11:39:08 /
+/// 11:39:30: four "Holds protected this session: 1 / 2 / 3 / 4" lines for ONE
+/// hold. Each alarm found `started == 0`, restarted the clock at zero, deferred
+/// again and logged again. **A 10 s bound that is reset by every quiet tick is
+/// not a bound**; it required ten CONSECUTIVE seconds of alarm, which a moving
+/// mouse makes impossible, so the deferral was unbounded in practice and the
+/// repair never came.
+///
+/// The hold's own end is still the ordinary way an episode finishes — Space-up,
+/// or `reap_stale_hold` — and that check lives at the top of `watchdog_check`,
+/// above every early return.
+pub(crate) fn defer_episode_ends_on_quiet_tick(hook_hold_latched: bool) -> bool {
+    !hook_hold_latched
+}
+
+/// PROBLEM 257 — "the keyboard is DEAF, and here is the key that proves it."
+///
+/// Every earlier deafness test had to infer "somebody typed" from a clock
+/// (`GetLastInputInfo`, which the mouse also moves) and was wrong about it
+/// 260 times (PROBLEM 101). This one asks the OS whether SPACE IS DOWN RIGHT
+/// NOW. Keyboard-hook law 3 says `GetAsyncKeyState` lies about keys we
+/// SUPPRESS — and that is exactly what makes it honest here: a Space our hook
+/// intercepted never reaches the OS key state, so the OS reports it UP while
+/// `MODIFIER_ACTIVE` is true. A Space the OS reports DOWN with
+/// `MODIFIER_ACTIVE` false is a Space our callback let through, and a callback
+/// that let it through must have FIRED for it (and for its auto-repeats, which
+/// start inside 1000 ms). So:
+///
+///     Space down per the OS  +  no hold latched  +  no deliberate pass-through
+///     +  callback silent past `threshold_ms`  =  the callback was not called.
+///
+/// `stand_down` is the union of the three deliberate pass-through gates
+/// (fullscreen, excluded app, bypass) and `other_modifier` is law 4's
+/// Ctrl/Alt/Win pass-through; both are cases where the callback DID fire and
+/// chose to return `CallNextHookEx`, so they are excluded rather than measured.
+/// `kb_callback_silence_ms` is `None` when the callback has not fired since the
+/// last install — that is UNKNOWN (PROBLEM 236), never proof, so it returns
+/// false: a fresh install that has never been called cannot be declared deaf
+/// by this test, only by the install-grace rules in `classify_callback_liveness`.
+pub(crate) fn keyboard_deaf_with_space_down(
+    space_physically_down: bool,
+    modifier_active: bool,
+    stand_down: bool,
+    other_modifier: bool,
+    kb_callback_silence_ms: Option<u64>,
+    threshold_ms: u64,
+) -> bool {
+    if !space_physically_down || modifier_active || stand_down || other_modifier {
+        return false;
+    }
+    matches!(kb_callback_silence_ms, Some(ms) if ms >= threshold_ms)
+}
+
+/// PROBLEM 260 — THE MECHANISM, NAMED ONCE SO NOBODY HAS TO REDISCOVER IT.
+///
+/// Printed on every forced repair. It is a sentence, not a number, for the same
+/// reason `RULE_DESC` is: the arithmetic is printed beside it from the
+/// constants, so the words can never drift away from the code.
+const TIMEOUT_EVICTION_DESC: &str =
+    "MECHANISM (PROBLEM 260): when a WH_KEYBOARD_LL callback overruns \
+     LowLevelHooksTimeout (HKCU\\Control Panel\\Desktop, 1000ms by default) Windows STOPS \
+     CALLING IT AND LEAVES THE HANDLE VALID — no message, no error, no return code says so, \
+     and UnhookWindowsHookEx on it still succeeds. WH_MOUSE_LL is a SEPARATE hook with its \
+     own timeout record on the same thread, so the mouse callback keeps firing at 30-60Hz \
+     while not one keystroke arrives; that is why a timed-out keyboard hook makes the app \
+     look alive from every clock except the keyboard's own. The ONLY cure a process has is \
+     to change the chain: unhook and install afresh. Therefore (a) a live MOUSE callback may \
+     never veto a keyboard-deaf verdict — it proves the pump, not the hook — and (b) a \
+     repair is an UNHOOK plus a fresh SetWindowsHookExW, which is why the old and new HHOOK \
+     values are printed below: an unchanged handle means no repair happened.";
+
+/// PROBLEM 260 — which instrument proved the keyboard hook is not being called.
+///
+/// Both are CALLBACK-ONLY on the side that matters (`LAST_KB_CALLBACK`); they
+/// differ only in how they establish the other half of the proof — that input
+/// the OS accepted did not reach us.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum ProvenDeaf {
+    /// PROBLEM 257's original test. `GetAsyncKeyState` says Space is physically
+    /// DOWN right now, with no hold latched and no pass-through gate open, and
+    /// the keyboard callback has been silent past the threshold. See
+    /// `keyboard_deaf_with_space_down` for why law 3's lie makes this honest.
+    SpaceHeld,
+    /// The generalisation, and the one that would have caught the 2026-09-07
+    /// episode 105 seconds sooner. The OS input clock moved inside
+    /// `os_input_max_age_ms`, and OUR OWN MOUSE CALLBACK cannot account for
+    /// that input: the mouse hook's last callback is older than the input by
+    /// more than `mouse_attribution_margin_ms`. So something the OS accepted as
+    /// user input was not a mouse event this process saw — and the keyboard
+    /// callback has been silent past the threshold.
+    ///
+    /// **THIS IS NOT PROBLEM 101'S DELETED `kb_dead` BRANCH.** That one read
+    /// `kb_silence > 120_000 && ms_silence < 8_000` — "the mouse hook is
+    /// delivering and nobody has typed for two minutes" — which is a
+    /// description of reading a page, and it produced 95 of 255 false alarms.
+    /// The difference is the direction of the mouse test. That branch fired
+    /// when the mouse WAS delivering; this one fires only when the mouse is
+    /// demonstrably NOT delivering while the OS says input happened anyway. A
+    /// user reading a page moves the mouse, so the mouse callback accounts for
+    /// the OS clock and this returns `None`. A user typing with their hand off
+    /// the mouse into a hook that is no longer called is the only shape left.
+    InputUnaccountedFor,
+}
+
+/// PROBLEM 260 — the proven-deaf verdict, as one pure function.
+///
+/// Everything here is either a CALLBACK-ONLY clock, a wall-clock age, or a fact
+/// read from the OS on the watchdog thread. Note which way each non-callback
+/// input can push: `since_install_ms` and `modifier_active` can only SUPPRESS;
+/// `os_input_age_ms` can admit a verdict, and it is checked AGAINST the mouse
+/// callback rather than trusted on its own, which is the whole of PROBLEM 101's
+/// lesson applied here.
+///
+/// The caller supplies the premises this function does not check: by the time
+/// `watchdog_check` reaches it, an idle user, a NULL foreground (UAC secure
+/// desktop) and an elevated foreground (UIPI) have all already returned early.
+/// A re-hook cannot cure any of those, so they must never reach this verdict.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn proven_keyboard_deaf(
+    space_physically_down: bool,
+    modifier_active: bool,
+    stand_down: bool,
+    other_modifier: bool,
+    kb_callback_silence_ms: Option<u64>,
+    ms_callback_silence_ms: Option<u64>,
+    os_input_age_ms: u64,
+    since_install_ms: u64,
+    threshold_ms: u64,
+    grace_ms: u64,
+    os_input_max_age_ms: u64,
+    mouse_attribution_margin_ms: u64,
+) -> Option<ProvenDeaf> {
+    // 1. THE INSTALL GRACE STILL OUTRANKS EVERYTHING. A hook that has not had a
+    //    fair chance to be called cannot be proven deaf, and PROBLEM 236's
+    //    16:28:53.412 alarm — six seconds after launch, before any callback had
+    //    run — is the record of what skipping this costs.
+    if since_install_ms < grace_ms {
+        return None;
+    }
+    // 2. NEVER WHILE A HOLD IS LATCHED. The forced repair below is destructive
+    //    by design (it re-installs, which loses the Space-UP), and landing that
+    //    on a live hold is the owner's "it dies mid-press" — PROBLEM 236. The
+    //    other paths in `watchdog_check` have `hold_defers_rehook` for the case
+    //    where a repair really must happen during a hold; this path simply does
+    //    not run then. `reap_stale_hold()` runs at the TOP of `watchdog_check`,
+    //    above every early return, so a hold the hook has stopped feeding is
+    //    already cleared before this is consulted — the latch cannot wedge this
+    //    verdict shut.
+    if modifier_active {
+        return None;
+    }
+    // 3. THE KEYBOARD CALLBACK MUST HAVE FIRED ONCE SINCE THIS INSTALL AND THEN
+    //    STOPPED. `None` is UNKNOWN, never proof (PROBLEM 228) — a hook that has
+    //    never been called since the install is the failed-install case, and it
+    //    belongs to `classify_callback_liveness`'s `unknown_max_ms` bound, not
+    //    here. Keeping this path narrow is what makes the word "PROVEN" honest:
+    //    fired-then-stopped IS the timeout-eviction signature.
+    let kb_silence = kb_callback_silence_ms?;
+    if kb_silence < threshold_ms {
+        return None;
+    }
+    // 4. PROOF A: a key is physically down right now and we were not called for
+    //    it (PROBLEM 257). Delegated rather than re-implemented, so PROBLEM
+    //    257's test and this one can never disagree about what "Space is down
+    //    and we are deaf" means. The gates are excluded rather than measured
+    //    because in each of them the callback DID fire and chose to pass the
+    //    key on.
+    if keyboard_deaf_with_space_down(
+        space_physically_down,
+        modifier_active,
+        stand_down,
+        other_modifier,
+        kb_callback_silence_ms,
+        threshold_ms,
+    ) {
+        return Some(ProvenDeaf::SpaceHeld);
+    }
+    // 5. PROOF B: the OS saw input our mouse hook cannot account for.
+    //
+    //    The gates are deliberately NOT excluded here. `LAST_KB_CALLBACK` is
+    //    stamped in the first four lines of `kb_hook_proc`, ABOVE every gate, so
+    //    a fullscreen/excluded/bypass window still stamps it on every keystroke.
+    //    Silence past the threshold therefore means the callback was not entered
+    //    at all, whatever the gates say.
+    if os_input_age_ms <= os_input_max_age_ms {
+        // "Can our mouse hook explain that input?" — it can only if it was
+        // called at about the time the OS recorded the input. The margin covers
+        // the gap between the OS stamping `GetLastInputInfo` and our callback
+        // reaching its `tick_count()`; it is small on purpose, because widening
+        // it is how this test would decay back into PROBLEM 101's.
+        let mouse_accounts_for_it = matches!(
+            ms_callback_silence_ms,
+            Some(ms) if ms <= os_input_age_ms.saturating_add(mouse_attribution_margin_ms)
+        );
+        if !mouse_accounts_for_it {
+            return Some(ProvenDeaf::InputUnaccountedFor);
+        }
+    }
+    None
+}
+
+/// PROBLEM 260 — how long the forced repair must wait, given how many
+/// consecutive forced repairs delivered nothing.
+///
+/// Doubling from `base_ms`, capped at `max_ms`. The cap matters more than the
+/// curve: a genuinely hostile environment (another process re-installing a hook
+/// ahead of ours in a loop, a driver eating keys upstream of every hook) must
+/// not be able to drive a repair storm, and a repair that keeps not working is
+/// evidence the cure is not ours to apply.
+///
+/// The streak counts INEFFECTIVE repairs only — one keyboard callback after a
+/// repair resets it to zero, so the fast cadence is always available again the
+/// moment a repair demonstrably works.
+pub(crate) fn forced_repair_backoff_ms(ineffective_streak: u32, base_ms: u64, max_ms: u64) -> u64 {
+    // Saturating at 16 doublings keeps the shift in range whatever the streak.
+    let shift = ineffective_streak.min(16);
+    base_ms.saturating_mul(1u64 << shift).min(max_ms)
+}
+
+/// PROBLEM 260 — may a forced repair run right now?
+///
+/// `last_repair_age_ms` is `None` when this session has not forced one yet.
+/// This is the ONLY throttle on the proven-deaf path: the 60 s cooldown and the
+/// "last repair delivered events" test are deliberately not consulted — see the
+/// forced-repair block in `watchdog_check` for why.
+pub(crate) fn forced_repair_allowed(
+    last_repair_age_ms: Option<u64>,
+    ineffective_streak: u32,
+    base_ms: u64,
+    max_ms: u64,
+) -> bool {
+    match last_repair_age_ms {
+        None => true,
+        Some(age) => age >= forced_repair_backoff_ms(ineffective_streak, base_ms, max_ms),
     }
 }
 
@@ -230,13 +856,24 @@ pub fn drain_hook_diagnostics() {
         // the two halves of the deafness test would describe different windows
         // — which is the same class of mistake as the one being fixed.
         static LAST_REF_COUNT: AtomicU32 = AtomicU32::new(0);
+        // PROBLEM 236 — the mouse counter's baseline, seeded and advanced in
+        // exact lockstep with the reference one for the same reason: four
+        // numbers printed on one line must describe ONE window, or the line
+        // recreates the cross-window subtraction it was added to abolish.
+        static LAST_MS_COUNT: AtomicU32 = AtomicU32::new(0);
         if last == 0 {
             LAST_SEEN_REPORT.store(now, Ordering::Relaxed);
             KB_EVENTS_SEEN.store(0, Ordering::Relaxed);
             KB_EVENTS_OWN_FG.store(0, Ordering::Relaxed);
+            KB_EVENTS_INJECTED.store(0, Ordering::Relaxed);
             LAST_REF_COUNT.store(REF_KB_EVENTS.load(Ordering::Relaxed), Ordering::Relaxed);
+            LAST_MS_COUNT.store(MS_EVENTS.load(Ordering::Relaxed), Ordering::Relaxed);
         } else if now.saturating_sub(last) >= 60_000 {
             let seen = KB_EVENTS_SEEN.swap(0, Ordering::Relaxed);
+            // Swapped ADJACENTLY to `seen`, so the two describe the same
+            // window to within one callback. `saturating_sub` below absorbs
+            // the one event that can land between the two swaps.
+            let injected = KB_EVENTS_INJECTED.swap(0, Ordering::Relaxed);
             let own = KB_EVENTS_OWN_FG.swap(0, Ordering::Relaxed);
             // PROBLEM 218 — the exposure and the alarm rate that go with the
             // `own` numerator. Drained together so the three can never
@@ -289,6 +926,35 @@ pub fn drain_hook_diagnostics() {
                      deafness IS specific to our own window being focused; if they track, it \
                      is not (PROJECT_STATUS 2026-08-25 recorded this as open for want of a \
                      denominator)."
+                );
+            }
+            // ═══ PROBLEM 236 — THE ONE LINE, PRINTED ONCE PER WINDOW ═══
+            //
+            // Four callback-only counters for the SAME 60-second window, so
+            // "the primary sees keys but the witness is silent" stops being
+            // something a reader has to assemble out of three lines minutes
+            // apart. See `format_liveness_split` for how to read it.
+            //
+            // Printed whenever ANYTHING moved — a window in which the mouse
+            // hook fired and nothing else did is exactly the window a
+            // `both_dead` alarm gets raised in, so suppressing it would hide
+            // the case this line exists for. A genuinely idle window (all four
+            // zero) still prints nothing.
+            let ms_now = MS_EVENTS.load(Ordering::Relaxed);
+            let ms_events = ms_now.wrapping_sub(LAST_MS_COUNT.swap(ms_now, Ordering::Relaxed));
+            let real = seen.saturating_sub(injected);
+            if seen > 0 || ref_events > 0 || ms_events > 0 {
+                log::info!(
+                    "hook liveness split — {} in the last {elapsed_s}s. All four are \
+                     callback-only counters (PROBLEM 236): nothing but a hook proc can move \
+                     them, so this line is the whole instrument panel for one window. \
+                     primary_real 0 with primary_injected above it means the keyboard is dead \
+                     and 'saw N key event(s)' was counting Spaceadom typing to itself; \
+                     primary_real above 0 with reference 0 means the witness hook is being \
+                     evicted again (PROBLEM 230 — check install order in install_hooks); \
+                     mouse alone above 0 means the hook thread's pump is fine, so any \
+                     WATCHDOG alarm in this window was measuring silence, not death.",
+                    format_liveness_split(real, injected, ref_events, ms_events)
                 );
             }
             match classify_hook_window(seen, ref_events) {
@@ -365,8 +1031,26 @@ pub fn drain_hook_diagnostics() {
              is the line that explains it."
         );
     }
+    // PROBLEM 257 — a non-zero value here is a keystroke the OS accepted that no
+    // keyboard hook in this process saw. The WARN line that raised it names the
+    // foreground window; this is the count.
+    let od = OWN_DEAF_REHOOKS.swap(0, Ordering::Relaxed);
+    // PROBLEM 261 — the fallback's own stranded-hold count. Separate from
+    // `sr` on purpose: they are two different reapers watching two different
+    // witnesses, and one number covering both would make "which path stranded
+    // it?" unanswerable from the log.
+    let fr = drain_own_holds_reaped();
+    // PROBLEM 262 — the three new bounds, each with its own number. `dh` is the
+    // deafness-aware reap (item 1), `lb` the last-resort latch bound (item 4)
+    // and `rt` holds torn down by a repair (item 3). A non-zero `lb` in
+    // particular is a bug report, not health: it means every earlier bound
+    // missed and the ring was un-raisable until it fired.
+    let dh = DEAF_HOLDS_REAPED.swap(0, Ordering::Relaxed);
+    let lb = LATCH_BOUND_CLEARS.swap(0, Ordering::Relaxed);
+    let rt = REPAIR_HOLD_TEARDOWNS.swap(0, Ordering::Relaxed);
     if fs == 0 && by == 0 && ro == 0 && st == 0 && un == 0 && dr == 0 && rh == 0 && os == 0
-        && dm == 0 && ex == 0 && sr == 0 && pi == 0
+        && dm == 0 && ex == 0 && sr == 0 && pi == 0 && od == 0 && fr == 0 && dh == 0
+        && lb == 0 && rt == 0
     {
         return;
     }
@@ -375,7 +1059,10 @@ pub fn drain_hook_diagnostics() {
          typed-not-command(rollover):{ro} stuck-modifier-resets:{st} unmapped-keys:{un} \
          dropped-events:{dr} watchdog-reinstalls:{rh} passed-to-os(ctrl/alt/win held):{os} \
          space-dropped(modifier still held on release):{dm} excluded-app:{ex} \
-         stale-holds-reaped(lost Space-UP):{sr}"
+         stale-holds-reaped(lost Space-UP):{sr} keyboard-deaf-rehooks(Space down, no callback):{od}          own-window-holds-reaped(page stopped talking mid-hold):{fr} \
+         deaf-holds-reaped(hook not called at all):{dh} \
+         modifier-latch-bound-clears(latched past {MAX_MODIFIER_HOLD_MS}ms with no callbacks):{lb} \
+         repair-hold-teardowns(hold predated a re-hook):{rt}"
     );
     if ro > 0 {
         // The advice here used to say "set a SLOWER typing speed (a slower
@@ -581,7 +1268,296 @@ pub(crate) fn hold_is_stale(
         && since_last_tick_ms > grace_ms
 }
 
-/// Tear down a Space-hold whose auto-repeat has stopped arriving.
+// --- PROBLEM 262 — THE REAPER MUST WORK WHEN NO CALLBACK IS ARRIVING AT ALL --
+//
+// THE FAILURE THIS EXISTS FOR, measured on installed 1.0.106 (2026-09-07):
+//
+//   11:37:33.240  hold start (hold #11)                   <- a HOOK hold
+//   11:37:34.340  engine: combo Space+RightAlt received   <- SPACE_COMBO_SEEN := true,
+//                                                            and the LAST keyboard
+//                                                            callback of the session
+//   ... nothing ... for 166 seconds ...
+//   11:38:33.351  WATCHDOG alarm confirmed, but a Space hold is LIVE ... protected: 1
+//   11:38:41.352  ... protected: 2     11:39:08.352 ... 3     11:39:30.352 ... 4
+//
+// The keyboard hook was evicted one callback after the combo. The Space-UP was
+// therefore never delivered, `MODIFIER_ACTIVE` stayed latched, and every
+// instrument that could have ended the hold was keyed on a callback that was
+// never going to run again:
+//
+//   * `hold_is_stale` needs Space AUTO-REPEAT, and PROBLEM 219 stands it down
+//     entirely once a combo has been seen. Both halves are callback-fed.
+//   * `proven_keyboard_deaf` returns `None` while `modifier_active` — so the
+//     one path that BYPASSES every cooldown was itself held shut by the latch.
+//   * `own_window_space_down_accepted`'s guard 2 refuses a fallback hold while
+//     `MODIFIER_ACTIVE` is latched, so the page could not raise the ring
+//     either. That is the owner's symptom exactly: *the ring stopped appearing
+//     and only a restart cured it.*
+//
+// So the latch was unfalsifiable from inside the process, and it was cleared
+// after 166 s only by luck — a stray keyboard callback got through and hit the
+// combo branch's own 30 s `MAX_MODIFIER_HOLD_MS` bound, which is also
+// callback-fed. Three bounds below close it, in the order they should fire.
+//
+// GENERALISE: **an instrument that can only be read by the thing that has
+// failed is not an instrument.** Every liveness test for a hold must have at
+// least one term that a dead hook cannot suppress.
+
+/// PROBLEM 262 — how long the keyboard callback must have been silent before a
+/// LATCHED hold may be torn down on deafness evidence alone.
+///
+/// 3000 ms — double `OWN_DEAF_SILENCE_MS`, and the same figure as `BLIND_MS`.
+/// A hold is the one state where a false positive costs a live press (PROBLEM
+/// 236's *"it dies mid-press"*), so this path is deliberately asked for twice
+/// the silence the no-hold forced repair is. It is not the only term: the
+/// verdict underneath it is `proven_keyboard_deaf`, which additionally requires
+/// the OS to have accepted input our own mouse callback cannot account for.
+const HOLD_DEAF_SILENCE_MS: u64 = 3_000;
+
+/// The stuck-latch bound, hoisted out of `kb_hook_proc` (PROBLEM 262 item 4).
+///
+/// It was a `const` local to the combo branch, which meant the ONLY code that
+/// could enforce it was the keyboard callback — the exact code that stops
+/// running in the failure this bound is for. Same value, same meaning,
+/// enforced from two places now: the callback (unchanged) and the reaper,
+/// which runs on the pump and on `st-hud-pointer`.
+///
+/// Generous on purpose: people hold Space and READ the guide ring.
+pub(crate) const MAX_MODIFIER_HOLD_MS: u64 = 30_000;
+
+/// PROBLEM 262 — WHY a latched hold was torn down. Named rather than boolean so
+/// the log says which instrument spoke and a test can assert the reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HoldReap {
+    /// PROBLEM 218's original, unchanged: the keyboard hook IS being called,
+    /// Space's auto-repeat has stopped arriving, and no combo has stood the
+    /// test down.
+    AutoRepeatStopped,
+    /// PROBLEM 262: the hook is not being called at all, so no callback-fed
+    /// instrument can ever report on this hold again.
+    KeyboardDeaf,
+    /// PROBLEM 262 item 4 — belt and braces. The latch has outlived
+    /// `MAX_MODIFIER_HOLD_MS` and the callback has been silent for that whole
+    /// span, so nothing in the process is going to end it.
+    LatchedPastBound,
+}
+
+/// PROBLEM 262 — may a latched hold be torn down because the KEYBOARD IS DEAF?
+///
+/// This is the answer to PROBLEM 219's one real cost. 219 stood the reaper down
+/// after a combo for a correct reason: Windows auto-repeats only the
+/// most-recently-pressed key, so after Space+Tab the Space never repeats again
+/// and "no repeats" stops being evidence of anything. **That exemption is for a
+/// hold that is still being FED — one where the callback is alive and simply
+/// has nothing to say about Space.** It was never meant to protect a hold whose
+/// hook has stopped being called, because for that hold the exemption is
+/// permanent: there is no future event that could ever lift it.
+///
+/// So the two are separated by the one question 219 could not ask: *is the
+/// callback running at all?* `proven_deaf` is `proven_keyboard_deaf`'s verdict
+/// — the OS accepted input that our own mouse callback cannot account for while
+/// our keyboard callback stayed silent — and `kb_callback_silence_ms` is the
+/// callback-only clock, `None` when the hook has not fired since the last
+/// install (UNKNOWN, never proof — PROBLEM 228).
+///
+/// A combo-seen hold that is STILL receiving auto-repeat has a small
+/// `kb_callback_silence_ms` and no proven-deaf verdict, so it stays protected
+/// exactly as PROBLEM 219 requires.
+pub(crate) fn hold_is_deaf_stale(
+    modifier_active: bool,
+    proven_deaf: bool,
+    kb_callback_silence_ms: Option<u64>,
+    min_silence_ms: u64,
+) -> bool {
+    if !modifier_active || !proven_deaf {
+        return false;
+    }
+    matches!(kb_callback_silence_ms, Some(ms) if ms >= min_silence_ms)
+}
+
+/// PROBLEM 262 item 4 — the last-resort bound, and the one that needs no
+/// verdict at all.
+///
+/// `MODIFIER_ACTIVE` has been latched longer than `max_hold_ms` AND the
+/// keyboard callback has been silent for longer than `max_hold_ms` — i.e. there
+/// were no keyboard callbacks in that whole span. Nothing about that shape is
+/// recoverable: the callback is the only writer of the Space-UP that would end
+/// the hold, and it has not run.
+///
+/// `None` (never fired since the last install) is deliberately NOT accepted
+/// here, for PROBLEM 228's reason: a hook that has never been called cannot be
+/// measured. That case belongs to item 3 instead — a repair tears down any hold
+/// that predates it, so a latch cannot survive an install either way.
+pub(crate) fn modifier_latched_past_bound(
+    modifier_active: bool,
+    hold_age_ms: u64,
+    kb_callback_silence_ms: Option<u64>,
+    max_hold_ms: u64,
+) -> bool {
+    modifier_active
+        && hold_age_ms > max_hold_ms
+        && matches!(kb_callback_silence_ms, Some(ms) if ms > max_hold_ms)
+}
+
+/// PROBLEM 262 — the whole reaping decision, pure, in the order the bounds
+/// should fire: cheapest and most specific first, last resort last.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn hold_reap_reason(
+    modifier_active: bool,
+    repeats: u32,
+    since_last_tick_ms: u64,
+    grace_ms: u64,
+    combo_seen: bool,
+    proven_deaf: bool,
+    kb_callback_silence_ms: Option<u64>,
+    deaf_silence_ms: u64,
+    hold_age_ms: u64,
+    max_hold_ms: u64,
+) -> Option<HoldReap> {
+    if hold_is_stale(modifier_active, repeats, since_last_tick_ms, grace_ms, combo_seen) {
+        return Some(HoldReap::AutoRepeatStopped);
+    }
+    if hold_is_deaf_stale(modifier_active, proven_deaf, kb_callback_silence_ms, deaf_silence_ms) {
+        return Some(HoldReap::KeyboardDeaf);
+    }
+    if modifier_latched_past_bound(modifier_active, hold_age_ms, kb_callback_silence_ms, max_hold_ms)
+    {
+        return Some(HoldReap::LatchedPastBound);
+    }
+    None
+}
+
+/// The deafness evidence the reaper needs, gathered OFF the hook callback.
+///
+/// Returns `(proven_deaf, kb_callback_silence_ms)`. Every clock here is scoped
+/// to the current install and callback-only on the side that matters, exactly
+/// as `watchdog_check`'s own proven-deaf block scopes them — the two must never
+/// disagree about what "the keyboard callback is silent" means.
+///
+/// `modifier_active` is passed as `false` ON PURPOSE, and it is the only
+/// deliberate divergence. `proven_keyboard_deaf` suppresses itself while a hold
+/// is latched because ITS caller performs a destructive re-hook, and landing
+/// that on a live hold is PROBLEM 236. Here the question is the opposite one —
+/// *is this latch itself a lie?* — so the latch may not be the thing that
+/// answers it. Feeding it back in is precisely how the 1.0.106 episode wedged.
+#[cfg(windows)]
+fn deaf_evidence_for_reap() -> (bool, Option<u64>) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    let t = tick_count();
+    let installed_at = HOOKS_INSTALLED_AT.load(Ordering::Relaxed);
+    let since_install = t.saturating_sub(installed_at);
+    let scoped = |cb: u64| (cb != 0 && cb >= installed_at).then(|| t.saturating_sub(cb));
+    let kb_cb_silence = scoped(LAST_KB_CALLBACK.load(Ordering::Relaxed));
+    let ms_cb_silence = scoped(LAST_MS_CALLBACK.load(Ordering::Relaxed));
+    // Legal on this thread and forbidden in the callback (keyboard law 3).
+    let space_down = unsafe { (GetAsyncKeyState(VK_SPACE as i32) as u16 & 0x8000) != 0 };
+    let stand_down = FULLSCREEN_ACTIVE.load(Ordering::Relaxed)
+        || EXCLUDED_ACTIVE.load(Ordering::Relaxed)
+        || BYPASS_MODE.load(Ordering::Relaxed);
+    let proven = proven_keyboard_deaf(
+        space_down,
+        false,
+        stand_down,
+        other_modifier_down(),
+        kb_cb_silence,
+        ms_cb_silence,
+        millis_since_last_input(),
+        since_install,
+        HOLD_DEAF_SILENCE_MS,
+        INSTALL_GRACE_MS,
+        FORCED_INPUT_MAX_AGE_MS,
+        FORCED_MOUSE_ATTRIBUTION_MS,
+    )
+    .is_some();
+    (proven, kb_cb_silence)
+}
+
+#[cfg(not(windows))]
+fn deaf_evidence_for_reap() -> (bool, Option<u64>) {
+    (false, None)
+}
+
+/// How often the reaper may spend Win32 calls on the deafness evidence.
+///
+/// `st-hud-pointer` polls at 62 Hz while a hold is latched (`TICK_HELD_MS`),
+/// and the bounds underneath this are 3 s and 30 s: four times a second is
+/// ample and 62 is waste. Same figure and same reasoning as
+/// `OWN_HOLD_FG_CHECK_MS`, which throttles the fallback reaper's foreground
+/// probe for exactly this reason. PROBLEM 218's auto-repeat test is unthrottled
+/// and still evaluated on every tick — it costs two relaxed loads.
+const HOLD_DEAF_CHECK_MS: u64 = 250;
+/// Tick of the last `deaf_evidence_for_reap()`. Raced by the pointer thread and
+/// the pump; the worst outcome of losing that race is one skipped probe 250 ms
+/// before the next.
+static LAST_DEAF_PROBE: AtomicU64 = AtomicU64::new(0);
+
+/// PROBLEM 262 — how many holds each bound took down. All three are DRAINED
+/// into the 60 s `hook diagnostics` line, beside `STALE_HOLDS_REAPED`, and kept
+/// apart on purpose: one number covering all of them would make "which
+/// instrument had to save us?" unanswerable from the log, which is the question
+/// the next session will need.
+static DEAF_HOLDS_REAPED: AtomicU32 = AtomicU32::new(0);
+/// Item 4's counter. A non-zero value here means every earlier bound missed and
+/// the last-resort one fired — read it as a bug report, not as health.
+static LATCH_BOUND_CLEARS: AtomicU32 = AtomicU32::new(0);
+/// Item 3's counter: holds that were latched when a repair replaced the hook.
+static REPAIR_HOLD_TEARDOWNS: AtomicU32 = AtomicU32::new(0);
+
+/// PROBLEM 262 item 3 — a hold that predates a repair must not survive it.
+///
+/// A repair is an unhook plus a fresh `SetWindowsHookExW` (keyboard law 7). The
+/// Space-UP of any hold that was latched when that happened belongs to the hook
+/// that is now gone, so it can never be delivered and the latch is
+/// **unfalsifiable** from that instant on. Left standing it is PROBLEM 218's
+/// stranded ring with no reaper able to see it — and, since PROBLEM 259, it is
+/// worse than a stuck picture: guard 2 of `own_window_space_down_accepted`
+/// refuses a fallback hold while `MODIFIER_ACTIVE` is latched, so no NEW ring
+/// can be raised either. That is the owner's 2026-09-07 report exactly.
+///
+/// The ordinary re-hook path in `watchdog_check` has always done this inline
+/// and its log lines are unchanged. This is the same set for the PROVEN-deaf
+/// forced repair, which had none of it: `proven_keyboard_deaf` returns `None`
+/// while a hook hold is latched, so the hook-hold case looked impossible —
+/// except a FALLBACK hold could be live there even then, and since item 1 the
+/// reaper clears the hook latch on the same tick, which makes the ordering
+/// something to state rather than to assume.
+fn tear_down_hold_across_repair(what: &str) {
+    let had_hook_hold = MODIFIER_ACTIVE.swap(false, Ordering::SeqCst);
+    SPACE_INTERCEPTED.store(false, Ordering::Relaxed);
+    SPACE_ABORTED.store(false, Ordering::Relaxed);
+    // PROBLEM 219 — combo evidence may not survive into the next hold and leave
+    // the reaper standing down for a hold that never pressed a key.
+    SPACE_COMBO_SEEN.store(false, Ordering::Relaxed);
+    SPACE_REPEATS.store(0, Ordering::Relaxed);
+    if had_hook_hold {
+        // PROBLEM 206 — an armed chip or a half-eaten click must not outlive
+        // the hold that created it.
+        pointer::reset_on_eviction();
+    }
+    // Does its own pointer reset, but ONLY if it owned a hold (see there).
+    let had_own_hold = disarm_own_window_hold();
+    if !had_hook_hold && !had_own_hold {
+        return;
+    }
+    REPAIR_HOLD_TEARDOWNS.fetch_add(1, Ordering::Relaxed);
+    let hud_was_up = crate::guide_hud::is_visible();
+    log::warn!(
+        "hook: repair-tore-down-a-hold-that-predated-it-spaceadom — {what} replaced the hook \
+         chain while a Space-hold was still latched (hook hold: {had_hook_hold}, own-window \
+         fallback hold: {had_own_hold}; HUD was up: {hud_was_up}). That hold's Space-UP belongs \
+         to a hook that no longer exists, so it can never arrive and the latch is unfalsifiable \
+         from here on. Tearing it down: pointer latches reset, ring hidden. Left standing it is \
+         a ring nothing can hide AND — because guard 2 of the own-window fallback refuses a new \
+         hold while MODIFIER_ACTIVE is latched — no new ring can ever be raised, which is the \
+         owner's 'the ring stopped appearing entirely and only a restart cured it'. PROBLEM 262 \
+         item 3."
+    );
+    crate::guide_hud::hide_guide_hud();
+}
+
+/// Tear down a Space-hold that is over, by whichever of the three bounds can
+/// see it (PROBLEM 218's auto-repeat, PROBLEM 262's deafness, PROBLEM 262's
+/// last-resort latch bound).
 ///
 /// Returns true when it reaped. Called from `st-hud-pointer` (an independent
 /// thread, so it still runs when the hook thread is the thing that is stuck)
@@ -593,18 +1569,50 @@ pub(crate) fn hold_is_stale(
 /// one is not. Every reset below is the same set `watchdog_check` already
 /// performs after an eviction — this simply reaches them on a bounded clock
 /// instead of only when the watchdog happens to re-hook.
+///
+/// ORDER MATTERS AT THE CALL SITE. This runs at the very TOP of
+/// `watchdog_check`, above every early return, and that is now load-bearing in
+/// a second way: clearing `MODIFIER_ACTIVE` here is what un-suppresses
+/// `proven_keyboard_deaf` further down the same tick, so a genuinely deaf hook
+/// is reaped and then repaired in one pass instead of neither.
 pub fn reap_stale_hold() -> bool {
+    let modifier_active = MODIFIER_ACTIVE.load(Ordering::Relaxed);
+    // Cheapest possible exit, and it must stay first: with no hold latched
+    // there is nothing to prove and no Win32 call worth making. This runs at
+    // 4 Hz from the pointer thread and 1 Hz from the pump.
+    if !modifier_active {
+        return false;
+    }
     let repeats = SPACE_REPEATS.load(Ordering::Relaxed);
-    let since = tick_count().saturating_sub(SPACE_TICK_TS.load(Ordering::Relaxed));
-    if !hold_is_stale(
-        MODIFIER_ACTIVE.load(Ordering::Relaxed),
+    let now = tick_count();
+    let since = now.saturating_sub(SPACE_TICK_TS.load(Ordering::Relaxed));
+    let hold_age = now.saturating_sub(SPACE_DOWN_TS.load(Ordering::Relaxed));
+    // Throttled: PROBLEM 218's auto-repeat test below is free and runs on every
+    // tick; the deafness evidence costs two Win32 calls and is only useful at
+    // the resolution of a 3 s bound. `(false, None)` on the ticks in between is
+    // exactly the behaviour this function had before PROBLEM 262.
+    let (proven_deaf, kb_cb_silence) =
+        if now.saturating_sub(LAST_DEAF_PROBE.load(Ordering::Relaxed)) >= HOLD_DEAF_CHECK_MS {
+            LAST_DEAF_PROBE.store(now, Ordering::Relaxed);
+            deaf_evidence_for_reap()
+        } else {
+            (false, None)
+        };
+    let combo_seen = SPACE_COMBO_SEEN.load(Ordering::Relaxed);
+    let Some(reason) = hold_reap_reason(
+        modifier_active,
         repeats,
         since,
         STALE_HOLD_GRACE_MS,
-        SPACE_COMBO_SEEN.load(Ordering::Relaxed),
-    ) {
+        combo_seen,
+        proven_deaf,
+        kb_cb_silence,
+        HOLD_DEAF_SILENCE_MS,
+        hold_age,
+        MAX_MODIFIER_HOLD_MS,
+    ) else {
         return false;
-    }
+    };
     // Claim it before doing anything else: both callers race each other, and
     // a double teardown would emit two `guide-hud-hide` events.
     if !MODIFIER_ACTIVE.swap(false, Ordering::SeqCst) {
@@ -613,14 +1621,54 @@ pub fn reap_stale_hold() -> bool {
     SPACE_REPEATS.store(0, Ordering::Relaxed);
     SPACE_COMBO_SEEN.store(false, Ordering::Relaxed);
     let hud_was_up = crate::guide_hud::is_visible();
-    log::warn!(
-        "hook: a Space-hold has been latched for {since}ms with no auto-repeat after \
-         {repeats} of them — the Space-UP was never delivered, so this hold is over and \
-         nothing else was going to end it. Reaping it (HUD was up: {hud_was_up}). Left \
-         standing this is a ring on screen that no later hide can reach, with the pointer \
-         still arming chips behind it (PROBLEM 218)."
-    );
-    STALE_HOLDS_REAPED.fetch_add(1, Ordering::Relaxed);
+    let kb_desc = match kb_cb_silence {
+        Some(ms) => format!("{ms}ms ago"),
+        None => "NEVER since the last install".to_string(),
+    };
+    match reason {
+        HoldReap::AutoRepeatStopped => {
+            STALE_HOLDS_REAPED.fetch_add(1, Ordering::Relaxed);
+            log::warn!(
+                "hook: a Space-hold has been latched for {since}ms with no auto-repeat after \
+                 {repeats} of them — the Space-UP was never delivered, so this hold is over and \
+                 nothing else was going to end it. Reaping it (HUD was up: {hud_was_up}). Left \
+                 standing this is a ring on screen that no later hide can reach, with the pointer \
+                 still arming chips behind it (PROBLEM 218)."
+            );
+        }
+        HoldReap::KeyboardDeaf => {
+            DEAF_HOLDS_REAPED.fetch_add(1, Ordering::Relaxed);
+            log::warn!(
+                "hook: stale-hold-reaped-because-the-keyboard-is-proven-deaf-spaceadom — a \
+                 Space-hold has been latched {hold_age}ms and the keyboard callback last ran \
+                 {kb_desc} (threshold {HOLD_DEAF_SILENCE_MS}ms) while the OS accepted input our \
+                 own mouse callback cannot account for. So the hook is not being called at all, \
+                 and NOTHING on the callback was ever going to end this hold: its auto-repeat \
+                 cannot arrive from a hook nobody calls, and PROBLEM 219's combo stand-down \
+                 (combo seen: {combo_seen}) would have protected it forever. Reaping it (HUD was \
+                 up: {hud_was_up}). PROBLEM 219's exemption is KEPT for the case it was written \
+                 for — a hold still being FED by auto-repeat, where the callback is alive and \
+                 simply has nothing to say about Space; that hold has a small callback silence \
+                 and no proven-deaf verdict, so it is untouched by this branch. PROBLEM 262."
+            );
+        }
+        HoldReap::LatchedPastBound => {
+            LATCH_BOUND_CLEARS.fetch_add(1, Ordering::Relaxed);
+            log::warn!(
+                "hook: modifier-active-latched-past-the-bound-with-no-keyboard-callbacks-spaceadom \
+                 — MODIFIER_ACTIVE has been latched {hold_age}ms (bound {MAX_MODIFIER_HOLD_MS}ms) \
+                 and the keyboard callback last ran {kb_desc}, so there were NO keyboard callbacks \
+                 in that whole span. Clearing it (HUD was up: {hud_was_up}). This is the \
+                 last-resort bound: every earlier one missed, which means the deafness verdict did \
+                 not fire either (the user may simply not have touched anything), and until \
+                 1.0.107 the only code that enforced this 30s bound was the keyboard callback \
+                 itself — the exact code that had stopped running. If this line is in the log, \
+                 read it as a bug report and not as health: with MODIFIER_ACTIVE latched, guard 2 \
+                 of the own-window fallback refuses every new hold, so the ring cannot appear at \
+                 all until this fires. PROBLEM 262 item 4."
+            );
+        }
+    }
     // We ate the Space-down and can no longer honour the tap-types-a-space
     // contract for it — the up is gone. Clear the latch rather than leave it
     // to be mistaken for the NEXT hold's down (which is how a stale
@@ -793,10 +1841,80 @@ static WATCHDOG_LAST_REINSTALL: AtomicU64 = AtomicU64::new(0);
 /// from re-hooking because the supervisor that performs it gives up for good
 /// after 5 rebuilds in 10 minutes.
 static LAST_ESCALATION: AtomicU64 = AtomicU64::new(0);
+
+/// PROBLEM 236 — GetTickCount64 ms of the last `install_hooks()`, for ALL
+/// three hooks (they are installed in one call, so it is one instant).
+///
+/// `REF_HOOK_INSTALLED_AT` already records the same number, but under a name
+/// that says "the reference hook", and this value is now load-bearing for the
+/// keyboard and mouse decisions too. Two names for one instant is cheaper than
+/// a reader assuming the reference's install time also bounds the primary's.
+///
+/// It is the ONLY non-callback input to `classify_callback_liveness`, and it
+/// can only ever move the verdict towards NO alarm (see that function).
+static HOOKS_INSTALLED_AT: AtomicU64 = AtomicU64::new(0);
+
+/// PROBLEM 236 — tick at which the current alarm's repair was first deferred
+/// for a live Space hold, or 0 when nothing is being deferred.
+///
+/// The bound (`MAX_HOLD_DEFER_MS`) is measured from THIS, not from the hold's
+/// start: the question is how long the REPAIR has been waiting, not how long
+/// the owner has been holding Space.
+static ALARM_DEFERRED_AT: AtomicU64 = AtomicU64::new(0);
+/// Whether the current deferral episode has already printed its line. "Log the
+/// deferral once" — the tick is 1 s and a deferral can last 10 s, so without
+/// this it would be ten identical lines.
+static ALARM_DEFER_LOGGED: AtomicBool = AtomicBool::new(false);
+/// How many live holds this build has protected from a watchdog teardown.
+/// Printed in the deferral line itself so the number is never separated from
+/// the sentence that explains it.
+static HOLDS_PROTECTED: AtomicU32 = AtomicU32::new(0);
+
+/// PROBLEM 236 — tick of the last "would have alarmed" line, and how many
+/// watchdog ticks the current episode has suppressed.
+///
+/// The OLD rule (`both_dead || kb_only_dead` off the seeded clocks) is still
+/// evaluated in full, and every time it fires while the new rule declines, a
+/// line is printed saying so. That is what keeps the fortnight of data the
+/// PROBLEM 236 entry asked for accruing — the behaviour changed, the
+/// measurement did not.
+///
+/// Throttled to the rising edge of an episode plus one line a minute while it
+/// persists, with the suppressed tick count in the line. `grep -c "would have
+/// alarmed"` therefore counts EPISODES, not ticks; the old rule re-hooked and
+/// re-stamped its own clocks, so it could not have produced one line per tick
+/// either.
+static WOULD_HAVE_ALARMED_AT: AtomicU64 = AtomicU64::new(0);
+static WOULD_HAVE_ALARMED_TICKS: AtomicU32 = AtomicU32::new(0);
 /// Same for the MOUSE hook. Kept separate: the two hooks are evicted
 /// independently, and our keyboard callback is the heavy one — a dead
 /// keyboard hook with a live mouse hook is the realistic failure.
+///
+/// **SEEDED, exactly like `LAST_KB_EVENT`** — `install_hooks()` and the
+/// watchdog's idle early-return both write it. Right for the ALARM, wrong for
+/// any sentence claiming the mouse hook fired. Use `LAST_MS_CALLBACK`.
 static LAST_MS_EVENT: AtomicU64 = AtomicU64::new(0);
+/// PROBLEM 236 — the mouse half of PROBLEM 228's fix, which was never applied.
+///
+/// `both_dead` — the branch that produced **16 of 16 watchdog alarms** in the
+/// owner's 1.0.96 session (38 min, 2026-09-04 16:28→17:06) — is
+/// `kb_silence > BLIND_MS && ms_silence > BLIND_MS`, and BOTH of those are
+/// seeded clocks. The alarm line says so in its own text ("both are re-stamped
+/// clocks") and then calls the result "NEITHER hook saw anything". It cannot
+/// know that. Measured in that session, the ten alarms whose mouse clock was
+/// NOT a round re-stamp value read
+/// 3172, 3172, 3218, 3234, 3297, 3313, 3328, 3437, 3875, 5250 ms —
+/// eight of the ten within 437 ms of the 3000 ms trip line, which is the shape
+/// of a threshold being crossed by an ordinary pause, not of an eviction (an
+/// evicted hook's clock keeps growing; these do not).
+///
+/// Stamped ONLY from inside `ms_hook_proc`. Nothing else may ever write it —
+/// that is the whole value, and it is the same law `LAST_KB_CALLBACK` follows.
+static LAST_MS_CALLBACK: AtomicU64 = AtomicU64::new(0);
+/// How many times the MOUSE callback has actually been called since launch.
+/// A counter for the same reason `REF_KB_EVENTS` is one: a clock can be
+/// forged by anything holding a `store`, a callback-only counter cannot.
+static MS_EVENTS: AtomicU32 = AtomicU32::new(0);
 /// PROBLEM 132 — consecutive watchdog reinstalls with NO hook event in
 /// between. The 2026-08-17 outage ran 20 unbroken minutes at one reinstall a
 /// minute, each logging `reinstall ok: true`, because re-hooking is the only
@@ -813,6 +1931,91 @@ static BLIND_REINSTALLS: AtomicU32 = AtomicU32::new(0);
 /// not describe: the UIPI discriminator skips self-focus, so it fell straight
 /// through to the eviction verdict with no evidence either way.
 static BLIND_WHILE_OWN_FG: AtomicU32 = AtomicU32::new(0);
+
+/// PROBLEM 257 — how many times the watchdog re-hooked because Space was
+/// PHYSICALLY DOWN (per `GetAsyncKeyState`, read on the watchdog thread where
+/// it is legal) while our keyboard callback had not fired for
+/// `OWN_DEAF_SILENCE_MS`. Drained into the 60s `hook diagnostics` line as
+/// `keyboard-deaf-rehooks`. Non-zero is the fingerprint of the 2026-09-06
+/// regression: a keystroke the OS accepted (its key state changed) that never
+/// reached ANY `WH_KEYBOARD_LL` hook in this process.
+static OWN_DEAF_REHOOKS: AtomicU32 = AtomicU32::new(0);
+/// PROBLEM 257 — tick of the last deafness re-hook.
+///
+/// PROBLEM 260 — **it no longer gates anything.** `LAST_FORCED_REPAIR` and
+/// `forced_repair_allowed` are the rate limit now. This is kept, and still
+/// stamped by the forced repair, purely as the historical name for "when did a
+/// deafness repair last happen" — do not build a new gate on it, and do not
+/// read its presence as evidence that it decides something.
+static LAST_OWN_DEAF_REHOOK: AtomicU64 = AtomicU64::new(0);
+/// PROBLEM 257 — how long the keyboard callback may be silent while Space is
+/// physically held before that counts as proof. Windows' LONGEST auto-repeat
+/// delay is 1000 ms, so a working hook holding Space sees a repeat inside this
+/// window; 1500 ms leaves margin without waiting a whole hold.
+const OWN_DEAF_SILENCE_MS: u64 = 1_500;
+/// PROBLEM 257 — floor between two deafness re-hooks.
+///
+/// PROBLEM 260 — SUPERSEDED as the throttle on the proven-deaf path. A 15 s
+/// floor is not itself a suppression bug (it never blocked a repair in the
+/// measured log), but it is coarser than it needs to be and it counted only the
+/// Space-held instance of the verdict. `FORCED_REPAIR_BASE_MS` below is the
+/// floor now, with a backoff behind it; this constant is kept only so the
+/// PROBLEM 257 entry and this file still agree about what 1.0.103 did.
+#[allow(dead_code)]
+const OWN_DEAF_REHOOK_COOLDOWN_MS: u64 = 15_000;
+
+// ═══ PROBLEM 260 — THE FORCED REPAIR'S OWN BOOKKEEPING ═══════════════════
+//
+// Separate from every counter above, for one reason: `OWN_DEAF_REHOOKS` is
+// DRAINED by `drain_hook_diagnostics` (`swap(0)`) every 60 s, and the
+// PROBLEM 257 log line computed its `repair #N this session` from it. So the
+// owner's 2026-09-06/07 logs printed **"repair #1 this session" three separate
+// times**, and the obvious reading — "the counter never advanced, so that path
+// never really reinstalled" — was wrong. The number was right; the word
+// "session" was the lie. A counter that is drained cannot also be a session
+// total, and a log line that says "session" must read one that is never drained.
+
+/// PROBLEM 260 — forced repairs since process start. **NEVER DRAINED.** This is
+/// the number the log means when it says "this session".
+static FORCED_REPAIRS_TOTAL: AtomicU32 = AtomicU32::new(0);
+/// PROBLEM 260 — `tick_count()` of the last forced repair, 0 for "none yet".
+/// The rate limit and the effectiveness test both read it.
+static LAST_FORCED_REPAIR: AtomicU64 = AtomicU64::new(0);
+/// PROBLEM 260 — consecutive forced repairs after which the keyboard callback
+/// still had not fired. Drives `forced_repair_backoff_ms`; reset to 0 the
+/// moment a repair is followed by a genuine keyboard callback.
+static FORCED_REPAIR_INEFFECTIVE: AtomicU32 = AtomicU32::new(0);
+/// PROBLEM 260 — which backoff window the "holding off" line has already been
+/// printed for, so one backoff produces one line instead of one per tick.
+static FORCED_BACKOFF_LOGGED_FOR: AtomicU64 = AtomicU64::new(0);
+
+/// PROBLEM 260 — floor between two forced repairs when the last one WORKED.
+///
+/// Five seconds, matching the blind-retry floor the other path already uses, so
+/// the two cadences cannot fight. It is short because a proven-deaf verdict is
+/// the app being dead at the one job it exists for: at a 1 s tick the repair
+/// lands within a second of the proof, and 5 s bounds the worst case at twelve
+/// repairs a minute rather than sixty.
+const FORCED_REPAIR_BASE_MS: u64 = 5_000;
+/// PROBLEM 260 — the cap on the backoff. Sixty seconds is the old fixed
+/// cooldown: an environment where repairs keep failing is exactly the case that
+/// cooldown was written for, so the backoff decays INTO it rather than past it.
+const FORCED_REPAIR_MAX_MS: u64 = 60_000;
+/// PROBLEM 260 — how fresh the OS input clock must be for `InputUnaccountedFor`.
+///
+/// `watchdog_check` has already returned early above `2000`, so this is the same
+/// bound stated where the decision can see it rather than left implicit in a
+/// caller — the pure function must be testable without the caller.
+const FORCED_INPUT_MAX_AGE_MS: u64 = 2_000;
+/// PROBLEM 260 — how much later than the OS's input stamp our mouse callback
+/// may be and still be credited with having caused it.
+///
+/// 250 ms. `GetLastInputInfo` is stamped by the OS at the moment the event is
+/// queued and `LAST_MS_CALLBACK` at the moment our callback runs, so the true
+/// gap is single-digit milliseconds; the rest is slack for a busy pump. Widening
+/// this is how the test decays back into PROBLEM 101's deleted branch, so it may
+/// only ever move DOWN.
+const FORCED_MOUSE_ATTRIBUTION_MS: u64 = 250;
 /// Set by the watchdog, read by the message pump: tear this whole thread down
 /// so the PROBLEM 82 supervisor rebuilds it with a fresh pump and fresh hooks.
 static ESCALATE_RESTART: AtomicBool = AtomicBool::new(false);
@@ -1089,6 +2292,16 @@ pub static HOOK_SHUTDOWN: std::sync::atomic::AtomicBool =
 
 pub fn spawn_hook_thread(tx: Sender<HookEvent>, rollover_ms: u64) {
     ROLLOVER_MS.store(rollover_ms, Ordering::Relaxed);
+    // PROBLEM 259 — the own-window fallback needs the SAME channel, and this
+    // is the only place in the process that holds it without touching lib.rs.
+    // Registering it HERE (not at channel creation) also gives the fallback
+    // the right lifetime for free: in SAFE MODE (PROBLEM 253) the hook thread
+    // is never spawned, so no sender is registered and every fallback command
+    // declines — safe mode means "Space is an ordinary space", and a webview
+    // back-door into the engine would have quietly broken that promise.
+    // `safe_mode`'s "Turn back on" calls this function, so the fallback comes
+    // back with the hook and not before it.
+    register_inject_sender(tx.clone());
     // PROBLEM 95 — say which window is in force. Without this line the log
     // cannot answer "why did a shortcut not fire" or "why did one fire while
     // typing": the single number that decides both was invisible.
@@ -1291,7 +2504,19 @@ fn hook_thread_main(tx: Sender<HookEvent>) {
 /// THE DISCRIMINATOR. Install a SECOND `WH_KEYBOARD_LL` that does nothing but
 /// stamp a timestamp and call the next hook. Windows evicts the hook whose
 /// callback overran `LowLevelHooksTimeout`, not every hook in the chain — and
-/// this one cannot overrun, because it does one relaxed store. So:
+/// this one cannot overrun, because it does one relaxed store.
+///
+/// ═══ PROBLEM 230 — "CANNOT OVERRUN" WAS TRUE OF THE BODY AND FALSE OF THE
+/// HOOK, FOR AS LONG AS IT SAT IN FRONT OF THE PRIMARY ═══
+///
+/// `CallNextHookEx` is synchronous, so a hook's measured duration includes
+/// every hook BELOW it. Installed last, this one sat at the head of the chain
+/// and its wall clock was `one relaxed store + the whole primary callback +
+/// everything downstream` — the largest number in the chain, not the smallest.
+/// It was evicted first, and the owner's 1.0.95 log has it frozen for 6¼
+/// minutes at a time while the primary was demonstrably still counting keys.
+/// It is now installed FIRST, so it sits at the TAIL; see `install_hooks()`
+/// for why the tail costs nothing that any consumer reads. So:
 ///
 ///     reference firing + primary silent  =  the primary was evicted. Certain.
 ///     both silent                        =  nobody is typing. Ambiguous, ignore.
@@ -1342,8 +2567,11 @@ static REF_KB_EVENTS: AtomicU32 = AtomicU32::new(0);
 /// fact that used to masquerade as one.
 static REF_HOOK_INSTALLED_AT: AtomicU64 = AtomicU64::new(0);
 
-/// Reference hook. Do NOT add anything to this function. Its entire value is
-/// that it cannot be evicted for being slow, and every line added erodes that.
+/// Reference hook. Do NOT add anything to this function, and do NOT move it
+/// back to being installed last. Its entire value is that it cannot be evicted
+/// for being slow; a line added erodes that from the inside, and installing it
+/// ahead of the primary erodes it from the outside by making it carry the
+/// primary's duration on its own clock (PROBLEM 230).
 ///
 /// The `fetch_add` (PROBLEM 228) is the same cost as the store beside it — one
 /// lock-free relaxed RMW, no allocation, no syscall, no branch that can grow.
@@ -1367,10 +2595,44 @@ unsafe fn install_hooks() -> (
     windows::Win32::UI::WindowsAndMessaging::HHOOK,
 ) {
     use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, WINDOWS_HOOK_ID};
-    let kb = SetWindowsHookExW(WINDOWS_HOOK_ID(WH_KEYBOARD_LL), Some(kb_hook_proc), None, 0)
-        .unwrap_or_default();
-    let ms = SetWindowsHookExW(WINDOWS_HOOK_ID(WH_MOUSE_LL), Some(ms_hook_proc), None, 0)
-        .unwrap_or_default();
+
+    // ═══ PROBLEM 230 — INSTALL ORDER IS THE INSTRUMENT'S CORRECTNESS ═══
+    //
+    // `SetWindowsHookExW` puts the new hook at the HEAD of the chain, so the
+    // hook installed LAST is called FIRST. The reference hook used to be
+    // installed last. That put it in front of the primary — and because
+    // `CallNextHookEx` is SYNCHRONOUS, the reference's own wall-clock duration
+    // was its one relaxed add PLUS the entire primary callback PLUS every hook
+    // downstream of us. `LowLevelHooksTimeout` is measured on that wall clock.
+    //
+    // So the hook documented as "cannot be evicted for being slow" was, by
+    // construction, the SLOWEST hook in the chain and the first Windows drops.
+    // Measured on the owner's machine, 1.0.95, 2026-09-01:
+    //
+    //     09:50:40  ref last genuinely fired 238843ms ago (2237 total)
+    //     09:52:42  ref last genuinely fired 360859ms ago (2237 total)
+    //     09:52:47  ref last genuinely fired 365859ms ago (2237 total)
+    //     09:52:56  ref last genuinely fired 374859ms ago (2237 total)
+    //
+    // — the counter frozen for 6¼ MINUTES, across three re-hooks, while the
+    // primary hook reported `saw 49 key event(s)` and `saw 13 key event(s)` for
+    // windows inside that same span. The instrument was dead and the thing it
+    // measures was alive: the exact inversion of what it was built to detect,
+    // and the engine behind 514 watchdog alarms in one 3.8-hour session.
+    //
+    // INSTALLED FIRST NOW, so it lands at the TAIL, behind the primary. The
+    // price of the tail is that a key the primary SUPPRESSES never reaches it —
+    // and that price is zero, because of when the count is read:
+    //
+    //   * `classify_hook_window(primary_seen, ref_events)` consults the
+    //     reference ONLY when `primary_seen == 0`, and a primary that saw
+    //     nothing suppressed nothing, so everything passed down to the tail.
+    //   * `kb_only_dead` has the same premise — the primary is silent.
+    //   * an EVICTED primary is skipped by the system, so the tail still fires.
+    //
+    // The one case the tail undercounts is the case where the app is provably
+    // working, which no consumer asks about. Do not "restore" the old order.
+    //
     // PROBLEM 181 — the liveness reference. Kept in its own static rather than
     // returned, because every caller of install_hooks() treats its two return
     // values as "the hooks to unhook", and this one must be replaced on the
@@ -1385,6 +2647,24 @@ unsafe fn install_hooks() -> (
     let rf = SetWindowsHookExW(WINDOWS_HOOK_ID(WH_KEYBOARD_LL), Some(ref_kb_hook_proc), None, 0)
         .unwrap_or_default();
     REF_KB_HOOK.store(rf.0 as isize as u64, Ordering::SeqCst);
+    // PROBLEM 230 — and its install result was NEVER CHECKED. Every deafness
+    // verdict this app has ever printed rests on this handle, and a failed
+    // install was indistinguishable in the log from a hook that installed fine
+    // and then went quiet — the two have opposite meanings and the same
+    // symptom. `kb`'s failure has been logged since PROBLEM 66; this one was
+    // not. Say it, at WARN, exactly once per install.
+    if rf.is_invalid() {
+        log::warn!(
+            "hook: the REFERENCE keyboard hook failed to install — every 'DEAF' and \
+             'keys ARE reaching the chain' verdict from here on is uninformed, because \
+             the counter they read can no longer move. The primary hook is unaffected."
+        );
+    }
+    // The real hooks go in AFTER the reference, so they sit in front of it.
+    let kb = SetWindowsHookExW(WINDOWS_HOOK_ID(WH_KEYBOARD_LL), Some(kb_hook_proc), None, 0)
+        .unwrap_or_default();
+    let ms = SetWindowsHookExW(WINDOWS_HOOK_ID(WH_MOUSE_LL), Some(ms_hook_proc), None, 0)
+        .unwrap_or_default();
 
     HOOK_INSTALLED.store(!kb.is_invalid(), Ordering::Relaxed);
     // PROBLEM 184 — a reinstall means we may have missed key-ups while unhooked,
@@ -1409,6 +2689,18 @@ unsafe fn install_hooks() -> (
     // RECENTLY, so an un-seeded reference clock makes that test harder to
     // satisfy, never easier.
     REF_HOOK_INSTALLED_AT.store(now, Ordering::Relaxed);
+    // PROBLEM 236 — the boundary the callback-only clocks are read against.
+    // "Has the keyboard callback fired SINCE THE LAST INSTALL?" cannot be asked
+    // of `LAST_KB_CALLBACK` alone, because that clock is deliberately never
+    // reset (resetting it would make the install a writer of the instrument
+    // again — PROBLEM 228). Recording the boundary separately keeps the clock
+    // callback-only and still lets the decision scope it to this install.
+    HOOKS_INSTALLED_AT.store(now, Ordering::Relaxed);
+    // A fresh install ends any deferral that was waiting on the OLD hooks:
+    // whatever hold it was protecting has just had its state torn down by the
+    // caller, so there is nothing left to protect.
+    ALARM_DEFERRED_AT.store(0, Ordering::Relaxed);
+    ALARM_DEFER_LOGGED.store(false, Ordering::Relaxed);
     (kb, ms)
 }
 
@@ -1539,6 +2831,22 @@ unsafe fn watchdog_check(
     // keyboard, and `millis_since_last_input() >= 2000` is exactly that
     // person. Putting the reap under that gate would skip the case it is for.
     let _ = reap_stale_hold();
+    // PROBLEM 261 — the fallback's twin, on the same 1 s cadence and for the
+    // same reason: two homes, two different failure modes. This one runs when
+    // the pointer watcher failed to spawn (PROBLEM 124); the watcher's own
+    // call is the fast one. `true` — the pump ticks once a second, so the
+    // foreground probe here is already inside its own throttle.
+    let _ = reap_own_window_hold(true);
+
+    // PROBLEM 236 — a deferral belongs to ONE hold. The moment there is no hold
+    // (Space-up, or the reaper immediately above) the episode is over, so the
+    // next one starts its `MAX_HOLD_DEFER_MS` clock from zero rather than
+    // inheriting a stale start and expiring instantly.
+    if !MODIFIER_ACTIVE.load(Ordering::Relaxed)
+        && ALARM_DEFERRED_AT.swap(0, Ordering::Relaxed) != 0
+    {
+        ALARM_DEFER_LOGGED.store(false, Ordering::Relaxed);
+    }
 
     // PROBLEM 134 - sample the foreground here, on the timer, so the hook
     // callback never has to. This branch already runs Win32 calls safely.
@@ -1646,6 +2954,239 @@ unsafe fn watchdog_check(
         }
     }
 
+    // ═══ PROBLEM 257 — THE PROVEN-DEAF TEST, AND THE ONE REPAIR WE OWN ═══
+    //
+    // 2026-09-06, installed 1.0.102, owner's hardware keys: with the dashboard
+    // focused, holding Space showed no ring and launched nothing, while the
+    // same keys worked over every other app. The log for 00:53:52→00:54:52
+    // (our window foreground 60 of 60 samples): `mouse:2705`,
+    // `primary_real:0`, `reference:0` — the mouse hook on THIS thread was
+    // firing 45 times a second while neither keyboard hook fired once. That is
+    // not a blocked pump, not a gate (every gate counter read 0), not
+    // eviction (keys resumed the moment another window took focus, with no
+    // re-hook). Keystrokes the OS accepted never reached ANY WH_KEYBOARD_LL
+    // hook in this process while our own window had focus. See PROBLEM 257
+    // for the bracket (last good 2026-09-05 14:11, first bad 15:35) and the
+    // candidates; the mechanism is OUTSIDE this code and is not claimed here.
+    //
+    // What this block does is make the next occurrence PROVE ITSELF and try
+    // the one repair a process owns against a keyboard hook it cannot see:
+    // re-installing ours puts it back at the HEAD of the chain, ahead of
+    // anything installed since. If keys arrive after the re-hook, something
+    // ahead of us was swallowing them; if they still do not, the drop is
+    // upstream of every hook in this process. Either way the next liveness
+    // line says which — so this is an instrument first and a repair second.
+    //
+    // The evidence is `GetAsyncKeyState(VK_SPACE)`, legal on this thread and
+    // forbidden in the callback (law 3) — see `keyboard_deaf_with_space_down`
+    // for why the lie it tells about suppressed keys is what makes it honest
+    // here. Placed AFTER the elevation early-return above on purpose: UIPI
+    // silence is expected and a re-hook cannot cure it.
+    // ═══ PROBLEM 260 — GENERALISED, AND IT BYPASSES EVERY THROTTLE BELOW ═══
+    //
+    // MEASURED 2026-09-07, installed 1.0.103, with an independent WH_KEYBOARD_LL
+    // probe running beside the app (`_probe/ll-probe/events-run3.txt`):
+    //
+    //   10:10:24  the last keyboard callback of the episode
+    //   10:11:49  hook liveness split — primary_real:0 primary_injected:0
+    //                                   reference:0 mouse:217 in the last 60s
+    //   10:12:34.246  the FIRST alarm of the episode — 130 SECONDS LATE
+    //
+    // Nothing suppressed a repair in those 130 seconds. **No alarm was ever
+    // RAISED**, and that is a worse fault than a suppressed one, because every
+    // throttle below is downstream of a candidate that never existed:
+    //
+    //   * `both_dead` is `kb_silence > BLIND_MS && ms_silence > BLIND_MS`. The
+    //     mouse hook was firing 3-4 times a second throughout (mouse:217), so
+    //     `ms_silence` never crossed 3000 ms. False on every tick.
+    //   * `kb_only_dead` needs `ref_silence < BLIND_MS` — a LIVE reference hook.
+    //     The reference had been silent for 129 seconds too (reference:0). False
+    //     on every tick.
+    //   * so the tick at 10:11:20, with the keyboard 56 s dead and the user
+    //     typing, returned at `if !both_dead && !kb_only_dead { … return; }`
+    //     without printing a word.
+    //
+    // The alarm at 10:12:34.246 fired only because the mouse happened to fall
+    // quiet for 3032 ms at that instant. **The repair was waiting on the mouse
+    // to stop moving.** That is the hole: the two candidate tests between them
+    // cannot see "both keyboard hooks dead, mouse alive", which is precisely
+    // what `LowLevelHooksTimeout` eviction produces (see TIMEOUT_EVICTION_DESC).
+    //
+    // This block is therefore not a throttle bypass bolted onto the old path —
+    // it is a THIRD, INDEPENDENT candidate that reaches its own verdict from
+    // instruments the repair cannot write, and repairs on it directly. It sits
+    // above every throttle deliberately:
+    //
+    //   * the 60 s cooldown and the "last repair delivered events" test exist to
+    //     stop churn on UNEVIDENCED alarms — PROBLEM 236, where 6 of 16 alarms
+    //     printed `4000/4000` seeded clocks and each false repair killed a live
+    //     hold. **They keep that job in full for the `both_dead`/`kb_only_dead`
+    //     path below.** They must never apply to a PROVEN-deaf verdict: an
+    //     instrument-backed proof that the app is deaf is the one case where
+    //     waiting is strictly worse than repairing.
+    //   * the install grace, PROBLEM 228's never-fired-is-UNKNOWN law, and the
+    //     no-repair-during-a-live-hold rule all still apply — they are inside
+    //     `proven_keyboard_deaf`, where a test can reach them.
+    //   * the only throttle here is `forced_repair_allowed`: a 5 s floor with a
+    //     doubling backoff to 60 s once repairs stop helping, so a hostile
+    //     environment cannot produce a repair storm.
+    //
+    // `GetAsyncKeyState` is legal on this thread and forbidden in the callback
+    // (law 3). Placed AFTER the elevation and NULL-foreground early-returns on
+    // purpose: UIPI silence is expected and a re-hook cannot cure it.
+    {
+        use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+        let space_down = (GetAsyncKeyState(VK_SPACE as i32) as u16 & 0x8000) != 0;
+        let stand_down = FULLSCREEN_ACTIVE.load(Ordering::Relaxed)
+            || EXCLUDED_ACTIVE.load(Ordering::Relaxed)
+            || BYPASS_MODE.load(Ordering::Relaxed);
+        let t = tick_count();
+        let installed_at = HOOKS_INSTALLED_AT.load(Ordering::Relaxed);
+        let since_install = t.saturating_sub(installed_at);
+        let kb_cb_raw = LAST_KB_CALLBACK.load(Ordering::Relaxed);
+        let ms_cb_raw = LAST_MS_CALLBACK.load(Ordering::Relaxed);
+        // Scoped to THIS install, exactly as the PROBLEM 236 path scopes them:
+        // the clocks stay callback-only and the install boundary lives in its
+        // own static, so no repair ever writes an instrument (PROBLEM 228).
+        let scoped =
+            |cb: u64| (cb != 0 && cb >= installed_at).then(|| t.saturating_sub(cb));
+        let kb_cb_silence = scoped(kb_cb_raw);
+        let ms_cb_silence = scoped(ms_cb_raw);
+        let proven = proven_keyboard_deaf(
+            space_down,
+            MODIFIER_ACTIVE.load(Ordering::Relaxed),
+            stand_down,
+            other_modifier_down(),
+            kb_cb_silence,
+            ms_cb_silence,
+            user_input_ms,
+            since_install,
+            OWN_DEAF_SILENCE_MS,
+            INSTALL_GRACE_MS,
+            FORCED_INPUT_MAX_AGE_MS,
+            FORCED_MOUSE_ATTRIBUTION_MS,
+        );
+        if let Some(reason) = proven {
+            // DID THE LAST FORCED REPAIR WORK? Callback-only on both sides:
+            // `LAST_KB_CALLBACK` is written by `kb_hook_proc` and by nothing
+            // else, and `LAST_FORCED_REPAIR` is stamped after the install
+            // completes. A keyboard callback strictly after the repair means
+            // that repair restored delivery — so the backoff resets, and the
+            // fast 5 s cadence is available again for this new episode.
+            let last_forced = LAST_FORCED_REPAIR.load(Ordering::Relaxed);
+            if last_forced != 0 && kb_cb_raw > last_forced {
+                FORCED_REPAIR_INEFFECTIVE.store(0, Ordering::Relaxed);
+            }
+            let streak = FORCED_REPAIR_INEFFECTIVE.load(Ordering::Relaxed);
+            let since_repair = (last_forced != 0).then(|| t.saturating_sub(last_forced));
+            if !forced_repair_allowed(
+                since_repair,
+                streak,
+                FORCED_REPAIR_BASE_MS,
+                FORCED_REPAIR_MAX_MS,
+            ) {
+                // ONE line per backoff window, not one per tick.
+                let wait = forced_repair_backoff_ms(
+                    streak,
+                    FORCED_REPAIR_BASE_MS,
+                    FORCED_REPAIR_MAX_MS,
+                );
+                if FORCED_BACKOFF_LOGGED_FOR.swap(last_forced, Ordering::Relaxed) != last_forced
+                {
+                    log::warn!(
+                        "hook: KEYBOARD DEAF, PROVEN ({reason:?}) — but {streak} consecutive \
+                         forced repair(s) delivered no keyboard callback, so the backoff is \
+                         engaged and the next repair waits {wait}ms (base \
+                         {FORCED_REPAIR_BASE_MS}ms, cap {FORCED_REPAIR_MAX_MS}ms); the last \
+                         one was {}ms ago. Repairs that keep not working are evidence the \
+                         cure is not ours to apply — something upstream of every hook in \
+                         this process is eating the keys. {TIMEOUT_EVICTION_DESC}",
+                        since_repair.unwrap_or(0)
+                    );
+                }
+                // Deliberately NOT a `return`: the ordinary `both_dead` /
+                // `kb_only_dead` path below is unchanged and may still have
+                // something to say about this tick.
+            } else {
+                let ms_desc = match ms_cb_silence {
+                    Some(ms) => format!("{ms}ms ago"),
+                    None => "NEVER since the last install".to_string(),
+                };
+                let fg = foreground_desc();
+                // Handles BEFORE the repair. `install_hooks()` replaces the
+                // reference hook too, from its own static, so all three are
+                // printed and "repair #N" can never again be ambiguous about
+                // whether anything actually changed.
+                let old_kb = kb.0 as usize;
+                let old_ms = ms.0 as usize;
+                let old_ref = REF_KB_HOOK.load(Ordering::SeqCst);
+                // A GENUINE repair: unhook both primaries, then install afresh.
+                // `install_hooks()` unhooks and reinstalls the REFERENCE first
+                // (law 5 — it must land at the TAIL of the chain, behind the
+                // primary, or it becomes the slowest hook and the first Windows
+                // evicts; PROBLEM 230). Do not reorder these three calls.
+                let _ = UnhookWindowsHookEx(*kb);
+                let _ = UnhookWindowsHookEx(*ms);
+                let (nkb, nms) = install_hooks();
+                let new_ref = REF_KB_HOOK.load(Ordering::SeqCst);
+                *kb = nkb;
+                *ms = nms;
+                // PROBLEM 262 item 3 — the chain has just changed, so any hold
+                // latched a moment ago belongs to a hook that no longer exists.
+                // Its Space-UP can never arrive. Tear it down before anything
+                // else reads the latch.
+                tear_down_hold_across_repair("the PROVEN-deaf forced repair");
+                let n = FORCED_REPAIRS_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+                // Kept as the DRAINED 60s diagnostic counter it always was —
+                // `hook diagnostics … keyboard-deaf-rehooks:N`. It is no longer
+                // the source of the "#N this session" number, which is why that
+                // number used to read 1 three times over.
+                OWN_DEAF_REHOOKS.fetch_add(1, Ordering::Relaxed);
+                HOOK_REINSTALLS.fetch_add(1, Ordering::Relaxed);
+                // Provisional: this repair counts as ineffective until a
+                // keyboard callback arrives after it (checked at the top of
+                // this block on the next proven-deaf verdict).
+                FORCED_REPAIR_INEFFECTIVE.fetch_add(1, Ordering::Relaxed);
+                let stamp = tick_count();
+                LAST_FORCED_REPAIR.store(stamp, Ordering::Relaxed);
+                LAST_OWN_DEAF_REHOOK.store(stamp, Ordering::Relaxed);
+                // Strictly after the install, for the same reason the ordinary
+                // path stamps it late: the cooldown's `previous_worked` test
+                // compares callbacks against this instant.
+                WATCHDOG_LAST_REINSTALL.store(stamp, Ordering::Relaxed);
+                log::warn!(
+                    "hook: KEYBOARD DEAF, PROVEN (PROBLEM 260, was 257) — reason {reason:?}. \
+                     Our keyboard callback has not fired for {}ms (threshold \
+                     {OWN_DEAF_SILENCE_MS}ms) while the mouse callback fired {ms_desc} and the \
+                     OS says the user was active {user_input_ms}ms ago; install {since_install}ms \
+                     ago, no hold latched. Foreground: {fg}. FORCED REPAIR #{n} this session \
+                     (this counter is never drained — the old line read a 60s counter and \
+                     printed '#1' three times). Handles: keyboard {old_kb:#x} -> {:#x}, mouse \
+                     {old_ms:#x} -> {:#x}, reference {old_ref:#x} -> {new_ref:#x}; a handle \
+                     that did not change means the install failed. reinstall ok: {}. This \
+                     repair BYPASSED the 60s cooldown and the 'last repair delivered events' \
+                     test on purpose: those exist to stop churn on UNEVIDENCED alarms \
+                     (PROBLEM 236) and a proven-deaf verdict is not one. {TIMEOUT_EVICTION_DESC} \
+                     READ THE NEXT 'hook liveness split' LINE: primary_real above 0 means the \
+                     re-install cured it; still 0 means the drop is upstream of every hook here.",
+                    kb_cb_silence.unwrap_or(0),
+                    nkb.0 as usize,
+                    nms.0 as usize,
+                    !nkb.is_invalid()
+                );
+                if nkb.is_invalid() {
+                    log::error!(
+                        "hook: the forced repair's SetWindowsHookExW returned an INVALID \
+                         keyboard handle — the app has no keyboard hook at all right now. The \
+                         backoff above will retry; if this repeats, the PROBLEM 82 supervisor's \
+                         thread rebuild is the next move."
+                    );
+                }
+                return;
+            }
+        }
+    }
+
     let now = tick_count();
 
     // PROBLEM 78 — cooldown. A real eviction is fixed by ONE reinstall; if
@@ -1685,6 +3226,7 @@ unsafe fn watchdog_check(
         format!("the reference hook last genuinely fired {ref_silence}ms ago ({ref_seen} total)")
     };
 
+
     // PROBLEM 101 — the `kb_dead` branch is DELETED. It read:
     //     kb_dead = kb_silence > 120_000 && ms_silence < 8_000
     // i.e. "the mouse hook is delivering but nobody has typed for 2 minutes",
@@ -1721,6 +3263,23 @@ unsafe fn watchdog_check(
         // Events are arriving: whatever was wrong has cleared. Reset the
         // streak so escalation only ever fires for CONTINUOUS blindness.
         BLIND_REINSTALLS.store(0, Ordering::Relaxed);
+        // PROBLEM 236 — the "would have alarmed" throttle counts one episode at
+        // a time, so it resets here.
+        //
+        // PROBLEM 262 item 2 — THE DEFERRAL CLOCK NO LONGER DOES, WHILE A HOLD
+        // IS LATCHED. It used to reset unconditionally, and this line is where
+        // the 2026-09-07 wedge lived: `both_dead` needs the mouse callback to
+        // fall silent past `BLIND_MS`, so every tick with the user's hand on the
+        // mouse landed here and threw the episode away. The bound then required
+        // ten CONSECUTIVE alarm seconds, never got them, and four separate
+        // "Holds protected this session" lines were logged for one hold while
+        // the repair never came. See `defer_episode_ends_on_quiet_tick`.
+        if defer_episode_ends_on_quiet_tick(MODIFIER_ACTIVE.load(Ordering::Relaxed))
+            && ALARM_DEFERRED_AT.swap(0, Ordering::Relaxed) != 0
+        {
+            ALARM_DEFER_LOGGED.store(false, Ordering::Relaxed);
+        }
+        WOULD_HAVE_ALARMED_TICKS.store(0, Ordering::Relaxed);
         return;
     }
     // PROBLEM 218 — count the alarm HERE, where it is confirmed, and count it
@@ -1730,6 +3289,110 @@ unsafe fn watchdog_check(
     if FG_IS_SELF.load(Ordering::Relaxed) {
         WD_ALARMS_OWN_FG.fetch_add(1, Ordering::Relaxed);
     }
+
+    // ═══ PROBLEM 236 — ASK THE CLOCKS THE REPAIR CANNOT WRITE ═══
+    //
+    // `kb_silence`/`ms_silence` above are SEEDED: `install_hooks()` and this
+    // function's own idle early-return stamp both. The alarm keeps using them
+    // (that is what stops PROBLEM 101's false alarms), but the SENTENCE it
+    // prints — "NEITHER hook saw anything" — is a claim about the callbacks,
+    // and until now nothing in the line could support it. Measured over the
+    // owner's 1.0.96 session (2026-09-04 16:28→17:06): 16 alarms, all from
+    // `both_dead`, ZERO from `kb_only_dead`, zero DEAF lines — and 6 of the 16
+    // printed `kb`/`mouse` as identical round numbers, the fingerprint of one
+    // non-hook writer setting both.
+    //
+    // Same law as PROBLEM 228: the alarm may read the seeded clock, the
+    // sentence may not. Decision unchanged — see `alarm_is_evidenced`.
+    // Each Option is "how long since this hook's callback last ran, SCOPED TO
+    // THE CURRENT INSTALL". `None` = it has not fired since the hooks were last
+    // installed, which is not the same fact as "it is dead" — see
+    // `classify_callback_liveness`. The clocks themselves stay callback-only;
+    // the install boundary is a separate static (`HOOKS_INSTALLED_AT`) so that
+    // no repair ever writes an instrument again.
+    let installed_at = HOOKS_INSTALLED_AT.load(Ordering::Relaxed);
+    let since_install = now.saturating_sub(installed_at);
+    let scoped = |cb: u64| (cb != 0 && cb >= installed_at).then(|| now.saturating_sub(cb));
+    let kb_cb_silence = scoped(LAST_KB_CALLBACK.load(Ordering::Relaxed));
+    let ms_cb_silence = scoped(LAST_MS_CALLBACK.load(Ordering::Relaxed));
+    let ref_cb_silence = if ref_seen > 0 {
+        scoped(LAST_REF_KB_EVENT.load(Ordering::Relaxed))
+    } else {
+        None
+    };
+    let since = |v: Option<u64>| match v {
+        Some(ms) => format!("{ms}ms ago"),
+        None => "NEVER since the last install".to_string(),
+    };
+    // The EVIDENCED/UNEVIDENCED word is UNCHANGED, on purpose: it is the tag the
+    // PROBLEM 236 entry told the next session to grep, and the fortnight of data
+    // is worth more if the word keeps meaning exactly what it meant in 1.0.97.
+    // It no longer decides anything — `classify_callback_liveness` does.
+    let cb_desc = format!(
+        "{} — the callback-only clocks (nothing but a hook proc writes these) say keyboard {}, \
+         mouse {}, reference {}, against a {BLIND_MS}ms threshold",
+        if alarm_is_evidenced(kb_cb_silence, ms_cb_silence, ref_cb_silence, BLIND_MS) {
+            "EVIDENCED"
+        } else {
+            "UNEVIDENCED"
+        },
+        since(kb_cb_silence),
+        since(ms_cb_silence),
+        since(ref_cb_silence)
+    );
+
+    // ═══ PROBLEM 236, DECISION CHANGED — THE GATE ═══
+    //
+    // Everything above this line is the OLD rule, computed in full and left
+    // untouched so its verdict can still be logged. Below it, the seeded clocks
+    // no longer authorise a repair on their own.
+    let verdict = classify_callback_liveness(
+        kb_cb_silence,
+        ms_cb_silence,
+        ref_cb_silence,
+        since_install,
+        BLIND_MS,
+        INSTALL_GRACE_MS,
+        UNKNOWN_MAX_MS,
+    );
+    if !matches!(verdict, CallbackLiveness::Dead(_)) {
+        // The hooks are not dead by any instrument the repair cannot write, so
+        // the destructive re-hook does NOT happen. Whatever was wrong is not
+        // something re-hooking would fix, and re-hooking would kill a hold.
+        BLIND_REINSTALLS.store(0, Ordering::Relaxed);
+        // PROBLEM 262 item 2 — same correction as the `!both_dead` return
+        // above: a tick that decides not to repair may not restart the bound of
+        // a deferral episode whose hold is still latched.
+        if defer_episode_ends_on_quiet_tick(MODIFIER_ACTIVE.load(Ordering::Relaxed))
+            && ALARM_DEFERRED_AT.swap(0, Ordering::Relaxed) != 0
+        {
+            ALARM_DEFER_LOGGED.store(false, Ordering::Relaxed);
+        }
+        // Keep the fortnight of data the PROBLEM 236 entry asked for: say what
+        // the OLD rule would have DONE, every time. Rising edge plus one line a
+        // minute while the episode persists, with the tick count in the line.
+        let ticks = WOULD_HAVE_ALARMED_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+        let last_line = WOULD_HAVE_ALARMED_AT.load(Ordering::Relaxed);
+        if ticks == 1 || now.saturating_sub(last_line) >= 60_000 {
+            WOULD_HAVE_ALARMED_AT.store(now, Ordering::Relaxed);
+            let which = if kb_only_dead && !both_dead {
+                "kb_only_dead"
+            } else {
+                "both_dead"
+            };
+            log::info!(
+                "hook: WATCHDOG would have alarmed ({which}) and re-hooked here, and 1.0.96 \
+                 would have — kb {kb_silence}ms / mouse {ms_silence}ms, but those are the \
+                 RE-STAMPED clocks (`install_hooks()` and this watchdog's own idle return \
+                 write both). {cb_desc}. Verdict from the callback-only clocks: {verdict:?} \
+                 (install {since_install}ms ago; grace {INSTALL_GRACE_MS}ms, unknown bound \
+                 {UNKNOWN_MAX_MS}ms). {RULE_DESC} Standing down — {ticks} tick(s) in this \
+                 episode. {ref_desc}."
+            );
+        }
+        return;
+    }
+    WOULD_HAVE_ALARMED_TICKS.store(0, Ordering::Relaxed);
 
     // PROBLEM 182 — the cooldown, now ADAPTIVE and applied after measuring.
     //
@@ -1762,11 +3425,25 @@ unsafe fn watchdog_check(
         // keyboard had been silent for 5-29s.
         //
         // A keyboard repair is proven by a KEYBOARD event and by nothing else.
+        //
+        // REVIEW FIX 2026-09-04 — AND BY A CALLBACK, NOT BY A CLOCK THE
+        // WATCHDOG WRITES ITSELF. This test read `LAST_KB_EVENT`, which
+        // `install_hooks()` and this function's own idle early-return both
+        // re-stamp (see the block above the elevation test). So after any pause
+        // following a re-hook, "the last repair delivered events" was satisfied
+        // by the watchdog writing to its own instrument — 100 such lines in the
+        // owner's log, none of them evidence, and every one of them a full 60
+        // seconds of holding off while the hook may genuinely have been dead.
+        // The PROBLEM 228 note below already SAID the claim was false and left
+        // the decision alone pending data; the data arrived, so the decision
+        // moves onto the callback-only clocks that nothing but a hook proc
+        // writes.
+        let kb_cb = LAST_KB_CALLBACK.load(Ordering::Relaxed);
+        let ms_cb = LAST_MS_CALLBACK.load(Ordering::Relaxed);
         let previous_worked = if kb_only_dead {
-            LAST_KB_EVENT.load(Ordering::Relaxed) > last
+            kb_cb > last
         } else {
-            LAST_KB_EVENT.load(Ordering::Relaxed) > last
-                || LAST_MS_EVENT.load(Ordering::Relaxed) > last
+            kb_cb > last || ms_cb > last
         };
         if previous_worked {
             // PROBLEM 218 — this was `log::debug!`, and release builds run at
@@ -1780,27 +3457,27 @@ unsafe fn watchdog_check(
             let already = HOLDOFF_LOGGED_FOR.swap(last, Ordering::Relaxed);
             if already != last {
                 // PROBLEM 228 — WHAT THIS SENTENCE USED TO CLAIM, AND WHY IT
-                // WAS FALSE. It said "the last repair DID deliver events", but
-                // the test above reads `LAST_KB_EVENT`, which the watchdog's own
-                // idle early-return re-stamps every tick the user has been quiet
-                // for 2 s. So after ANY pause following a re-hook the claim was
-                // satisfied by the watchdog writing to its own instrument —
-                // 100 such lines in the current log, none of them evidence.
-                //
-                // The DECISION is left exactly as it was on purpose: changing it
-                // changes how often the app re-hooks, and that is a behaviour
-                // question to answer with a fortnight of honest data, not in the
-                // same pass that fixes the instrument. What changes is that the
-                // line now prints the CALLBACK-ONLY clock beside the seeded one,
-                // so the next fortnight of logs can settle it. Look for
-                // "genuine keyboard callback: none since the repair" — that is
-                // the hold-off happening on no evidence.
-                let genuine = LAST_KB_CALLBACK.load(Ordering::Relaxed);
-                let genuine_desc = if genuine > last {
-                    format!("a genuine keyboard callback arrived {}ms after it", genuine - last)
+                // WAS FALSE. It said "the last repair DID deliver events" off
+                // `LAST_KB_EVENT`, which the watchdog's own idle early-return
+                // re-stamps every tick the user has been quiet for 2 s. The
+                // 2026-09-04 review moved the DECISION onto the callback-only
+                // clocks (above), so the sentence and the test finally agree:
+                // this hold-off cannot happen on a re-stamp any more.
+                let genuine_desc = if kb_cb > last {
+                    format!("a genuine keyboard callback arrived {}ms after it", kb_cb - last)
+                } else if ms_cb > last {
+                    format!(
+                        "no keyboard callback since the repair, but a genuine MOUSE callback \
+                         arrived {}ms after it (this alarm was not keyboard-only, so the mouse \
+                         counts)",
+                        ms_cb - last
+                    )
                 } else {
-                    "genuine keyboard callback: NONE since the repair (the test above was \
-                     satisfied by the idle re-stamp, not by a key)"
+                    // Unreachable while `previous_worked` is what gates this
+                    // block; kept so a future edit that widens the test cannot
+                    // make the sentence lie without the log saying so.
+                    "no callback of any kind since the repair — the test that let this line \
+                     print has been widened and no longer matches what it claims"
                         .to_string()
                 };
                 log::info!(
@@ -1844,6 +3521,85 @@ unsafe fn watchdog_check(
     // "an event arrived after the repair" and the blind-retry path could
     // never fire. The whole adaptive cooldown was dead on arrival.
 
+    // ═══ PROBLEM 236 — LIVE-HOLD PROTECTION ═══
+    //
+    // Everything below this point is destructive by design, and correct for a
+    // REAL eviction: the Space-UP is genuinely lost, so `MODIFIER_ACTIVE`,
+    // `SPACE_INTERCEPTED`, `SPACE_ABORTED` and `SPACE_COMBO_SEEN` must be
+    // cleared, the pointer latches reset (PROBLEM 206) and the ring hidden
+    // (PROBLEM 177) or they outlive the hold forever. Landing that set on a
+    // hold that is still ALIVE is the owner's *"the ring dies mid-press"*.
+    //
+    // The premise that the hold is alive is callback-only on both sides:
+    // `LAST_KB_CALLBACK >= SPACE_DOWN_TS` says the keyboard callback was
+    // entered at or after this hold began. Nothing off the hook path writes
+    // either value.
+    //
+    // WHY THIS IS NOT A HOLE. `reap_stale_hold()` runs at the very TOP of this
+    // function, above every early return: a hold whose auto-repeat has stopped
+    // arriving has already been reaped before this line is reached. So the only
+    // hold that can defer here is one still being fed by the keyboard callback,
+    // or one that fired a combo (where PROBLEM 219 stood the reaper down on
+    // purpose because Windows moved auto-repeat to the other key). Both of
+    // those are holds a teardown would damage rather than repair. And the
+    // deferral is BOUNDED — see `MAX_HOLD_DEFER_MS`.
+    {
+        let hold_active = MODIFIER_ACTIVE.load(Ordering::Relaxed);
+        let space_down_at = SPACE_DOWN_TS.load(Ordering::Relaxed);
+        let saw_key_within_hold = space_down_at != 0
+            && LAST_KB_CALLBACK.load(Ordering::Relaxed) >= space_down_at;
+        // The clock starts on the FIRST alarm tick that finds a deferrable
+        // hold, not on the hold itself: the bound is "how long has the repair
+        // been waiting", not "how long has he been holding Space".
+        let deferrable = hold_active && saw_key_within_hold;
+        let mut started = ALARM_DEFERRED_AT.load(Ordering::Relaxed);
+        if deferrable && started == 0 {
+            ALARM_DEFERRED_AT.store(now, Ordering::Relaxed);
+            started = now;
+        }
+        let deferred_for = if started == 0 { 0 } else { now.saturating_sub(started) };
+        if hold_defers_rehook(hold_active, saw_key_within_hold, deferred_for, MAX_HOLD_DEFER_MS) {
+            let held_for = now.saturating_sub(space_down_at);
+            // ONCE per deferral episode. The tick is 1s and the bound is 10s,
+            // so an unthrottled line would be ten copies of the same sentence.
+            if !ALARM_DEFER_LOGGED.swap(true, Ordering::Relaxed) {
+                let n = HOLDS_PROTECTED.fetch_add(1, Ordering::Relaxed) + 1;
+                log::info!(
+                    "hook: WATCHDOG alarm confirmed, but a Space hold is LIVE — it has been \
+                     latched {held_for}ms and the keyboard callback was entered inside it, so \
+                     tearing it down here would clear MODIFIER_ACTIVE, reset the pointer \
+                     latches and hide the ring mid-press (PROBLEM 236). Deferring the re-hook \
+                     until the hold ends (Space-up, or PROBLEM 218's reaper), and no longer \
+                     than {MAX_HOLD_DEFER_MS}ms. {cb_desc}. Holds protected this session: {n}."
+                );
+            }
+            return;
+        }
+        // Not deferring: either there is no live hold, or the bound expired.
+        // Clear the episode so the next one logs again, and say so exactly once
+        // when the bound is what ended it — a deferral that timed out means the
+        // hold outlived the alarm, which is the case this bound exists for.
+        if started != 0 && deferred_for >= MAX_HOLD_DEFER_MS {
+            let held_for = now.saturating_sub(space_down_at);
+            let n = HOLDS_PROTECTED.load(Ordering::Relaxed);
+            log::warn!(
+                "hook: deferral-episode-bound-expired-proceeding-with-the-repair-spaceadom — the \
+                 Space hold outlived the deferred WATCHDOG alarm. EPISODE DURATION \
+                 {deferred_for}ms, measured from the FIRST deferred alarm of this episode (bound \
+                 {MAX_HOLD_DEFER_MS}ms); the hold itself has been latched {held_for}ms, and \
+                 {n} hold(s) have been protected this session. Proceeding with the re-hook, which \
+                 tears this hold down a few lines below — a hold latched by a hook that is about \
+                 to be replaced is unfalsifiable (PROBLEM 262 item 3). If the hold was real, this \
+                 is the one press PROBLEM 236's protection cannot save; if the hook was dead, the \
+                 repair is {deferred_for}ms late and no later. PROBLEM 262 item 2: before 1.0.107 \
+                 this line could not print at all once the mouse was moving, because every quiet \
+                 tick reset the clock this duration is measured from."
+            );
+        }
+        ALARM_DEFERRED_AT.store(0, Ordering::Relaxed);
+        ALARM_DEFER_LOGGED.store(false, Ordering::Relaxed);
+    }
+
     // Unhook FIRST (dead handles unhook harmlessly), log after — the old
     // hooks are gone by the time the disk write happens.
     let _ = UnhookWindowsHookEx(*kb);
@@ -1859,6 +3615,17 @@ unsafe fn watchdog_check(
     // PROBLEM 206 — nor the pointer latches: an armed chip whose release was
     // lost with the hook, or a suppressed click whose up never arrived.
     pointer::reset_on_eviction();
+    // PROBLEM 261 — and not the FALLBACK's latch either. A re-hook hides the
+    // ring a few lines below; a fallback hold left latched under a hidden ring
+    // would keep the mouse callback's `note_cursor` running against a chip
+    // snapshot nobody can see. The fallback's own reaper would catch it within
+    // 250 ms, but the repair already knows the hold is over — say so now.
+    if disarm_own_window_hold() {
+        log::info!(
+            "own-window fallback: the re-hook tore down a live fallback hold (PROBLEM 261) — \
+             its ring is being hidden below, so its pointer latches go with it."
+        );
+    }
 
     // PROBLEM 177, second half — and it must not leave the HUD stuck either.
     //
@@ -1902,13 +3669,22 @@ unsafe fn watchdog_check(
     // being delivered to the chain" are different faults with different causes,
     // and until the reference hook existed they were indistinguishable in this
     // line.
-    if kb_only_dead && !both_dead {
+    // REVIEW FIX 2026-09-04 — this branch is REACHABLE AGAIN, and it now keys
+    // off the verdict that actually authorised the repair rather than off the
+    // seeded clocks. It was dead code from the moment the gate above accepted a
+    // live reference hook as proof of life: `kb_only_dead`'s premise IS a live
+    // reference, so every alarm that would have printed this sentence was
+    // vetoed one screen earlier. `Dead(KbOnly)` is exactly "the reference is
+    // being called and our primary is not", which is what this line says.
+    if matches!(verdict, CallbackLiveness::Dead(DeadKind::KbOnly)) {
         log::warn!(
             "hook: WATCHDOG — the KEYBOARD hook alone was evicted. {ref_desc}, so keys ARE \
              reaching the chain, but ours has been silent for \
              {kb_silence}ms (mouse {ms_silence}ms, user active {user_input_ms}ms ago). \
              Foreground: {fg}. This is the failure `both_dead` could never see — it needs BOTH \
-             hooks quiet, and the mouse hook keeps it false. Re-hooking. reinstall ok: {}",
+             hooks quiet, and the mouse hook keeps it false. {cb_desc}. {RULE_DESC} This alarm \
+             PASSED that rule (install {since_install}ms ago). Re-hooking. \
+             reinstall ok: {}",
             !nkb.is_invalid()
         );
     } else {
@@ -1923,8 +3699,10 @@ unsafe fn watchdog_check(
             "hook: WATCHDOG — user active {user_input_ms}ms ago but NEITHER hook saw anything \
              (kb {kb_silence}ms / mouse {ms_silence}ms — both are re-stamped clocks; \
              {ref_desc}). Foreground: {fg}. \
-             Elevation was ALREADY ruled out above, so this is NOT UIPI. Re-hooking. \
-             reinstall ok: {}",
+             Elevation was ALREADY ruled out above, so this is NOT UIPI. {cb_desc}. \
+             {RULE_DESC} This alarm PASSED that rule (install {since_install}ms ago), which \
+             is why it was allowed to re-hook at all — 1.0.96 re-hooked on the re-stamped \
+             clocks alone and did it every ~2.4 minutes. Re-hooking. reinstall ok: {}",
             !nkb.is_invalid()
         );
     }
@@ -2020,6 +3798,27 @@ unsafe extern "system" fn kb_hook_proc(
     // fire?". This one can, because this line is its only writer.
     LAST_KB_CALLBACK.store(now, Ordering::Relaxed);
 
+    // PROBLEM 104 — count EVERY key before any decision.
+    //
+    // PROBLEM 230 — AND IT HAS TO BE *EVERY* KEY, BECAUSE OF WHAT IT IS
+    // COMPARED AGAINST. This add used to sit ~50 lines below, underneath the
+    // `dwExtraInfo == MAGIC_INJECTED` early return, while the reference hook
+    // counts on `n_code >= 0` with no cookie test at all. The two counters
+    // therefore measured DIFFERENT POPULATIONS — and
+    // `classify_hook_window(primary_seen, genuine_ref_events)` subtracts one
+    // from the other. A 60-second window whose only keyboard traffic was this
+    // app's OWN injection (`inject_space`, `force_foreground`'s synthetic tap —
+    // both reachable from a tray click or a dashboard button, with nobody
+    // touching the keyboard) gave `ref_events > 0, primary_seen == 0`: a
+    // verdict of DEAF, at WARN, with a Sentry event, produced by the app
+    // typing to itself while the hook worked perfectly.
+    //
+    // Moved above the cookie test so the two halves of the subtraction count
+    // the same events. This is what the doc comment on `KB_EVENTS_SEEN` has
+    // claimed since PROBLEM 104 ("incremented on entry, before any branch") and
+    // what the code did not do.
+    KB_EVENTS_SEEN.fetch_add(1, Ordering::Relaxed);
+
     const MAGIC_INJECTED: usize = 0x7A7A7A7A;
     // --- Ignore OUR OWN synthetic inputs to prevent infinite loops ---
     //
@@ -2030,6 +3829,15 @@ unsafe extern "system" fn kb_hook_proc(
     // genuinely physical keystrokes. The magic cookie is sufficient to break
     // the feedback loop, because every key we synthesise carries it.
     if ks.dwExtraInfo == MAGIC_INJECTED {
+        // PROBLEM 236 — the split `KB_EVENTS_SEEN` alone cannot report.
+        // PROBLEM 230 was right to count injections in the total (both sides of
+        // `classify_hook_window` must count the same population), and it left
+        // `saw N key event(s)` unable to say whether those N were a person
+        // typing or this app injecting to itself with the real keyboard dead.
+        // Counting them SEPARATELY answers both questions from one callback:
+        // the total stays honest for the subtraction, and `total - injected` is
+        // the real traffic. One relaxed add on a branch already taken.
+        KB_EVENTS_INJECTED.fetch_add(1, Ordering::Relaxed);
         return CallNextHookEx(None, n_code, w_param, l_param);
     }
 
@@ -2053,10 +3861,10 @@ unsafe extern "system" fn kb_hook_proc(
     // reads them and does the logging safely off the hook path.
     // ===================================================================
 
-    // PROBLEM 104 — count EVERY key before any decision. Two atomics and one
-    // GetForegroundWindow/GetWindowThreadProcessId pair; no allocation, no
-    // lock, no logging, so the callback still returns in microseconds.
-    KB_EVENTS_SEEN.fetch_add(1, Ordering::Relaxed);
+    // (PROBLEM 104's `KB_EVENTS_SEEN.fetch_add` used to live HERE, under the
+    // injected-cookie early return. PROBLEM 230 moved it to the top of the
+    // callback — see the comment there for why counting a different population
+    // than the reference hook produced false DEAF verdicts.)
 
     // PROBLEM 184 — maintain the Ctrl/Alt/Win mask from the events themselves,
     // BEFORE the fullscreen and bypass early returns below, because a modifier
@@ -2336,7 +4144,16 @@ unsafe extern "system" fn kb_hook_proc(
         // Generous on purpose: people hold Space and READ the guide HUD.
         // A latched modifier only mistypes until the user taps Space again,
         // so err on the side of never interrupting a real hold.
-        const MAX_MODIFIER_HOLD_MS: u64 = 30_000;
+        //
+        // PROBLEM 262 item 4 — `MAX_MODIFIER_HOLD_MS` used to be declared HERE,
+        // as a `const` local to this branch, which meant the only code in the
+        // process that could enforce it was this callback. That is the exact
+        // code that stops running when the hook is evicted, so the bound could
+        // not fire in the one failure it was written for: on 2026-09-07 a hold
+        // stayed latched 166 s and was cleared only when a stray callback
+        // happened to reach this line. Same constant, same value, now at module
+        // scope so `reap_stale_hold` enforces it too — from the pump and from
+        // `st-hud-pointer`, neither of which needs the hook to be alive.
         let latched_ms = now.saturating_sub(SPACE_DOWN_TS.load(Ordering::Relaxed));
         if latched_ms > MAX_MODIFIER_HOLD_MS {
             STUCK_MODIFIER.fetch_add(1, Ordering::Relaxed);
@@ -2522,7 +4339,16 @@ unsafe extern "system" fn ms_hook_proc(
     // PROBLEM 65 — liveness stamp (see kb_hook_proc). Must be BEFORE the
     // MODIFIER_ACTIVE early-return or the watchdog only sees mouse life
     // while Space is held.
-    LAST_MS_EVENT.store(tick_count(), Ordering::Relaxed);
+    let ms_now = tick_count();
+    LAST_MS_EVENT.store(ms_now, Ordering::Relaxed);
+    // PROBLEM 236 — the same instant and the same event, in a clock and a
+    // counter NOTHING ELSE MAY WRITE. `LAST_MS_EVENT` above is re-stamped by
+    // `install_hooks()` and by the watchdog's idle early-return, so it cannot
+    // answer "did the mouse hook actually fire?" — and that question is half of
+    // `both_dead`, which raised every alarm in the owner's 1.0.96 session.
+    // Two relaxed writes beside the one already here (PROBLEM 58 envelope).
+    LAST_MS_CALLBACK.store(ms_now, Ordering::Relaxed);
+    MS_EVENTS.fetch_add(1, Ordering::Relaxed);
     let msg = w_param.0 as u32;
 
     // PROBLEM 206 — the second half of a suppressed click, and it must run
@@ -2544,7 +4370,25 @@ unsafe extern "system" fn ms_hook_proc(
     if EXCLUDED_ACTIVE.load(Ordering::Relaxed) {
         return CallNextHookEx(None, n_code, w_param, l_param);
     }
-    if !MODIFIER_ACTIVE.load(Ordering::Relaxed) {
+    // PROBLEM 261 — "is a hold latched?", asked of BOTH witnesses.
+    //
+    // This used to read `MODIFIER_ACTIVE` alone, and that single load is the
+    // whole of the owner's 1.0.105 report: with the dashboard focused the
+    // keyboard hook is never called (PROBLEM 257), so `MODIFIER_ACTIVE` is
+    // false for the entire hold, so this gate returned before `note_cursor`
+    // ("it's not seeing my cursor movement") and before the `WM_LBUTTONDOWN`
+    // branch below ("it's not opening apps when clicked"). The ring was drawn
+    // by the engine, which the fallback DOES reach; the pointer hangs off the
+    // mouse callback, which it did not.
+    //
+    // COST: one extra relaxed load per mouse event when no hook hold is
+    // latched, i.e. on the common path. Nothing else changes — no branch, no
+    // call, no allocation. `hold_latched` is `#[inline(always)]` and short-
+    // circuits, so a hook hold pays nothing at all (PROBLEM 58's envelope).
+    if !hold_latched(
+        MODIFIER_ACTIVE.load(Ordering::Relaxed),
+        OWN_HOLD_ACTIVE.load(Ordering::Relaxed),
+    ) {
         return CallNextHookEx(None, n_code, w_param, l_param);
     }
 
@@ -2611,6 +4455,584 @@ fn send_event(event: HookEvent) {
             }
         }
     });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PROBLEM 259 — THE OWN-WINDOW FALLBACK
+//
+// PROBLEM 257, measured live on 2026-09-07: while our own WebView2 window
+// holds the foreground, NEITHER keyboard hook in this process is called —
+// primary_real:0, reference:0, mouse:2705 in the same minute on the same
+// thread — and re-hooking does not recover it. The hook is not deciding
+// anything about those keys; it is not being asked.
+//
+// The dashboard PAGE, however, receives ordinary `keydown`/`keyup` for them:
+// it is the window with focus, so the events reach it through the normal
+// WebView2 input path, which is upstream of nothing we lost. So the page can
+// be the witness the hook cannot be, and `src/own-window-keys.ts` feeds what
+// it sees back in through the three `own_window_*` commands.
+//
+// THE ONE THING THIS MUST NEVER DO IS DOUBLE-FIRE. If the hook is healthy over
+// our window (on another machine, or after the OS-side cause goes away) both
+// paths see the same Space and the user gets two holds, two rings, and two
+// launches. Three independent guards make that structurally impossible:
+//
+//   1. FOREGROUND. The fallback only ever acts while OUR window is the
+//      foreground window — the exact and only situation PROBLEM 257 describes.
+//   2. DEDUPE. If the hook stamped a Space-down inside the last
+//      `OWN_WINDOW_DEDUPE_MS`, or has a hold latched right now
+//      (`MODIFIER_ACTIVE`), the page's Space-down is dropped: the hook got
+//      there first and owns this hold.
+//   3. OWNERSHIP. `own_window_key` and `own_window_space_up` do nothing unless
+//      the fallback itself accepted the matching Space-down. A hold belongs to
+//      exactly one path for its whole life; there is no interleaving.
+//
+// Nothing here runs on the hook callback. These functions are called from
+// Tauri command handlers, where logging, `GetForegroundWindow` and a mutex are
+// all legal (the same reasoning as PROBLEM 243's shown-over line).
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// How recently the HOOK must have stamped a Space-down for the page's
+/// Space-down to be read as a duplicate of it rather than a new hold.
+///
+/// 100 ms: far longer than the microseconds between the hook's `send_event`
+/// and the page's `invoke` for one physical press, and far shorter than the
+/// fastest realistic gap between two deliberate Space presses (~120 ms even
+/// for a fast double-tap).
+pub(crate) const OWN_WINDOW_DEDUPE_MS: u64 = 100;
+
+/// The fallback's own stuck-hold bound, mirroring `MAX_MODIFIER_HOLD_MS` in
+/// the combo branch. A page that is torn down mid-hold (navigation, a crash,
+/// a reload) never sends its `keyup`, and without this the fallback would
+/// stay latched forever and hand the next stray `own_window_key` a combo.
+pub(crate) const OWN_WINDOW_MAX_HOLD_MS: u64 = 30_000;
+
+/// The engine channel, cloned out of `spawn_hook_thread`. `None` until the
+/// hook thread is spawned — which is also the safe-mode answer (see there).
+static INJECT_TX: std::sync::Mutex<Option<Sender<HookEvent>>> = std::sync::Mutex::new(None);
+
+/// Tick of the Space-down the FALLBACK accepted, or 0 for "no fallback hold".
+/// Written only by the `own_window_*` commands, never by the callback.
+static OWN_HOLD_TS: AtomicU64 = AtomicU64::new(0);
+/// Has the current fallback hold already fired a combo? Reported back on
+/// `SpaceUp { modifier_fired }` so the engine sees the same shape the hook
+/// would have sent.
+static OWN_HOLD_COMBO: AtomicBool = AtomicBool::new(false);
+/// How many holds the fallback has served. Purely for the log line, so one
+/// episode reads as an episode rather than as scattered lines.
+static OWN_WINDOW_HOLDS: AtomicU32 = AtomicU32::new(0);
+
+// --- PROBLEM 261 — the fallback hold's OWN latch -------------------------
+//
+// THE FAILURE. 1.0.105 shipped PROBLEM 259's fallback and it drew the ring
+// inside the dashboard exactly as asked. It armed NOTHING: the owner's report
+// on 2026-09-07 is *"it's not seeing my cursor movement and it's not opening
+// apps when clicked"*, with pointer aiming working normally over every other
+// app. Pointer activation was never wired to the second witness.
+//
+// WHY. Every gate pointer activation passes through asks `MODIFIER_ACTIVE`,
+// and `MODIFIER_ACTIVE` is written by the keyboard CALLBACK — the one thing
+// that by definition never runs for a fallback hold (PROBLEM 257). Three
+// gates, all of them shut:
+//   1. `ms_hook_proc` returns `CallNextHookEx` before `note_cursor`, so no
+//      cursor position is ever recorded — "not seeing my cursor movement".
+//   2. The same early return sits above the `WM_LBUTTONDOWN` branch, so
+//      gesture B never runs — "not opening apps when clicked".
+//   3. `HoldTracker::tick`'s `live` term is
+//      `enabled && modifier_active && hud_visible && !blocked`, so even with a
+//      cursor the poller could not arm.
+// And a fourth, quieter one: the poller identifies WHICH hold a tick belongs
+// to by `SPACE_DOWN_TS`, also callback-written. A fallback hold reuses the
+// last hook hold's stamp (or 0 at boot), so `CURSOR_STAMP >= hold_ts` would
+// have accepted a cursor position from a previous hold.
+//
+// WHY NOT JUST SET `MODIFIER_ACTIVE` FROM HERE. It is the obvious fix and it
+// is wrong, for four independent reasons — this comment is the record so it is
+// not "simplified" back:
+//   * **It is guard 2.** `own_window_space_down_accepted` refuses a fallback
+//     hold while `MODIFIER_ACTIVE` is latched, because a latched hook hold is
+//     the same physical press. If the fallback set it, a fallback hold whose
+//     Space-UP was lost would refuse EVERY later fallback hold, permanently.
+//     PROBLEM 259 states the invariant outright: `SPACE_DOWN_TS` and
+//     `MODIFIER_ACTIVE` are *read, never written* by this path, *which is why
+//     they can arbitrate*. An arbiter may not be a party.
+//   * **It is the deafness verdict.** `proven_keyboard_deaf` takes
+//     `MODIFIER_ACTIVE` as evidence a hold is in progress. A fallback hold
+//     that set it would talk the PROBLEM 260 instrument out of the very
+//     verdict the fallback exists because of.
+//   * **It arms the keyboard callback.** `if MODIFIER_ACTIVE && is_down` is
+//     the combo branch. Alt-Tab mid-hold into a window where the hook is NOT
+//     deaf and the next letter typed there is eaten as a shortcut.
+//   * **It breaks the hook's own Space-down branch**, which reads a latched
+//     `MODIFIER_ACTIVE` as "this is an auto-repeat" and sends no `SpaceDown`.
+//
+// SO THE FALLBACK GETS ITS OWN LATCH, and every consumer that asked
+// "is a hold latched?" is changed to ask BOTH. `MODIFIER_ACTIVE` keeps meaning
+// exactly what it meant — *the callback saw a Space go down and has not seen
+// it come up* — and stays the arbiter. Consequence stated so nobody looks for
+// it later: **a fallback hold can never latch `MODIFIER_ACTIVE`, because
+// nothing on this path writes it.** The PROBLEM 218 class is closed here by
+// construction rather than by a reaper; the reaper below exists for the latch
+// this path *does* own.
+/// `true` while the PROBLEM 259 fallback owns a Space-hold. The exact
+/// counterpart of `MODIFIER_ACTIVE` for the second witness, and read on the
+/// mouse callback (one relaxed load) so the cursor and the click reach the
+/// pointer the same way they do for a hook hold.
+static OWN_HOLD_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// How many fallback holds the reaper below has torn down. Non-zero is the
+/// fingerprint of a page that stopped talking mid-hold.
+static OWN_HOLDS_REAPED: AtomicU32 = AtomicU32::new(0);
+
+/// How often the fallback reaper re-asks the question guard 1 asked once.
+/// 250 ms: fast enough that a stranded ring is a blink rather than a state,
+/// slow enough that the foreground probe (three Win32 calls and a `String`)
+/// runs four times a second during a hold and never otherwise.
+pub(crate) const OWN_HOLD_FG_CHECK_MS: u64 = 250;
+
+pub(crate) fn register_inject_sender(tx: Sender<HookEvent>) {
+    *INJECT_TX.lock().unwrap_or_else(|p| p.into_inner()) = Some(tx);
+}
+
+/// Push an event onto the engine channel from OUTSIDE the hook thread.
+///
+/// `send_event` cannot be used: its sender is a `thread_local!` that only the
+/// hook thread ever sets, so a Tauri command calling it silently does nothing.
+/// Returns whether the event was actually queued.
+///
+/// PRIVATE ON PURPOSE — `pub(crate)`, and every caller in the tree goes
+/// through the guarded `own_window_*` functions below. This is a back door
+/// into the engine; it may never grow a public or un-guarded entrance.
+pub(crate) fn inject_hook_event(ev: HookEvent) -> bool {
+    let guard = INJECT_TX.lock().unwrap_or_else(|p| p.into_inner());
+    match guard.as_ref() {
+        Some(tx) => tx.try_send(ev).is_ok(),
+        None => false,
+    }
+}
+
+/// Age in ms of the last Space-down the HOOK stamped, or `None` if it has
+/// never stamped one in this process (`SPACE_DOWN_TS` starts at 0).
+fn hook_space_down_age_ms() -> Option<u64> {
+    let ts = SPACE_DOWN_TS.load(Ordering::Relaxed);
+    if ts == 0 {
+        return None;
+    }
+    Some(tick_count().saturating_sub(ts))
+}
+
+fn own_hold_age_ms() -> Option<u64> {
+    let ts = OWN_HOLD_TS.load(Ordering::Relaxed);
+    if ts == 0 {
+        return None;
+    }
+    Some(tick_count().saturating_sub(ts))
+}
+
+/// Is the foreground window one of OURS? Compared by exe stem, the same
+/// normalisation `exclusions` and PROBLEM 243's shown-over line use, so
+/// "own window" means one thing across the whole log.
+fn foreground_is_own_window() -> bool {
+    #[cfg(windows)]
+    {
+        let own = exclusions::own_stem();
+        let fg = unsafe { exclusions::foreground_stem() };
+        !fg.is_empty() && fg == own
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// THE GUARD, as a pure function — every reason the fallback may decline, in
+/// one place that a test can walk.
+pub(crate) fn own_window_space_down_accepted(
+    foreground_is_own_window: bool,
+    bypass_active: bool,
+    hook_hold_latched: bool,
+    hook_space_down_age_ms: Option<u64>,
+    dedupe_ms: u64,
+    own_hold_age_ms: Option<u64>,
+    own_hold_max_ms: u64,
+) -> bool {
+    // Guard 1 — the fallback exists for exactly one situation.
+    if !foreground_is_own_window {
+        return false;
+    }
+    // Bypass mode means "Space is an ordinary space" (the hook passes
+    // everything through), and a fallback that ignored it would make the
+    // dashboard the one window where bypass does not work. The escape hatch
+    // is NOT Space+`.` here — that needs a hold the fallback just refused to
+    // start — it is the pause control in Settings, which is on screen.
+    if bypass_active {
+        return false;
+    }
+    // Guard 2 — the hook got there first. `MODIFIER_ACTIVE` is a live latched
+    // hold; the age is the press that latched it (or one whose latch was
+    // dropped by a gate, which is still a press we must not duplicate).
+    if hook_hold_latched {
+        return false;
+    }
+    // Guard 2b — PROBLEM 262 item 5. THE FALLBACK-VS-FALLBACK DEDUPE, which
+    // guard 2 never was: it asks about the HOOK, and the hook is the one
+    // witness that cannot double-fire this path.
+    //
+    // THE HOLE, from the 1.0.106 ship notes: two `own-window fallback:` lines
+    // were logged in the SAME MILLISECOND for one physical press. Nothing here
+    // refused the second call, so it armed a second time and injected a second
+    // `OwnWindowSpaceDown`. `arm_own_window_hold` is idempotent by construction
+    // (every line is a store of a constant), so the state survived it — but the
+    // engine got two holds, and the second one's `SpaceUp` is the one that
+    // would have typed a phantom space or launched twice.
+    //
+    // The predicate is `own_window_hold_is_ours` — guard 3's, deliberately the
+    // same one — so the two questions can never drift apart: *a Space-down
+    // arriving while the fallback still owns a hold IS that hold.* Using the
+    // bounded form rather than a bare `OWN_HOLD_ACTIVE` matters: a page torn
+    // down mid-hold leaves the latch set with no `keyup` coming, and a bare
+    // flag would then refuse every new ring for the full 30 s until the reaper
+    // caught up. An EXPIRED hold is not a duplicate of anything, so it is let
+    // through and the fresh arm overwrites it.
+    if own_window_hold_is_ours(own_hold_age_ms, own_hold_max_ms) {
+        return false;
+    }
+    !matches!(hook_space_down_age_ms, Some(age) if age < dedupe_ms)
+}
+
+/// Guard 3 — a key or a release only counts while the fallback owns the hold.
+pub(crate) fn own_window_hold_is_ours(own_hold_age_ms: Option<u64>, max_hold_ms: u64) -> bool {
+    matches!(own_hold_age_ms, Some(age) if age <= max_hold_ms)
+}
+
+// ---------------------------------------------------------------------------
+// PROBLEM 261 — the two questions pointer activation asks, answered for BOTH
+// witnesses. Pure, so the whole arming decision is walkable in a test without
+// a mouse, a hook or a window.
+// ---------------------------------------------------------------------------
+
+/// Is SOME Space-hold latched right now? The mouse callback's gate and the
+/// poller's `live` term both used to read `MODIFIER_ACTIVE` alone; this is the
+/// one place that knows there are two witnesses.
+///
+/// `||`, not `^`: the two are mutually exclusive by guard 2 for a single
+/// press, but a fallback hold that is being torn down while the hook takes a
+/// fresh one is a legal transient, and during it a hold IS latched.
+#[inline(always)]
+pub(crate) fn hold_latched(hook_latched: bool, own_hold_active: bool) -> bool {
+    hook_latched || own_hold_active
+}
+
+/// WHICH hold a poller tick belongs to. The stamp is the identity of a hold
+/// (`HoldTracker` resets everything when it changes) AND the floor
+/// `CURSOR_STAMP` must clear before a cursor position counts as "moved during
+/// THIS hold". Both clocks are `GetTickCount64`, so they compare directly.
+///
+/// The fallback's stamp WINS while it owns the hold. Falling back to
+/// `SPACE_DOWN_TS` — a stamp from some previous hook hold, or 0 at boot —
+/// would hand the tracker a cursor position the user parked minutes ago and
+/// arm a chip the user never pointed at.
+#[inline(always)]
+pub(crate) fn hold_ts_for(hook_ts: u64, own_hold_active: bool, own_ts: u64) -> u64 {
+    if own_hold_active && own_ts != 0 {
+        own_ts
+    } else {
+        hook_ts
+    }
+}
+
+/// Why the fallback reaper tore a hold down. Named rather than boolean so the
+/// log line says which bound fired, and so the test asserts the reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnHoldReap {
+    /// Our window stopped being the foreground window. Guard 1 is the ONLY
+    /// reason this hold was allowed to start; re-asked, it now says no.
+    ForegroundLost,
+    /// `OWN_WINDOW_MAX_HOLD_MS` elapsed. The page was torn down, navigated or
+    /// crashed mid-hold and its `keyup` is never coming.
+    Expired,
+}
+
+/// THE FALLBACK REAPER'S DECISION, pure.
+///
+/// `foreground_is_own` is `None` on the ticks between foreground probes —
+/// "not checked", which can never be a reason to reap. Ordering is
+/// deliberate: expiry is checked FIRST, so a hold that is both expired and
+/// still foreground reports the bound that is actually unrecoverable.
+pub(crate) fn own_hold_reap_reason(
+    active: bool,
+    own_hold_age_ms: Option<u64>,
+    max_hold_ms: u64,
+    foreground_is_own: Option<bool>,
+) -> Option<OwnHoldReap> {
+    if !active {
+        return None;
+    }
+    match own_hold_age_ms {
+        // Active with no stamp is a torn state, not a hold: treat it as
+        // expired so the latch cannot survive it.
+        None => Some(OwnHoldReap::Expired),
+        Some(age) if age > max_hold_ms => Some(OwnHoldReap::Expired),
+        _ => {
+            if foreground_is_own == Some(false) {
+                Some(OwnHoldReap::ForegroundLost)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Everything a hook Space-down sets that pointer activation depends on,
+/// applied for a FALLBACK hold — from the IPC thread, never a callback.
+///
+/// IDEMPOTENT BY CONSTRUCTION (brief item 4). Every line is a store of a
+/// constant, so running it twice for one press leaves exactly the state
+/// running it once leaves. That matters because PROBLEM 259's dedupe is a
+/// 100 ms window and a clock, not a mutex: if it ever lets two calls through
+/// for one physical press, the worst outcome must be a duplicate log line,
+/// not two arms or a doubled hold.
+///
+/// WHAT IS DELIBERATELY ABSENT, and each omission is a decision:
+/// * `MODIFIER_ACTIVE` — see the long comment on `OWN_HOLD_ACTIVE`. It is the
+///   arbiter; it may not be a party.
+/// * `SPACE_INTERCEPTED` — the hook did not swallow this Space-down, so it
+///   owes no Space-up. Setting it would make the NEXT real Space-up the hook
+///   does see inject a phantom space the user never typed.
+/// * `SPACE_TICK_TS` / `SPACE_REPEATS` / `SPACE_COMBO_SEEN` — the auto-repeat
+///   liveness signal `reap_stale_hold` measures. A fallback hold produces no
+///   hook auto-repeats, so writing those would feed that reaper evidence it
+///   did not observe. The fallback's own bound is `own_hold_reap_reason`.
+fn arm_own_window_hold(now: u64) {
+    // Stamp BEFORE the latch, so the poller can never read active-with-no-ts.
+    OWN_HOLD_TS.store(now, Ordering::Relaxed);
+    OWN_HOLD_COMBO.store(false, Ordering::Relaxed);
+    // A fresh hold starts unaborted, or `apply_to`'s CAS refuses every arm for
+    // the whole hold (it claims `SPACE_ABORTED` false→true to arm). The hook's
+    // Space-down branch does exactly this store for exactly this reason.
+    SPACE_ABORTED.store(false, Ordering::Relaxed);
+    // PROBLEM 206 — a fresh hold must not inherit the last hold's armed chip
+    // or its wheel-block.
+    pointer::on_space_down();
+    OWN_HOLD_ACTIVE.store(true, Ordering::SeqCst);
+}
+
+/// The exact inverse, and the ONLY way `OWN_HOLD_ACTIVE` becomes false.
+///
+/// Returns whether this call is the one that owned the teardown — a
+/// `swap`-based claim, so the release path, the reaper and the watchdog can
+/// all race and only one logs. Also idempotent: a second call is a no-op that
+/// returns `false`.
+fn disarm_own_window_hold() -> bool {
+    let owned = OWN_HOLD_ACTIVE.swap(false, Ordering::SeqCst);
+    OWN_HOLD_TS.store(0, Ordering::Relaxed);
+    OWN_HOLD_COMBO.store(false, Ordering::Relaxed);
+    // PROBLEM 206 — an armed chip or a half-eaten click must not outlive the
+    // hold that created it. Without this a stranded arm is what "opened
+    // whatever my cursor was towards" (PROBLEM 218's owner report).
+    //
+    // ONLY WHEN WE OWNED ONE. `own_window_space_up` calls this on its
+    // not-ours branch too (an expired hold must not survive its own release),
+    // and `ARMED_INDEX` / `CLICK_EATEN` are SHARED with the hook path — a
+    // stray release from a page with torn state would otherwise disarm a chip
+    // a perfectly healthy HOOK hold had armed, or strand the up-half of a
+    // suppressed click. If this path did not own the hold it does not own the
+    // pointer latches either.
+    if owned {
+        pointer::reset_on_eviction();
+    }
+    owned
+}
+
+/// Is the fallback holding Space right now? One relaxed load; called on the
+/// MOUSE callback, so it may never be anything more than that.
+#[inline(always)]
+pub(crate) fn own_hold_active() -> bool {
+    OWN_HOLD_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// The poller's hold identity, resolved across both witnesses.
+pub(crate) fn current_hold_ts() -> u64 {
+    hold_ts_for(
+        SPACE_DOWN_TS.load(Ordering::Relaxed),
+        OWN_HOLD_ACTIVE.load(Ordering::Relaxed),
+        OWN_HOLD_TS.load(Ordering::Relaxed),
+    )
+}
+
+/// Is a hold latched by EITHER witness? The poller's `live` term.
+pub(crate) fn any_hold_latched() -> bool {
+    hold_latched(
+        MODIFIER_ACTIVE.load(Ordering::Relaxed),
+        OWN_HOLD_ACTIVE.load(Ordering::Relaxed),
+    )
+}
+
+/// PROBLEM 261 — the fallback's stale-hold reaper, `reap_stale_hold`'s twin.
+///
+/// Called from `st-hud-pointer` (an independent thread — the whole point is to
+/// still be running when the page that owns the hold has stopped talking) and
+/// from the hook pump's WM_TIMER branch, exactly like `reap_stale_hold`. Off
+/// every callback, so logging here is legal.
+///
+/// `check_foreground` is the caller's throttle: the probe allocates a `String`
+/// and makes three Win32 calls, which is nothing four times a second and not
+/// nothing at 62 Hz.
+///
+/// WHY A FOREGROUND PROBE IS THE RIGHT LIVENESS SIGNAL HERE. `reap_stale_hold`
+/// uses auto-repeat because the callback's own evidence is all it has. This
+/// path has something better: guard 1 admitted this hold **because our window
+/// was foreground**, and that condition is continuously observable from
+/// outside the page. Re-asking it is the same question, not a proxy — and it
+/// catches the case the page's `blur` listener cannot (the page is gone, so
+/// its listener is gone with it). The 30 s bound underneath covers the
+/// remaining shape: a dead page inside a window that is still foreground.
+pub fn reap_own_window_hold(check_foreground: bool) -> bool {
+    let reason = own_hold_reap_reason(
+        OWN_HOLD_ACTIVE.load(Ordering::Relaxed),
+        own_hold_age_ms(),
+        OWN_WINDOW_MAX_HOLD_MS,
+        check_foreground.then(foreground_is_own_window),
+    );
+    let Some(reason) = reason else { return false };
+    // Claim it before anything else: the poller, the pump and a late
+    // `own_window_space_up` all race here, and a double teardown would emit
+    // two `guide-hud-hide` events.
+    if !disarm_own_window_hold() {
+        return false;
+    }
+    let hud_was_up = crate::guide_hud::is_visible();
+    log::warn!(
+        "own-window fallback: reaping a fallback Space-hold ({reason:?}) — the dashboard page \
+         took the hold (PROBLEM 259) and never sent its release. HUD was up: {hud_was_up}. \
+         Left standing this is a ring on screen with the pointer still arming chips behind \
+         it, which is PROBLEM 218's failure on the path PROBLEM 218's reaper cannot see: \
+         that one measures the keyboard hook's auto-repeat, and a fallback hold produces \
+         none. Nothing here touches MODIFIER_ACTIVE — the fallback never latches it."
+    );
+    OWN_HOLDS_REAPED.fetch_add(1, Ordering::Relaxed);
+    SPACE_ABORTED.store(false, Ordering::Relaxed);
+    crate::guide_hud::hide_guide_hud();
+    true
+}
+
+/// Drained into the 60 s diagnostics line beside `STALE_HOLDS_REAPED`.
+pub(crate) fn drain_own_holds_reaped() -> u32 {
+    OWN_HOLDS_REAPED.swap(0, Ordering::Relaxed)
+}
+
+/// VK → combo, for the SUBSET of the hook's map that is safe to take away
+/// from a focused web page.
+///
+/// Deliberately smaller than the callback's map, and every omission is a
+/// decision, not an oversight:
+///
+/// * `Escape`, `Enter`, `Tab` — the brief's exclusion list. They are how a
+///   user closes a popover, submits a name and moves between fields; a
+///   fallback that ate them would break the dashboard to add a shortcut.
+/// * Arrows, `Backspace`, Right Alt — the same reasoning. Space+⌫ is
+///   Force Close (Alt+F4) and Space+↑/↓ scroll; none is worth swallowing a
+///   caret key inside a text field for.
+/// * F1–F12 specials — they are gated on `BOUND_SPECIALS`, which is hook-side
+///   state the page has no business re-deriving.
+/// * DIGITS — `vk_to_char` maps A–Z only, so the hook produces NO event for a
+///   digit either. Intercepting one would swallow a keystroke to do nothing.
+///
+/// What is left is what the ring actually shows: the letters, plus the three
+/// punctuation combos that have no meaning in a text field beyond the
+/// character they type (which the rollover window already protects).
+pub(crate) fn own_window_combo_for_vk(vk: u16) -> Option<KeyCombo> {
+    match vk {
+        VK_OEM_3 => Some(KeyCombo::Backtick),
+        VK_OEM_COMMA => Some(KeyCombo::Comma),
+        VK_OEM_PERIOD => Some(KeyCombo::Period),
+        v if is_alpha_vk(v) => vk_to_char(v).map(KeyCombo::Alpha),
+        _ => None,
+    }
+}
+
+/// The page saw Space go down. Returns `true` if the fallback took the hold.
+pub(crate) fn own_window_space_down() -> bool {
+    if !own_window_space_down_accepted(
+        foreground_is_own_window(),
+        BYPASS_MODE.load(Ordering::Relaxed),
+        MODIFIER_ACTIVE.load(Ordering::Relaxed),
+        hook_space_down_age_ms(),
+        OWN_WINDOW_DEDUPE_MS,
+        own_hold_age_ms(),
+        OWN_WINDOW_MAX_HOLD_MS,
+    ) {
+        return false;
+    }
+    // PROBLEM 261 — arm the hold BEFORE the event goes to the engine, not
+    // after. The engine's `SpaceDown` arm shows the ring after
+    // `guide_hud_delay_ms`, and the poller only arms against a ring it can
+    // see; but the MOUSE callback starts recording cursor positions the
+    // instant the latch is set, and guard 2's travel test measures from where
+    // the cursor was when the hold began. Setting the latch after the inject
+    // would drop every mousemove in that window and start the travel
+    // measurement late.
+    arm_own_window_hold(tick_count().max(1));
+    OWN_WINDOW_HOLDS.fetch_add(1, Ordering::Relaxed);
+    if !inject_hook_event(HookEvent::OwnWindowSpaceDown) {
+        // The channel is full or absent; the hold never reached the engine, so
+        // do not leave the fallback thinking it owns one — and above all do
+        // not leave `OWN_HOLD_ACTIVE` latched with no ring and no release
+        // coming. Full teardown, not just the stamp.
+        disarm_own_window_hold();
+        return false;
+    }
+    true
+}
+
+/// The page saw a key go down while Space was held. Returns `true` if it was
+/// dispatched as a combo (which is also the page's cue that suppressing the
+/// keystroke was correct).
+pub(crate) fn own_window_key(vk: u16) -> bool {
+    if !own_window_hold_is_ours(own_hold_age_ms(), OWN_WINDOW_MAX_HOLD_MS) {
+        return false;
+    }
+    let Some(combo) = own_window_combo_for_vk(vk) else {
+        return false;
+    };
+    OWN_HOLD_COMBO.store(true, Ordering::Relaxed);
+    inject_hook_event(HookEvent::KeyCombo(combo))
+}
+
+/// The page saw Space come up. Returns `true` if the fallback ended a hold it
+/// owned.
+pub(crate) fn own_window_space_up(had_combo: bool) -> bool {
+    if !own_window_hold_is_ours(own_hold_age_ms(), OWN_WINDOW_MAX_HOLD_MS) {
+        // Clear anyway: an expired hold must not survive its own release.
+        disarm_own_window_hold();
+        return false;
+    }
+    let modifier_fired = had_combo || OWN_HOLD_COMBO.load(Ordering::Relaxed);
+    // PROBLEM 206 gesture A, mirrored from the hook's Space-UP branch and in
+    // the same order: consume the arm FIRST, then tear the hold down.
+    //
+    // `take_armed_key` is the same function the callback calls, and it is the
+    // ONLY consumer of `ARMED_INDEX` — so a chip armed under a fallback hold
+    // launches on release exactly as it does under a hook hold. It also sets
+    // `HOLD_BLOCKED`, which is what stops a click-then-release activating
+    // twice; `disarm_own_window_hold` clearing that a moment later is fine,
+    // because the hold is over by then.
+    //
+    // NO SPACE IS INJECTED HERE, and that is not an omission: the hook types
+    // the space on release because it swallowed the down-stroke, and this path
+    // never did — the browser already inserted (or the page already took back)
+    // the character. See PROBLEM 259, "KNOWN DIVERGENCE FROM THE HOOK".
+    let ev = match pointer::take_armed_key() {
+        Some(ch) => HookEvent::PointerActivate(ch),
+        None => HookEvent::SpaceUp { modifier_fired },
+    };
+    disarm_own_window_hold();
+    inject_hook_event(ev)
+}
+
+/// The hold number, for the one log line the fallback prints per hold.
+pub(crate) fn own_window_hold_count() -> u32 {
+    OWN_WINDOW_HOLDS.load(Ordering::Relaxed)
 }
 
 // ---------------------------------------------------------------------------
@@ -3147,6 +5569,413 @@ mod deaf_instrument_tests {
     }
 }
 
+/// PROBLEM 230 — the two remaining ways this subtraction lied, and the shape of
+/// both fixes.
+///
+/// PROBLEM 228 made the reference counter unforgeable by the repair. It did not
+/// make the two sides of `classify_hook_window` count the same events, and it
+/// did not stop Windows from evicting the reference BEFORE the primary. These
+/// tests pin both properties. They are arithmetic, not behaviour: the fixes
+/// live where the counters are written (`kb_hook_proc`'s add, moved above the
+/// injected-cookie test; `install_hooks()`, which now installs the reference
+/// FIRST so it lands at the tail of the chain).
+#[cfg(test)]
+mod deaf_instrument_population_tests {
+    use super::{classify_hook_window, HookWindow};
+
+    /// A 60-second window whose ONLY keyboard traffic was this app injecting to
+    /// itself — `inject_space`, or `force_foreground`'s synthetic tap, both
+    /// reachable from a tray click with nobody's hands on the keyboard.
+    ///
+    /// The reference hook counts on `n_code >= 0` and has never had a cookie
+    /// test, so it counted those. The primary's add used to sit BELOW its
+    /// `dwExtraInfo == MAGIC_INJECTED` early return, so it did not. The window
+    /// arrived here as `(0, n)` — DEAF, at WARN, with a Sentry event, describing
+    /// a hook that was working perfectly.
+    #[test]
+    fn a_window_of_only_our_own_injections_must_not_read_as_deafness() {
+        let injected = 4u32;
+        // What the old code produced.
+        assert_eq!(classify_hook_window(0, injected), HookWindow::Deaf);
+        // What it produces now that the add counts every callback entry.
+        assert_eq!(classify_hook_window(injected, injected), HookWindow::Working);
+    }
+
+    /// The general property, stated as arithmetic so it cannot be argued with:
+    /// while both counters count the same events, a live primary can never be
+    /// called deaf — for ANY amount of traffic.
+    #[test]
+    fn equal_populations_can_never_produce_a_deaf_verdict() {
+        for events in 1..64u32 {
+            assert_eq!(classify_hook_window(events, events), HookWindow::Working);
+        }
+    }
+
+    /// And the converse: every event the primary is not credited with is an
+    /// event that pushes the verdict toward DEAF. One dropped from the
+    /// numerator is enough, which is why the fix had to be at the counter.
+    #[test]
+    fn any_shortfall_in_the_primary_population_alone_manufactures_deafness() {
+        let real_traffic = 12u32;
+        assert_eq!(classify_hook_window(real_traffic, real_traffic), HookWindow::Working);
+        assert_eq!(classify_hook_window(0, real_traffic), HookWindow::Deaf);
+    }
+
+    /// THE ORDERING FIX, as arithmetic.
+    ///
+    /// `CallNextHookEx` is synchronous, so a hook's measured duration includes
+    /// every hook below it. Installed LAST, the reference sat at the head of the
+    /// chain carrying the primary's whole callback on its own `LowLevelHooks-
+    /// Timeout` clock, and Windows evicted it first. Measured on 1.0.95: the
+    /// reference counter frozen at 2237 for 6¼ minutes while the primary logged
+    /// `saw 49 key event(s)`.
+    ///
+    /// An evicted reference makes `genuine_ref_events` zero, so the verdict
+    /// collapses to Quiet — the instrument goes BLIND rather than loud. That is
+    /// why 22 hours of 1.0.95 produced zero DEAF lines while the watchdog raised
+    /// 514 alarms: absence of the alarm was never evidence of health.
+    #[test]
+    fn an_evicted_reference_hook_reports_quiet_not_deaf_so_silence_proves_nothing() {
+        assert_eq!(classify_hook_window(0, 0), HookWindow::Quiet);
+        assert_ne!(classify_hook_window(0, 0), HookWindow::Deaf);
+    }
+
+    /// WHY THE TAIL POSITION COSTS NOTHING. At the tail the reference cannot see
+    /// a key the primary SUPPRESSED — and that is free, because of when its
+    /// count is read. `classify_hook_window` consults it only on the
+    /// `primary_seen == 0` branch, and a primary that saw nothing suppressed
+    /// nothing, so the whole stream reached the tail. Deafness is still detected
+    /// at full strength.
+    #[test]
+    fn a_silent_primary_suppressed_nothing_so_the_tail_reference_sees_everything() {
+        for arrived in 1..32u32 {
+            // primary_seen == 0 ⟹ suppressed == 0 ⟹ the tail saw all of them.
+            let tail_ref_events = arrived;
+            assert_eq!(classify_hook_window(0, tail_ref_events), HookWindow::Deaf);
+        }
+    }
+}
+
+/// PROBLEM 236 — the instrument panel, and the two questions the 1.0.96 log
+/// could not answer.
+///
+/// Baseline, measured on the owner's machine over 38 minutes of 1.0.96
+/// (2026-09-04 16:28:47 → 17:06:17, the build that shipped PROBLEM 230's
+/// install-order fix): **16 watchdog alarms, every one of them `both_dead`,
+/// ZERO `kb_only_dead`, ZERO DEAF lines.** PROBLEM 230 held — the reference
+/// counter climbed 6 → 395 → 484 → 588 → 701 → 730 and its silence tracked the
+/// primary's exactly whenever a key flowed (`kb 7922ms` / `ref 7922ms` at
+/// 16:59:39.641; `kb 3235ms` / `ref 3235ms` at 16:59:01.636). What did NOT hold
+/// is the sentence `both_dead` prints: "NEITHER hook saw anything", asserted
+/// from two clocks that `install_hooks()` and the watchdog's own idle
+/// early-return both write.
+///
+/// These tests are arithmetic, not behaviour. The fixes live where the counters
+/// are written (`ms_hook_proc` now stamps a callback-only clock and counter;
+/// `kb_hook_proc` counts injections separately on the branch it already takes).
+#[cfg(test)]
+mod liveness_split_tests {
+    use super::{alarm_is_evidenced, format_liveness_split, BLIND_MS};
+
+    /// The reading that cost a session. `saw 60 key event(s)` is ONE number
+    /// covering real keys and this app's own injections, so "the primary is
+    /// seeing keys" and "the keyboard is dead and Spaceadom is typing to
+    /// itself" print identically. Split, they cannot.
+    #[test]
+    fn a_window_of_pure_injection_is_visibly_different_from_a_window_of_typing() {
+        let only_injection = format_liveness_split(0, 12, 12, 40);
+        let real_typing = format_liveness_split(12, 0, 12, 40);
+        assert_ne!(only_injection, real_typing);
+        assert!(only_injection.contains("primary_real:0"));
+        assert!(real_typing.contains("primary_real:12"));
+    }
+
+    /// PROBLEM 230's inversion, as a line a reader can grep. A live primary
+    /// beside a frozen reference is the witness being evicted again — and in
+    /// 1.0.95 that shape was only visible by correlating three lines minutes
+    /// apart.
+    #[test]
+    fn a_live_primary_beside_a_frozen_reference_is_visible_in_one_line() {
+        let evicted_witness = format_liveness_split(49, 0, 0, 210);
+        assert!(evicted_witness.contains("primary_real:49"));
+        assert!(evicted_witness.contains("reference:0"));
+    }
+
+    /// The 6-of-16 case: `kb 4000ms / mouse 4000ms`, two identical round
+    /// numbers written by `install_hooks()` or the idle re-stamp, printed under
+    /// the words "NEITHER hook saw anything". The callback clocks say the mouse
+    /// hook fired 120 ms ago, so nothing was evicted.
+    #[test]
+    fn a_live_mouse_callback_makes_a_both_dead_alarm_unevidenced() {
+        assert!(!alarm_is_evidenced(Some(9_000), Some(120), Some(9_000), BLIND_MS));
+    }
+
+    /// The ten measured non-seeded mouse clocks from that session
+    /// (3172…5250 ms). Every one is a mouse hook that fired seconds ago and
+    /// then crossed a 3-second line — an evicted hook's clock keeps growing,
+    /// these did not. Above the threshold they DO count as evidence; the point
+    /// of the function is that the verdict is now stated rather than assumed.
+    #[test]
+    fn silence_past_the_threshold_on_every_unforgeable_clock_is_evidence() {
+        for ms in [3_172u64, 3_218, 3_234, 3_297, 3_313, 3_328, 3_437, 3_875, 5_250] {
+            assert!(alarm_is_evidenced(Some(20_000), Some(ms), Some(20_000), BLIND_MS));
+        }
+        // …and one hair under it is not.
+        assert!(!alarm_is_evidenced(Some(20_000), Some(2_999), Some(20_000), BLIND_MS));
+    }
+
+    /// NEVER-FIRED IS NOT STOPPED. The 16:28:53.412 alarm fired 6 s after
+    /// launch, before any hook had been called once, and printed "NEITHER hook
+    /// saw anything" — true, and about nothing. PROBLEM 228 is the record of
+    /// what conflating "no evidence" with "evidence of death" costs, so `None`
+    /// can never make an alarm evidenced no matter what the other two say.
+    #[test]
+    fn a_hook_that_has_never_fired_can_never_evidence_an_alarm() {
+        assert!(!alarm_is_evidenced(None, Some(60_000), Some(60_000), BLIND_MS));
+        assert!(!alarm_is_evidenced(Some(60_000), None, Some(60_000), BLIND_MS));
+        assert!(!alarm_is_evidenced(Some(60_000), Some(60_000), None, BLIND_MS));
+        assert!(!alarm_is_evidenced(None, None, None, BLIND_MS));
+    }
+
+    /// The idle window. All four zero prints nothing at all, so a log full of
+    /// this line still means the machine was being used.
+    #[test]
+    fn the_line_reports_a_dead_window_as_four_zeroes_not_as_a_fault() {
+        assert_eq!(
+            format_liveness_split(0, 0, 0, 0),
+            "primary_real:0 primary_injected:0 reference:0 mouse:0"
+        );
+    }
+}
+
+/// PROBLEM 236, DECISION CHANGED — the rule that now GATES the repair.
+///
+/// The tests above pin the WORDS the 1.0.97 pass added. These pin the
+/// BEHAVIOUR: which alarms are still allowed to tear a hook down, and which
+/// live hold is allowed to stop one that is.
+///
+/// Every case here is one of the shapes measured in the owner's 1.0.96 session
+/// (2026-09-04, 16:28:47 → 17:06:17, 16 alarms in 38 minutes, all `both_dead`):
+/// the six `4000/4000` seeded pairs, the ten mouse clocks clustered within
+/// 437 ms of the 3000 ms trip line, and the alarm that fired 6 s after launch
+/// before any callback had run.
+#[cfg(test)]
+mod alarm_decision_tests {
+    use super::{
+        classify_callback_liveness, hold_defers_rehook, CallbackLiveness, DeadKind, BLIND_MS,
+        INSTALL_GRACE_MS, MAX_HOLD_DEFER_MS, UNKNOWN_MAX_MS,
+    };
+
+    /// Shorthand: the production constants, so a test can never pass against
+    /// numbers the app does not actually use.
+    fn verdict(
+        kb: Option<u64>,
+        ms: Option<u64>,
+        rf: Option<u64>,
+        since_install: u64,
+    ) -> CallbackLiveness {
+        classify_callback_liveness(
+            kb,
+            ms,
+            rf,
+            since_install,
+            BLIND_MS,
+            INSTALL_GRACE_MS,
+            UNKNOWN_MAX_MS,
+        )
+    }
+
+    /// THE SIX SEEDED ALARMS. `kb 4000ms / mouse 4000ms` — two identical round
+    /// numbers written by `install_hooks()` or the idle re-stamp, printed under
+    /// the words "NEITHER hook saw anything". No callback has run since the
+    /// install, so there is nothing here to be evidence, and 1.0.96 re-hooked
+    /// on it anyway.
+    #[test]
+    fn a_seeded_pair_with_no_callback_behind_it_never_alarms() {
+        assert_eq!(verdict(None, None, None, 20_000), CallbackLiveness::Unknown);
+    }
+
+    /// THE 16:28:53.412 ALARM. Six seconds after launch, before any hook had
+    /// been called once. Inside the grace, so the answer is "ask me later",
+    /// not "the hooks are dead".
+    #[test]
+    fn within_the_post_install_grace_nothing_can_alarm() {
+        // Even the shape that WOULD alarm a second later.
+        assert_eq!(
+            verdict(Some(60_000), Some(60_000), Some(60_000), INSTALL_GRACE_MS - 1),
+            CallbackLiveness::Unknown
+        );
+        assert_eq!(verdict(None, None, None, 6_000), CallbackLiveness::Unknown);
+    }
+
+    /// The failure the watchdog exists for, stated from instruments the repair
+    /// cannot write: all three hooks have fired since the install, and all
+    /// three have now been silent past the threshold while the user is active
+    /// (the caller has already proved the user is active before reaching here).
+    #[test]
+    fn all_three_callbacks_silent_past_the_threshold_is_still_an_alarm() {
+        assert_eq!(
+            verdict(Some(9_000), Some(9_000), Some(9_000), 120_000),
+            CallbackLiveness::Dead(DeadKind::Both)
+        );
+        // And one hair under the threshold on any single one of them is not.
+        assert_eq!(
+            verdict(Some(BLIND_MS - 1), Some(9_000), Some(9_000), 120_000),
+            CallbackLiveness::Alive
+        );
+    }
+
+    /// THE TEN MEASURED MOUSE CLOCKS (3172…5250 ms). Above the line they are
+    /// evidence — but only while the keyboard and the reference agree. The
+    /// owner's cluster sat within 437 ms of the trip line, which is what an
+    /// ordinary pause in mouse movement looks like; with a live keyboard
+    /// callback beside it, no alarm.
+    #[test]
+    fn a_mouse_pause_beside_a_live_keyboard_callback_is_not_death() {
+        for ms in [3_172u64, 3_218, 3_234, 3_297, 3_313, 3_328, 3_437, 3_875, 5_250] {
+            assert_eq!(
+                verdict(Some(140), Some(ms), Some(140), 120_000),
+                CallbackLiveness::Alive,
+                "mouse silent {ms}ms while the keyboard callback fired 140ms ago"
+            );
+        }
+    }
+
+    /// REVIEW FIX 2026-09-04 — THE CORRECTED SEMANTICS, and the test this
+    /// replaces (`a_live_reference_hook_alone_prevents_the_alarm`) is the
+    /// clearest record of how the rule went wrong: it asserted `Alive`, so the
+    /// bug had a passing test defending it.
+    ///
+    /// The reference hook IS the third vote, but it votes on WHICH failure this
+    /// is, never on whether there is one. A keyboard and mouse that have both
+    /// gone quiet while the witness is still being called means keys are
+    /// reaching the chain and ours is not being called for them — that is
+    /// `kb_only_dead`'s premise, not `both_dead`'s. So the reference narrows
+    /// the verdict to `KbOnly` (which the re-hook repairs) instead of
+    /// cancelling it.
+    #[test]
+    fn a_live_reference_hook_narrows_the_verdict_instead_of_cancelling_it() {
+        assert_eq!(
+            verdict(Some(20_000), Some(20_000), Some(200), 120_000),
+            CallbackLiveness::Dead(DeadKind::KbOnly)
+        );
+        // …and the same clocks WITHOUT a live reference are the other failure.
+        assert_eq!(
+            verdict(Some(20_000), Some(20_000), Some(20_000), 120_000),
+            CallbackLiveness::Dead(DeadKind::Both)
+        );
+    }
+
+    /// THE FAILURE THE OWNER LIVES WITH, stated in one assertion: the reference
+    /// fires, the PRIMARY keyboard callback does not. Before this fix the rule
+    /// answered `Alive` here and the `kb_only_dead` re-hook branch was
+    /// unreachable dead code — the watchdog vetoed itself for exactly the shape
+    /// it exists to catch (PROBLEM 181: 24 of 46 alarms had this fingerprint).
+    ///
+    /// The mouse is deliberately silent-but-present in the first case (the user
+    /// is typing, not moving the mouse) and alive in the second, which must
+    /// still be `Alive`: a live PRIMARY hook is proof, and the mouse is one.
+    #[test]
+    fn live_reference_with_silent_primary_is_kb_only_dead() {
+        assert_eq!(
+            verdict(Some(BLIND_MS + 1), Some(9_000), Some(120), 120_000),
+            CallbackLiveness::Dead(DeadKind::KbOnly)
+        );
+        // A live MOUSE callback is a primary and does cancel the alarm.
+        assert_eq!(
+            verdict(Some(9_000), Some(120), Some(120), 120_000),
+            CallbackLiveness::Alive
+        );
+        // The install grace still outranks it — nothing alarms inside it.
+        assert_eq!(
+            verdict(Some(9_000), Some(9_000), Some(120), INSTALL_GRACE_MS - 1),
+            CallbackLiveness::Unknown
+        );
+        // And PROBLEM 228's law survives: a primary that has NEVER fired since
+        // the install is UNKNOWN, however loudly the witness is shouting —
+        // until the unknown bound expires, which is what stops a hook that
+        // never fires from becoming permanent deafness.
+        assert_eq!(
+            verdict(None, Some(9_000), Some(120), UNKNOWN_MAX_MS - 1),
+            CallbackLiveness::Unknown
+        );
+        assert_eq!(
+            verdict(None, Some(9_000), Some(120), UNKNOWN_MAX_MS),
+            CallbackLiveness::Dead(DeadKind::KbOnly)
+        );
+    }
+
+    /// NEVER-FIRED IS NOT STOPPED — PROBLEM 228's law, applied to the decision
+    /// rather than to the sentence. Any single hook that has not fired since
+    /// the install holds the verdict at UNKNOWN, no matter how loudly the other
+    /// two are shouting.
+    #[test]
+    fn one_hook_that_never_fired_since_the_install_holds_the_verdict_at_unknown() {
+        let long = UNKNOWN_MAX_MS - 1;
+        assert_eq!(verdict(None, Some(20_000), Some(20_000), long), CallbackLiveness::Unknown);
+        assert_eq!(verdict(Some(20_000), None, Some(20_000), long), CallbackLiveness::Unknown);
+        assert_eq!(verdict(Some(20_000), Some(20_000), None, long), CallbackLiveness::Unknown);
+    }
+
+    /// AND THE HOLE THAT WOULD OTHERWISE OPEN. Read literally, "never fired ⇒
+    /// unknown ⇒ no alarm" means a `SetWindowsHookExW` that returns a handle
+    /// and never fires can never be retried, because no callback can ever move
+    /// to contradict it — intermittent deafness converted into permanent
+    /// deafness, which this file's own law calls the fix being worse than the
+    /// bug. The unknown state is therefore BOUNDED: past `UNKNOWN_MAX_MS` of a
+    /// demonstrably-present user with not one callback on any hook, silence
+    /// stops being an absence of evidence.
+    #[test]
+    fn an_install_that_has_produced_no_callback_at_all_is_eventually_evidence() {
+        assert_eq!(
+            verdict(None, None, None, UNKNOWN_MAX_MS - 1),
+            CallbackLiveness::Unknown
+        );
+        assert_eq!(
+            verdict(None, None, None, UNKNOWN_MAX_MS),
+            CallbackLiveness::Dead(DeadKind::Both)
+        );
+    }
+
+    /// The bound must not fire while something is demonstrably alive, or a
+    /// working app would be re-hooked every 30 seconds forever.
+    #[test]
+    fn the_unknown_bound_never_overrides_a_hook_that_is_actually_firing() {
+        assert_eq!(
+            verdict(None, Some(50), None, 10 * UNKNOWN_MAX_MS),
+            CallbackLiveness::Alive
+        );
+    }
+
+    /// LIVE-HOLD PROTECTION. A hold the keyboard callback was entered inside is
+    /// a hold the teardown would damage rather than repair.
+    #[test]
+    fn a_live_hold_defers_the_repair() {
+        assert!(hold_defers_rehook(true, true, 0, MAX_HOLD_DEFER_MS));
+        assert!(hold_defers_rehook(true, true, MAX_HOLD_DEFER_MS - 1, MAX_HOLD_DEFER_MS));
+    }
+
+    /// …and it is BOUNDED. A hold that outlives the alarm past the bound stops
+    /// protecting anything: if the hook really is dead, the repair is ten
+    /// seconds late and no later.
+    #[test]
+    fn the_deferral_expires_so_a_dead_hook_is_always_repaired() {
+        assert!(!hold_defers_rehook(true, true, MAX_HOLD_DEFER_MS, MAX_HOLD_DEFER_MS));
+        assert!(!hold_defers_rehook(true, true, 60_000, MAX_HOLD_DEFER_MS));
+    }
+
+    /// No hold, or a latch with no callback behind it, defers nothing. The
+    /// second case matters: `MODIFIER_ACTIVE` can be left latched by an
+    /// eviction that ate the Space-UP (PROBLEM 218), and that stale latch must
+    /// never be able to block the repair for the eviction that created it.
+    #[test]
+    fn a_stale_latch_with_no_callback_inside_it_defers_nothing() {
+        assert!(!hold_defers_rehook(false, true, 0, MAX_HOLD_DEFER_MS));
+        assert!(!hold_defers_rehook(true, false, 0, MAX_HOLD_DEFER_MS));
+        assert!(!hold_defers_rehook(false, false, 0, MAX_HOLD_DEFER_MS));
+    }
+}
+
 /// PROBLEM 227 — what a SHORT `SendInput` insert leaves latched.
 ///
 /// `SendInput` stops at the first event another thread blocks and returns a
@@ -3239,5 +6068,1064 @@ mod partial_injection_tests {
     fn an_impossible_count_is_clamped_rather_than_panicking() {
         let batch = [(WIN, false), (WIN, true)];
         assert!(unreleased_keys(&batch, 99).is_empty());
+    }
+}
+
+/// PROBLEM 257 — the proven-deaf test. Every row is a state the watchdog can
+/// actually be in; the only one that may re-hook is "Space is down, nobody
+/// intercepted it, nobody deliberately passed it through, and the callback
+/// has been silent past the threshold".
+#[cfg(test)]
+mod keyboard_deaf_tests {
+    use super::keyboard_deaf_with_space_down as deaf;
+    const T: u64 = 1_500;
+
+    /// The 2026-09-06 shape: dashboard focused, Space physically held, no hold
+    /// latched, every gate off, callback silent for 20 s.
+    #[test]
+    fn space_down_with_a_silent_callback_is_deaf() {
+        assert!(deaf(true, false, false, false, Some(20_000), T));
+        assert!(deaf(true, false, false, false, Some(T), T));
+    }
+
+    /// A working hold: our hook swallowed the down, so the OS reports Space UP
+    /// and `MODIFIER_ACTIVE` is latched. Neither half may trip.
+    #[test]
+    fn a_working_intercepted_hold_is_not_deaf() {
+        assert!(!deaf(false, true, false, false, Some(20_000), T));
+        assert!(!deaf(true, true, false, false, Some(20_000), T));
+    }
+
+    /// Space really is down and the callback saw it a moment ago (its
+    /// auto-repeats keep the clock fresh): the hook is working.
+    #[test]
+    fn a_recent_callback_is_not_deaf() {
+        assert!(!deaf(true, false, false, false, Some(0), T));
+        assert!(!deaf(true, false, false, false, Some(T - 1), T));
+    }
+
+    /// The three stand-down gates and law 4's modifier pass-through are cases
+    /// where the callback fired and CHOSE to let Space reach the OS. Excluded,
+    /// never measured.
+    #[test]
+    fn a_deliberate_pass_through_is_not_deaf() {
+        assert!(!deaf(true, false, true, false, Some(20_000), T));
+        assert!(!deaf(true, false, false, true, Some(20_000), T));
+    }
+
+    /// Nobody is holding Space: there is nothing to be deaf to, however long
+    /// the callback has been quiet (PROBLEM 101's whole lesson).
+    #[test]
+    fn space_up_is_never_deaf() {
+        assert!(!deaf(false, false, false, false, Some(600_000), T));
+    }
+
+    /// A callback that has not fired since the last install is UNKNOWN, not
+    /// dead (PROBLEM 236): this test may not declare a fresh install deaf.
+    #[test]
+    fn never_fired_since_install_is_unknown_not_deaf() {
+        assert!(!deaf(true, false, false, false, None, T));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TESTS — PROBLEM 260. The proven-deaf verdict, the throttle it bypasses, and
+// the one throttle it does not.
+//
+// Every case below is a shape MEASURED in the owner's 2026-09-07 log
+// (1.0.103, with an independent WH_KEYBOARD_LL probe running beside the app):
+//
+//   10:10:24      the last keyboard callback of the episode
+//   10:11:49      liveness split — primary_real:0 reference:0 mouse:217 / 60s
+//   10:12:34.246  the first alarm — 130 s late, and only because the mouse
+//                 fell quiet for 3032 ms at that instant
+//   10:10:59      "WATCHDOG would re-hook … but the cooldown test says the
+//                 last repair delivered events … Holding off for the rest of
+//                 the 60s cooldown"
+//
+// These are arithmetic, not behaviour: the decision is a pure function and the
+// watchdog does none of its own.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod proven_deaf_tests {
+    use super::{
+        forced_repair_allowed, forced_repair_backoff_ms, proven_keyboard_deaf, ProvenDeaf,
+        FORCED_INPUT_MAX_AGE_MS, FORCED_MOUSE_ATTRIBUTION_MS, FORCED_REPAIR_BASE_MS,
+        FORCED_REPAIR_MAX_MS, INSTALL_GRACE_MS, OWN_DEAF_SILENCE_MS,
+    };
+
+    /// The production constants, so no test can pass against numbers the app
+    /// does not actually use. Arguments in the order a reader of the log needs
+    /// them: is Space down, is a hold latched, keyboard-callback silence,
+    /// mouse-callback silence, how old the OS input clock is, install age.
+    #[allow(clippy::too_many_arguments)]
+    fn verdict(
+        space_down: bool,
+        modifier_active: bool,
+        kb: Option<u64>,
+        ms: Option<u64>,
+        os_input_age: u64,
+        since_install: u64,
+    ) -> Option<ProvenDeaf> {
+        proven_keyboard_deaf(
+            space_down,
+            modifier_active,
+            false,
+            false,
+            kb,
+            ms,
+            os_input_age,
+            since_install,
+            OWN_DEAF_SILENCE_MS,
+            INSTALL_GRACE_MS,
+            FORCED_INPUT_MAX_AGE_MS,
+            FORCED_MOUSE_ATTRIBUTION_MS,
+        )
+    }
+
+    /// THE 2026-09-07 EPISODE, AT THE TICK THE OLD CODE SAID NOTHING.
+    ///
+    /// 10:11:20-ish: the keyboard callback 56 s silent, the mouse hook firing
+    /// three times a second (mouse:217 in the window), the user typing into
+    /// WindowsTerminal. `both_dead` was false because the mouse was alive;
+    /// `kb_only_dead` was false because the reference was dead too. No
+    /// candidate, no alarm, no line. This verdict is the one that fires.
+    #[test]
+    fn a_live_mouse_hook_does_not_hide_a_dead_keyboard_hook() {
+        // Mouse callback 3200 ms old — older than the 391 ms OS input clock by
+        // far more than the attribution margin, so the mouse cannot be what the
+        // OS saw. Something else reached the OS and never reached us.
+        assert_eq!(
+            verdict(false, false, Some(56_000), Some(3_200), 391, 135_000),
+            Some(ProvenDeaf::InputUnaccountedFor)
+        );
+    }
+
+    /// THE MEASURED ALARM ITSELF (10:12:34.246): `kb 129672ms`, `mouse 3032ms`,
+    /// `user active 391ms ago`. The old path needed the mouse to cross 3000 ms
+    /// before it could even raise a candidate; this verdict does not care where
+    /// the mouse is, only that it cannot account for the input.
+    #[test]
+    fn the_measured_alarm_is_proven_deaf_by_the_new_rule_too() {
+        assert_eq!(
+            verdict(false, false, Some(129_672), Some(3_032), 391, 135_016),
+            Some(ProvenDeaf::InputUnaccountedFor)
+        );
+    }
+
+    /// PROBLEM 101, THE ONE THIS MUST NOT REBECOME. A person reading a page
+    /// moves the mouse and does not type: the OS input clock is fresh BECAUSE
+    /// of the mouse, and our mouse callback fired for it. Nothing here says
+    /// anything about the keyboard hook, so nothing may be repaired — that
+    /// branch cost 95 of 255 false alarms when it was decided the other way up.
+    #[test]
+    fn a_moving_mouse_accounts_for_the_input_and_is_never_deafness() {
+        // Mouse callback 60 ms old, OS input 60 ms old: the same event.
+        assert_eq!(verdict(false, false, Some(600_000), Some(60), 60, 900_000), None);
+        // And with the callback a little behind the OS stamp, inside the margin.
+        assert_eq!(
+            verdict(false, false, Some(600_000), Some(FORCED_MOUSE_ATTRIBUTION_MS), 0, 900_000),
+            None
+        );
+        // One millisecond past the margin is the other verdict. This is the
+        // whole width of the discriminator, asserted so a future widening of
+        // the margin cannot happen silently.
+        assert_eq!(
+            verdict(
+                false,
+                false,
+                Some(600_000),
+                Some(FORCED_MOUSE_ATTRIBUTION_MS + 1),
+                0,
+                900_000
+            ),
+            Some(ProvenDeaf::InputUnaccountedFor)
+        );
+    }
+
+    /// A user who has genuinely stopped touching anything proves nothing. The
+    /// watchdog returns early above 2000 ms anyway, but the pure function must
+    /// hold the line on its own or it is not testable.
+    #[test]
+    fn a_stale_os_input_clock_proves_nothing() {
+        assert_eq!(
+            verdict(false, false, Some(600_000), Some(600_000), FORCED_INPUT_MAX_AGE_MS + 1, 900_000),
+            None
+        );
+    }
+
+    /// THE GRACE STILL SUPPRESSES. PROBLEM 236's 16:28:53.412 alarm fired six
+    /// seconds after launch, before any hook had been called once. Inside the
+    /// grace the answer is "ask me later", and that outranks every proof below
+    /// it — including a physically-held Space.
+    #[test]
+    fn the_install_grace_suppresses_even_a_proven_shape() {
+        assert_eq!(
+            verdict(false, false, Some(56_000), Some(3_200), 391, INSTALL_GRACE_MS - 1),
+            None
+        );
+        assert_eq!(verdict(true, false, Some(56_000), None, 100, INSTALL_GRACE_MS - 1), None);
+        // One millisecond past the grace, the same shape is a verdict.
+        assert_eq!(
+            verdict(false, false, Some(56_000), Some(3_200), 391, INSTALL_GRACE_MS),
+            Some(ProvenDeaf::InputUnaccountedFor)
+        );
+    }
+
+    /// A LIVE HOLD IS NEVER REPAIRED HERE. The repair re-installs, which loses
+    /// the Space-UP, clears the latches and hides the ring — the owner's "it
+    /// dies mid-press" (PROBLEM 236). `reap_stale_hold()` runs above every
+    /// early return in `watchdog_check`, so a hold the hook has stopped feeding
+    /// is already cleared before this is asked; the latch cannot wedge it shut.
+    #[test]
+    fn a_latched_hold_suppresses_the_forced_repair() {
+        assert_eq!(verdict(false, true, Some(56_000), Some(3_200), 391, 135_000), None);
+        assert_eq!(verdict(true, true, Some(56_000), Some(3_200), 391, 135_000), None);
+    }
+
+    /// PROBLEM 228'S LAW, UNCHANGED. A keyboard callback that has never fired
+    /// since the install is UNKNOWN, not dead — that is the failed-install case
+    /// and it belongs to `classify_callback_liveness`'s unknown bound, where the
+    /// evidence is thirty seconds of a present user rather than one keystroke.
+    #[test]
+    fn a_keyboard_callback_that_never_fired_is_unknown_not_proven() {
+        assert_eq!(verdict(false, false, None, Some(3_200), 391, 900_000), None);
+        assert_eq!(verdict(true, false, None, None, 100, 900_000), None);
+    }
+
+    /// A keyboard callback inside the threshold is a working hook, whatever the
+    /// mouse is doing. This is the ordinary case and it must cost nothing.
+    #[test]
+    fn a_recent_keyboard_callback_is_never_deaf() {
+        assert_eq!(
+            verdict(false, false, Some(OWN_DEAF_SILENCE_MS - 1), Some(600_000), 10, 900_000),
+            None
+        );
+        assert_eq!(
+            verdict(true, false, Some(OWN_DEAF_SILENCE_MS - 1), Some(600_000), 10, 900_000),
+            None
+        );
+    }
+
+    /// PROBLEM 257'S ORIGINAL PROOF still fires, and still outranks the new one
+    /// when both hold — the log reads better when it names the strongest
+    /// instrument available.
+    #[test]
+    fn space_physically_down_is_still_its_own_proof() {
+        assert_eq!(
+            verdict(true, false, Some(21_875), Some(1_203), 16, 900_000),
+            Some(ProvenDeaf::SpaceHeld)
+        );
+    }
+
+    /// THE BACKOFF ENGAGES AFTER N INEFFECTIVE REPAIRS, and the first repair of
+    /// an episode never waits at all.
+    #[test]
+    fn the_backoff_doubles_and_then_caps() {
+        let b = |n| forced_repair_backoff_ms(n, FORCED_REPAIR_BASE_MS, FORCED_REPAIR_MAX_MS);
+        assert_eq!(b(0), FORCED_REPAIR_BASE_MS);
+        assert_eq!(b(1), FORCED_REPAIR_BASE_MS * 2);
+        assert_eq!(b(2), FORCED_REPAIR_BASE_MS * 4);
+        assert_eq!(b(3), FORCED_REPAIR_BASE_MS * 8);
+        // Capped, and it stays capped however long the streak runs — a hostile
+        // environment must not be able to drive this off the end of a u64.
+        assert_eq!(b(4), FORCED_REPAIR_MAX_MS);
+        assert_eq!(b(40), FORCED_REPAIR_MAX_MS);
+        assert_eq!(b(u32::MAX), FORCED_REPAIR_MAX_MS);
+    }
+
+    /// THE RATE LIMIT ITSELF. Never repaired yet → repair now. Repaired
+    /// recently → wait. Waited long enough → repair.
+    #[test]
+    fn the_first_forced_repair_never_waits_and_the_second_does() {
+        assert!(forced_repair_allowed(None, 0, FORCED_REPAIR_BASE_MS, FORCED_REPAIR_MAX_MS));
+        assert!(!forced_repair_allowed(
+            Some(FORCED_REPAIR_BASE_MS - 1),
+            0,
+            FORCED_REPAIR_BASE_MS,
+            FORCED_REPAIR_MAX_MS
+        ));
+        assert!(forced_repair_allowed(
+            Some(FORCED_REPAIR_BASE_MS),
+            0,
+            FORCED_REPAIR_BASE_MS,
+            FORCED_REPAIR_MAX_MS
+        ));
+        // Three ineffective repairs and the same 5 s wait is no longer enough.
+        assert!(!forced_repair_allowed(
+            Some(FORCED_REPAIR_BASE_MS),
+            3,
+            FORCED_REPAIR_BASE_MS,
+            FORCED_REPAIR_MAX_MS
+        ));
+        assert!(forced_repair_allowed(
+            Some(FORCED_REPAIR_BASE_MS * 8),
+            3,
+            FORCED_REPAIR_BASE_MS,
+            FORCED_REPAIR_MAX_MS
+        ));
+    }
+
+    /// A REPAIR THAT RESTORES EVENTS RESETS THE BACKOFF. The watchdog does this
+    /// by storing 0 into the streak when a keyboard callback lands after the
+    /// repair stamp; stated here as the arithmetic that follows from it, so the
+    /// property is asserted rather than only commented.
+    #[test]
+    fn a_repair_that_delivers_events_puts_the_fast_cadence_back() {
+        let slow = forced_repair_backoff_ms(4, FORCED_REPAIR_BASE_MS, FORCED_REPAIR_MAX_MS);
+        assert_eq!(slow, FORCED_REPAIR_MAX_MS);
+        // The streak reset the watchdog performs, in one line.
+        let after_reset = forced_repair_backoff_ms(0, FORCED_REPAIR_BASE_MS, FORCED_REPAIR_MAX_MS);
+        assert_eq!(after_reset, FORCED_REPAIR_BASE_MS);
+        // A wait that was NOT enough while the streak stood is enough after it.
+        assert!(!forced_repair_allowed(
+            Some(FORCED_REPAIR_BASE_MS),
+            4,
+            FORCED_REPAIR_BASE_MS,
+            FORCED_REPAIR_MAX_MS
+        ));
+        assert!(forced_repair_allowed(
+            Some(FORCED_REPAIR_BASE_MS),
+            0,
+            FORCED_REPAIR_BASE_MS,
+            FORCED_REPAIR_MAX_MS
+        ));
+    }
+
+    /// THE POINT OF THE WHOLE CHANGE, as one assertion pair: an UNEVIDENCED
+    /// alarm still respects the cooldown (it never reaches this function at
+    /// all — it has no proof to offer), while the PROVEN verdict is reached
+    /// from callback-only clocks and is repaired regardless of it.
+    ///
+    /// The 10:10:59 line — "the cooldown test says the last repair delivered
+    /// events … Holding off for the rest of the 60s cooldown" — was printed
+    /// 5344 ms after a keyboard callback genuinely arrived, so it was correct
+    /// on its own terms. What it could not know is that the keyboard died again
+    /// 35 seconds later. This function is what knows that.
+    #[test]
+    fn no_proof_means_no_forced_repair_and_the_cooldown_keeps_its_job() {
+        // Nothing proven: keyboard silent, but the mouse accounts for the input
+        // and Space is up. The `both_dead`/`kb_only_dead` path and its 60 s
+        // cooldown handle this case exactly as before.
+        assert_eq!(verdict(false, false, Some(4_000), Some(100), 100, 900_000), None);
+        // Proven: the same keyboard silence, with input the mouse cannot own.
+        assert_eq!(
+            verdict(false, false, Some(4_000), Some(4_000), 100, 900_000),
+            Some(ProvenDeaf::InputUnaccountedFor)
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TESTS — PROBLEM 259. The own-window fallback's three guards.
+//
+// House rule (CLAUDE.md): test the pure logic a user only reaches after
+// something else has already gone wrong — and this whole path exists because
+// something already has (PROBLEM 257). The branch that MUST be exercised is
+// the one nobody will ever see fail safely: the day the hook starts working
+// over our own window again, these guards are the only thing standing between
+// the owner and two rings, two launches and two spaces per press.
+// ---------------------------------------------------------------------------
+
+/// PROBLEM 262 — THE 2026-09-07 WEDGE, BRANCH BY BRANCH.
+///
+/// The measured episode, from installed 1.0.106's `debug.log`:
+///
+/// ```text
+/// 11:37:33.240  hold start (hold #11)
+/// 11:37:34.340  engine: combo Space+RightAlt received   <- last keyboard callback
+/// 11:38:33.351  WATCHDOG alarm confirmed ... Holds protected this session: 1
+/// 11:38:41.352  ...                                                        2
+/// 11:39:08.352  ...                                                        3
+/// 11:39:30.352  ...                                                        4
+/// ```
+///
+/// Four "protected" lines for ONE hold is the fingerprint of an episode clock
+/// that was being reset, and the numbers in these tests are that log's numbers.
+#[cfg(test)]
+mod deaf_hold_reaper_tests {
+    use super::{
+        defer_episode_ends_on_quiet_tick, hold_defers_rehook, hold_is_deaf_stale, hold_reap_reason,
+        modifier_latched_past_bound, HoldReap, HOLD_DEAF_SILENCE_MS, MAX_HOLD_DEFER_MS,
+        MAX_MODIFIER_HOLD_MS, MIN_OBSERVED_REPEATS, STALE_HOLD_GRACE_MS,
+    };
+
+    /// Every argument spelled once, so each test below changes exactly the term
+    /// it is about. Defaults describe a HEALTHY combo hold: latched, a combo
+    /// seen (so PROBLEM 219 stands the auto-repeat test down), the keyboard
+    /// callback running, and nothing proven deaf.
+    fn reason(
+        combo_seen: bool,
+        repeats: u32,
+        since_last_tick_ms: u64,
+        proven_deaf: bool,
+        kb_silence: Option<u64>,
+        hold_age_ms: u64,
+    ) -> Option<HoldReap> {
+        hold_reap_reason(
+            true,
+            repeats,
+            since_last_tick_ms,
+            STALE_HOLD_GRACE_MS,
+            combo_seen,
+            proven_deaf,
+            kb_silence,
+            HOLD_DEAF_SILENCE_MS,
+            hold_age_ms,
+            MAX_MODIFIER_HOLD_MS,
+        )
+    }
+
+    /// PROBLEM 219 IS KEPT, AND THIS IS THE CASE IT WAS WRITTEN FOR. The user
+    /// is holding Space and tapping a combo key; Windows moved auto-repeat to
+    /// that key, so Space stops repeating — but the CALLBACK is alive and says
+    /// so. No verdict, small silence: hands off.
+    #[test]
+    fn a_combo_seen_hold_is_still_protected_while_the_callback_is_alive() {
+        // The literal PROBLEM 219 numbers: 5 repeats, then 2016ms of quiet
+        // across four Space+Tab taps.
+        assert_eq!(reason(true, 5, 2_016, false, Some(40), 2_500), None);
+        // And a long, quiet, perfectly healthy read of the ring after a combo.
+        for since in [3_000u64, 10_000, 25_000] {
+            assert_eq!(
+                reason(true, 40, since, false, Some(120), since + 500),
+                None,
+                "a combo hold with the callback still running must never be reaped"
+            );
+        }
+    }
+
+    /// THE SAME HOLD, ONCE THE KEYBOARD IS PROVEN DEAF. Nothing about the hold
+    /// changed; what changed is that an instrument OFF the callback now says
+    /// the callback is not being entered at all, so PROBLEM 219's exemption can
+    /// never be lifted by any future event.
+    #[test]
+    fn the_same_combo_hold_is_reaped_once_the_keyboard_is_proven_deaf() {
+        assert_eq!(
+            reason(true, 5, 2_016, true, Some(58_922), 60_125),
+            Some(HoldReap::KeyboardDeaf),
+            "the 11:38:33 numbers from the 1.0.106 log"
+        );
+        // Even with zero repeats ever observed — a deaf hook cannot produce
+        // one, so `MIN_OBSERVED_REPEATS` can never be satisfied on this path.
+        assert_eq!(
+            reason(true, 0, 0, true, Some(HOLD_DEAF_SILENCE_MS), 4_000),
+            Some(HoldReap::KeyboardDeaf)
+        );
+    }
+
+    /// The verdict is not enough on its own: the callback-only clock has to
+    /// agree, and it has to have RUN once since this install (PROBLEM 228 —
+    /// `None` is UNKNOWN, never proof).
+    #[test]
+    fn the_deaf_path_needs_both_the_verdict_and_the_callback_clock() {
+        assert!(!hold_is_deaf_stale(true, true, None, HOLD_DEAF_SILENCE_MS));
+        assert!(!hold_is_deaf_stale(
+            true,
+            true,
+            Some(HOLD_DEAF_SILENCE_MS - 1),
+            HOLD_DEAF_SILENCE_MS
+        ));
+        assert!(hold_is_deaf_stale(
+            true,
+            true,
+            Some(HOLD_DEAF_SILENCE_MS),
+            HOLD_DEAF_SILENCE_MS
+        ));
+        // No verdict, and no hold, are each fatal on their own.
+        assert!(!hold_is_deaf_stale(true, false, Some(60_000), HOLD_DEAF_SILENCE_MS));
+        assert!(!hold_is_deaf_stale(false, true, Some(60_000), HOLD_DEAF_SILENCE_MS));
+    }
+
+    /// PROBLEM 218's own shape still reports PROBLEM 218's reason, and still
+    /// wins over the newer bounds — it is the most specific of the three.
+    #[test]
+    fn a_silent_hold_with_no_combo_is_still_reaped_as_auto_repeat_stopped() {
+        assert_eq!(
+            reason(false, MIN_OBSERVED_REPEATS, STALE_HOLD_GRACE_MS + 1, false, Some(40), 3_000),
+            Some(HoldReap::AutoRepeatStopped)
+        );
+        // Deaf as well: 218's reason is still the one printed, because it is
+        // the one that describes the hold rather than the process.
+        assert_eq!(
+            reason(false, 40, 60_000, true, Some(60_000), 61_000),
+            Some(HoldReap::AutoRepeatStopped)
+        );
+    }
+
+    /// ITEM 4, THE LAST RESORT. No verdict at all — the user simply stopped
+    /// touching anything, so `proven_keyboard_deaf` has no input to reason
+    /// from — but the latch has outlived the 30 s bound with NO keyboard
+    /// callbacks in that whole span.
+    #[test]
+    fn a_latch_past_the_bound_with_no_callbacks_in_that_span_is_cleared() {
+        assert_eq!(
+            reason(true, 0, 0, false, Some(58_922), 60_125),
+            Some(HoldReap::LatchedPastBound),
+            "the 11:38:33 hold, with the deafness verdict withheld"
+        );
+        assert!(modifier_latched_past_bound(
+            true,
+            MAX_MODIFIER_HOLD_MS + 1,
+            Some(MAX_MODIFIER_HOLD_MS + 1),
+            MAX_MODIFIER_HOLD_MS
+        ));
+    }
+
+    /// The bound may not fire on a hold the callback is still feeding — that is
+    /// a person reading the ring, and tearing it down is PROBLEM 236's
+    /// "it dies mid-press".
+    #[test]
+    fn a_long_hold_the_callback_is_still_feeding_is_never_cleared_by_the_bound() {
+        assert!(!modifier_latched_past_bound(
+            true,
+            10 * 60_000,
+            Some(120),
+            MAX_MODIFIER_HOLD_MS
+        ));
+        // Exactly at the bound is not past it, on either term.
+        assert!(!modifier_latched_past_bound(
+            true,
+            MAX_MODIFIER_HOLD_MS,
+            Some(MAX_MODIFIER_HOLD_MS + 1),
+            MAX_MODIFIER_HOLD_MS
+        ));
+        assert!(!modifier_latched_past_bound(
+            true,
+            MAX_MODIFIER_HOLD_MS + 1,
+            Some(MAX_MODIFIER_HOLD_MS),
+            MAX_MODIFIER_HOLD_MS
+        ));
+        // Never fired since the install is UNKNOWN, not proof (PROBLEM 228).
+        assert!(!modifier_latched_past_bound(true, 10 * 60_000, None, MAX_MODIFIER_HOLD_MS));
+        // And no hold means nothing to bound.
+        assert!(!modifier_latched_past_bound(
+            false,
+            10 * 60_000,
+            Some(10 * 60_000),
+            MAX_MODIFIER_HOLD_MS
+        ));
+    }
+
+    /// A hold with no latch is not a hold, whatever the other evidence says.
+    #[test]
+    fn nothing_is_reaped_when_no_hold_is_latched() {
+        assert_eq!(
+            hold_reap_reason(
+                false,
+                40,
+                60_000,
+                STALE_HOLD_GRACE_MS,
+                false,
+                true,
+                Some(60_000),
+                HOLD_DEAF_SILENCE_MS,
+                60_000,
+                MAX_MODIFIER_HOLD_MS
+            ),
+            None
+        );
+    }
+
+    // ── ITEM 2 — the deferral bound, replayed against the real predicates ──
+
+    /// One second-by-second run of `watchdog_check`'s episode bookkeeping,
+    /// using the REAL predicates and nothing else. Returns the tick (in
+    /// seconds from the first alarm) on which the repair finally proceeds.
+    ///
+    /// `reset_on_quiet_tick` is the ONLY difference between 1.0.106 and the
+    /// fix: it models the `!both_dead && !kb_only_dead` early return, which
+    /// used to zero `ALARM_DEFERRED_AT` unconditionally.
+    fn first_repair_second(alarm_seconds: &[u64], run_for: u64, reset_on_quiet_tick: bool) -> Option<u64> {
+        let mut started: Option<u64> = None;
+        for now in 0..=run_for {
+            if !alarm_seconds.contains(&now) {
+                // The quiet tick. A hold IS latched throughout this episode.
+                if reset_on_quiet_tick || defer_episode_ends_on_quiet_tick(true) {
+                    started = None;
+                }
+                continue;
+            }
+            let start = *started.get_or_insert(now);
+            let deferred_for = (now - start) * 1_000;
+            if !hold_defers_rehook(true, true, deferred_for, MAX_HOLD_DEFER_MS) {
+                return Some(now);
+            }
+        }
+        None
+    }
+
+    /// THE MEASURED FAILURE. The alarm can only fire on a tick where the mouse
+    /// callback has ALSO been silent past `BLIND_MS`, so with a hand on the
+    /// mouse the alarms are sparse: 11:38:33, :41, 11:39:08, :30 — 0s, 8s, 35s
+    /// and 57s apart. Under 1.0.106's unconditional reset the 10 s bound needs
+    /// ten CONSECUTIVE alarm seconds, which never happen, so the repair never
+    /// comes and each alarm re-opens the episode from zero (which is why the
+    /// log printed "Holds protected this session: 1, 2, 3, 4" for one hold).
+    #[test]
+    fn the_deferral_bound_cannot_be_extended_by_new_alarms() {
+        let measured = [0u64, 8, 35, 57];
+        assert_eq!(
+            first_repair_second(&measured, 600, true),
+            None,
+            "1.0.106: a bound reset by every quiet tick is not a bound — this is the wedge"
+        );
+        assert_eq!(
+            first_repair_second(&measured, 600, false),
+            Some(35),
+            "the clock runs from the FIRST deferred alarm, so the third one is past the bound"
+        );
+    }
+
+    /// A CONTIGUOUS run still behaves exactly as PROBLEM 236 designed it: ten
+    /// seconds of protection, then the repair. The fix must not shorten the
+    /// deferral it was written to provide.
+    #[test]
+    fn a_contiguous_alarm_run_still_gets_its_full_ten_seconds() {
+        let every_second: Vec<u64> = (0..30).collect();
+        assert_eq!(first_repair_second(&every_second, 600, false), Some(10));
+        assert_eq!(first_repair_second(&every_second, 600, true), Some(10));
+    }
+
+    /// The predicate itself, stated: only the end of the hold ends the episode.
+    #[test]
+    fn only_the_end_of_the_hold_ends_a_deferral_episode() {
+        assert!(!defer_episode_ends_on_quiet_tick(true));
+        assert!(defer_episode_ends_on_quiet_tick(false));
+    }
+}
+
+/// PROBLEM 262 item 3 + item 5 — the two branches that touch process state.
+/// Kept in one module and one test each, because they mutate module statics.
+#[cfg(test)]
+mod repair_teardown_tests {
+    use super::{
+        arm_own_window_hold, own_hold_active, own_window_space_down_accepted,
+        tear_down_hold_across_repair, tick_count, Ordering, MODIFIER_ACTIVE, OWN_HOLD_TS,
+        OWN_WINDOW_DEDUPE_MS, OWN_WINDOW_MAX_HOLD_MS, REPAIR_HOLD_TEARDOWNS, SPACE_ABORTED,
+        SPACE_COMBO_SEEN, SPACE_DOWN_TS, SPACE_INTERCEPTED,
+    };
+
+    /// These two tests write the module's real statics (`MODIFIER_ACTIVE`,
+    /// `OWN_HOLD_ACTIVE`), and `cargo test` runs tests in parallel threads, so
+    /// they must not run at the same time as each other. Every other test in
+    /// this file is pure and needs no such thing.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// ITEM 3. A hold latched by a hook that is about to be replaced is
+    /// unfalsifiable: its Space-UP belongs to a hook that will not exist. The
+    /// repair must take it with it — and must be idempotent, because the
+    /// ordinary re-hook path performs the same teardown inline.
+    #[test]
+    fn a_repair_clears_a_hold_that_predates_it() {
+        let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        let before = REPAIR_HOLD_TEARDOWNS.load(Ordering::Relaxed);
+        // The 11:37:33 hold: latched, a combo seen, Space swallowed.
+        MODIFIER_ACTIVE.store(true, Ordering::SeqCst);
+        SPACE_COMBO_SEEN.store(true, Ordering::Relaxed);
+        SPACE_INTERCEPTED.store(true, Ordering::Relaxed);
+        SPACE_DOWN_TS.store(tick_count(), Ordering::Relaxed);
+
+        tear_down_hold_across_repair("a unit test");
+
+        assert!(!MODIFIER_ACTIVE.load(Ordering::SeqCst), "the latch must not survive a repair");
+        assert!(!SPACE_COMBO_SEEN.load(Ordering::Relaxed));
+        assert!(!SPACE_INTERCEPTED.load(Ordering::Relaxed));
+        assert!(!SPACE_ABORTED.load(Ordering::Relaxed));
+        assert_eq!(
+            REPAIR_HOLD_TEARDOWNS.load(Ordering::Relaxed),
+            before + 1,
+            "the teardown is counted, so the 60s diagnostics line can report it"
+        );
+
+        // Idempotent: a second repair with nothing latched counts nothing and
+        // logs nothing. Without this the ordinary path (which already tears the
+        // hold down inline) would double-count every eviction.
+        tear_down_hold_across_repair("a unit test, again");
+        assert_eq!(REPAIR_HOLD_TEARDOWNS.load(Ordering::Relaxed), before + 1);
+    }
+
+    /// ITEM 5. The 1.0.106 ship noted two `own-window fallback:` lines logged
+    /// in the SAME MILLISECOND for one press: guard 2 asks about the HOOK, and
+    /// the hook is the one witness that cannot double-fire this path. A second
+    /// fallback Space-down while one is live is now a no-op.
+    #[test]
+    fn a_second_fallback_space_down_while_one_is_live_is_a_no_op() {
+        let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        // No fallback hold: the ordinary accept.
+        assert!(own_window_space_down_accepted(
+            true,
+            false,
+            false,
+            None,
+            OWN_WINDOW_DEDUPE_MS,
+            None,
+            OWN_WINDOW_MAX_HOLD_MS
+        ));
+        // One live, of any age inside the bound — including the same
+        // millisecond, which is the shape that was actually logged.
+        for age in [0u64, 1, 200, OWN_WINDOW_MAX_HOLD_MS] {
+            assert!(
+                !own_window_space_down_accepted(
+                    true,
+                    false,
+                    false,
+                    None,
+                    OWN_WINDOW_DEDUPE_MS,
+                    Some(age),
+                    OWN_WINDOW_MAX_HOLD_MS
+                ),
+                "a fallback hold {age}ms old already owns this press"
+            );
+        }
+        // An EXPIRED fallback hold is not a duplicate of anything: the page was
+        // torn down mid-hold and its keyup is never coming. Refusing here would
+        // wedge the ring shut for the rest of the 30s bound — the very failure
+        // this whole entry is about.
+        assert!(own_window_space_down_accepted(
+            true,
+            false,
+            false,
+            None,
+            OWN_WINDOW_DEDUPE_MS,
+            Some(OWN_WINDOW_MAX_HOLD_MS + 1),
+            OWN_WINDOW_MAX_HOLD_MS
+        ));
+    }
+
+    /// And the same thing through the real latch, so the wiring is exercised
+    /// and not just the predicate.
+    #[test]
+    fn the_live_fallback_latch_is_what_refuses_the_duplicate() {
+        let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        MODIFIER_ACTIVE.store(false, Ordering::SeqCst);
+        arm_own_window_hold(tick_count().max(1));
+        assert!(own_hold_active());
+        assert!(!own_window_space_down_accepted(
+            true,
+            false,
+            false,
+            None,
+            OWN_WINDOW_DEDUPE_MS,
+            super::own_hold_age_ms(),
+            OWN_WINDOW_MAX_HOLD_MS
+        ));
+        // Leave the statics as they were found.
+        super::disarm_own_window_hold();
+        OWN_HOLD_TS.store(0, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod own_window_fallback_tests {
+    use super::{
+        own_window_combo_for_vk, own_window_hold_is_ours, own_window_space_down_accepted,
+        KeyCombo, OWN_WINDOW_DEDUPE_MS, OWN_WINDOW_MAX_HOLD_MS,
+    };
+
+    /// The 2026-09-07 shape, and the only one that may be accepted: our window
+    /// is in front, bypass is off, and the hook has said nothing about Space —
+    /// either ever, or for far longer than the dedupe window.
+    #[test]
+    fn a_deaf_hook_over_our_own_window_hands_the_hold_to_the_page() {
+        assert!(own_window_space_down_accepted(
+            true, false, false, None, OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS
+        ));
+        assert!(own_window_space_down_accepted(
+            true, false, false, Some(60_000), OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS
+        ));
+        assert!(own_window_space_down_accepted(
+            true, false, false, Some(OWN_WINDOW_DEDUPE_MS), OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS
+        ));
+    }
+
+    /// GUARD 2, THE ONE THAT MATTERS. A healthy hook stamped this same physical
+    /// press microseconds ago. Accepting the page's copy is the double-fire.
+    #[test]
+    fn a_space_the_hook_just_saw_is_never_taken_twice() {
+        for age in [0u64, 1, 50, OWN_WINDOW_DEDUPE_MS - 1] {
+            assert!(
+                !own_window_space_down_accepted(
+                    true, false, false, Some(age), OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS
+                ),
+                "the hook stamped a Space-down {age}ms ago — the page's is the same press"
+            );
+        }
+    }
+
+    /// A latched hold is the hook mid-press. Its Space-down may be older than
+    /// the dedupe window (the owner reads the ring), so the age alone is not
+    /// enough — `MODIFIER_ACTIVE` is the half that covers a long hook hold.
+    #[test]
+    fn a_hook_hold_already_in_flight_blocks_the_page_however_old_it_is() {
+        assert!(!own_window_space_down_accepted(
+            true, false, true, Some(9_000), OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS
+        ));
+        assert!(!own_window_space_down_accepted(
+            true, false, true, None, OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS
+        ));
+    }
+
+    /// GUARD 1. Nothing else in the process may reach the engine through this
+    /// door: if our window is not the foreground window there is no PROBLEM
+    /// 257 to work around, and an accepted event would be an unexplained hold.
+    #[test]
+    fn nothing_is_accepted_while_another_window_has_the_foreground() {
+        assert!(!own_window_space_down_accepted(
+            false, false, false, None, OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS
+        ));
+    }
+
+    /// Bypass means Space is an ordinary space everywhere, and "everywhere"
+    /// has to include the one window that has a second way in.
+    #[test]
+    fn bypass_mode_switches_the_fallback_off_too() {
+        assert!(!own_window_space_down_accepted(
+            true, true, false, None, OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS
+        ));
+    }
+
+    /// GUARD 3. A key or a release with no fallback hold behind it is a stray:
+    /// either the hook owns this hold, or a page reloaded mid-press.
+    #[test]
+    fn a_key_without_a_fallback_hold_is_ignored() {
+        assert!(!own_window_hold_is_ours(None, OWN_WINDOW_MAX_HOLD_MS));
+        assert!(own_window_hold_is_ours(Some(0), OWN_WINDOW_MAX_HOLD_MS));
+        assert!(own_window_hold_is_ours(Some(4_000), OWN_WINDOW_MAX_HOLD_MS));
+    }
+
+    /// The page that never sent its `keyup` (navigation, reload, crash). The
+    /// hold must expire on its own or the next stray key becomes a launch.
+    #[test]
+    fn a_fallback_hold_that_outlives_its_page_expires() {
+        assert!(own_window_hold_is_ours(
+            Some(OWN_WINDOW_MAX_HOLD_MS),
+            OWN_WINDOW_MAX_HOLD_MS
+        ));
+        assert!(!own_window_hold_is_ours(
+            Some(OWN_WINDOW_MAX_HOLD_MS + 1),
+            OWN_WINDOW_MAX_HOLD_MS
+        ));
+    }
+
+    /// The map is the hook's, narrowed. A–Z must survive it — that is the
+    /// owner's requirement ("Space+letter must launch") in one assertion.
+    #[test]
+    fn every_letter_maps_to_the_same_alpha_the_hook_would_send() {
+        for vk in 0x41u16..=0x5A {
+            let ch = char::from_u32(vk as u32 + 32).unwrap();
+            assert!(
+                matches!(own_window_combo_for_vk(vk), Some(KeyCombo::Alpha(c)) if c == ch),
+                "VK {vk:#04X} must map to Alpha('{ch}')"
+            );
+        }
+    }
+
+    /// The three punctuation combos the ring offers, and nothing else.
+    #[test]
+    fn the_three_punctuation_combos_survive_and_the_excluded_keys_do_not() {
+        assert!(matches!(own_window_combo_for_vk(0xC0), Some(KeyCombo::Backtick)));
+        assert!(matches!(own_window_combo_for_vk(0xBC), Some(KeyCombo::Comma)));
+        assert!(matches!(own_window_combo_for_vk(0xBE), Some(KeyCombo::Period)));
+        // Escape, Enter, Tab, Backspace, arrows, Right Alt — the brief's
+        // exclusion list. A page needs these to be a page.
+        for vk in [0x1Bu16, 0x0D, 0x09, 0x08, 0x25, 0x26, 0x27, 0x28, 0xA5] {
+            assert!(
+                own_window_combo_for_vk(vk).is_none(),
+                "VK {vk:#04X} must stay with the page"
+            );
+        }
+        // Digits: the hook maps none of them either (`vk_to_char` is A–Z), so
+        // suppressing one here would cost a keystroke and buy nothing.
+        for vk in 0x30u16..=0x39 {
+            assert!(own_window_combo_for_vk(vk).is_none());
+        }
+        // F1–F12 are gated on hook-side `BOUND_SPECIALS` the page cannot read.
+        for vk in 0x70u16..=0x7B {
+            assert!(own_window_combo_for_vk(vk).is_none());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PROBLEM 261 — pointer activation under a FALLBACK hold.
+//
+// The owner's 1.0.105 report: with the dashboard focused, holding Space drew
+// the ring (PROBLEM 259's fallback working) but "it's not seeing my cursor
+// movement and it's not opening apps when clicked". Every gate below is one of
+// the reasons why, turned into a decision a test can walk.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod own_window_pointer_tests {
+    use super::{
+        arm_own_window_hold, disarm_own_window_hold, hold_latched, hold_ts_for,
+        own_hold_active, own_hold_reap_reason, OwnHoldReap, OWN_HOLD_ACTIVE, OWN_HOLD_COMBO,
+        OWN_HOLD_TS, OWN_WINDOW_MAX_HOLD_MS, SPACE_ABORTED,
+    };
+    use crate::hook::pointer;
+    use std::sync::atomic::Ordering;
+
+    /// The whole bug in one assertion. `MODIFIER_ACTIVE` is false for the
+    /// entire life of a fallback hold — nothing on that path writes it, and
+    /// deliberately so (it is guard 2's arbiter) — so a gate that reads it
+    /// alone is a gate the fallback can never open.
+    #[test]
+    fn a_fallback_hold_is_a_latched_hold_even_though_the_callback_never_ran() {
+        assert!(!hold_latched(false, false), "no hold at all");
+        assert!(hold_latched(true, false), "an ordinary hook hold");
+        assert!(
+            hold_latched(false, true),
+            "A FALLBACK HOLD. This is the assertion that was false in 1.0.105: the mouse \
+             callback returned before note_cursor and before WM_LBUTTONDOWN, and the \
+             poller's `live` term was false, so nothing could ever arm inside the dashboard."
+        );
+        // Both, briefly, while one hold is torn down as another begins. A hold
+        // IS latched during that transient — `||`, never `^`.
+        assert!(hold_latched(true, true));
+    }
+
+    /// The quiet fourth gate. `SPACE_DOWN_TS` identifies WHICH hold a poller
+    /// tick belongs to and is the floor `CURSOR_STAMP` must clear before a
+    /// cursor position counts as "moved during THIS hold". A fallback hold
+    /// never stamps it, so without this the tracker would pair a fallback hold
+    /// with a stamp from some previous hook hold — or with 0 at boot, which
+    /// every stamp clears.
+    #[test]
+    fn a_fallback_hold_is_identified_by_its_own_stamp_not_the_last_hook_holds() {
+        // No fallback hold: the hook's stamp, unchanged.
+        assert_eq!(hold_ts_for(9_000, false, 0), 9_000);
+        assert_eq!(hold_ts_for(9_000, false, 4_242), 9_000);
+        // A fallback hold owns the identity.
+        assert_eq!(hold_ts_for(9_000, true, 12_345), 12_345);
+        // Boot: the hook has never stamped one. Without the fallback's stamp
+        // the floor would be 0 and EVERY stale cursor position would qualify.
+        assert_eq!(hold_ts_for(0, true, 12_345), 12_345);
+        // Latched with no stamp is a torn state, not a hold — fall back to the
+        // hook's stamp rather than publish 0 as a floor.
+        assert_eq!(hold_ts_for(9_000, true, 0), 9_000);
+    }
+
+    /// Brief item 3, the PROBLEM 218 class on the fallback's own latch. The
+    /// reaper `reap_stale_hold` cannot see this shape: it measures the
+    /// keyboard hook's auto-repeat, and a fallback hold produces none.
+    #[test]
+    fn the_reaper_covers_a_fallback_hold_whose_release_never_came() {
+        // Nothing latched: never reap, however bad the other evidence looks.
+        assert_eq!(
+            own_hold_reap_reason(false, Some(999_999), OWN_WINDOW_MAX_HOLD_MS, Some(false)),
+            None
+        );
+        // A healthy hold, foreground confirmed: leave it alone.
+        assert_eq!(
+            own_hold_reap_reason(true, Some(1_200), OWN_WINDOW_MAX_HOLD_MS, Some(true)),
+            None
+        );
+        // A healthy hold on a tick that did NOT probe the foreground. "Not
+        // checked" may never be a reason to reap.
+        assert_eq!(
+            own_hold_reap_reason(true, Some(1_200), OWN_WINDOW_MAX_HOLD_MS, None),
+            None
+        );
+        // THE ALT-TAB SHAPE. Guard 1 admitted this hold because our window was
+        // foreground; re-asked, it says no. This is also the case the page's
+        // own `blur` listener cannot cover once the page itself is gone.
+        assert_eq!(
+            own_hold_reap_reason(true, Some(1_200), OWN_WINDOW_MAX_HOLD_MS, Some(false)),
+            Some(OwnHoldReap::ForegroundLost)
+        );
+        // THE DEAD-PAGE SHAPE: still foreground, still latched, past the bound.
+        assert_eq!(
+            own_hold_reap_reason(
+                true,
+                Some(OWN_WINDOW_MAX_HOLD_MS + 1),
+                OWN_WINDOW_MAX_HOLD_MS,
+                Some(true)
+            ),
+            Some(OwnHoldReap::Expired)
+        );
+        // Exactly at the bound is still ours — `own_window_hold_is_ours` uses
+        // `<=`, and the two must not disagree about the same millisecond.
+        assert_eq!(
+            own_hold_reap_reason(
+                true,
+                Some(OWN_WINDOW_MAX_HOLD_MS),
+                OWN_WINDOW_MAX_HOLD_MS,
+                Some(true)
+            ),
+            None
+        );
+        // Latched with no stamp: a torn state the latch must not survive.
+        assert_eq!(
+            own_hold_reap_reason(true, None, OWN_WINDOW_MAX_HOLD_MS, Some(true)),
+            Some(OwnHoldReap::Expired)
+        );
+        // Expiry is reported ahead of a lost foreground: when both are true the
+        // log should name the bound that is actually unrecoverable.
+        assert_eq!(
+            own_hold_reap_reason(true, Some(999_999), OWN_WINDOW_MAX_HOLD_MS, Some(false)),
+            Some(OwnHoldReap::Expired)
+        );
+    }
+
+    /// Brief item 4. PROBLEM 259's dedupe is a 100 ms window and a clock, not
+    /// a mutex. If it ever lets two calls through for one physical press, the
+    /// worst outcome must be a duplicate log line — never two arms, never a
+    /// hold that survives its own release.
+    ///
+    /// Serial by construction rather than by attribute: it is the only test in
+    /// the tree that writes `OWN_HOLD_*`, and it leaves them as it found them.
+    #[test]
+    fn arming_twice_for_one_press_is_the_same_state_as_arming_once() {
+        // Poison every latch first, so a passing assertion below can only mean
+        // the arm cleared it rather than that it happened to be clear already.
+        SPACE_ABORTED.store(true, Ordering::SeqCst);
+        pointer::ARMED_INDEX.store(7, Ordering::SeqCst);
+        OWN_HOLD_COMBO.store(true, Ordering::SeqCst);
+
+        arm_own_window_hold(1_000);
+        let after_one = (
+            OWN_HOLD_ACTIVE.load(Ordering::SeqCst),
+            OWN_HOLD_TS.load(Ordering::SeqCst),
+            OWN_HOLD_COMBO.load(Ordering::SeqCst),
+            SPACE_ABORTED.load(Ordering::SeqCst),
+            pointer::ARMED_INDEX.load(Ordering::SeqCst),
+        );
+        assert_eq!(
+            after_one,
+            (true, 1_000, false, false, -1),
+            "one arm must latch the hold, stamp it, and clear every per-hold latch \
+             pointer activation depends on"
+        );
+
+        arm_own_window_hold(1_000);
+        assert_eq!(
+            (
+                OWN_HOLD_ACTIVE.load(Ordering::SeqCst),
+                OWN_HOLD_TS.load(Ordering::SeqCst),
+                OWN_HOLD_COMBO.load(Ordering::SeqCst),
+                SPACE_ABORTED.load(Ordering::SeqCst),
+                pointer::ARMED_INDEX.load(Ordering::SeqCst),
+            ),
+            after_one,
+            "IDEMPOTENCE: a second arm for the same press must change nothing"
+        );
+        assert!(own_hold_active());
+
+        // Teardown is a claim: exactly one caller owns it, and a second call
+        // is a no-op. The release path, the reaper and the watchdog all race
+        // here, and a double teardown would emit two `guide-hud-hide` events.
+        assert!(disarm_own_window_hold(), "the first teardown owns the hold");
+        assert!(!disarm_own_window_hold(), "a second teardown owns nothing");
+        assert!(!own_hold_active());
+        assert_eq!(OWN_HOLD_TS.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            pointer::ARMED_INDEX.load(Ordering::SeqCst),
+            -1,
+            "PROBLEM 206/218 — an armed chip may not outlive the hold that armed it"
+        );
+
+        // Leave the world as it was found.
+        SPACE_ABORTED.store(false, Ordering::SeqCst);
     }
 }

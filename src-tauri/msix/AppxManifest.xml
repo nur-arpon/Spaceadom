@@ -1,0 +1,177 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  AppxManifest.xml - Spaceadom's Microsoft Store (MSIX) package manifest.
+  PROBLEM 250.
+
+  THIS FILE IS A TEMPLATE. The four {{DOUBLE-BRACE}} placeholders are filled in
+  by scripts/build-msix.ps1 from src-tauri/msix/identity.json (gitignored; see
+  identity.example.json) and from package.json's version. It is still valid XML
+  with the placeholders in place, on purpose, so that `[xml]` can load and
+  structurally check it without a build having run.
+
+  WHY THIS IS HAND-WRITTEN. Tauri v2 has no MSIX bundle target - the tracking
+  issue (tauri-apps/tauri#4818, open since Aug 2022) is still open, and Tauri's
+  own Store guidance is Route A: host a signed .exe and point the listing at it.
+  The one third-party tool that does Tauri -> MSIX
+  (@choochmeque/tauri-windows-bundle) was evaluated on 2026-09-05 and NOT
+  adopted: it still requires the identity values, the assets, the Windows SDK
+  and the certificate from you, so it removes none of the surface that actually
+  costs anything, while adding a single-maintainer npm package with a bundled
+  native binary to a project whose rule is explicit, auditable scripts. This
+  file plus MakeAppx.exe is the whole of the alternative.
+
+  ============================================================================
+  WHAT IS DELIBERATELY *NOT* IN HERE
+  ============================================================================
+
+  * `desktop6:FileSystemWriteVirtualization` / `desktop6:RegistryWriteVirtualization`.
+    The brief that produced this file asked about them. They are the opt-OUT
+    switches for VIRTUALIZED (appContainer) packages; Microsoft's
+    desktop-to-uwp-behind-the-scenes page scopes every AppData/registry
+    redirection rule with "this section applies only to virtualized apps", and
+    this package is `runFullTrust` (mediumIL), which is not one. Declaring an
+    element that does not apply - together with the `unvirtualizedResources`
+    restricted capability it needs - would be a Store-review question we could
+    not answer and a manifest nobody could reconstruct the reason for later.
+    The consequence for the app is in src/packaged.rs::migrate_legacy_data_once,
+    which is written to be correct whether or not AppData turns out to be
+    virtualized here. NOTE, honestly: no Microsoft page states in one sentence
+    that a full-trust package is never virtualized. That is an inference.
+
+  * A bundled WebView2 runtime, and any `win32dependencies:ExternalDependency`
+    on it. Reasons, in order:
+      - You cannot run an installer from inside a package, so `npm run store`'s
+        offline-bootstrapper NSIS build has nothing to contribute here. The MSIX
+        carries the app's FILES, not an installer. It is laid out from the plain
+        `npm run tauri build` release binary.
+      - The Evergreen WebView2 Runtime is a component of Windows 11 and is
+        present on all but a small number of Windows 10 devices (Microsoft's own
+        distribution page says both of those things).
+      - `ExternalDependency` is honoured only by the App Installer app, not by
+        Store-driven installs, so it would do nothing for the case we are
+        shipping into and MakeAppx does not validate it either.
+      - The remaining option is the Fixed Version runtime, +~250 MB inside the
+        package. That is an OWNER DECISION, not a default: see
+        to-publish-in-microsoft-store/SUBMIT-CHECKLIST.md, "Route B".
+    RESIDUAL RISK, stated plainly: on a Windows 10 machine with no Evergreen
+    runtime this package starts and shows no window. That is the same failure
+    the app already has in that situation, and it is the reason Route A's
+    installer embeds the offline runtime while this one cannot.
+
+  * `resources.pri` and `.scale-200` asset variants. Without a `makepri.exe`
+    step, files named `Logo.scale-200.png` are inert - Windows would never look
+    at them - so shipping them would be decoration that reads as correctness.
+    Only 100%-scale assets are generated (build-msix.ps1 makes them from
+    icons/icon.png). Windows scales them. If the Store listing ever wants
+    crisper tiles, the fix is a makepri step, not more files.
+
+  ============================================================================
+  THE ONE CROSS-FILE CONTRACT
+  ============================================================================
+
+  desktop:StartupTask/@TaskId below MUST equal `packaged::STARTUP_TASK_ID` in
+  src-tauri/src/packaged.rs. `StartupTask::GetAsync` fails with E_INVALIDARG for
+  an id the manifest does not declare, and in a log that is indistinguishable
+  from "the WinRT API is unavailable" - so a typo here becomes a Store-only
+  autostart bug that reads as something else entirely.
+
+  Enabled="true" is allowed for a desktop startupTask and means the user gets
+  autostart from the first launch without the app having to ask. They can turn
+  it off in Settings > Apps > Startup or Task Manager > Startup apps, and if
+  they do, Windows will not let the app switch it back on - which is why the
+  Settings row goes inert with an explanation instead of pretending.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap desktop rescap">
+
+  <!-- All three filled from msix/identity.json; Version is a.b.c.0 from
+       package.json, the fourth field left at 0 because the Store reserves it. -->
+  <Identity
+    Name="{{IDENTITY_NAME}}"
+    Publisher="{{IDENTITY_PUBLISHER}}"
+    Version="{{VERSION}}"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Spaceadom</DisplayName>
+    <PublisherDisplayName>{{PUBLISHER_DISPLAY_NAME}}</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <!-- MinVersion 10.0.17763.0 = Windows 10 1809. Two things set this floor:
+         the windows.startupTask desktop extension (1607 and up) and WebView2,
+         which is not realistically present below 1809. MaxVersionTested is the
+         SDK this package is actually built with, 10.0.26100.0 - not a guess:
+         it is the version of MakeAppx.exe that packs it. -->
+    <TargetDeviceFamily Name="Windows.Universal"
+                        MinVersion="10.0.17763.0"
+                        MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <!-- EntryPoint="Windows.FullTrustApplication" + Executable is the documented
+         pair for a packaged classic Win32 app. It is what lets spaceadom.exe be
+         an ordinary desktop process - which it must be, because a
+         WH_KEYBOARD_LL hook is not something an appContainer app can install. -->
+    <Application Id="Spaceadom"
+                 Executable="spaceadom.exe"
+                 EntryPoint="Windows.FullTrustApplication">
+
+      <uap:VisualElements
+        DisplayName="Spaceadom"
+        Description="Hold Space and tap a key to launch, focus or minimise any app."
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile
+          Wide310x150Logo="Assets\Wide310x150Logo.png"
+          Square71x71Logo="Assets\Square71x71Logo.png"
+          Square310x310Logo="Assets\Square310x310Logo.png"
+          ShortName="Spaceadom" />
+        <!-- A tray utility has nothing to say on the lock screen and asks for
+             no notification surface it does not use. -->
+      </uap:VisualElements>
+
+      <Extensions>
+        <!-- PROBLEM 250 - autostart, the ONLY way that works in a package.
+             TaskId must match packaged::STARTUP_TASK_ID (see the header). -->
+        <desktop:Extension
+          Category="windows.startupTask"
+          Executable="spaceadom.exe"
+          EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask
+            TaskId="SpaceadomStartupTask"
+            Enabled="true"
+            DisplayName="Spaceadom" />
+        </desktop:Extension>
+      </Extensions>
+
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <!-- The only capability this app needs, and the one that makes it a normal
+         desktop process. The global keyboard hook, the tray icon, launching
+         other applications and reading their window titles are all ordinary
+         Win32 under full trust - there is no narrower capability that grants
+         them, and no broader one is being asked for.
+
+         `runFullTrust` is a RESTRICTED capability: it must be declared in the
+         rescap namespace, and Partner Center asks you to justify it during
+         submission. The justification is in LISTING.md's certification notes,
+         and it is the same sentence the app has always given: the feature IS
+         the spacebar behaving differently in other applications, which cannot
+         be done without a system-wide hook. -->
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+
+</Package>

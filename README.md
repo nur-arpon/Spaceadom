@@ -1,39 +1,101 @@
-# Spaceadom 🚀
+# Spaceadom
 
-**Hold Space, tap a key, and the app you want is there.**
+*Source-visible, proprietary — see [LICENSE](LICENSE).*
 
-Space + `c` opens Chrome. Press it again and Chrome minimises. Space + `w` for
-WhatsApp, Space + `s` for Spotify — twenty-six keys, three profiles, no
-Alt-Tab.
+**Hold Space, tap any app's initial letter — boom! it opens. Hold Space, tap
+the app's initial again — boom! it's gone.**
 
-Tap Space on its own and it types a space, exactly like always.
+> **A hero screenshot and a short demo GIF belong here and aren't in yet.**
+> `docs/media/hud-starry.png` (the dashboard, Starry theme, ideally with the
+> radial "hold Space" HUD up) and `docs/media/demo.gif` (5–10 seconds of the
+> gesture above) are both owed by the owner. See
+> [`docs/media/CAPTURE-NOTES.md`](docs/media/CAPTURE-NOTES.md) for exactly
+> what was tried, why the HUD specifically can't be captured from a browser
+> preview, and the fastest path to finish both. Once `hud-starry.png` exists,
+> replace this note with
+> `![Spaceadom's Starry-night dashboard](docs/media/hud-starry.png)`.
 
-Windows only. Rust + Tauri v2. No telemetry, no network, no account.
+Windows only. Rust + Tauri v2. No account, no analytics, no ads.
 
 ---
 
 ## Install
 
 Download the latest **`Spaceadom_*_x64-setup.exe`** from
-[Releases](../../releases) and run it.
+[Releases](../../releases) and run it. This is the **recommended** installer:
+it installs into your own user folder, never asks for an admin password, and
+is the one that keeps itself updated (see "Updates" below).
 
 Windows will warn that the publisher is unknown — the build isn't code-signed.
 Choose **More info → Run anyway**.
+
+A **`.msi`** is also published on every release, for anyone whose workplace
+requires that installer format. It installs for the whole PC and asks for
+admin once. **Don't run the `.msi` if you already installed with `setup.exe`**
+— it installs itself into wherever Spaceadom already lives, and Windows then
+believes those files belong to the `.msi`; uninstalling that entry later
+deletes them. Full detail, including a correction to an earlier version of
+this warning, is in
+[`all-versions/WHAT-CHANGED.md`](all-versions/WHAT-CHANGED.md). Install one,
+never both.
+
+**Microsoft Store** listing is prepared but not yet submitted — see
+[`to-publish-in-microsoft-store/`](to-publish-in-microsoft-store/).
 
 That's it. Spaceadom starts with Windows and lives in your tray.
 
 ---
 
+## Portable
+
+Don't want an installer touching your machine at all? Download
+**`Spaceadom_*_x64-portable.zip`** instead, unzip it anywhere, and run
+`spaceadom.exe` directly. Nothing is written to Program Files, the registry,
+or Task Scheduler — a `data` folder appears next to the exe on first run and
+that is the ONLY place Spaceadom ever writes: your config, the log, your
+rolling backups, the app-picker cache. Move the folder and your settings move
+with it; delete the folder and Spaceadom, and every trace of it, is gone.
+
+Two trade-offs, both a direct consequence of having no installer: a portable
+copy does **not** start with Windows on its own (add a shortcut to
+`spaceadom.exe` in your own Startup folder — `Win+R` → `shell:startup` — if
+you want that), and it does **not** update itself (grab a newer zip from
+[Releases](../../releases) when one comes out). It also needs the WebView2
+runtime already on the machine, same as every other build here, but with no
+installer step to fetch it if it's missing — see the zip's own
+`README-portable.txt` for the one-time fix if the window never appears.
+
+Don't run a portable copy alongside an installed one (`setup.exe` or `.msi`)
+on the same machine — both hook the spacebar, and the dashboard's "second
+copy found" banner applies here exactly as it does to two installed copies.
+
+---
+
 ## How it works
 
-Hold **Space** for a moment and a radial guide appears showing every key you've
-bound. Tap one.
+- **Hold Space, tap a letter** — the app bound to that letter launches, comes
+  to the front if it's already open, or minimises if it's already in front.
+- **Hold Space for a moment** and a radial guide appears over the keyboard
+  showing every shortcut you've set, so you never have to memorise them.
+- **Tap Space on its own and it always types a space** — exactly as it always
+  has. That rule is the whole design: a modifier you already have, that costs
+  you nothing.
+
+**The first time you open it, Spaceadom walks you through one binding** — pick
+a letter, give it something to open, then hold Space and tap it. It shows up
+once; Settings has **"Show me the walkthrough"** as the way back in.
+
+Bindings are edited from the dashboard — click any key on the on-screen
+keyboard and pick an app, or paste a URL. Drag a shortcut onto a key and that
+works too.
+
+### Every shortcut
 
 | Gesture | What happens |
 | --- | --- |
 | `Space` + letter | Launch the app, focus it if it's already open, minimise it if it's already focused |
 | `Space` + `Right Alt` | Cycle profiles — Founders → Gamers → Professionals |
-| `Space` + `Esc` | Boss key: hide everything |
+| `Space` + `Esc` | Boss key: hide everything and mute the PC |
 | `Space` + `` ` `` | Picture-in-picture cycle |
 | `Space` + scroll | Fade the window under the cursor |
 | `Space` + `.` | Pause Spaceadom |
@@ -47,8 +109,63 @@ Every one of these is also explained inside the app: the row along the bottom
 of the dashboard is pressable, and so is each of those keys on the on-screen
 keyboard.
 
-Bindings are edited from the dashboard — click any key on the on-screen
-keyboard and pick an app, or paste a URL.
+---
+
+## Features
+
+*(The full non-negotiable contract these are drawn from is
+[`CORE_AIM.md`](CORE_AIM.md).)*
+
+- **Smart Cascade** — Space + a letter launches, focuses, or minimises an app
+  in a reliable, repeatable loop, using native window-handle caching and OS
+  focus forcing, not a guess.
+- **Typing protection** — tapping Space always inserts a space; holding it
+  never leaks a repeat; fast typing that clips the edge of a hold still comes
+  through as ordinary text, never a misfired shortcut.
+- **Three profiles** (Founders, Gamers, Professionals, or your own), switched
+  with Space + Right Alt, so the same 26 keys mean different things at work
+  and at play.
+- **Boss Key** (Space + Esc) — minimises every window and mutes the system in
+  one press natively; the same combination again restores and unmutes.
+- **A visual guide, not a cheat sheet you have to remember** — hold Space and
+  a glassmorphism HUD shows the current profile's bindings; every action also
+  gets a toast confirming what just happened.
+- **Three themes** — Earthy daylight, Warcry, and a Starry night that is a
+  real animated night sky (moon phases, 20 constellations, a storm, a rigged
+  galleon) — or turn Fun mode off for something plain and quiet.
+- **Set up by clicking a keyboard**, not by editing a config file — the
+  dashboard *is* the on-screen keyboard; click a key, pick an app or paste a
+  URL, done.
+
+---
+
+## Privacy
+
+Spaceadom's local files — your bindings and a debug log — stay on your own
+computer. Its only network activity is an optional crash report (one click to
+turn off) and, outside the Microsoft Store build, a daily check for a newer
+version. Neither ever contains what you type or what you've bound.
+
+The full policy — exactly what each file and each network request contains,
+and how to delete everything — is
+**[PRIVACY.md](https://github.com/nur-arpon/Spaceadom/blob/main/PRIVACY.md)**.
+
+---
+
+## Updates
+
+**Spaceadom updates itself.** Every `setup.exe`/`.msi` install checks once a
+day for a newer release, downloads it, verifies its signature, and installs it
+silently in the background — no prompt, no admin password. You'll see
+"Updated to …" for a few seconds next time you open the dashboard. To pin a
+version instead, set `"auto_update": false` in
+`%APPDATA%\Spaceadom\config.json`.
+
+**If you install from the Microsoft Store**, the Store handles updates the
+normal Store way, and Spaceadom's own updater doesn't run at all.
+
+See [PRIVACY.md](https://github.com/nur-arpon/Spaceadom/blob/main/PRIVACY.md#checking-for-updates)
+for exactly what the update check does and does not send.
 
 ---
 
@@ -77,19 +194,43 @@ doesn't, turn on **Settings → Software overlay** and restart.
 
 ---
 
-## Building it yourself
+## Build from source
 
 Requires [Rust](https://rustup.rs/), [Node 20+](https://nodejs.org/), and the
 WebView2 runtime (already on Windows 11).
 
 ```bash
 npm install
-npm run tauri dev     # run it
-npm run tauri build   # installers → src-tauri/target/release/bundle/
+npm run build         # tsc + vite — must run before any cargo command
+npm run tauri dev      # run it
+npm run tauri build    # installers -> src-tauri/target/release/bundle/
 ```
 
-`npm run build` must run before any cargo command — Tauri reads the built
-frontend at compile time.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full environment, the checks a
+change needs to pass, and this project's documentation rules.
+
+---
+
+## Licence
+
+**Source-visible, proprietary** — see [LICENSE](LICENSE). You may read and
+build this source for personal, non-commercial use and evaluation. No
+redistribution of source or binaries, no selling, no derivative products. This
+is not an OSI open-source licence. Third-party components keep their own
+licences — see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Official
+binaries only come from this repository's
+[Releases](../../releases) and, once published, the Microsoft Store.
+
+---
+
+## Support
+
+- **Bugs:** [open an issue](../../issues/new/choose) — the template asks for
+  exactly what gets a Spaceadom bug fixed fast (version, installer, Windows
+  build, `debug.log`).
+- **Questions and ideas:** [Discussions](../../discussions).
+- **Security issues:** see [SECURITY.md](SECURITY.md) — please don't file
+  those as a public issue.
 
 ---
 
@@ -114,20 +255,3 @@ itself visible while painting nothing, a list that stopped at 60 items, a
 confirmation dialog that never rendered, a watchdog that logged 260 errors
 without catching a single real fault. They're written up so the next person
 doesn't have to rediscover them.
-
----
-
-## Privacy
-
-Spaceadom has no network code, no accounts and no telemetry. It watches your
-keyboard because that is its job, and it records none of what you type.
-
-The full policy — including exactly what the settings file and the log DO
-contain, and how to delete them — is in
-**[PRIVACY.md](PRIVACY.md)**.
-
----
-
-## Licence
-
-MIT — see [LICENSE](LICENSE).

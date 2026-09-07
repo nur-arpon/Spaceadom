@@ -1,10 +1,20 @@
 [package]
 name = "spaceadom"
-version = "1.0.95"
+version = "1.0.107"
 description = "Spaceadom — hold Space + tap a key to launch, focus or minimise any app"
 authors = ["Spaceadom"]
 edition = "2021"
 rust-version = "1.77"
+# PROBLEM 256 — this used to have no `license` field at all (never "MIT"; that
+# belief traced to the About screen's GitHub link, not to this file — see
+# controls.ts's `ABOUT_LINKS` comment). The repo's own LICENSE is the
+# source-visible/proprietary text in `../LICENSE`, which is not an SPDX
+# identifier, so this uses SPDX's own escape hatch for a non-standard licence
+# (`LicenseRef-<idstring>`) rather than `license-file` — Cargo treats the two
+# as mutually exclusive, and the SPDX form is what the owner asked to see
+# here and in package.json (`SEE LICENSE IN LICENSE`, npm's equivalent
+# escape hatch).
+license = "LicenseRef-Spaceadom-Source-Visible"
 
 [lib]
 name = "space_toggle_os_lib"
@@ -28,6 +38,15 @@ tauri-plugin-shell        = "2"
 tauri-plugin-dialog       = "2"
 tauri-plugin-opener       = "2"
 tauri-plugin-single-instance = "2"
+# PROBLEM 245 — the in-app updater. Pinned exactly (owner: pin versions).
+# 2.11.0 is the newest stable on crates.io as of 2026-09-04 (published
+# 2026-08-31). Everything about how it is driven lives in src/updater.rs.
+# NOT added: tauri-plugin-process. Its only job is the JS `relaunch()`,
+# which is `AppHandle::restart()` — the exact call PROBLEM 233 bans here
+# (single-instance kills the newcomer). The relaunch is the NSIS
+# installer's own `/R`, which starts the app only after this process is
+# gone.
+tauri-plugin-updater = "=2.11.0"
 
 # Serialization
 serde      = { version = "1", features = ["derive"] }
@@ -70,6 +89,72 @@ sentry     = { version = "0.49", default-features = false, features = ["backtrac
 # The `log` → Sentry bridge. `SentryLogger::with_dest(...)` wraps log4rs's
 # logger rather than replacing it, so the local debug.log is untouched.
 sentry-log = "0.49"
+
+# PROBLEM 249 — the "What's new" fetch in src/release_notes.rs (one GET to the
+# GitHub releases API, unauthenticated).
+#
+# THIS ADDS NOTHING TO THE BUILD. reqwest 0.13.4 is already compiled into this
+# tree twice over — `tauri-plugin-updater` downloads the installer with it and
+# `sentry` sends crash reports with it — and Cargo.lock already pins that exact
+# version with `rustls` on. Naming it here only makes the crate that is being
+# compiled anyway REACHABLE from our own code. Measured, not assumed: the only
+# change to Cargo.lock is ONE line — `"reqwest"` joining `spaceadom`'s own
+# dependency list. No new `[[package]]` entry appears, i.e. not one crate is
+# downloaded or compiled that was not already. `default-features = false` so
+# nothing new is switched on from our side either: feature unification leaves
+# whatever the other two enabled exactly as it was.
+#
+# `rustls` (not `rustls-tls` — the feature was renamed in 0.13) because nothing
+# on this build machine is installed system-wide; the whole toolchain is on D:,
+# which is the same reason sentry takes rustls rather than native-tls.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+
+# PROBLEM 253 — the "Report a problem" diagnostics bundle (src/diagnostics.rs).
+#
+# THIS ADDS NO NEW CRATE TO THE BUILD, and that is why it was chosen over
+# writing a STORED archive by hand. `zip 4.6.1` is ALREADY compiled into this
+# tree: `tauri-plugin-updater` depends on it (it unpacks a downloaded update),
+# and Cargo.lock already pins that exact version. Naming it here only makes the
+# crate that is being compiled anyway REACHABLE from our own code.
+#
+# `default-features = false` because the default set is aes-crypto + bzip2 +
+# deflate64 + lzma + ppmd + time + zstd + xz — seven compression and crypto
+# trees for an archive that holds four text files.
+#
+# `deflate-flate2` and NOT `deflate`: zip's aggregate `deflate` feature pulls in
+# `zopfli` and `flate2-zlib-rs`, which ARE new crates. `deflate-flate2` takes
+# `flate2` with its default rust backend, and `flate2 1.1.9` + `miniz_oxide` are
+# likewise already in Cargo.lock (via `png` and `tauri-plugin-updater`). So the
+# whole feature costs one extra `zip` feature flag and zero downloads.
+#
+# NOT `Stored`: a 5,000-line log tail is a megabyte of repetitive text and
+# deflates roughly tenfold, which is the difference between a report a user
+# attaches to a GitHub issue and one they do not.
+zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
+
+# REVIEW FIXES 2026-09-05 (H1) — re-verifying an ARCHIVED installer before
+# running it elevated (src/updater.rs).
+#
+# NEITHER OF THESE ADDS A CRATE TO THE BUILD, which is why they were chosen
+# over hand-rolling either primitive. Both are already compiled into this tree
+# and already pinned at these exact versions in Cargo.lock:
+#
+#   minisign-verify 0.2.5 — `tauri-plugin-updater`'s own signature check
+#                           (`updater.rs::verify_signature`). It is a private
+#                           function there, so the plugin cannot be asked to
+#                           re-verify a file it did not download; naming the
+#                           crate here makes the SAME code reachable from ours,
+#                           against the SAME public key out of tauri.conf.json.
+#                           The crate has no dependencies of its own at all.
+#   sha2 0.10             — already in the tree via `sentry`/`reqwest`'s
+#                           transitive graph. Used for the write-then-recompute
+#                           guard on the `.msi` in %TEMP%.
+#
+# Measured the same way the `reqwest` and `zip` notes above were: the only
+# change to Cargo.lock is these two names joining `spaceadom`'s dependency
+# list. No new `[[package]]` entry appears.
+minisign-verify = "0.2"
+sha2 = "0.10"
 
 # Misc utilities
 once_cell = "1"
@@ -145,4 +230,51 @@ features = [
   "Win32_UI_WindowsAndMessaging",
   # GetTickCount64 (engine double-tap timer)
   "Win32_System_SystemInformation",
+  # PROBLEM 250 — GetCurrentPackageFullName, the MSIX/Store identity probe in
+  # src/packaged.rs. Already present above for PROBLEM 79's
+  # GetPackageFamilyName(hProcess); named again here so removing either caller
+  # cannot silently break the other.
+  "Win32_Storage_Packaging_Appx",
+  # PROBLEM 250 follow-up (LIVE TEST 2026-09-05) —
+  # Windows.Management.Deployment.PackageManager, so an UNPACKAGED copy can see
+  # that a Microsoft Store copy is installed beside it
+  # (rival_install::find_store_package). This is the `Get-AppxPackage
+  # *Spaceadom*` the live test ran by hand.
+  #
+  # `FindPackagesByPackageFamily` (Win32, already available) was the first
+  # choice and cannot be used: it needs a package FAMILY name, which is derived
+  # from `msix/identity.json` — gitignored, and not compiled into this binary
+  # in any form. So the WinRT enumerator it is.
+  #
+  # Read-only and unelevated: FindPackagesByUserSecurityId("") is scoped to the
+  # calling user. The all-users `FindPackages()` is the one that needs
+  # administrator, and nothing here calls it.
+  #
+  # Feature names, same trap as StartupTask below: the namespace is
+  # `Windows.Management.Deployment`, so the feature is `Management_Deployment`
+  # (underscore per namespace segment). Iterating the returned IIterable<Package>
+  # needs `Foundation_Collections`.
+  "Management_Deployment",
+  "Foundation_Collections",
+  # PROBLEM 250 — Windows.ApplicationModel.StartupTask, the ONLY autostart
+  # mechanism that works for a Store install (packaged::set_startup_task).
+  #
+  # This is a WinRT namespace, not a Win32 one, and it is the first in this
+  # crate. Two things about the feature name are worth writing down, because
+  # both cost time to establish (windows-rs 0.58 source, grepped directly):
+  #
+  #   - There is NO `ApplicationModel_StartupTask` feature. `StartupTask` is a
+  #     class sitting DIRECTLY in the `Windows.ApplicationModel` namespace, not
+  #     in a sub-namespace, so it rides on the plain `ApplicationModel` feature.
+  #     Guessing the sub-namespace spelling produces CLAUDE.md's documented
+  #     "unresolved import on a path that plainly exists in the docs".
+  #   - `ApplicationModel = ["Foundation"]` in windows-rs's own Cargo.toml, so
+  #     this transitively enables WinRT `Foundation` — which is what supplies
+  #     `IAsyncOperation<T>::get()`, the blocking await used to drive
+  #     RequestEnableAsync off the UI thread.
+  #
+  # NOT enabled: Foundation_Collections. It is needed only by
+  # StartupTask::GetForCurrentPackageAsync, and packaged.rs uses GetAsync(id)
+  # with an explicit TaskId instead — one less namespace compiled in.
+  "ApplicationModel",
 ]

@@ -205,6 +205,17 @@ pub fn log_filter(metadata: &log::Metadata<'_>) -> sentry_log::LogFilter {
     if metadata.target() == DEGRADED_TARGET {
         return sentry_log::LogFilter::Ignore;
     }
+    // PROBLEM 245 — tauri-plugin-updater logs "update endpoint did not
+    // respond with a successful status code" at ERROR on every failed
+    // fetch. Offline, a captive portal, GitHub down, or a 404 before the
+    // first signed release: all of them would become a crash report from
+    // every installed copy, once a day. Measured on 2026-09-04 22:02:21 —
+    // the first 1.0.99 check, before any latest.json existed. The app
+    // already logs its own WARN for the same failure (updater.rs), and a
+    // failed update check is not a crash.
+    if metadata.target().starts_with("tauri_plugin_updater") {
+        return sentry_log::LogFilter::Ignore;
+    }
     // log::Level orders Error(1) < Warn(2) < Info(3): "at least as severe as"
     // is `<=`, not `>=`. Getting this backwards would send everything.
     if metadata.level() <= SENTRY_MINIMUM_LEVEL {
@@ -278,6 +289,19 @@ pub enum Degraded {
     /// The display-rebuild failure path (`display_watch.rs`): no overlay window
     /// exists and one could not be built.
     OverlayRebuildFailed,
+    /// PROBLEM 253 — three launches in a row started and never stayed alive
+    /// thirty seconds, so this one came up with NO keyboard hook and NO
+    /// overlay (`safe_mode.rs`).
+    ///
+    /// This variant belongs in this enum and not somewhere quieter, and the
+    /// reason is the enum's own definition: "the app is degraded and the user
+    /// probably cannot tell". Here the user IS told — there is a banner — but
+    /// what the banner cannot say is WHY the three crashes happened, and this
+    /// is the only signal that a build is failing to start on machines nobody
+    /// here owns. It is exactly the shape the rate limiter was built for: a
+    /// permanently broken machine says so once or twice, not once per launch
+    /// forever.
+    SafeModeEntered,
 }
 
 impl Degraded {
@@ -291,6 +315,7 @@ impl Degraded {
             Degraded::OverlayCompositingDead => "overlay-compositing-dead",
             Degraded::OverlayDisabled => "overlay-disabled",
             Degraded::OverlayRebuildFailed => "overlay-rebuild-failed",
+            Degraded::SafeModeEntered => "safe-mode-entered",
         }
     }
 }
@@ -500,7 +525,17 @@ fn cap(s: &str, n: usize) -> String {
 ///
 /// Hand-written rather than a regex because `regex` is not a dependency of this
 /// project and adding one to scrub three shapes is not a trade worth making.
-fn scrub(input: &str) -> String {
+///
+/// PROBLEM 253 — `pub(crate)`, not private, so `diagnostics.rs` can scrub the
+/// config it puts in a "Report a problem" bundle through THIS function rather
+/// than a second one. Two definitions of "safe to send" is how one of them
+/// falls behind. Note what this function cannot do, and what
+/// `diagnostics::scrub_config_json` therefore does around it: an email LOCAL
+/// PART with no `@` (`browser_profile_name` holds exactly that) is not
+/// address-shaped and passes through untouched. That is handled by redacting on
+/// the FIELD NAME before scrubbing, in diagnostics.rs — not by widening the
+/// rules here, which are shared with the crash reporter and must stay tight.
+pub(crate) fn scrub(input: &str) -> String {
     // Addresses go FIRST, before the path/URL walk, because an address can sit
     // inside either one (`C:\Users\me\a@b.com`, `https://u@host/x`) and both of
     // those branches consume to the next space — running them first would let
@@ -745,6 +780,18 @@ mod tests {
                 "{quieter} must never be sent — ordinary use of the app sends nothing"
             );
         }
+
+        // 3b. PROBLEM 245 — the updater plugin's own ERROR on a failed fetch
+        //     is not a crash and must never reach Sentry, whatever its level.
+        let upd = log::Metadata::builder()
+            .level(log::Level::Error)
+            .target("tauri_plugin_updater::updater")
+            .build();
+        assert_eq!(
+            log_filter(&upd),
+            sentry_log::LogFilter::Ignore,
+            "a failed update check is not a crash report"
+        );
 
         // 4. PROBLEM 217 — a record this module logged ITSELF is already
         //    reported, rate-limited, by report_degraded/report_frontend_error.

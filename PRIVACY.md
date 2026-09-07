@@ -1,22 +1,25 @@
 # Privacy Policy — Spaceadom
 
-**Last updated: 26 August 2026 (version 1.0.82).**
+**Last updated: 5 September 2026 (version 1.0.100).**
 
 Spaceadom is a keyboard utility for Windows. To do its job it has to watch your
 keyboard, so it is reasonable to want a straight answer about what happens to
 what you type.
 
-**Spaceadom sends one kind of thing, and only one: a report when it crashes or
-hits an error.** There are no accounts, no analytics, and nothing that watches
-how you use the app. Everything else in this document concerns files kept on
-your own computer, which only you can read.
+**Spaceadom's network activity is exactly two things: a report when it crashes
+or hits an error, and a once-a-day check for a newer version of itself.**
+Neither one sends anything about what you type, what you have bound, or how
+you use the app. There are no accounts and no analytics. Everything else in
+this document concerns files kept on your own computer, which only you can
+read.
 
 > **What changed, and why this document no longer says what it used to.**
 > Until version 1.0.81 this page said Spaceadom had no network code at all and
 > could not send anything anywhere. That was true then and it is not true now,
 > so the sentence is gone rather than softened. Version 1.0.82 added crash
-> reporting. The section below says exactly what it sends and how to switch it
-> off.
+> reporting, and version 1.0.100 added the self-updater described below. The
+> sections that follow say exactly what each one sends and, where there is a
+> switch, how to turn it off.
 
 ---
 
@@ -106,6 +109,42 @@ either way.
 **Where to check this yourself:** `src-tauri/src/telemetry.rs`. The severity
 floor is the constant `SENTRY_MINIMUM_LEVEL` (set to `Error`), and the switch
 is the `SENDING_ENABLED` flag it checks before anything is sent.
+
+---
+
+## Checking for updates
+
+**What it is.** Since version 1.0.100, an installed copy of Spaceadom checks
+once a day (and once shortly after each launch) whether a newer version has
+been published, by fetching a small JSON file from this project's own GitHub
+releases — `latest.json` for a `setup.exe` install, `latest-msi.json` for an
+`.msi` install. If a newer version is found, Spaceadom downloads it, verifies
+its cryptographic signature against the public key built into the app, and
+installs it silently in the background; you see a brief "Updated to …" message
+next time you open the dashboard.
+
+**What that request contains.** A standard HTTPS request for a fixed,
+public, unauthenticated file. It does not carry your settings, your bindings,
+your username, or anything that identifies you individually beyond what any
+HTTPS request to any server necessarily reveals (your IP address, handled the
+same way any web request handles it — Spaceadom does not read or log it).
+Nothing about how you use the app, what you have bound, or what you type is
+in this request or ever could be — the file it fetches is the same for every
+user, at every request.
+
+**How to switch it off.** There is deliberately no toggle for this in
+Settings — the owner's decision is that most people should always be on the
+current, most-secure build. If you want to pin a version yourself, set
+`"auto_update": false` in `%APPDATA%\Spaceadom\config.json`.
+
+**If you installed from the Microsoft Store**, this check does not run at
+all — the Store's own update mechanism handles new versions, the same way it
+does for every other Store app, and Spaceadom never contacts GitHub in that
+build.
+
+**Where to check this yourself:** `src-tauri/src/updater.rs`. The two manifest
+URLs are the constants `NSIS_MANIFEST` and `MSI_MANIFEST`, both pointed at
+`github.com/nur-arpon/Spaceadom/releases/latest/download/…`.
 
 ---
 
@@ -286,24 +325,31 @@ your browser's.
 
 The claims above are checkable, which is the point of publishing the source:
 
-- **There is exactly one thing in Spaceadom that talks to a network**, and it
-  is the crash reporter: the `sentry` crate, at `src-tauri/src/telemetry.rs`.
-  It is the only reason `reqwest`, `hyper` and `rustls` appear in the
-  dependency tree, which they did not before 1.0.82. Nothing else in the Rust
-  code opens a socket, and the frontend still contains no `fetch`,
+- **There are exactly two things in Spaceadom that talk to a network**: the
+  crash reporter (`sentry` crate, `src-tauri/src/telemetry.rs`) and the update
+  checker (`src-tauri/src/updater.rs`, the `tauri-plugin-updater` crate).
+  Between them they are the reason `reqwest`, `hyper` and `rustls` appear in
+  the dependency tree, which they did not before 1.0.82. Nothing else in the
+  Rust code opens a socket, and the frontend still contains no `fetch`,
   `XMLHttpRequest` or `WebSocket` call at all.
-- **What that one thing can send is bounded in the source, not by policy.**
-  `telemetry::log_filter` is the single function every log record passes
-  through on its way to Sentry, and it returns `Ignore` — a drop, not a queue —
-  for anything below `SENTRY_MINIMUM_LEVEL`, which is `log::Level::Error`, and
-  for everything whatsoever when `SENDING_ENABLED` is false. The switch flips
-  that flag directly, so "off" is enforced at the last possible moment before
-  a record could become a report, not by a setting checked somewhere earlier.
+- **What the crash reporter can send is bounded in the source, not by
+  policy.** `telemetry::log_filter` is the single function every log record
+  passes through on its way to Sentry, and it returns `Ignore` — a drop, not a
+  queue — for anything below `SENTRY_MINIMUM_LEVEL`, which is
+  `log::Level::Error`, and for everything whatsoever when `SENDING_ENABLED` is
+  false. The switch flips that flag directly, so "off" is enforced at the last
+  possible moment before a record could become a report, not by a setting
+  checked somewhere earlier.
+- **What the update checker can send is bounded by what it is: a GET request
+  for a static file.** It carries no request body and no data about you — see
+  "Checking for updates" above. It has no equivalent of the crash reporter's
+  off switch, by owner decision, short of `"auto_update": false`.
 - There is one other network event, at **install** time: Microsoft's own
   WebView2 bootstrapper may download the WebView2 runtime if your copy of
   Windows does not already include it. That is a Microsoft component,
   downloaded from Microsoft, and Spaceadom itself never uses it to send
-  anything.
+  anything. The Microsoft Store build updates through the Store instead of
+  through Spaceadom's own updater — see "Checking for updates" above.
 - The keyboard hook lives in `src-tauri/src/hook/mod.rs`. It holds one
   timestamp and one key code at a time and keeps no history.
 - Everything written to disk goes through `src-tauri/src/config/mod.rs` and

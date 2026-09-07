@@ -1,21 +1,74 @@
-MIT License
+Spaceadom Source-Available Licence
+Copyright (c) 2026 Nur Ifran Arpon. All rights reserved.
 
-Copyright (c) 2026 Nur Ifran Arpon
+This is NOT an open-source licence. It is not one of the licences approved by
+the Open Source Initiative, and it does not give you the rights that "open
+source" usually implies (no right to redistribute, no right to sell, no right
+to build a competing product on top of it). It is a source-available licence:
+the code is public so you can read it, learn from it, build it yourself, and
+verify what the app actually does — nothing more.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+1. What you may do
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+   - Read the source code.
+   - Build the source code and run the result, for your own personal,
+     non-commercial use, or to evaluate the app before deciding whether to use
+     it.
+   - Fork or clone the repository to study it, keeping this licence intact.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+2. What you may not do
+
+   - Redistribute the source code, or any binary you built from it, to anyone
+     else — publicly or privately, modified or unmodified, free or paid.
+   - Sell the software, or any modified version of it, or bundle it into a
+     product or service that you sell or otherwise monetise.
+   - Publish a derivative product based on this code — a fork positioned as
+     its own app, a "clone", or a rebrand.
+   - Remove or alter any copyright, licence, or attribution notice from the
+     source code or from the app itself.
+   - Use Nur Ifran Arpon's name, "Spaceadom", or any of the project's branding
+     to imply endorsement of your own build or fork.
+
+3. Official builds
+
+   The only builds you should trust as "the real app" are the ones the owner
+   publishes himself:
+
+   - GitHub Releases on this repository
+     (https://github.com/nur-arpon/Spaceadom/releases), and
+   - the Microsoft Store listing, once published.
+
+   A build from anywhere else — including one you compiled yourself — is not
+   an official build, and distributing it as if it were one is exactly what
+   Section 2 forbids.
+
+4. Third-party components
+
+   Spaceadom is built on open-source libraries (Rust crates, npm packages, and
+   the Tauri framework, among others). Each of those keeps its own licence,
+   unmodified by anything in this document. See THIRD-PARTY-NOTICES.md for the
+   full list, including which of them require you to keep their own
+   attribution if you build and redistribute anything containing them (most
+   permissive licences, like MIT, Apache-2.0 and BSD, do).
+
+5. Contributions
+
+   If you submit a change to this project (a pull request, a patch, or
+   similar), you agree that your contribution is licensed to the project under
+   the terms of this licence, so the project can keep distributing official
+   builds that include it. See CONTRIBUTING.md.
+
+6. No warranty
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE
+   SOFTWARE OR THE USE OF IT, HOWEVER CAUSED.
+
+7. Questions
+
+   If you want to do something with this code that isn't covered above —
+   for example, a legitimate reason to redistribute a build — open an issue or
+   contact the owner through GitHub. Permission is the owner's to give and is
+   not implied by anything else in this document.

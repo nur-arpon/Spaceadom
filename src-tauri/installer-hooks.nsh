@@ -13,11 +13,13 @@
 ; someone who thought they had removed this program. Microsoft Store policy
 ; 10.2.7 requires a product to "cleanly uninstall and remove" itself.
 ;
-; WHAT IS DELIBERATELY NOT REMOVED: %APPDATA%\Spaceadom (config.json and
-; debug.log) and %LOCALAPPDATA%\SpaceadomBackups. Those are the user's own
-; profiles and key bindings. Deleting them silently would mean reinstalling
-; costs someone every binding they ever set, and an uninstaller is not the
-; place to ask. The README says where they live for anyone who wants them gone.
+; UPDATE (PROBLEM 247): %APPDATA%\Spaceadom and %LOCALAPPDATA%\SpaceadomBackups
+; are no longer unconditionally kept. An interactive uninstall now ASKS —
+; see NSIS_HOOK_PREUNINSTALL / NSIS_HOOK_POSTUNINSTALL below for the question
+; and PROBLEM 247 in V14_FIXES_AND_CODE.md for the full reasoning. The default
+; answer is still Keep, and a silent or self-update uninstall can never be
+; asked, so it always keeps — this only changes what happens when someone
+; uninstalls by hand and says No.
 ;
 ; KNOWN GAP: this covers the NSIS installer (Spaceadom_*_x64-setup.exe) only.
 ; Tauri v2 exposes `installerHooks` for NSIS and has no documented equivalent
@@ -55,6 +57,13 @@
 ; a question nobody will hear. Safe to kill — config.json is written on every
 ; change, never held for later, so nothing is lost.
 ; ---------------------------------------------------------------------------
+; PROBLEM 247's answer, set in NSIS_HOOK_PREUNINSTALL and acted on in
+; NSIS_HOOK_POSTUNINSTALL — declared here, at file scope, because this whole
+; file is !include'd once near the top of the generated script (ahead of every
+; Section), the same place Tauri's own template declares $UpdateMode and
+; $PassiveMode.
+Var ST_KeepData
+
 !macro NSIS_HOOK_PREINSTALL
   DetailPrint "Closing Spaceadom so its files can be replaced..."
   ; /T kills child processes too (the WebView2 hosts), which hold DLLs open.
@@ -83,4 +92,84 @@
   Pop $0
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "SpaceToggle OS"
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "SpaceToggleV14"
+
+  ; ---------------------------------------------------------------------
+  ; PROBLEM 247 — ask whether to keep profiles, key bindings and backups.
+  ;
+  ; Everything above this point (the scheduled task and both Run values,
+  ; current identity and legacy) is removed UNCONDITIONALLY, on every
+  ; uninstall, silent or not, update or not — that is autostart cleanup, not
+  ; user data, and Store policy 10.2.7 requires it regardless of the answer
+  ; below.
+  ;
+  ; What follows decides only the fate of %APPDATA%\Spaceadom (config.json,
+  ; debug.log/.0/.1, picker-cache.json, last-run-version.txt) and
+  ; %LOCALAPPDATA%\SpaceadomBackups (the rolling config backups from
+  ; PROBLEM 94) — the actual RMDir happens in NSIS_HOOK_POSTUNINSTALL, after
+  ; Tauri's own uninstall steps, using the answer captured here in
+  ; $ST_KeepData. Two cases must NEVER prompt and must NEVER delete:
+  ;
+  ;   1. A SILENT uninstall (/S). There is nobody to answer a dialog, and
+  ;      Store policy 10.2.9 requires silent to be possible at all — the same
+  ;      shape of problem PROBLEM 127 solved for installing.
+  ;   2. A SELF-UPDATE. `updater.rs` installs the next version with
+  ;      `setup.exe /S /UPDATE /R /ARGS --autostart`; Tauri's generated
+  ;      installer.nsi runs that flow through the OLD version's uninstall.exe
+  ;      first (its `un.onInit` reads the `/UPDATE` flag into $UpdateMode,
+  ;      which the same generated file also uses to skip removing shortcuts
+  ;      and the Run-key entry on this exact path). An update is silent by
+  ;      construction anyway, but $UpdateMode is checked on its own so this
+  ;      can never fire even if that ever changes.
+  ;
+  ; Default is Keep in every case: $ST_KeepData starts "1" and only a typed
+  ; No changes it, matching the dialog's own default button (IDYES).
+  ; ---------------------------------------------------------------------
+  StrCpy $ST_KeepData 1
+
+  ${If} $UpdateMode = 1
+    Goto st247_decided
+  ${EndIf}
+
+  IfSilent st247_decided
+
+  MessageBox MB_YESNO|MB_ICONQUESTION "Keep your settings? (profiles, key bindings, backups)$\r$\n$\r$\nChoose No to also delete $APPDATA\Spaceadom and $LOCALAPPDATA\SpaceadomBackups from this PC." IDYES st247_decided
+  StrCpy $ST_KeepData 0
+
+  st247_decided:
+!macroend
+
+!macro NSIS_HOOK_POSTUNINSTALL
+  ; ---------------------------------------------------------------------
+  ; PROBLEM 247 continued — act on the answer captured above, after Tauri's
+  ; own uninstall section has already removed the app's own install folder,
+  ; shortcuts and registry keys. $ST_KeepData is "1" (keep) on every path
+  ; that cannot prompt (silent, or an update — see NSIS_HOOK_PREUNINSTALL)
+  ; and on every explicit Yes; it is "0" only after an interactive uninstall
+  ; where the owner typed No.
+  ;
+  ; Exactly these two paths, hardcoded, no wildcards, and guarded against an
+  ; empty environment variable so a lookup failure can never widen to "the
+  ; current directory": nothing outside them is ever touched.
+  ;   %APPDATA%\Spaceadom             config.json, debug.log(.0/.1),
+  ;                                    picker-cache.json, last-run-version.txt
+  ;   %LOCALAPPDATA%\SpaceadomBackups rolling config backups (PROBLEM 94)
+  ; ---------------------------------------------------------------------
+  ${If} $ST_KeepData = 1
+    Goto st247_data_done
+  ${EndIf}
+
+  ; Per-user install (nsis.installMode = currentUser): always the current
+  ; user's own profile, matching the SetShellVarContext Tauri's own
+  ; delete-app-data branch already uses a few lines above in this Section.
+  SetShellVarContext current
+
+  DetailPrint "Removing your Spaceadom settings..."
+  ${If} $APPDATA != ""
+    RMDir /r "$APPDATA\Spaceadom"
+  ${EndIf}
+  ${If} $LOCALAPPDATA != ""
+    RMDir /r "$LOCALAPPDATA\SpaceadomBackups"
+  ${EndIf}
+
+  st247_data_done:
 !macroend

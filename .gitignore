@@ -105,3 +105,47 @@ install-proof.txt
 # can only submit events, never read the account), but not safe to publish
 # in git history - see src-tauri/src/sentry_dsn.example.txt for setup.
 src-tauri/src/sentry_dsn.txt
+
+# ---------------------------------------------------------------------------
+# THE UPDATER SIGNING KEY (PROBLEM 245). Same rule as the Sentry DSN: never in
+# git, CI injects it from the TAURI_SIGNING_PRIVATE_KEY /
+# TAURI_SIGNING_PRIVATE_KEY_PASSWORD Actions secrets. The whole directory is
+# ignored — the private key, its password file, and the .pub beside them (the
+# public half is not secret, it lives in tauri.conf.json, but a file named
+# spaceadom.key.pub one character away from spaceadom.key is a typo away from
+# a leak). Lose this key and no existing install can ever accept an update
+# again: the public key is baked into every shipped exe.
+# ---------------------------------------------------------------------------
+src-tauri/.tauri/
+
+# ---------------------------------------------------------------------------
+# PROBLEM 250 - THE MSIX (Microsoft Store) PACKAGING DIRECTORY.
+#
+# What IS committed from src-tauri/msix/ : AppxManifest.xml (the template) and
+# identity.example.json. Everything else in there is generated or private, and
+# each line below exists for its own reason:
+#
+#   identity.json    the three Partner Center values. Not secret, but
+#                    ACCOUNT-SPECIFIC - committing them would put another
+#                    developer's clone one `npm run msix` away from building a
+#                    package that claims this account's identity.
+#   test-signing.pfx a SELF-SIGNED certificate and, right beside it, the private
+#                    key. Worthless off this machine (the Store re-signs what it
+#                    distributes) and still not a thing that goes in git.
+#   layout/          rebuilt from scratch on every run - MakeAppx packs whatever
+#                    is in it, so a committed leftover would ship silently.
+#   unpacked/        the makeappx unpack round-trip's output, a copy of layout/.
+#   Assets/          the six logos, regenerated from icons/icon.png every run.
+#
+# NOTE: *.msi and *.exe are already ignored much further up, but .msix is a
+# THIRD extension and was not covered by either. The package itself is ~35 MB.
+# ---------------------------------------------------------------------------
+*.msix
+*.msixbundle
+*.appx
+src-tauri/msix/identity.json
+src-tauri/msix/*.pfx
+src-tauri/msix/*.cer
+src-tauri/msix/layout/
+src-tauri/msix/unpacked/
+src-tauri/msix/Assets/

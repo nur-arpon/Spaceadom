@@ -15,6 +15,11 @@ import { invoke } from "@tauri-apps/api/core";
 // into it), seeded and updated by overlay.ts. Read via getBandCount() at
 // layout time — never cached at import, where it is still the default.
 import { getBandCount } from "./hud-band-count";
+// PROBLEM 255 — the ONE "auto" theme rule, shared with the DASHBOARD bundle.
+// A leaf module (it imports nothing at all), so taking it here adds nothing
+// to the overlay's bundle and cannot drag `main.ts` in behind it — which is
+// the reason the overlay carried its own, wrong, copy of the rule until now.
+import { resolveTheme } from "../theme-resolve";
 
 const LIFE = 2800;   // toast lifetime; the progress ring drains over this
 const OPEN_AT = 200; // dot → open
@@ -820,9 +825,56 @@ interface GuideHudPayload {
   profile: string;
   apps: [string, string][];      // [key, label] — ONLY assigned letters
   specials: [string, string][];
+  /** The active profile's emoji, for the glyph beside the SPACE pill.
+   *  `null`/absent is the NORMAL state and must draw the pill exactly as every
+   *  build before this one did — see `paintSpacePill`. */
+  profile_emoji?: string | null;
+  /** Present ONLY for a Settings preview (`preview_hud_layout`). A real
+   *  Space-hold sends `null` and the ring reads the user's own saved settings,
+   *  exactly as it always has. See `previewOverride`. */
+  preview?: { layout?: string; bands?: string } | null;
 }
 let _hudEl: HTMLDivElement | null = null;
 let _lastPayload: GuideHudPayload | null = null;
+
+/* ===========================================================================
+   THE SETTINGS PREVIEW — the page's half. 1.0.96.
+
+   A preview is the REAL ring, with the REAL bindings, drawn in a layout the
+   user has not chosen yet. Two things and ONLY two things differ from an
+   ordinary hold:
+
+     1. `buildHud` takes the layout and band count from the PAYLOAD instead of
+        from the saved settings, for that one show. Nothing is written and
+        nothing is cached — `getHudLayout()` / `getBandCount()` are untouched,
+        so the very next real hold is back on the user's own choice with no
+        cleanup step that could be missed.
+
+     2. `publishHudChips` does not run, so Rust never learns where the chips
+        are. Together with Rust declining to publish the chip KEYS for the same
+        show, both of `pointer.rs`'s counts stay at zero and there is nothing
+        for the pointer to arm — no beam, no armed chip, nothing a release or a
+        click could fire. That is the whole of the "preview cannot launch
+        anything" guarantee on this side, and it is one early return rather
+        than a new mode threaded through the aiming code.
+
+   Deliberately NOT a module-level "preview mode" that something has to turn
+   off. It is derived from the payload every time it is needed, so the only way
+   to be left in preview state is to still be showing the preview. */
+/** The layout override for THIS payload, normalised, or `null` for a real
+ *  hold. Normalisation matches `hud-layout.ts` / `hud-band-count.ts` exactly —
+ *  the strings come from Rust, but a renamed constant on either side must
+ *  degrade to the shipped default rather than to something nobody chose. */
+function previewOverride(
+  p: GuideHudPayload | null,
+): { mode: HudLayoutMode; bands: "auto" | "one" | "two" } | null {
+  const pv = p?.preview;
+  if (!pv) return null;
+  return {
+    mode: pv.layout === "classic" ? "classic" : "magnetic",
+    bands: pv.bands === "one" ? "one" : pv.bands === "two" ? "two" : "auto",
+  };
+}
 
 /** Estimated chip width — used ONLY to pick the ring radii before the real
  *  chips exist. Placement itself uses MEASURED widths (PROBLEM 77). */
@@ -1111,24 +1163,122 @@ let _bloomCap = GLANCE_R + BLOOM_PUSH_ARMED;
  *  chip on the wide flank has room a chip at the top does not. */
 let _bloomHalf = { w: 0, h: 0 };
 
-/** Cumulative arc length of an ellipse, sampled ARC_N times. Shared by
- *  `ellipsePerimeter` and `arcAngles` so the length the ring is SIZED against
- *  and the length chips are PLACED along can never disagree. */
+/** THE ARC_N SAMPLE ANGLES' cos/sin, BUILT ONCE.
+ *
+ *  `arcTable`'s loop used to call `Math.cos` and `Math.sin` 1,440 times per
+ *  table for arguments that never change — `(i / ARC_N) · 2π` is a property of
+ *  ARC_N, not of the ellipse. Hoisting them is BIT-IDENTICAL by construction
+ *  (same function, same argument, evaluated once instead of N times) and it is
+ *  half the cost of a table: measured 43µs -> 20µs per build.
+ *
+ *  Deliberately NOT a `Math.hypot` -> `Math.sqrt(dx*dx + dy*dy)` swap as well.
+ *  That is faster again and it is NOT bit-identical — `hypot` is the more
+ *  accurate of the two — and `arcAngles` inverts this table with a binary
+ *  search, so a last-bit change can flip a chip to the adjacent sample, which
+ *  is 1/720 of the ring: up to 4px of movement at the radii this file reaches.
+ *  Every gain here has to be exact, or it is a layout change wearing a
+ *  performance hat. */
+const _arcCos = new Float64Array(ARC_N + 1);
+const _arcSin = new Float64Array(ARC_N + 1);
+for (let i = 0; i <= ARC_N; i++) {
+  const t = (i / ARC_N) * Math.PI * 2;
+  _arcCos[i] = Math.cos(t);
+  _arcSin[i] = Math.sin(t);
+}
+
+/** PER-BUILD MEMO FOR `arcTable`.
+ *
+ *  A HUD build asks for a table hundreds of times over: the ceiling ladder
+ *  re-solves the whole band layout at up to 12 ceilings (CEIL_STEPS 6 +
+ *  CEIL_BISECT 5, plus the first solve), each of those tries up to `maxBands`
+ *  band counts, and every count is measured TWICE — loose and tightened. And
+ *  `packBands` puts the innermost band on `lo` and the outermost on `hiR` for
+ *  every one of those counts, so those two ellipses alone recur once per count
+ *  per measurement. Measured at 40 chips, 1707x1067: 723 tables per rung before
+ *  any of this. 583 of those were `ellipsePerimeter` wanting one scalar and are
+ *  gone entirely (closed form, below); the 140 that remain are the real
+ *  `arcAngles` calls, and they name only **54 distinct (rx, ry) pairs** — which
+ *  is what this Map is for.
+ *
+ *  KEYED ON THE EXACT (rx, ry) PAIR, not on a rounded one. The repeats this is
+ *  here to collect are EXACT repeats — `lo`, `hiR` and
+ *  `lo + b·(hiR − lo)/(n − 1)` recomputed from the same operands — so an exact
+ *  key catches all of them, and it makes the memo provably a no-op on the
+ *  layout: a hit returns the table the miss would have built, bit for bit.
+ *  A tolerance key (0.5px was tried) buys nothing on top of that and reopens
+ *  the binary-search flip described above, because two radii a quarter-pixel
+ *  apart do NOT produce the same table.
+ *
+ *  Nothing mutates a table it gets back, so sharing one is safe.
+ *
+ *  CLEARED AT THE TOP OF `buildHud` (see `clearArcCache`) so the Map cannot
+ *  grow across a session of display changes and label sets. */
+const _arcCache = new Map<string, number[]>();
+/** Drop the per-build `arcTable` memo. Called once, at the top of `buildHud`. */
+function clearArcCache(): void { _arcCache.clear(); }
+
+/** Cumulative arc length of an ellipse, sampled ARC_N times. `arcAngles`
+ *  inverts it to turn a chip's share of the rim into a parameter angle, and it
+ *  is now the ONLY caller — `ellipsePerimeter` used to build a whole table to
+ *  read `cum[ARC_N]` out of it and answers in closed form instead. */
 function arcTable(rx: number, ry: number): number[] {
+  const key = `${rx}|${ry}`;
+  const hit = _arcCache.get(key);
+  if (hit) return hit;
   const cum = new Array<number>(ARC_N + 1);
   cum[0] = 0;
   let px = rx, py = 0;                       // t = 0
   for (let i = 1; i <= ARC_N; i++) {
-    const t = (i / ARC_N) * Math.PI * 2;
-    const x = rx * Math.cos(t), y = ry * Math.sin(t);
+    const x = rx * _arcCos[i], y = ry * _arcSin[i];
     cum[i] = cum[i - 1] + Math.hypot(x - px, y - py);
     px = x; py = y;
   }
+  _arcCache.set(key, cum);
   return cum;
 }
 
+/**
+ * THE RIM LENGTH, IN CLOSED FORM — Ramanujan's second approximation.
+ *
+ *     P ≈ π(a + b)(1 + 3h / (10 + √(4 − 3h))),   h = ((a − b)/(a + b))²
+ *
+ * WHY IT IS NOT `arcTable(rx, ry)[ARC_N]` ANY MORE. That built a 721-entry
+ * cos/sin/hypot table in full and then read exactly one number out of it.
+ * Harmless when the ring was solved once; not harmless since PROBLEM 240 gave
+ * rung (a) a ceiling ladder. `CEIL_STEPS` 6 + `CEIL_BISECT` 5 ceilings × up to
+ * 19 band counts × two measurements each is 2,400-3,400 table builds behind
+ * ONE Space hold, ~81% of them for a single scalar, every one of them
+ * synchronous on the main thread while the user is holding the key — and twice
+ * that on a display-change rebuild. Measured on the standalone transcription
+ * of this path at 1707x1067, 212px chips, per HOLD (the full (a)-(d) walk) —
+ * table counts are per rung:
+ *
+ *     chips   before                    after (this + the memo + hoisted trig)
+ *      8      126 tables /  4.2 ms      9 tables /  0.3 ms
+ *     26      659 tables  / 84.7 ms     55 tables /  8.2-11.8 ms
+ *     34      737 tables  / 92.2 ms     56 tables / 11.4-14.8 ms
+ *     40      723 tables  / 97.0 ms     54 tables / 14.3-15.5 ms
+ *
+ * ACCURACY, AND WHY THE SWAP IS NOT A GEOMETRY CHANGE. Ramanujan II is exact
+ * to ~1e-10 relative over every eccentricity this file can produce (`ry/rx`
+ * runs 0.42-0.62 in Magnetic and up to `RING_ASPECT_MAX` in classic). The
+ * 720-gon it replaces is INSCRIBED, so it was SHORT by ~π²/(6·ARC_N²) ≈ 3.2e-6
+ * relative — 0.006px on a 2,000px rim. The new value is that much larger, so
+ * `fitRx` answers with a radius ~0.002px smaller. `arcAngles` still normalises
+ * by its own table's `cum[N]`, so placement is unchanged in shape; the two
+ * lengths differ only by that 3.2e-6, which is four orders of magnitude below
+ * the 1px quantisation `offsetWidth` already imposes on every chip width.
+ * Measured end-to-end, this change alone: 93 of 105 display × band-mode ×
+ * label-set cells BIT-IDENTICAL, the other 12 at 0.0008-0.0015px. Max
+ * chip-position delta 0.0015px, against a 0.5px budget (see PROBLEM 240).
+ */
 function ellipsePerimeter(rx: number, ry: number): number {
-  return arcTable(rx, ry)[ARC_N];
+  const a = Math.max(rx, ry), b = Math.min(rx, ry);
+  const s = a + b;
+  if (!(s > 0)) return 0;
+  const d = (a - b) / s;
+  const h = d * d;
+  return Math.PI * s * (1 + (3 * h) / (10 + Math.sqrt(4 - 3 * h)));
 }
 
 /**
@@ -1249,6 +1399,39 @@ function minClearance(boxes: ChipBox[]): number {
   return m;
 }
 
+/**
+ * THE HOLLOW — how far the nearest chip sits from the SPACE pill, in px.
+ *
+ * The number the owner was describing when he asked to "make sure the compact
+ * actually shows always compact and there's not too much hollow space". It is
+ * the empty band between the pill and the ring, and until 1.0.96 NOTHING
+ * measured it: the ladder's whole acceptance test is about chips hitting each
+ * other, and a ring flung far away from the pill passes that test perfectly.
+ * Measured on the owner's own labels before the fix, specials hidden:
+ *
+ *     apps   4     8    12    14    16    18    26
+ *     hollow 16    20    51    75   101    34    32     (px)
+ *
+ * The spike at 16 is the bug (see the `overflow` note in `trial`), and it is
+ * only visible because it is measured. Reported on `HudFit` so a bug report
+ * can carry it.
+ *
+ * Same convention as `minClearance` — two rectangles are apart if they clear on
+ * EITHER axis, so a pair's real gap is the better of the two. The pill is
+ * centred, hence `|x|`/`|y|` against half of `SPACE_W`/`SPACE_H`.
+ */
+function hollowOf(boxes: ChipBox[]): number {
+  let m = Infinity;
+  for (const b of boxes) {
+    const g = Math.max(
+      Math.abs(b.x) - (b.w + SPACE_W) / 2,
+      Math.abs(b.y) - (b.h + SPACE_H) / 2,
+    );
+    if (g < m) m = g;
+  }
+  return m;
+}
+
 /** Which rung of the (a)-(d) ladder the last layout settled on. Exported for
  *  the harness and worth having in a bug report: "step d at 34 chips" says
  *  the ring ran out of screen, not that the maths is wrong. */
@@ -1298,6 +1481,18 @@ export interface HudFit {
    *  Reported rather than assumed: an inner specials band can legitimately
    *  push it past the ceiling (see `layout`). */
   reach: number;
+  /** THE EMPTY MIDDLE, in px: the gap between the SPACE pill and the nearest
+   *  chip (`hollowOf`). Small is compact. It is REPORTED, not enforced —
+   *  see `trial`'s `overflow` for the thing that is actually decided on. */
+  hollow: number;
+  /** How much rim the bands are SHORT of what their own chips need, summed
+   *  per band, in px. Zero means every band can genuinely hold what it was
+   *  given; anything above zero means a band is carrying more content than it
+   *  has rim for, which is `fitRx` having saturated at its ceiling.
+   *
+   *  MAGNETIC ONLY in spirit — classic reports its single ring's shortfall the
+   *  same way, from the numbers it already had, so a bug report can compare. */
+  overflow: number;
   /** True when the page dropped a specials list Rust DID send, because the
    *  apps turned out to need a second band. That decision is the page's alone
    *  and only in `auto` — see `engine::specials_for_hud`'s truth table. */
@@ -1445,6 +1640,155 @@ function packBands(
   return bands.filter((b) => b.items.length > 0);
 }
 
+/* ===========================================================================
+   TIGHTENING — v1.0.96, and the whole of "make it actually compact".
+
+   `packBands` sizes a SINGLE band to its content (`fitRx` returns the smallest
+   radius whose rim holds it), and that is why three chips sit tight against
+   SPACE instead of being flung out to the ceiling. But for n > 1 it does
+   something else entirely: it SPREADS the bands evenly from `lo` to `hiR`,
+   `rx = lo + b·(hiR − lo)/(n − 1)`. So the outermost band of every multi-band
+   ring lands on the CEILING regardless of how little it is carrying, and the
+   inner band's floor is computed from the widest chip in the whole payload
+   even when that chip is out on the band above it.
+
+   Measured on the owner's 26 real labels, specials hidden, before this pass:
+
+     apps   bands (rx)     furthest chip edge     hollow
+     16     332            383                    101      (one band, at the ceiling)
+     18     208 / 332      385                     34
+     26     208 / 331      384                     32
+
+   The 18-app ring is 385px wide carrying content that fits inside 349, and its
+   inner band sits 12px further out than the chips ON it require. Neither costs
+   a collision, so nothing in the ladder ever noticed.
+
+   THE PASS. Once the packer has decided WHICH chips go on WHICH band — which
+   is the part that has to be done against generous radii, or the inside-out
+   fill would break to a new band too early — every band is pulled IN to the
+   smallest radius that still holds its own chips and still clears whatever is
+   inside it. Inside-out, so each band's floor is the tightened radius of the
+   one below plus one `bandStep`.
+
+   IT CAN ONLY EVER MOVE A BAND INWARD (`fitRx`'s ceiling is the band's own
+   current radius). The caller MEASURES the result and keeps the untightened
+   bands if it does not come out clean — see `trial`.
+
+   THAT SENTENCE USED TO BE A CLAIM AND IS NOW ENFORCED (2026-09-04 review).
+   It shipped as `fitRx(need, min(lo, src.rx), MAX(lo, src.rx))`, and the
+   `max` was there for a case the header waved away as degenerate — "the floor
+   itself is already outside the band, nothing to do". It is not degenerate and
+   there was plenty to do: `solveAt` computes the packer's floor as
+   `Math.min(hiCeil, RIN_CLEAR + outerHalf + BAND_LO_PAD)`, so on a display too
+   small to hold the dead zone the CEILING clamps `lo` down, while `floor0`
+   here is NOT clamped. `lo > src.rx` then, `max` becomes the floor, and the
+   band is PUSHED OUT past `hiScreen` — the very bound `hiScreen` exists to
+   respect. Measured on the standalone transcription of this path, one band,
+   `bandMode` auto/one/two alike:
+
+     display    chips        loose rx -> tight rx      outer edge past the
+                                                       94% window (pre-scale)
+     640x480    5 @212px     162.8 -> 220.9  (+58.1)   19.4px
+     640x480    6..40 @212   162.8 -> 245.0  (+82.2)   up to 12.1px after the
+                                                       final uniform clamp
+     800x600    6..40 @212   238.0 -> 245.0  (+7.0)    0px
+
+   And nothing caught it, because a ring pushed OUTWARD has more rim than it
+   needs: `trial` prefers the tightened bands on `overlaps === 0 && clear >=
+   RING_GAP_MIN`, both of which a too-large ring passes trivially. The cost
+   lands where the page cannot see it — `overlay_fit_hud` clamps the window to
+   94% of the monitor and CROPS whatever sticks out, silently.
+
+   THE FIX IS THE INVARIANT, SPELLED OUT: the ceiling handed to `fitRx` is
+   `src.rx` and nothing else. When `lo > src.rx` both ends collapse onto
+   `src.rx` and the band is returned exactly where `packBands` put it, which is
+   the honest answer — the floor cannot be honoured at this ceiling, so
+   tightening has nothing to offer and must not pretend otherwise. When
+   `lo <= src.rx` (every case on a normal display) `min(lo, src.rx)` is `lo`
+   and `src.rx` is `max(lo, src.rx)`, i.e. byte-identical to what shipped.
+
+   A SINGLE-band ring therefore genuinely cannot move now: with one band its
+   own widest chip IS the payload's widest chip and its own content IS the
+   whole content, so floor and radius come out where `packBands` already put
+   them — and where they used to diverge (the clamped-ceiling case above) the
+   band is pinned instead of flung. Every 1..~15-app ring is byte-identical to
+   1.0.95.
+   =========================================================================== */
+
+/** The smallest radius the innermost band may take, given the widest chip
+ *  ACTUALLY on it. This is the "dead zone": inside it there is nothing to aim
+ *  at, so every pixel of it is empty middle. */
+type Floor0 = (halfWidest: number) => number;
+
+/** Pull each band in to the smallest radius that holds its own chips.
+ *
+ *  NEVER OUTWARD — `src.rx` is the ceiling, unconditionally, and that is the
+ *  one property the caller relies on (see the header above for what it cost
+ *  when it was only a comment). Never inside `floor0` (band 0) or one
+ *  `bandStep` of the band below EITHER, except in the one case where those two
+ *  bounds cannot both hold: a floor already outside the band. There the
+ *  no-push rule wins and the band is left exactly where `packBands` put it.
+ *  Returns a NEW array — the caller keeps the original to fall back to. */
+function tightenBands(
+  bands: Band[], gap: number, bandStep: number, floor0: Floor0,
+): Band[] {
+  const out: Band[] = [];
+  for (let b = 0; b < bands.length; b++) {
+    const src = bands[b];
+    const need = src.items.reduce((s, it) => s + it.w + gap, 0);
+    const half = src.items.length
+      ? Math.max(...src.items.map((it) => it.w)) / 2 : 0;
+    const lo = b === 0 ? floor0(half) : out[b - 1].rx + bandStep;
+    /* `src.rx` IS THE CEILING, ALWAYS — that is what makes this a pull and
+       never a push, and it is the whole of the header's invariant. `lo` can
+       legitimately land OUTSIDE the band (`solveAt` clamps the packer's floor
+       to the ceiling on a small display and `floor0` is not clamped); when it
+       does, `min` and the ceiling collapse onto `src.rx` and the band comes
+       back untouched. Do not restore a `Math.max(lo, src.rx)` here: it reads
+       like a guard and is a licence to grow past `hiScreen`, where the window
+       clamp crops the chips and nothing in the page can observe it. */
+    const rx = fitRx(need, Math.min(lo, src.rx), src.rx);
+    out.push({
+      rx, ry: rx * BAND_RATIO,
+      cap: ellipsePerimeter(rx, rx * BAND_RATIO), items: src.items,
+    });
+  }
+  return out;
+}
+
+/** Rim a band is SHORT of what its own chips need, summed over the bands.
+ *
+ *  THE MEASUREMENT THE AUTO SEARCH WAS MISSING. `fitRx` SATURATES: asked for a
+ *  radius whose rim holds `need` and given a ceiling that cannot, it returns
+ *  the ceiling and says nothing. `packBands` then hands back a band carrying
+ *  more content than it has rim for, and `arcAngles` distributes that content
+ *  proportionally — which is the only honest thing it can do with an impossible
+ *  budget, and it means the chips come out spaced by LESS than their own
+ *  widths. Usually that shows up as an overlap and the ladder catches it. At 16
+ *  of the owner's labels it did not: 1734px of content on a 1711px rim missed
+ *  by 23px, no pair intersected, `clear` measured 19px — and `auto` accepted a
+ *  ring pinned to the ceiling with a 101px hole in the middle.
+ *
+ *  So "one band does not fit" is now measured instead of being inferred from a
+ *  collision that may or may not happen. That IS the owner's rule — "auto
+ *  should prefer one band unless it doesn't fit" — made true.
+ *
+ *  UNITS: `b.cap` comes from `b.rx`, and `it.w` is a chip's `offsetWidth`.
+ *  BOTH are pre-scale — the ring's `scale` is a CSS transform on `#st-hud`, and
+ *  a transform does not touch `offsetWidth`. So this comparison is already in
+ *  one consistent space and must stay that way. Multiplying only the cap by
+ *  `scale` (tried, 1.0.96) inflates the result into fiction: at scale .93 the
+ *  26-app/no-specials set reported a 158px SHORTFALL against bands that
+ *  actually had ~97px of SLACK. */
+function bandOverflow(bands: Band[], gap: number): number {
+  let over = 0;
+  for (const b of bands) {
+    const need = b.items.reduce((s, it) => s + it.w + gap, 0);
+    if (need > b.cap) over += need - b.cap;
+  }
+  return over;
+}
+
 /** Lay each band's items out along its rim by ARC LENGTH (`arcAngles`), band
  *  `i` staggered by `i · π / count_i` so an outer chip does not sit directly
  *  over an inner one. */
@@ -1561,8 +1905,64 @@ function hudLayoutMode(): HudLayoutMode {
   }
 }
 
+/* ===========================================================================
+   THE PROFILE EMOJI ON THE SPACE PILL. 1.0.96.
+
+   The owner wanted the active profile's emoji visible where the ring already
+   draws his attention, and the SPACE pill is the one element that is always
+   there and always in the middle. Three constraints shaped what it became:
+
+   1. **It must not fight the wordmark.** "SPACE" is the pill — 800 weight,
+      .22em tracking, dead centre — and it is what tells a new user what the
+      ring is for. So the emoji is pinned ABSOLUTELY to the pill's left inner
+      edge instead of joining the flex row. Adding it as a sibling flex item
+      would push "SPACE" off-centre by half the glyph, which is visible on a
+      230px pill and would make the whole HUD look mis-hung.
+
+   2. **Absent means BYTE-IDENTICAL, not "similar".** With no emoji this
+      appends no element at all — not a hidden one, not an empty one. The pill's
+      box, its centring and its `st-space-pop` are exactly what they were in
+      every previous build, which is the contract `Profile::emoji` states for
+      every surface that renders it.
+
+   3. **It is TEXT, set with textContent, and that is not a style choice.**
+      `emoji_is_valid` (schema.rs) is deliberately permissive — "anything that
+      renders as one glyph", so kaomoji and symbols pass, and so does a bare
+      "<". Interpolating that into `innerHTML` would be a live injection path
+      from a hand-edited config.json into the overlay document. A text node
+      cannot be one.
+
+   Palettes: the glyph carries its own colour, so all four (earthy, nocturne,
+   warcry, starry) get the same treatment with no per-theme rule — which is
+   also why it has no disc or plate behind it. Reduced motion: its one
+   animation is switched off by a `:root.reduced-motion` guard in the
+   stylesheet, alongside the pill's own.
+   =========================================================================== */
+function paintSpacePill(emoji: string | null | undefined): void {
+  if (!_hudEl) return;
+  const pill = _hudEl.querySelector<HTMLElement>(".space");
+  if (!pill) return;
+  const text = typeof emoji === "string" ? emoji.trim() : "";
+  // Nothing to show → nothing in the DOM. `buildHud` has just rewritten
+  // `innerHTML`, so there is never a stale one to remove; this is the
+  // "byte-identical" branch and it does nothing on purpose.
+  if (!text) return;
+  const el = document.createElement("span");
+  el.className = "st-space-emoji";
+  // Decorative: the pill already reads "SPACE" to a screen reader, and an
+  // emoji's own name read aloud beside it would be noise.
+  el.setAttribute("aria-hidden", "true");
+  el.textContent = text;
+  pill.appendChild(el);
+}
+
 function buildHud(payload: GuideHudPayload, entranceDelay = 0): Promise<Rect | null> {
   if (!_hudEl) return Promise.resolve(null);
+  /* ONE BUILD, ONE ARC-TABLE MEMO. Cleared here rather than at the end so an
+     early return further down can never leave a stale table behind, and so the
+     memo's lifetime is exactly the thing it is keyed against — the radii of
+     THIS build, on THIS display, for THIS label set. */
+  clearArcCache();
   const specials = payload.specials ?? [];
   const apps = payload.apps ?? [];   // already only assigned letters
 
@@ -1571,9 +1971,18 @@ function buildHud(payload: GuideHudPayload, entranceDelay = 0): Promise<Rect | n
      from `get_config`), but ALSO not re-read per rung or per pointer event:
      a band count that could change mid-hold would let the ring re-shape under
      a stationary cursor, and a layout mode that could change mid-hold would
-     be worse. They can only differ BETWEEN holds. */
-  const mode = hudLayoutMode();
-  const bandMode = getBandCount();
+     be worse. They can only differ BETWEEN holds.
+
+     A PREVIEW SUBSTITUTES BOTH, FOR THIS BUILD ONLY. The override arrives in
+     the payload and is read exactly where the settings are read, so every rung
+     of the ladder below, the specials drop, the bloom flag and the reported
+     `fit` all see one consistent answer — the same guarantee the settings
+     themselves get. Nothing is written and nothing is remembered: a resize
+     rebuild re-reads `_lastPayload`, which still carries the override while the
+     preview is up and stops carrying it the moment a real hold replaces it. */
+  const preview = previewOverride(payload);
+  const mode = preview ? preview.mode : hudLayoutMode();
+  const bandMode = preview ? preview.bands : getBandCount();
 
   // NO glow element here — a large blurred surface makes this transparent
   // window compose zero pixels. See the removal note at the top of
@@ -1591,6 +2000,7 @@ function buildHud(payload: GuideHudPayload, entranceDelay = 0): Promise<Rect | n
       '<div class="jet"></div><div class="lick"></div><div class="core"></div>' +
     '</div>' +
     '<div class="space">SPACE</div>';
+  paintSpacePill(payload.profile_emoji);
   // Same handover mechanism as --hud-in/--hud-out: the nominal beam box is
   // owned HERE, in TS, and the stylesheet reads it. paintArmedBeam divides by
   // BEAM_NOM to get its scaleX, so a literal in the CSS would be a second,
@@ -1979,39 +2389,112 @@ function buildHud(payload: GuideHudPayload, entranceDelay = 0): Promise<Rect | n
       ? Math.max(RYO_BASE, gi.ry + (innerTall + outerTall) / 2 + RING_CLEAR)
       : Math.max(SPACE_H / 2 + outerTall / 2 + RING_CLEAR,
                  Math.min(RYO_BASE, RING_ASPECT_MAX * rout0));
-    const go = growRing(
-      apW, rout0, ryo0, gap,
-      Math.max(rout0, maxRoutBudget), Math.max(ryo0, maxRyoBudget),
-    );
+    /* =====================================================================
+       GROW UNTIL THE CLEARANCE IS REAL, NOT UNTIL THE ARITHMETIC SAYS SO.
+       PROBLEM 235, the CLASSIC half.
 
-    // The ORIGINAL screen clamp, kept verbatim as the final safety net. It
-    // only bites on a display too small to hold even the un-grown ring, which
-    // the budgets above cannot help with. Uniform, so the angles solved below
-    // are unaffected by it.
-    const scale = Math.min(1, (vw / 2 - outerHalf - 24) / go.rx, (vh / 2 - 40) / go.ry);
-    const rin = gi.rx * scale, ryi = gi.ry * scale;
-    const rout = go.rx * scale, ryo = go.ry * scale;
+       `growRing` sizes the ellipse so its rim holds `sum(w) + n * gap` — i.e.
+       it buys each neighbour `gap` px of ARC. What the ring is judged on, and
+       what the user sees, is the axis-aligned clearance between two rectangles,
+       and arc is not chord: on the flanks and in the diagonals a 16px arc share
+       lands as materially less than 16px of box separation. Measured at rung
+       (a) with the specials shown: 8px between "Files"/"Youtube" on the owner's
+       `sexy_tumar_mexy` profile, and 8px between "Docs"/"Calendar" on
+       `Founders`. Both passed classic's acceptance test, because that test is
+       `overlaps === 0` and nothing intersected — this is the same "technically
+       apart, and unreadable" the inner ring was given `minClearance` for in
+       1.0.88, still unfixed on the outer one.
 
-    // The inner ring's angles were already solved by `fitInner`, at the rung
-    // it accepted and with THAT rung's gap. They are reused, not recomputed:
-    // `scale` above is uniform, and a uniform scale leaves `arcAngles`'
-    // parameter mapping identical — so recomputing here could only introduce a
-    // second, silently-diverging source of truth for the same placement.
-    // Outer ring: half-step offset so its chips sit in the inner ring's gaps.
-    const asIn = gi.as;
-    const asOut = arcAngles(apW, rout, ryo, gap, apps.length ? Math.PI / apps.length : 0);
+       THE FIX IS RUNG (a) DOING ITS JOB: keep growing while the MEASURED
+       clearance is under RING_GAP_MIN. The lever is the gap fed to `growRing`,
+       because that is precisely "how much room per neighbour the rim must buy";
+       `arcAngles` keeps the REAL `gap` so the extra rim is distributed by the
+       same width-proportional rule and nothing about the placement changes
+       shape. Bounded by the same screen budget `growRing` already clamps to,
+       and abandoned the moment growing stops moving the radius.
 
-    const spPos = asIn.map((a) => ({ x: Math.cos(a) * rin, y: Math.sin(a) * ryi }));
-    const apPos = asOut.map((a) => ({ x: Math.cos(a) * rout, y: Math.sin(a) * ryo }));
+       THE RUNG IS NOT CHANGED, only the radius it produces. `clean()` still
+       judges classic on `overlaps === 0` alone — the documented no-op
+       guarantee against 1.0.88 is about which CONCESSION a config lands on,
+       and this walk can only ever make the ring larger, never push a config
+       onto a lower rung with smaller type or shorter labels.
+       ===================================================================== */
+    interface ClassicFit {
+      go: ReturnType<typeof growRing>;
+      scale: number; rin: number; ryi: number; rout: number; ryo: number;
+      spPos: { x: number; y: number }[]; apPos: { x: number; y: number }[];
+      boxes: ChipBox[]; overlaps: number; clear: number;
+    }
+    /** Size, place and MEASURE the classic ring for one growth gap. */
+    const solveClassic = (growGap: number): ClassicFit => {
+      const go = growRing(
+        apW, rout0, ryo0, growGap,
+        Math.max(rout0, maxRoutBudget), Math.max(ryo0, maxRyoBudget),
+      );
 
-    const boxes: ChipBox[] = [
-      ...spPos.map((p, i) => ({
-        x: Math.round(p.x), y: Math.round(p.y), w: spW[i], h: spH[i],
-      })),
-      ...apPos.map((p, i) => ({
-        x: Math.round(p.x), y: Math.round(p.y), w: apW[i], h: apH[i],
-      })),
-    ];
+      // The ORIGINAL screen clamp, kept verbatim as the final safety net. It
+      // only bites on a display too small to hold even the un-grown ring,
+      // which the budgets above cannot help with. Uniform, so the angles
+      // solved below are unaffected by it.
+      const scale = Math.min(1, (vw / 2 - outerHalf - 24) / go.rx, (vh / 2 - 40) / go.ry);
+      const rin = gi.rx * scale, ryi = gi.ry * scale;
+      const rout = go.rx * scale, ryo = go.ry * scale;
+
+      // The inner ring's angles were already solved by `fitInner`, at the rung
+      // it accepted and with THAT rung's gap. They are reused, not recomputed:
+      // `scale` above is uniform, and a uniform scale leaves `arcAngles`'
+      // parameter mapping identical — so recomputing here could only introduce
+      // a second, silently-diverging source of truth for the same placement.
+      // Outer ring: half-step offset so its chips sit in the inner ring's gaps.
+      const asIn = gi.as;
+      const asOut = arcAngles(apW, rout, ryo, gap, apps.length ? Math.PI / apps.length : 0);
+
+      const spPos = asIn.map((a) => ({ x: Math.cos(a) * rin, y: Math.sin(a) * ryi }));
+      const apPos = asOut.map((a) => ({ x: Math.cos(a) * rout, y: Math.sin(a) * ryo }));
+
+      const boxes: ChipBox[] = [
+        ...spPos.map((p, i) => ({
+          x: Math.round(p.x), y: Math.round(p.y), w: spW[i], h: spH[i],
+        })),
+        ...apPos.map((p, i) => ({
+          x: Math.round(p.x), y: Math.round(p.y), w: apW[i], h: apH[i],
+        })),
+      ];
+      return {
+        go, scale, rin, ryi, rout, ryo, spPos, apPos, boxes,
+        overlaps: overlapCount(boxes), clear: minClearance(boxes),
+      };
+    };
+    /** Walk, then give the slack back. Same shape as the magnetic ceiling
+     *  ladder, and it only runs for a ring that did not clear the bar. */
+    const CLASSIC_GROW = [12, 28, 52, 88, 140];
+    const CLASSIC_BISECT = 5;
+    let cf = solveClassic(gap);
+    const classicOk = (f: ClassicFit) => f.overlaps === 0 && f.clear >= RING_GAP_MIN;
+    if (!classicOk(cf)) {
+      let lastShort = 0;
+      let clean: ClassicFit | null = null;
+      let cleanExtra = 0;
+      for (const extra of CLASSIC_GROW) {
+        const cand = solveClassic(gap + extra);
+        // `growRing` clamps at the screen budget and then stops moving. When
+        // it has, no further extra can help and the walk is over.
+        if (cand.go.rx <= cf.go.rx && cand.go.ry <= cf.go.ry) break;
+        if (classicOk(cand)) { clean = cand; cleanExtra = extra; break; }
+        lastShort = extra;
+        if (cand.clear > cf.clear || cand.overlaps < cf.overlaps) cf = cand;
+      }
+      if (clean) {
+        let lo2 = lastShort, hi2 = cleanExtra;
+        for (let i = 0; i < CLASSIC_BISECT; i++) {
+          const mid = (lo2 + hi2) / 2;
+          const cand = solveClassic(gap + mid);
+          if (classicOk(cand)) { clean = cand; hi2 = mid; } else lo2 = mid;
+        }
+        cf = clean;
+      }
+    }
+    const { go, scale, rin, ryi, rout, ryo, spPos, apPos, boxes } = cf;
 
     // Size the window to the bloom box + PAD. PAD clears the 340px ring-pulse
     // and its glow — without it the circle looks "cut off at the back".
@@ -2053,6 +2536,22 @@ function buildHud(payload: GuideHudPayload, entranceDelay = 0): Promise<Rect | n
         clear: minClearance(boxes),
         reach: apPos.length
           ? Math.max(...apPos.map((p, i) => Math.hypot(p.x, p.y) + apW[i] / 2)) : 0,
+        /* Measured on `boxes` — the SAME final, scaled set `clear` and
+           `overlaps` are judged on, and it already carries the specials. Not
+           re-derived from the ring radii: a reported hollow that disagrees
+           with the drawn chips is worse than no number at all, and the
+           radii are pre-scale here. */
+        hollow: hollowOf(boxes),
+        /* Classic has ONE app ring, so its shortfall is the single
+           have-vs-need subtraction it already computed — reported the same way
+           magnetic sums its per-band shortfalls, so a bug report can put the
+           two modes side by side. Clamped at 0: rim exceeding need is a ring
+           with room to spare, not negative overflow.
+           PRE-SCALE, deliberately, matching magnetic's `t.overflow` and the
+           `clear`/`hollow` beside it — `go.have` and `go.need` are already in
+           one space and `bandOverflow` records what re-scaling one of them
+           did when it was tried. */
+        overflow: Math.max(0, go.need - go.have),
         spDropped: false,
         restCap: FULL_CAP,
       },
@@ -2135,19 +2634,9 @@ function buildHud(payload: GuideHudPayload, entranceDelay = 0): Promise<Rect | n
       maxRoutBudget,
       (maxRyoBudget - chipH / 2) / BAND_RATIO,
     );
-    let hiR = Math.min(glance - outerHalf, hiScreen);
-    /* The innermost app band. With no specials it clears the SPACE pill and
-       sits tight against it, which is the whole point of Magnetic: three chips
-       do NOT get flung out to the ceiling. With specials it must clear the
-       specials band instead — the same `+ half + half + RING_CLEAR`
-       expression 1.0.87 used, because a band is still a ring and two rings
-       still have to miss each other. */
-    let lo = Math.min(hiR, RIN_CLEAR + outerHalf + BAND_LO_PAD);
-    if (hasSp) lo = Math.max(lo, gi.rx + gi.half + outerHalf + RING_CLEAR);
-    /* The collision floor wins if the two disagree — a ceiling may never pull
-       a band INTO the ring inside it. `fit.reach` reports what actually
-       happened either way rather than pretending. */
-    hiR = Math.max(hiR, lo);
+    /* The ceiling the glance target implies. It is where the search STARTS,
+       not where it must end — see the ceiling ladder below `solveAt`. */
+    const hiGlance = Math.min(glance - outerHalf, hiScreen);
 
     const items: BandItem[] = apW.map((w, i) => ({ i, w, h: apH[i] }));
     /* WITH THE SPECIALS SHOWN THERE IS EXACTLY ONE APP BAND, and that is the
@@ -2162,48 +2651,227 @@ function buildHud(payload: GuideHudPayload, entranceDelay = 0): Promise<Rect | n
     const forced = hasSp
       ? 1
       : bandMode === "one" ? 1 : bandMode === "two" ? 2 : 0;
-    const maxBands = hasSp
-      ? 1
-      : Math.max(1, Math.floor((hiR - lo) / bandStep) + 1);
 
     interface Trial {
       n: number; bands: Band[]; placed: Placed[];
       overlaps: number; clear: number;
+      /** Rim the bands are SHORT by (`bandOverflow`) — 0 means they fit. */
+      overflow: number;
+      /** Gap from the SPACE pill to the nearest chip (`hollowOf`). */
+      hollow: number;
     }
-    /** Pack, place, relax and MEASURE one candidate band count. */
-    const trial = (n: number): Trial => {
-      const bands = packBands(items, gap, lo, hiR, bandStep, n);
+    /** Place, relax and MEASURE one set of bands. */
+    const measureBands = (bands: Band[]): Trial => {
       const placed = placeBands(bands, gap);
       relaxAngles(placed);
       const boxes: ChipBox[] = placed.map((p) => ({
         x: Math.round(p.x), y: Math.round(p.y), w: p.w, h: p.h,
       }));
-      return { n: bands.length, bands, placed,
-               overlaps: overlapCount(boxes), clear: minClearance(boxes) };
+      // The SPECIALS band is part of the hollow — with it on screen the middle
+      // is not empty, it is occupied by another ring. Measuring the apps alone
+      // would report a 162px hole where the user sees a full inner ring.
+      const withSp: ChipBox[] = hasSp
+        ? boxes.concat(gi.as.map((a, i) => ({
+            x: Math.round(Math.cos(a) * gi.rx), y: Math.round(Math.sin(a) * gi.ry),
+            w: spW[i], h: spH[i],
+          })))
+        : boxes;
+      return {
+        n: bands.length, bands, placed,
+        overlaps: overlapCount(boxes), clear: minClearance(boxes),
+        overflow: bandOverflow(bands, gap), hollow: hollowOf(withSp),
+      };
+    };
+    /** The innermost band's floor, from the widest chip ACTUALLY on it.
+     *  Same two expressions `lo` uses above — the only difference is WHOSE
+     *  half-width goes in, and that is the whole of "the dead-zone radius
+     *  adapts": with specials the floor is the specials ring, without them it
+     *  is the SPACE pill. */
+    const floor0: Floor0 = (half) => (hasSp
+      ? Math.max(RIN_CLEAR + half + BAND_LO_PAD, gi.rx + gi.half + half + RING_CLEAR)
+      : RIN_CLEAR + half + BAND_LO_PAD);
+
+    /** ZERO OVERLAPS, RING_GAP_MIN OF CLEARANCE, AND EVERY BAND HOLDING WHAT
+     *  IT WAS GIVEN. One predicate, used by the band-count search AND by the
+     *  ceiling ladder below it, so the two can never disagree about what
+     *  "fits" means. */
+    const meets = (x: Trial) =>
+      x.overlaps === 0 && x.clear >= RING_GAP_MIN && x.overflow === 0;
+    /** Which of two trials to keep when NEITHER meets the bar. Fewer
+     *  collisions first, then less rim shortfall, then more clearance. */
+    const better = (a: Trial, b: Trial) =>
+      a.overlaps < b.overlaps ||
+      (a.overlaps === b.overlaps && a.overflow < b.overflow) ||
+      (a.overlaps === b.overlaps && a.overflow === b.overflow && a.clear > b.clear);
+
+    interface Solution { t: Trial; lo: number; hiR: number; ceil: number }
+
+    /**
+     * Solve the whole band layout at ONE ceiling.
+     *
+     * Everything from the dead-zone floor to the accepted band count is a
+     * function of the ceiling, so it lives in here and the ladder below is
+     * free to try more than one. At `hiGlance` this is byte-for-byte the
+     * 1.0.96 body.
+     */
+    const solveAt = (hiCeil: number): Solution => {
+      /* The innermost app band. With no specials it clears the SPACE pill and
+         sits tight against it, which is the whole point of Magnetic: three
+         chips do NOT get flung out to the ceiling. With specials it must clear
+         the specials band instead — the same `+ half + half + RING_CLEAR`
+         expression 1.0.87 used, because a band is still a ring and two rings
+         still have to miss each other. */
+      let lo = Math.min(hiCeil, RIN_CLEAR + outerHalf + BAND_LO_PAD);
+      if (hasSp) lo = Math.max(lo, gi.rx + gi.half + outerHalf + RING_CLEAR);
+      /* The collision floor wins if the two disagree — a ceiling may never
+         pull a band INTO the ring inside it. `fit.reach` reports what actually
+         happened either way rather than pretending. */
+      const hiR = Math.max(hiCeil, lo);
+      const maxBands = hasSp
+        ? 1
+        : Math.max(1, Math.floor((hiR - lo) / bandStep) + 1);
+
+      /** Pack one candidate band count, then measure it BOTH untightened and
+       *  tightened and keep the tightened one only if it comes out clean.
+       *
+       *  The fallback is not defensive padding: `tightenBands` moves bands
+       *  closer together, and two bands one `bandStep` apart are at the
+       *  closest the measured chip height allows. If that turns out to collide
+       *  on a real label set, the answer is the ring 1.0.95 already shipped —
+       *  never a tighter one that overlaps. */
+      const trial = (n: number): Trial => {
+        const spread = packBands(items, gap, lo, hiR, bandStep, n);
+        const loose = measureBands(spread);
+        const tight = measureBands(tightenBands(spread, gap, bandStep, floor0));
+        return (tight.overlaps === 0 && tight.clear >= RING_GAP_MIN) ? tight : loose;
+      };
+
+      /* AUTO PREFERS ONE BAND, AND PROVES IT RATHER THAN ASSUMING IT.
+         Owner: "auto should prefer one band unless it doesn't fit." So the
+         search starts at ONE and stops the moment a count clears the
+         acceptance bar — zero measured overlaps AND at least RING_GAP_MIN of
+         clearance. It does NOT balance chips across bands and must not be
+         "optimised" into doing so: a half-empty outer band is worse to read
+         than a full inner one, and the whole design is about reading ONE name
+         at a time. `packBands`' own capacity arithmetic remains the fallback
+         for the case where nothing measures clean. */
+      let t: Trial;
+      if (forced) {
+        t = trial(forced);
+      } else {
+        let best: Trial | null = null;
+        for (let n = 1; n <= maxBands; n++) {
+          const cand = trial(n);
+          if (!best || better(cand, best)) best = cand;
+          /* THE ACCEPTANCE BAR, and `overflow === 0` is the 1.0.96 addition.
+             Zero overlaps and RING_GAP_MIN of clearance say "nothing
+             collides"; they do NOT say "the band can hold what it was given".
+             At 16 of the owner's labels those two passed on a band pinned to
+             the ceiling with 23px less rim than its content, and `auto`
+             stopped there — one lonely ring 383px out with a 101px hole in the
+             middle, for exactly the same outer size a second band would have
+             cost (382px measured). With the shortfall measured, `auto` walks
+             on and opens the band INSIDE, which is what the Magnetic Sector
+             header says should happen and what "compact" means to the owner.
+
+             A band count that never clears the bar still falls through to
+             `best` above, so a payload that genuinely cannot fit ends up
+             exactly where 1.0.95 left it. */
+          if (meets(cand)) { best = cand; break; }
+        }
+        t = best ?? trial(0);
+      }
+      return { t, lo, hiR, ceil: hiCeil };
     };
 
-    /* AUTO PREFERS ONE BAND, AND PROVES IT RATHER THAN ASSUMING IT.
-       Owner: "auto should prefer one band unless it doesn't fit." So the
-       search starts at ONE and stops the moment a count clears the acceptance
-       bar — zero measured overlaps AND at least RING_GAP_MIN of clearance.
-       It does NOT balance chips across bands and must not be "optimised" into
-       doing so: a half-empty outer band is worse to read than a full inner
-       one, and the whole design is about reading ONE name at a time.
-       `packBands`' own capacity arithmetic remains the fallback for the case
-       where nothing measures clean. */
-    let t: Trial;
-    if (forced) {
-      t = trial(forced);
-    } else {
-      let best: Trial | null = null;
-      for (let n = 1; n <= maxBands; n++) {
-        const cand = trial(n);
-        if (!best || cand.overlaps < best.overlaps ||
-            (cand.overlaps === best.overlaps && cand.clear > best.clear)) best = cand;
-        if (cand.overlaps === 0 && cand.clear >= RING_GAP_MIN) { best = cand; break; }
+    /* =====================================================================
+       THE CEILING IS PART OF RUNG (a). PROBLEM 235.
+
+       WHAT WAS WRONG. The (a)-(d) ladder's own header states the owner's order
+       of preference: (a) GROW the ring until it can hold its content, and only
+       then (b) close the gap, (c) shrink the chips, (d) truncate the labels.
+       Under Magnetic, (a) could not actually grow: `hiR` was pinned at
+       `glance - outerHalf` for the whole build, so a payload that did not fit
+       inside the glance target fell straight past (a) to (c) and (d) — smaller
+       type and shorter labels — with the ring still not fitting afterwards.
+
+       MEASURED, on the owner's `sexy_tumar_mexy` profile (16 apps, seven of
+       them browser-profile pairs like "Youtube — ARPON'S STUDIES", which
+       render 168-212px wide against ~90px for an ordinary first-word chip):
+
+         layout            before                       cause
+         Compact, sp off   step (d), clear 7px,         one band pinned at the
+                           overflow 231px               400px ceiling
+         Double            step (d), 2 OVERLAPS,        two bands 96px apart
+                           clear -23px                  carrying 168px chips
+
+       The Double figures are the owner's screenshot: "Youtube — Arpon" over
+       "Google Chrome — Arpon" (keys Y/M) and "Claude" under "Youtube — ARPON'S
+       ST…" (keys C/U). Both pairs sat at EXACTLY 5.0-5.1 degrees apart, which
+       is `RELAX_FLOOR` — the cross-band relax pass had done its job and its
+       job was the wrong one: 5 degrees is an ANGLE, and what two chips 96px
+       apart on adjacent bands need on the ellipse's LEFT and RIGHT FLANKS is
+       (w1 + w2) / 2 of PIXELS, here 122 and 144. Nothing else measures that:
+       `bandStepFor` sizes the radial step from chip HEIGHT (correct at the top
+       and bottom, where stacked bands separate in y, and the wrong axis on the
+       flanks), and `bandOverflow` measures per-band RIM shortfall, which is a
+       same-band property and reported a clean 0 for both colliding pairs.
+
+       THE FIX, and it is the documented rung (a) rather than a new idea: when
+       the ceiling in force cannot produce geometry that meets the bar, RAISE
+       IT — bounded by `hiScreen`, which is already the 94% clamp Rust applies
+       — and take the SMALLEST ceiling that measures clean. Growing the ceiling
+       spreads the bands apart radially, which is the only lever that can
+       deliver flank clearance, and it does it without touching the type size.
+
+       GLANCE_R IS A TARGET, NOT A LAW, and this file already says so twice:
+       GLANCE_R's own comment ("a ceiling the geometry meets whenever it can,
+       not a law it can always obey") and GLANCE_R_WITH_SPECIALS, which exists
+       because one configuration provably could not meet it. The owner's ruling
+       is quoted there in his words — *"a little bit here and there is okay,
+       it's not a hard line"*. This is the same allowance, granted for the same
+       reason, and granted only when the alternative is a ring that overlaps.
+
+       NOTHING THAT ALREADY FITS MOVES. The ladder's first rung IS today's
+       ceiling, and it returns immediately when the answer meets the bar — so
+       every ring in the owner's other three profiles, and every small ring,
+       comes out byte-identical. The search only runs for a payload that was
+       already going to be shipped broken.
+
+       AND IT IS BOUNDED AND MEASURED. `hiScreen` caps the walk on both axes;
+       every rung is judged by `meets()` on the real boxes; a walk that never
+       clears keeps the best it saw, which is exactly what 1.0.96 would have
+       shipped. `fit.reach` reports the outcome either way.
+       ===================================================================== */
+    /** Rungs of the ceiling walk, then a bisection to give back the slack. Both
+     *  small on purpose: this only runs for a payload that did not fit, and a
+     *  HUD is built while the user is holding Space. */
+    const CEIL_STEPS = 6;
+    const CEIL_BISECT = 5;
+    let sol = solveAt(hiGlance);
+    if (!meets(sol.t) && hiScreen > hiGlance + 1) {
+      let lastShort = hiGlance;
+      let clean: Solution | null = null;
+      for (let i = 1; i <= CEIL_STEPS; i++) {
+        const cand = solveAt(hiGlance + ((hiScreen - hiGlance) * i) / CEIL_STEPS);
+        if (meets(cand.t)) { clean = cand; break; }
+        lastShort = cand.ceil;
+        if (better(cand.t, sol.t)) sol = cand;
       }
-      t = best ?? trial(0);
+      if (clean) {
+        // Give back as much of the growth as the bar allows: the smallest
+        // ceiling that still measures clean, not the first one that did.
+        let lo2 = lastShort, hi2 = clean.ceil;
+        for (let i = 0; i < CEIL_BISECT; i++) {
+          const mid = (lo2 + hi2) / 2;
+          const cand = solveAt(mid);
+          if (meets(cand.t)) { clean = cand; hi2 = mid; } else lo2 = mid;
+        }
+        sol = clean;
+      }
     }
+    const t = sol.t;
+    const lo = sol.lo;
 
     /* The ORIGINAL screen clamp, kept as the final safety net for a display
        too small to hold even the un-grown ring. Uniform, so it cannot disturb
@@ -2281,6 +2949,22 @@ function buildHud(payload: GuideHudPayload, entranceDelay = 0): Promise<Rect | n
         bandMode: bandMode,
         clear: minClearance(boxes),
         reach,
+        /* THE NUMBER THE HOLLOW FIX IS JUDGED ON. Measured on `boxes` — the
+           same final, scaled set `clear` and `overlaps` are judged on, which
+           already carries the specials ring — and NOT taken from `t.hollow`.
+           The trial's copy is measured pre-scale, so on any display where
+           `scale` is not 1 it would disagree with what the user is actually
+           looking at. A reported hollow that does not match the drawn chips
+           is worse than no number: it is the number a bug report quotes. */
+        hollow: hollowOf(boxes),
+        /* THE LADDER'S OWN NUMBER, not a re-measurement — `t` is the accepted
+           trial, so this is exactly the shortfall that was decided on, and the
+           two can never drift apart. Pre-scale, like `clear` and `hollow`
+           beside it: see `bandOverflow` for why re-scaling it produces fiction.
+           (`outerRim` IS scaled and `outerNeed` is not — a mixed pair that
+           predates this field. Do not "make overflow match" them; the honest
+           move is one consistent space, which is this one.) */
+        overflow: t.overflow,
         spDropped: _spDropped,
         restCap: REST_CAP_BACKSTOP,
       },
@@ -2608,6 +3292,9 @@ function buildHud(payload: GuideHudPayload, entranceDelay = 0): Promise<Rect | n
   paintArmedChip();
 
   const w = geo.win.w, h = geo.win.h;
+  // Captured now, before the invoke below, so the rAF closure can tell THIS
+  // show apart from whatever show is active by the time it actually runs.
+  const seq = _hudShowSeq;
   // PROBLEM 112 — hand the promise back. The window MOVE is the one thing here
   // that cannot be animated, so callers must be able to wait for it and keep
   // content invisible until it has landed.
@@ -2616,7 +3303,12 @@ function buildHud(payload: GuideHudPayload, entranceDelay = 0): Promise<Rect | n
       // One rAF so the webview has actually re-laid-out at the NEW window
       // size before the chip boxes are read — the chips are placed with
       // `calc(50% + …)`, so every rect depends on the post-resize viewport.
-      requestAnimationFrame(() => publishHudChips());
+      // RACE GUARD: a preview's buildHud can still have this rAF pending when
+      // a REAL Space-hold starts and bumps `_hudShowSeq` before the rAF fires
+      // — without the check below, the preview's stale rAF would publish
+      // preview geometry for the real ring (and consume `_chipsPubSeq`,
+      // skipping the real publish outright).
+      requestAnimationFrame(() => { if (seq === _hudShowSeq) publishHudChips(); });
       if (r) { _rect = r; return r; }
       // SHOULD-FIX 4 — the overlay_log call that used to live here is
       // DELETED, deliberately. `overlay_fit_hud`'s null return means Rust
@@ -2937,6 +3629,22 @@ let _chipsPubSeq = -1;
 
 export function publishHudChips(): void {
   if (!_isOverlay || !_hudEl) return;
+  /* A PREVIEW PUBLISHES NOTHING, AND THAT IS THE WHOLE SUPPRESSION.
+     Rust declines to publish the chip KEYS for the same show, so both of
+     `pointer.rs`'s counts stay at zero and `sector_pick` is never reached —
+     no armed chip, no beam, nothing a release or a click can fire. Doing it
+     here rather than by threading a flag through the aiming code means there
+     is no second mode to keep correct: a preview simply never tells Rust where
+     anything is.
+     `_chipsPubSeq` is deliberately left ALONE on this path, so it still holds
+     the last REAL show's seq — a preview must not be able to consume the
+     publish slot of the hold that follows it. That's necessary but not
+     sufficient: the caller of this function (the rAF in buildHud's
+     `overlay_fit_hud` handler) only fires it when the `seq` it captured at
+     build time still matches `_hudShowSeq` — that guard is what stops a
+     preview's own pending rAF from calling in here at all once a real hold
+     has started and bumped the seq. */
+  if (previewOverride(_lastPayload)) return;
   if (_chipsPubSeq === _hudShowSeq) return;      // already published this show
   _chipsPubSeq = _hudShowSeq;
   /* RESTING RECTS ONLY — never bloomed ones. `offsetLeft`/`offsetTop` are the
@@ -2959,6 +3667,33 @@ export function publishHudChips(): void {
         w, h,
       };
     });
+  /* THE 41st CHIP IS DRAWN AND IS NOT HIT-TESTABLE. SAY SO.
+     `pointer.rs`'s `MAX_CHIPS` is 40 and BOTH of its publish paths truncate
+     with `.min(MAX_CHIPS)` — `publish_keys` for the letters and
+     `publish_geometry` for the rects — silently, because a fixed-size static
+     table is the right shape for something the hook thread reads. Its own
+     comment says "26 letters is the real maximum (only alpha keys can carry
+     bindings)", and through this app's UI that is true: `keyboard-matrix.ts`
+     marks only `ALPHA_KEYS` bindable, so 26 is the ceiling a user can reach by
+     clicking.
+     IT IS NOT THE CEILING A CONFIG CAN REACH. `engine::hud_apps_for` iterates
+     every `is_mapped()` binding in the profile with no key filter, and
+     `config::profile_from_export` takes `bindings` from an imported file
+     VERBATIM — no whitelist, no cap (PROBLEM 231 shipped that import). So a
+     hand-edited or imported profile can carry 41+ mapped keys, this page will
+     lay out and draw all of them, and chips 41.. would then aim at nothing
+     with no error anywhere. Logged rather than clamped: clamping here would
+     hide the same fact one layer up, and the ring is still CORRECT — it is the
+     POINTER that stops at 40. */
+  if (chips.length > 40 && _isOverlay) {
+    invoke("overlay_log", {
+      msg: `publishHudChips: ${chips.length} app chips published, but pointer.rs ` +
+        `MAX_CHIPS is 40 — chips 41..${chips.length} are DRAWN and will not ` +
+        `hit-test, so pointing at them arms nothing and releasing over them ` +
+        `launches nothing. The keyboard can only bind 26; a profile this large ` +
+        `came from an imported or hand-edited config.json.`,
+    }).catch(() => {});
+  }
   try {
     invoke("publish_hud_chips", { chips, dpr: window.devicePixelRatio || 1 })
       .catch(() => { /* Rust side not landed yet — see the block above */ });
@@ -4116,10 +4851,54 @@ export function applyTheme(dark: boolean): void {
  * SEPARATE window that never had the attribute set, so every warcry rule
  * missed it. Setting the same attribute here means the overlay and the
  * dashboard select on one identical mechanism instead of two that can drift.
+ *
+ * **PROBLEM 255 — and `"auto"` is why this function no longer decides for
+ * itself.** The theme pill can store the literal string `"auto"` ("match
+ * Windows"), and this function's old rule — *anything that is not
+ * warcry/starry is earthy* — rendered it in daylight while the dashboard
+ * beside it, which already resolved `"auto"` through `main.ts::resolveTheme`,
+ * was in Starry night. Two windows of one app in two palettes is exactly what
+ * "ONE setting drives everything" exists to prevent. The rule now comes from
+ * `src/theme-resolve.ts`, a leaf module the DASHBOARD imports too, so there
+ * is one rule rather than two that agree by hand.
+ *
+ * The RAW value is remembered, never the resolved one:
+ * [`reapplyResolvedTheme`] re-runs the resolution when Windows' own light/dark
+ * setting changes, and it can only do that if it still knows the user asked
+ * for "auto" rather than for whatever "auto" happened to mean at seed time.
  */
 export function applyThemeName(theme: string): void {
-  const t = theme === "warcry" || theme === "starry" ? theme : "earthy";
+  _rawThemeName = theme;
+  const t = resolveTheme(theme);
   document.body.dataset.theme = t;
+  // The nocturne base, set from the SAME resolved value rather than waiting
+  // for a separate `theme-changed` bool. For a named theme this is identical
+  // to what `applyTheme(dark_mode)` already does — Rust guarantees
+  // `dark_mode == (theme != "earthy")` — so nothing changes for the three
+  // fixed palettes. For `"auto"` it is the only thing that can be right: an
+  // OS flip emits no Rust event at all, so `dark_mode` is stale the moment
+  // the user changes their Windows setting, and a window wearing the starry
+  // palette on a light nocturne base is unreadable.
+  document.body.classList.toggle("nocturne", t !== "earthy");
+}
+
+/** The last raw value handed to [`applyThemeName`] — possibly `"auto"`. */
+let _rawThemeName = "earthy";
+
+/**
+ * Re-run the resolution against the CURRENT OS setting. Wired by `overlay.ts`
+ * to `theme-resolve.ts`'s `onSystemThemeChange`, which since REVIEW FIXES
+ * 2026-09-05 (H4) fires from Rust's `os-theme-changed` event rather than from
+ * this webview's `prefers-color-scheme` — a webview reports the colour scheme
+ * it was TOLD to prefer, which is why the dashboard (pinned to
+ * `"theme": "Light"`) and this window used to resolve `"auto"` differently.
+ *
+ * A no-op for a fixed theme by construction rather than by an early return:
+ * `resolveTheme("starry")` is `"starry"` whatever the OS says, so re-applying
+ * writes the same two attributes it already had.
+ */
+export function reapplyResolvedTheme(): void {
+  applyThemeName(_rawThemeName);
 }
 
 /** Sound ticks on/off. Exported so overlay.ts can seed it at startup. */

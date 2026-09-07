@@ -14,12 +14,19 @@ before and after has both. Install ONE, never both.
 user folder, needs no admin password, and replaces whatever is there — you do
 not need to uninstall first.
 
-**One warning about the old `.msi` files, if you ever run one:** an `.msi`
-installs to `C:\Program Files` instead, which is a SEPARATE copy. Windows then
-has two Spaceadoms that cannot see each other, and both try to start when you
-log in — two programs fighting over your spacebar. If you ever do it by
-accident, uninstall "Spaceadom" from Add/Remove Programs and reinstall from a
-`setup.exe`.
+**DO NOT RUN AN `.msi` IF YOU ALREADY INSTALLED WITH A `setup.exe`.** This
+warning used to say the `.msi` installs to `C:\Program Files`, as a separate
+copy. That was measured on 2026-09-04 and it is **wrong**: the `.msi` looks up
+where Spaceadom is already installed and installs itself *into that same
+folder* — your own user folder — and from then on Windows believes those files
+belong to the `.msi`. Uninstalling that entry later deletes them. On the
+owner's own machine, on 2026-09-04, that is exactly what happened: a
+"Spaceadom" left over in Add/Remove Programs was removed and the running app
+disappeared with it. Settings were untouched (they live in
+`%APPDATA%\Spaceadom`), and reinstalling from the `setup.exe` brought
+everything back. **From 1.0.98 the dashboard can no longer do this to you** —
+when it offers to clear a leftover entry it now only deletes the entry, never
+the files. Use the `setup.exe`.
 
 **Your settings are not touched** by switching versions — profiles and bindings
 live in `%APPDATA%\Spaceadom\config.json`, separate from the app. Rolling back
@@ -27,10 +34,240 @@ is safe.
 
 **Missing: 1.0.28.** Deleted at your request on 2026-08-14 — it was the first
 attempt at the toast/HUD transition and it made the HUD feel delayed. Every
-other version is here, 1.0.0 through 1.0.74, including the few that were
+other version is here, 1.0.0 through 1.0.107, including the few that were
 superseded within minutes on 2026-08-20 (1.0.64, 1.0.66, 1.0.67, 1.0.68) —
 those are wrong turns, and they are kept so the record is honest rather than
 tidy. Their rows say what each one got wrong.
+
+---
+
+## 2026-09-07 (latest) — 1.0.107
+
+| Version | What changed |
+| --- | --- |
+| **1.0.107** | **A held Spacebar can no longer get stuck in a way that stops the ring appearing at all.** This is the fault behind *"the ring stopped appearing entirely and only a restart cured it"*. It is not the same bug as 1.0.104's or 1.0.106's, and it is the one that made those two look unreliable: after it happened once, nothing you did brought the ring back. |
+| | **What was going wrong.** When you hold Space, Spaceadom sets a flag meaning *a hold is in progress*, and clears it when you let go. If the keyboard listener stops being called in the middle of a hold — which is the fault 1.0.105 chases — then the release never reaches Spaceadom, so that flag is never cleared. It stays set forever. And that flag is also the referee that decides whether the dashboard page is allowed to take a hold of its own: while it is set, every new hold is refused. So one lost release did not cost you one press. It cost you **every** press until you restarted the app. |
+| | **Why nothing already in the app caught it.** There were three separate safety nets that should each have ended that hold, and all three were reading a clock that only the keyboard listener winds. The stuck-hold reaper waited for the key-repeat to stop — but key-repeat comes from the listener that had stopped. The 30-second limit on a hold was enforced by the listener itself. And the repair that re-installs the listener would stand aside for up to 10 seconds whenever a hold looked live, on a timer that every quiet moment reset, so in practice it could stand aside forever. **Every guard against a dead listener was asking the dead listener whether it was alive.** |
+| | **What changed.** Four things, and none of them run on the keyboard listener any more. A hold is now ended when Spaceadom has independently proven the keyboard is deaf, even if the old rules said to leave that hold alone. A hold that has been latched past its limit with no keyboard activity at all in that whole span is now cleared by a separate timer. When Spaceadom replaces the keyboard listener, any hold that was latched by the old one is torn down with it — that hold's release belongs to a listener that no longer exists and can never arrive. And the stand-aside timer now measures the real elapsed time, so it actually expires. |
+| | **What you should notice.** Nothing, on a good day. On a bad day the ring comes back on the next press instead of after a restart. If it ever does happen, the log now says so in plain terms and names which of the four guards caught it, so it can be read afterwards rather than guessed at. |
+| | **WHAT WAS PROVEN ON THIS MACHINE, AND WHAT WAS NOT.** The build was proven to be the one installed and running: version stamp 1.0.107, all four new log markers present in the installed program and absent from 1.0.106, a fresh process, settings byte-identical across the install, and the keyboard and overlay both started cleanly. **NONE OF THE FOUR NEW BEHAVIOURS HAS EVER RUN ON HARDWARE.** Each one only fires after the keyboard has already gone deaf mid-hold, and that did not happen in the minutes after installing — the counters for all four read zero. The code is covered by 556 automated tests, but a test is not a keyboard. Until one of these lines shows up in a real log, treat this as a fix that is shipped and unwitnessed. |
+| | Nothing you have set up is touched. Installs over 1.0.106 and keeps every profile, binding and setting. |
+---
+
+## 2026-09-07 (later still) — 1.0.106
+
+| Version | What changed |
+| --- | --- |
+| **1.0.106** | **Aiming and clicking now work on a ring raised inside the dashboard.** 1.0.104 made the ring appear again when you hold Space with the Spaceadom window in front — the dashboard page itself watches the Spacebar, because the keyboard listener is not being called at all in those stretches. But that was only half of it, and you found the other half: *"it's not seeing my cursor movement and it's not opening apps when clicked"*. Move the mouse toward a shortcut and nothing lit up; click one and nothing launched. Outside the dashboard, both worked normally. |
+| | **Why only inside the dashboard.** Pointing at a shortcut and clicking it are handled by the MOUSE listener, and every one of its checks began by asking the same question: *is a Space-hold in progress?* It asked that of a flag the KEYBOARD listener sets — the one part of Spaceadom that, in these stretches, is never called. So on a ring raised by the page, that flag was false for the whole hold, and the mouse listener returned before it ever looked at where your cursor was or whether you had clicked. Two symptoms, one early exit. |
+| | **The fix is a second flag, not a shortcut.** The obvious repair is to have the page set the keyboard listener's flag, and it is wrong four times over — most importantly because that same flag is the referee that decides whether the page is allowed to take a hold at all. One hold with a lost key-up would have refused every later hold, permanently. So the page's holds now have a flag of their own, and everything that used to ask "is a hold in progress?" asks both. A referee cannot also be a player. |
+| | **A ring left standing is now cleaned up too.** If the page that owns a hold goes away mid-press — the window is closed, or it stops responding — Spaceadom notices within a quarter of a second, by checking whether its own window is still the one in front, and takes the ring down along with everything the pointer had armed. There is a 30-second backstop underneath that for a page that is still there but has gone silent. |
+| | **The Conflicts cards are compact and side by side.** In Settings, the list of other keyboard programs that could clash with Spaceadom used to be one full-width bar per program, stacked down the panel. They are now compact cards on a responsive grid: two sit side by side in the expanded panel and stack one per row in the narrow popover, with the description clipped to two lines (the full text is still there on hover). Measured: 595×100 side by side expanded, 242×115 stacked. |
+| | **WHAT WAS PROVEN ON THIS MACHINE, AND WHAT WAS NOT.** Aiming was proven: within a minute of installing 1.0.106, a hold carried by the page lit up six shortcuts in a row as the cursor moved — `c`, `m`, `c`, `a`, `c`, `b` — while the keyboard listener recorded exactly zero keystrokes for that window. That is the reported symptom, gone, on hardware. **LAUNCHING FROM THE RING ON A PAGE-CARRIED HOLD WAS NOT PROVEN**: the hold ended without a click and without a release-on-target, so the launch half has still never run for real. If you hold Space in the dashboard, move to a shortcut until it lights up, and then click it or let go of Space, that is the missing test. |
+| | Nothing you have set up is touched. Installs over 1.0.105 and keeps every profile, binding and setting. |
+
+---
+
+## 2026-09-07 (later) — 1.0.105
+
+| Version | What changed |
+| --- | --- |
+| **1.0.105** | **Spaceadom can now SEE the fault that kills the Spacebar, and repairs it immediately instead of waiting for you to stop moving the mouse.** This is the other half of 1.0.104. 1.0.104 routed around the fault inside the dashboard; 1.0.105 goes after the fault itself. |
+| | **What was actually wrong with the old self-check.** Spaceadom has always had a watchdog that notices when its keyboard listener has gone quiet and re-installs it. It had two ways of deciding something was wrong, and on 2026-09-07 neither of them could describe what was happening. One needed the MOUSE listener to fall silent too — it was firing three or four times a second the whole time, because a hand was on the mouse. The other needed a second, spare listener to still be alive — it was dead as well. So for **130 seconds** of a completely dead Spacebar the watchdog printed nothing at all, and the repair only ran when the mouse happened to sit still for three seconds. In plain words: **the repair was waiting for you to take your hand off the mouse.** |
+| | **What 1.0.105 adds.** A third test that does not depend on the mouse being still or on the spare listener being alive. It asks two questions of clocks nothing else can move: has our keyboard listener been silent past the threshold, and did Windows accept input in that time that our own mouse listener cannot account for? If both are true the keyboard is provably deaf — and Spaceadom repairs it **on the spot**, genuinely: it removes both listeners and installs fresh ones, and writes the old and the new listener handles into the log side by side, so "it says it repaired" can always be checked against "it actually changed something". |
+| | **It no longer waits its turn once the evidence is in.** There is a one-minute cool-off that stops the watchdog thrashing on a hunch, and that cool-off stays exactly as it was for every guess-based alarm. A **proven** verdict now skips it: waiting a minute is strictly worse than repairing when the app is demonstrably deaf. Two things still hold it back on purpose — it never repairs in the first seconds after a fresh install, and it never repairs in the middle of a hold you are in the middle of, because re-installing mid-press is exactly what "it dies while I am holding it" feels like. |
+| | **And it gives up gracefully rather than looping.** If a forced repair does not bring the keyboard back, the next one waits 5 seconds, then 10, 20, 40, up to a minute — resetting the moment a repair works. Repairs that keep not working are evidence the cure is not Spaceadom's to apply, and the log now says so in those words. |
+| | **The mechanism, written into the app once so nobody has to rediscover it.** When Windows decides a keyboard listener has taken too long, it stops calling it and **leaves it looking perfectly installed** — no message, no error, and removing it still reports success. The mouse listener is a separate thing with its own timer, so it keeps firing 30–60 times a second while not one keystroke arrives. That is why the app looks healthy from every clock except the keyboard's own, and why re-installing is the only cure a program has. That paragraph is now printed with every forced repair. |
+| | **NOT PROVEN ON HARDWARE, and that is not a formality.** The forced repair has never run on a real machine — not once, on any build. It is covered by the automated tests (539 of them pass) and it is switched on in this build, but the first time it fires for real will be on somebody's machine, not in a test. Nothing else changed: no new buttons, no new settings, nothing visual. |
+| | Nothing you have set up is touched. Installs over 1.0.104 and keeps every profile, binding and setting. |
+
+---
+
+## 2026-09-07 — 1.0.104
+
+| Version | What changed |
+| --- | --- |
+| **1.0.104** | **The ring works inside Spaceadom again, even while the fault is happening.** Holding Space with the Spaceadom window in front has been going dead in stretches — no ring, no shortcut — while the same hold works perfectly in every other app. The keypress is not being hidden; it never reaches Spaceadom's keyboard listener at all. 1.0.104 does not fix that, and does not pretend to. It **routes around it**: when the Spaceadom window is the one you are looking at, the dashboard page itself now watches the Spacebar — the page still receives the keypress when the listener does not — and hands it to the same engine that has always handled it. So the ring appears and Space+letter launches your app, inside Spaceadom, while the underlying drop is still going on. Everywhere else, nothing changed: this second path only ever runs when the Spaceadom window itself is in front. |
+| | **It cannot fire twice.** Spaceadom refuses the page's version of a keypress if its own keyboard listener stamped that same Space in the last tenth of a second, or if it already has a hold in progress, or if the window is not genuinely in front. The failure worth engineering against was never "the fallback did nothing" — it was two rings, two launches and two spaces per press, on a machine where nothing looks wrong. |
+| | **What still does NOT work inside the dashboard, deliberately:** Space with Escape, Tab, the arrow keys or the number row. Those keys do too much inside a window to take over; they are unchanged everywhere else. One known difference: hold Space inside a dashboard text box until the ring appears and let go, and no space is typed. A tap still types one, exactly as everywhere else. |
+| | **THE HONEST PART, and it is the important one. The underlying fault is still open.** It is not caused by any version of Spaceadom. On 2026-09-07 the owner installed 1.0.91, then 1.0.100, then 1.0.103, and **every one of them reproduced it** — that is what a bisect is for, and it came back empty. It is intermittent: 1.0.100 was working at 10:12:48 and was deaf again minutes later. And it happened again during this build's own install proof, at 10:22:15, with Spaceadom's own window in front and the Spacebar physically down: the keyboard callback had not fired for 5,906 ms while the mouse callback on the very same thread had fired 922 ms earlier. Something outside this app is swallowing the keystroke before any listener inside it is called, and no code in a normal non-administrator app can stop that. What 1.0.104 can do, and now does, is keep the app usable while it is happening. |
+| | Nothing you have set up is touched. Installs over 1.0.103 and keeps every profile, binding and setting. |
+
+---
+## 2026-09-06 (night) — 1.0.103
+
+| Version | What changed |
+| --- | --- |
+| **1.0.103** | **The main fix is one you cannot see, and it is the one that matters: shortcuts that went dead while the Spaceadom window itself was in front.** Since 1.0.101 there were stretches where holding Space *inside the Spaceadom dashboard* did nothing — no ring, no shortcut — while the very same hold worked perfectly in any other app. It was not the ring being hidden; the keystroke was never reaching Spaceadom at all. 1.0.103 does two things about it. First, it **notices**: if the Spacebar is physically held down and Spaceadom's keyboard listener has heard nothing for a second and a half, it writes a plainly-worded warning to its log naming the window in front, and **re-attaches its keyboard listener to the front of the queue** — the one repair we are allowed to make from inside the app. Second, it **records every hold it does see**, one line each, so "the hold never arrived" and "the hold arrived and the ring failed" can finally be told apart instead of guessed at. If it ever happens to you again, the log now says which of the two it was. | 
+| | **Setting up a browser shortcut asks about profiles at the right moment.** During the first-run walkthrough, binding a key to a browser that has more than one profile now shows its own step — "Brave has more than one profile. Pick the one this key should open — or skip, and it opens Brave the way it always has." Before, the walkthrough sat *underneath* the profile picker still telling you to do the step you were already doing. |
+| | **Deleting a profile offers ONE undo, not two, and it counts down where you can see it.** Deleting a profile used to raise two separate undo offers — a banner at the top of the window and a row where the profile had been — with no way to tell whether they were the same ten seconds. There is now one: the row where the profile was, with a live countdown on the button itself ("Undo · 9s" down to "Undo · 0s"). The profile is still recoverable afterwards from the timestamped backup Spaceadom writes before any delete. |
+| | Nothing you have set up is touched. Installs over 1.0.102 and keeps every profile, binding and setting. |
+
+---
+
+## 2026-09-05 (evening) — 1.0.102
+
+| Version | What changed |
+| --- | --- |
+| **1.0.102** | **One visible fix: the Theme buttons in Settings.** The Theme row (Auto / Earthy / Warcry / Starry night) highlights the look you have chosen with a sliding coloured pill. Since the fourth option was added, that pill sat in the wrong place — it covered part of the *next* label instead of the one you picked, worst on "Starry night", which is the longest. It was being positioned by arithmetic that assumed all four buttons were the same width, and they are not, because their words are not the same length. It is now positioned by measuring the button you actually chose, so it fits that button whatever it says, in the small gear panel and full-screen alike. The Compact / Wide / Double ring row uses the same control and got the same fix. Nothing else changed: same app, same engine, installs over 1.0.101 and keeps everything. |
+
+---
+
+## 2026-09-05 (afternoon) — 1.0.101
+
+**The two sections below that say "NOT BUILT AS A NUMBERED RELEASE YET" are
+now built: 1.0.101 is the version that carries them.** The portable build and
+the `.msi` corrections described there are in this installer.
+
+| Version | What changed |
+| --- | --- |
+| **1.0.101** | **Mostly the things 1.0.100 was carrying but had not been given a number.** The `.msi` now installs to `C:\Program Files\Spaceadom` and nowhere else, and it updates itself like the `setup.exe` does — with one Windows permission prompt per update, because a per-machine installer cannot install quietly without one. Three copies of Spaceadom can now recognise each other properly: if you have both the Microsoft Store version and an ordinary installed one, whichever you open says so and tells you which Settings page removes the other — **and it no longer offers a Remove button it cannot honour**, which is the one visible change in this build. Underneath: the app no longer counts a double-click on the tray icon, or a successful self-update, as a startup crash (three of those in a row used to put it into safe mode with the spacebar switched off); "Report a problem" no longer puts window titles, addresses or your Windows user name into the file it writes; the light/dark setting in Windows is now watched while the app is running, so an "Auto" theme follows it without a restart; and your settings file is written in a stable order, so two saves of the same settings now produce an identical file. Nothing you have to do — it installs over 1.0.100 and keeps everything. |
+
+---
+
+## 2026-09-05 — NOT BUILT AS A NUMBERED RELEASE YET — a portable, no-installer build
+
+A `Spaceadom_<version>_x64-portable.zip` will start appearing on releases
+alongside the `setup.exe` and `.msi`, for anyone who wants to run Spaceadom
+without an installer touching their machine at all: no Program Files entry,
+no Task Scheduler entry, no registry Run value. Unzip it anywhere and run
+`spaceadom.exe`. The first time it runs, a `data` folder appears right next
+to the exe and everything Spaceadom ever writes — settings, the log, backups,
+the app-picker cache — goes there instead of `%APPDATA%`. Move or copy the
+whole folder and your settings travel with it; delete the whole folder and
+Spaceadom, plus every trace of it, is gone — there is no separate uninstall
+step.
+
+Two things a portable copy deliberately does NOT do: it does not start with
+Windows on its own (put a shortcut in your own Startup folder if you want
+that), and it does not update itself (download a newer zip from Releases
+instead) — both need an installer, which is the one thing a portable build
+is defined by not having. Running a portable copy at the same time as an
+installed Spaceadom is still two copies fighting over the spacebar, exactly
+like two installed copies would be; the dashboard's existing "second copy"
+banner covers this too.
+
+**Not yet exercised**: this has been built and its zip inspected, but the
+extracted exe has never actually been run on any machine (see
+`V14_FIXES_AND_CODE.md` §PROBLEM 254 for why, and what to test first).
+
+---
+
+## 2026-09-05 — NOT BUILT AS A NUMBERED RELEASE YET — the `.msi` updates itself too
+
+**Read this before the 1.0.100 row below, which it corrects.** Two changes are
+in the source tree and have not been given a version number yet:
+
+- **The `.msi` now installs to `C:\Program Files\Spaceadom` and nowhere else.**
+  Until now it looked up where Spaceadom was already installed and put itself
+  *into that folder* — your own user folder, if you had used the `setup.exe` —
+  which is what let a later uninstall delete the running app. That lookup has
+  been removed from the installer. This is the real fix for the 2026-09-04
+  incident; 1.0.98's fix stopped the dashboard from triggering it, this stops
+  the `.msi` from being able to do it at all.
+- **An `.msi` install now updates itself, like the `setup.exe` already does.**
+  The difference is one Windows admin prompt: because the `.msi` installs for
+  the whole PC, Windows requires an administrator, and it will only ask if the
+  installer is allowed to show something. So an `.msi` user sees **one admin
+  prompt and a progress bar, once per update, and nothing else** — no dialog,
+  no "update available" nag. Say no and nothing happens; it asks again the next
+  day. `setup.exe` users see no change at all: theirs is still completely
+  silent.
+
+**Not yet proved end to end.** The `.msi` cannot be test-installed on the
+developer's machine without recreating the very bug being fixed, so the live
+`.msi` update — the admin prompt, the restart, the version actually changing on
+disk — still has to be run once on a second PC. Until it has been, treat the
+`.msi` self-update as built and unproven.
+
+---
+
+## 2026-09-05 — NOT BUILT AS A NUMBERED RELEASE YET — uninstalling asks before it deletes your settings
+
+Also in the source tree, no version number yet:
+
+- **Uninstalling now asks "Keep your settings? (profiles, key bindings,
+  backups)"** instead of always keeping `%APPDATA%\Spaceadom` and
+  `%LOCALAPPDATA%\SpaceadomBackups` on disk with no way to say otherwise
+  short of deleting the folders yourself afterward. Answer Yes (or just close
+  the box) and nothing changes from how every version up to 1.0.100 behaved.
+  Answer No and both folders are removed along with the app.
+- **A silent uninstall, and the self-updater's own upgrade step, are never
+  asked and never delete anything** — there is nobody to answer a dialog
+  during either, so both always keep, same as today.
+- The autostart entries (the Run value and, on the rare machine where it
+  exists, the Scheduled Task) are still removed on every uninstall regardless
+  of the answer, exactly as since 1.0.41 — this only changes the fate of your
+  profiles and backups.
+
+**Not yet proved end to end.** Built and NSIS-compiles cleanly on the
+developer's machine, but the actual dialog and the actual deletion were not
+run there — it is the machine's own live install. A second machine or a VM
+needs to run the install → uninstall(No) → uninstall(Yes) → self-update
+sequence once before this is more than "compiles."
+
+**The `.msi` now does this too** — it did not when this note was first written.
+See the next section.
+
+---
+
+## 2026-09-05 — NOT BUILT AS A NUMBERED RELEASE YET — the `.msi` uninstaller asks the same question
+
+Also in the source tree, no version number yet. This finishes the note above,
+which used to end "the `.msi` is not part of this yet."
+
+- **Uninstalling the `.msi` now asks "Keep your settings? (profiles, key
+  bindings, backups)" as well**, with the two folders spelled out in full so
+  you can see exactly what would go. Yes keeps them — and so do Esc, Alt+F4 and
+  the X in the corner, so there is no way to delete your settings by dismissing
+  a box you did not read. No removes both.
+- **The question appears whether you uninstall from Settings → Apps or by
+  running the `.msi` again**, which are two different routes through Windows'
+  own uninstall screens and needed handling separately.
+- **An automatic update never asks and never deletes.** An `.msi` update
+  replaces the old version by removing it first, and that removal is silent by
+  nature — so it always keeps, the same way the `setup.exe` self-update does.
+  The same is true of any silent or unattended uninstall (`/qn`, `/passive`):
+  no question, nothing removed.
+- If you script uninstalls, you can answer in advance with
+  `msiexec /x {ProductCode} ST_KEEPDATA=0`. It still refuses to delete anything
+  in a fully silent run — a script that cannot show the question does not get
+  to skip it either.
+
+**Not yet proved end to end, and less proved than the `setup.exe` half.** The
+`.msi` cannot be test-installed on the developer's machine without recreating
+the 2026-09-04 incident, so the dialog has never actually been shown and no
+folder has ever actually been deleted by it. What was checked is that the
+finished `.msi` really contains the dialog, the buttons, the conditions and the
+delete instructions, read straight back out of the built file. A second machine
+still has to run install → uninstall(No) → uninstall(Yes) → a `/passive`
+update once.
+
+---
+
+## 2026-09-04 (late night) — the app updates itself
+
+| Version | What changed |
+| --- | --- |
+| **1.0.100** | **This is the last installer you should ever need to run.** From this version Spaceadom checks for a newer release once a day — and once shortly after it starts — downloads it, checks its signature, installs it silently and comes back on its own. No prompt, no admin password, nothing to click; the next time you open the dashboard it says "Updated to …" for a few seconds. It only ever installs the same KIND of installer you used: a setup.exe install gets the next setup.exe. **If you installed with the .msi it does not update itself** — a silent .msi install needs an administrator and Windows will not ask for one quietly — so keep downloading the .msi from the releases page. Your settings are never touched (they live in `%APPDATA%\Spaceadom`, which the installer never enters — measured: the settings file's checksum was identical before and after). To pin a version, set `"auto_update": false` in that folder's `config.json`; there is deliberately no switch for it in Settings. This build also carries the small fix from proving 1.0.99 (see its row). **The sentence about the `.msi` is true of this archived file and no longer true of the source tree — see the 2026-09-05 note above.** |
+| **1.0.99** | **Never published; the build that first carried the updater.** It was installed on the developer's machine, pointed at a local copy of 1.0.100, and it found it, downloaded it, installed it silently and relaunched — the whole thing measured from the log, the process id and the event log. Proving it caught one thing: the "Updated to …" message was being shown to a hidden window after the quiet relaunch, so nobody would have seen it. 1.0.100 fixes that. |
+
+---
+
+## 2026-09-04 (night) — the "remove the old copy" button can never remove the app itself again
+
+| Version | What changed |
+| --- | --- |
+| **1.0.98** | **This one is a repair, and it is worth reading even though there is nothing new to play with.** Earlier the same evening, the banner added in 1.0.97 — the one that notices Spaceadom listed twice in Programs and Features — was clicked, and the app vanished off the machine. Nothing was wrong with noticing the duplicate. What was wrong was how it cleared it: it asked Windows Installer to uninstall the leftover entry, and Windows Installer deletes the files that entry says it owns. Because an `.msi` had been run at some point on a PC that already had Spaceadom installed, the `.msi` had installed itself *into the folder Spaceadom was already living in*, and Windows had been recording the live app as its property ever since. So "remove the leftover entry" meant "delete the app", and Windows carried it out without a word — it even tried to close the running program first, failed, and deleted the files anyway. Settings survived, because those live somewhere else, and reinstalling put everything back. **Now: clearing a leftover entry removes the entry and nothing else.** No installer is involved, no files are touched, and the running app is never asked to close. The banner says so in as many words — "This only removes the leftover entry from Programs and Features. Your app and settings are not touched." — and the button is labelled "Remove the leftover entry" rather than "Remove the old copy", because there was no old copy. **A genuine second installation can still be removed the old way**, but only after the app has checked that the thing it is about to uninstall lives somewhere other than where the app itself is running from — and even then it tells Windows not to close any running programs on its behalf. **And the `.msi` warning in this file was wrong and has been corrected.** It said an `.msi` installs to `C:\Program Files` as a separate copy. It does not; it installs on top of wherever Spaceadom already is. Use the `setup.exe`. |
+
+---
+
+## 2026-09-04 — Settings you can find things in, profiles you can rearrange, and shortcuts that stop dying mid-hold
+
+| Version | What changed |
+| --- | --- |
+| **1.0.97** | **Start here: the first time you open it, it shows you the one thing you cannot guess.** Hold Space, tap a letter — that is the whole idea, and there is no way to discover it by pressing things, because Spaceadom takes the spacebar before anything on screen can hint at it. So a first run now walks you through it in four short steps: pick a letter, give it an app, then actually hold Space and tap that letter. Step three closes by itself the moment the app opens, so you find out it worked instead of being told. Skip it whenever you like; it is always there again under the gear, "Show me the walkthrough". **The app no longer freezes when you open the app picker.** Clicking a key to choose an app used to lock the whole window for six to seventeen seconds — Windows painted "Not responding" over it — because it was reading every shortcut in your Start menu and pulling 247 icons out of them on the same thread that draws the window. All of that has moved to its own background thread and the result is saved to disk, so the first open takes a few seconds once and every open after that answers in about a hundredth of a second. If the scan ever does fail, it now says so instead of quietly showing you an empty grid. **Shortcuts stop dying mid-hold, properly this time.** 1.0.96 moved the witness hook to the back of the queue and that part held. What was left was the alarm itself: it was deciding a hook was dead from two counters the repair kept resetting, so it fired the repair on no evidence at all — sixteen times in thirty-eight minutes — and every repair drops whatever hold is in progress, which is exactly the ring dying under your thumb. It now only acts when the keyboard, the mouse and the witness have all been silent for three full seconds and each has been heard from at least once since starting; it cannot fire in the first ten seconds after launch; and if you happen to be holding Space when it wants to act, it waits until you let go. **Dragging profiles into order works in the real app now.** It always worked in testing and did nothing in the app, because Tauri's own file-drag handling was swallowing the drag before the page ever saw it. **Picking an emoji for a profile saves on the first pick** — no Enter, no second step. **The ring never overlaps itself in Double.** On profiles with long browser-profile names, two chips could come to rest on top of each other. The ring now grows to fit before it starts shrinking text, so the labels come out bigger than they were, not smaller. **Full-screen Settings actually uses the screen:** the panel is centred at a readable width instead of stretched across two thousand pixels, the Engine row no longer covers the top of the list once you scroll, and the buttons at the bottom are split into Maintenance and a Danger zone so nothing destructive sits beside "Open log folder". **Pasting over a key that already has something on it offers to Replace it** — the box used to be hidden behind the pill, so the only thing you could do was clear the key and start again. There is an Undo for ten seconds. **A leftover installer entry gets noticed.** If Programs and Features lists Spaceadom twice while only one copy is really installed, the dashboard says so and offers to clear the stale entry. **And the ring does come up over Spaceadom's own window** — nothing was ever blocking it, and the log now names which app the ring appeared over, so that is something you can check rather than argue about. |
+| **1.0.96** | **The big one is the last item, so start there if you only read one: shortcuts no longer go dead in the middle of a hold.** Spaceadom keeps a second, deliberately tiny keyboard hook alongside the real one, purely as a witness — it exists to answer "did any key reach this machine at all?" when the main hook goes quiet. It was being installed in the wrong order. Windows calls the most recently installed hook FIRST, and the witness was going in last, which put it in front of the real hook; because each hook waits for the next one to finish, Windows timed the witness as if it had taken the entire chain's work, and dropped it for being slow. The one thing that could not be allowed to die was, by construction, the first thing Windows killed — and once the witness was dead, the app's own watchdog started reading a frozen counter as proof that keys were flowing, and stopped repairing the real hook. On your machine that produced 514 false alarms in one 3.8-hour session, and shortcuts that quit halfway through a hold. The witness now goes in first and sits at the back where nothing can time it wrong. **Everything else:** Settings is grouped into Appearance, Behaviour and The Space ring, with a search box at the top — type "sound", "startup", "ring" and only the matching rows stay — and a ⤢ button that fills the window when the panel gets long (Esc brings the small panel back). **The ring's shape is one pill now: Compact, Wide or Double.** Press one and the real ring appears on screen for four seconds so you can see the shape before you commit — no need to hold Space to check. Double puts your apps in two rings; it borrows the room the special keys were using, so those step aside while it is on and come back when you pick Compact or Wide. **The profile popover has an Edit button.** In edit mode you can drag profiles into the order RAlt cycles through, click one to rename it, duplicate it, give it an emoji instead of its initial letter (it opens Windows' own emoji panel for you), export it to a file and import one back. Deleting shows an Undo right where the profile was, for about ten seconds. Click Done and clicking a profile switches to it again, as normal. **"The ring isn't showing?" is now a button you can press.** It is in Settings under Conflicts, called "Check the ring". It draws the ring, looks at the actual pixels on your screen, and tells you in plain words what it found — that your graphics driver is not showing it and Spaceadom has switched to a backup way of drawing, or that the ring drew fine and is simply on a display you were not looking at. It only offers a restart when it actually changed something. **The tray menu can pause Spaceadom.** Right-click the tray icon → "Pause Spaceadom" and the spacebar goes back to being an ordinary spacebar; the item then reads "Resume Spaceadom". The Settings switch, the tray item and Space+\ all stay in step with each other. **And Space+Tab puts a fullscreen window back properly** — a tile that started as true fullscreen returns to true fullscreen, not to a maximised window with the browser chrome showing. |
 
 ---
 

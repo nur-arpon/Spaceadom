@@ -162,9 +162,54 @@ pub fn app_handle() -> Option<AppHandle> {
 #[derive(serde::Serialize, Clone)]
 pub struct GuideHudPayload {
     pub profile: String,
+    /// The active profile's emoji, rendered BESIDE the central SPACE pill.
+    ///
+    /// `None` — every config written before this field existed, and every
+    /// profile the user has not given an emoji — must draw the pill EXACTLY as
+    /// it drew before: the page adds no element at all in that case, so the
+    /// wordmark's box, its centring and its `st-space-pop` are byte-identical.
+    /// Built by `engine::profile_emoji_for`; see that function for the Lane C
+    /// hand-over point.
+    pub profile_emoji: Option<String>,
     pub apps: Vec<(String, String)>,
     pub specials: Vec<(String, String)>,
+    /// `Some` ONLY for a Settings preview (`commands::preview_hud_layout`).
+    ///
+    /// A real Space-hold sends `None` and the page then reads the user's own
+    /// `hud_magnetic_layout` / `hud_band_count` exactly as it always has — so
+    /// nothing about the shipped path changes shape. See `HudPreview`.
+    pub preview: Option<HudPreview>,
 }
+
+/// A TRANSIENT layout override for one HUD show, and nothing else.
+///
+/// It is deliberately NOT a config write. The owner is choosing a layout in
+/// Settings and wants to SEE it first; writing the config to show a preview
+/// would mean a preview he cancels has already changed his HUD, and a crash
+/// mid-preview would leave the wrong layout persisted. So the override travels
+/// with the payload, lives for the ~4s the preview is on screen, and the page
+/// falls straight back to the saved settings on the next real hold.
+///
+/// The two strings are the page's OWN vocabulary — `hud-layout.ts`'s
+/// `HudLayout` and `hud-band-count.ts`'s `HudBandCount` — not the config's
+/// (`hud_magnetic_layout` is a bool). Rust does the bool→name translation once,
+/// here, for the same reason `hud-layout.ts` exists: nobody downstream should
+/// be comparing a raw bool.
+#[derive(serde::Serialize, Clone)]
+pub struct HudPreview {
+    /// `"magnetic"` | `"classic"`.
+    pub layout: String,
+    /// `"auto"` | `"one"` | `"two"` — APP bands only, as everywhere else.
+    pub bands: String,
+}
+
+/// How long a preview stays on screen before it hides itself.
+///
+/// Long enough to read a 26-chip ring, short enough that the owner does not
+/// reach for a way to dismiss it. It is a CEILING, not a guarantee: a real
+/// Space-hold, a newer preview, or any ordinary hide supersedes it early
+/// through the same epoch the rest of this file is built on.
+const PREVIEW_MS: u64 = 4000;
 
 /// Size and place the overlay window CENTRED on the monitor under the cursor.
 ///
@@ -198,13 +243,105 @@ fn place_overlay_centred(win: &tauri::WebviewWindow, w: f64, h: f64) {
     let _ = win.set_position(tauri::LogicalPosition::new(x, y));
 }
 
-/// Show the Guide HUD — content via event, visibility via the window itself.
+/// Show the Guide HUD for a real Space-hold — content via event, visibility
+/// via the window itself.
+///
+/// A thin wrapper since 1.0.96: everything below the payload is shared with
+/// `show_preview_hud`, and it is shared as ONE function rather than copied so
+/// the PROBLEM 177 epoch checks, the topmost re-assert and the compositing
+/// baseline can never exist in one path and not the other.
 pub fn show_guide_hud(
     epoch: u64,
     profile_name: &str,
+    profile_emoji: Option<String>,
     apps: Vec<(String, String)>,
     specials: Vec<(String, String)>,
 ) {
+    show_hud_payload(
+        epoch,
+        GuideHudPayload {
+            profile: profile_name.to_string(),
+            profile_emoji,
+            apps,
+            specials,
+            preview: None,
+        },
+    );
+}
+
+/// Show a Settings PREVIEW of the Guide HUD, and take it down again after
+/// `PREVIEW_MS`.
+///
+/// THE PREVIEW IS A PROJECTION, NOT A HOLD. It draws the real ring with the
+/// user's real bindings so the choice in Settings is made on the truth, but
+/// nothing about it is armable:
+///
+///   * `show_hud_payload` does NOT call `pointer::publish_keys` for a preview,
+///     and it CLEARS the chip tables instead. The page's `publishHudChips` is
+///     suppressed on its side for the same show, so `CHIP_GEOM_COUNT` and
+///     `CHIP_KEY_COUNT` both stay at zero and `sector_pick` has nothing to
+///     return. Two independent locks on the same door, and neither of them is
+///     in `hook/mod.rs` — the hook's own arming gate is untouched.
+///   * `HoldTracker::tick` additionally requires `modifier_active`, which is
+///     only true while Space is physically down. A preview is raised from a
+///     mouse click in the dashboard, so that gate is already shut. This is the
+///     belt to the two braces above, not the argument on its own: the owner
+///     could be holding Space when the click lands, and the epoch below is
+///     what makes that case correct rather than lucky.
+///
+/// EPOCH DISCIPLINE, PROBLEM 177, unchanged and reused rather than reinvented.
+/// The caller stamps the preview with `begin_hold()`. A real Space-down calls
+/// `begin_hold()` too and a release calls `end_hold()`, so either one moves the
+/// counter past us — and then this preview's auto-hide refuses, exactly as a
+/// stale deferred show refuses. A newer preview supersedes an older one by the
+/// same single mechanism. There is no second timer to cancel and no flag that
+/// can be left set.
+pub fn show_preview_hud(epoch: u64, payload: GuideHudPayload) {
+    let layout = payload
+        .preview
+        .as_ref()
+        .map(|p| format!("{} / {} bands", p.layout, p.bands))
+        .unwrap_or_else(|| "NONE — this is not a preview payload".to_string());
+    log::info!(
+        "guide_hud: PREVIEW #{epoch} — showing the real ring as {layout} for {PREVIEW_MS}ms \
+         with {} app(s) and {} special(s). Pointer activation is inert for this show: no chip \
+         keys and no chip rects are published, so there is nothing to arm.",
+        payload.apps.len(),
+        payload.specials.len(),
+    );
+    show_hud_payload(epoch, payload);
+
+    // The auto-hide. Spawned, not slept-on: this runs from a Tauri command and
+    // the dashboard must get its reply immediately.
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_millis(PREVIEW_MS)).await;
+        hide_preview_hud(epoch);
+    });
+}
+
+/// Take a preview down — but ONLY if it is still the one on screen.
+///
+/// The whole point of the epoch check: by the time this fires, four seconds
+/// later, the HUD may belong to a real Space-hold or to a newer preview.
+/// Hiding then would take down somebody else's window, which is PROBLEM 177's
+/// failure with the arrow pointing the other way.
+pub fn hide_preview_hud(epoch: u64) {
+    let current = HOLD_EPOCH.load(Ordering::SeqCst);
+    if current != epoch {
+        log::info!(
+            "guide_hud: preview #{epoch}'s timeout fired after it had been superseded by \
+             #{current} (a real Space-hold, or a newer preview) — NOT hiding. The owner of \
+             the HUD now is the only thing allowed to take it down."
+        );
+        return;
+    }
+    log::info!("guide_hud: preview #{epoch} timed out — hiding");
+    hide_guide_hud_pending(false);
+}
+
+/// The shared body of every show. `payload.preview` decides the two things
+/// that differ, and nothing else does.
+fn show_hud_payload(epoch: u64, payload: GuideHudPayload) {
     // PROBLEM 177 — the hold this show was scheduled for is over. Refuse.
     //
     // Checked HERE, not at the call site: the call site cannot be atomic with
@@ -220,12 +357,6 @@ pub fn show_guide_hud(
         return;
     }
     let Some(handle) = APP_HANDLE.get() else { return };
-
-    let payload = GuideHudPayload {
-        profile: profile_name.to_string(),
-        apps,
-        specials,
-    };
 
     // Mark the HUD live BEFORE the window work and the emit, not after.
     // `overlay_fit_hud` refuses to place the window unless `is_visible()` is
@@ -298,6 +429,12 @@ pub fn show_guide_hud(
                 let _ = win.show();
                 SHOW_OUTSTANDING.store(true, Ordering::SeqCst);
                 log::info!("guide_hud: overlay window shown (hold #{epoch})");
+                // PROBLEM 243 — say WHICH window the ring just landed over.
+                // Deliberately AFTER `show()`, so the query cannot delay the
+                // one thing the owner is waiting to see, and deliberately not
+                // a gate: nothing above this line has ever consulted the
+                // foreground, and nothing below it may start.
+                log_shown_over();
             } else {
                 return;
             }
@@ -361,7 +498,21 @@ pub fn show_guide_hud(
     // the page builds its chips from this payload's `apps`. Geometry arrives
     // separately (the page calls `publish_hud_chips` after layout); until it
     // does, the zeroed geometry count keeps pointer activation inert.
-    crate::hook::pointer::publish_keys(&payload.apps);
+    //
+    // NOT FOR A PREVIEW. The preview is a projection of a layout, not an
+    // offer to launch anything, and the cheapest correct way to make it inert
+    // is to give the pointer nothing to work with: no keys here, no rects from
+    // the page (`publishHudChips` returns early on a preview show), so both
+    // counts stay zero and `sector_pick` is never even reached. Cleared rather
+    // than merely skipped, because a snapshot left over from the PREVIOUS real
+    // hold would otherwise still be sitting in those tables — every hide path
+    // clears them, but "every hide path" is a claim about other code and this
+    // is the one line that makes it not matter.
+    if payload.preview.is_none() {
+        crate::hook::pointer::publish_keys(&payload.apps);
+    } else {
+        crate::hook::pointer::clear_chips();
+    }
     // GLOBAL broadcast, on purpose. Targeted emits (emit_to) silently never
     // reached this page's listeners regardless of how they were registered —
     // Tauri 2's target matching is stricter than it looks (Labeled vs
@@ -370,6 +521,67 @@ pub fn show_guide_hud(
     // dashboard deliberately does not (main.ts step 9).
     if let Err(e) = handle.emit("guide-hud-show", payload) {
         log::warn!("guide_hud: emit failed: {e}");
+    }
+}
+
+/// PROBLEM 243 — the sentence the log prints once per show, naming the app the
+/// ring has just been drawn over.
+///
+/// WHY THIS EXISTS AT ALL. The owner's requirement is that holding Space
+/// **inside Spaceadom's own dashboard** raises the ring exactly as it does over
+/// any other app. Answering "does it?" from the log used to mean joining two
+/// numbers that describe different windows: a point-in-time
+/// `overlay window shown (hold #N)` against a 60-second aggregate
+/// (`saw N key event(s) … M of them while the Spaceadom window itself had
+/// focus`). `docs/IF-SHORTCUTS-DIE-AGAIN.md` names that exact join as the trap
+/// that nearly re-opened PROBLEM 230: **two numbers may only be compared when
+/// they describe the same window.** One line, stamped at the moment of the
+/// show, removes the join entirely.
+///
+/// PURE ON PURPOSE. The Win32 half is one `GetForegroundWindow` +
+/// `QueryFullProcessImageNameW`; the DECISION — which of the three things to
+/// say — is this function, so it can be tested without a desktop. Every input
+/// below is one that really arrives: a stem from
+/// `exclusions::foreground_stem` (already lowercased and extension-stripped),
+/// our own stem from `exclusions::own_stem` (which never returns empty), and
+/// the empty string that `foreground_stem` returns when the foreground window
+/// has no readable process — a lock screen, a UAC prompt, or a window closing
+/// underneath us.
+///
+/// GENERALISE: an instrument that answers a question about a MOMENT must be
+/// read at that moment. Aggregates cannot be cross-examined afterwards.
+pub(crate) fn shown_over_phrase(fg_stem: &str, own_stem: &str) -> String {
+    let fg = fg_stem.trim();
+    if fg.is_empty() {
+        return "over a window whose process could not be read".to_string();
+    }
+    if !own_stem.trim().is_empty() && fg.eq_ignore_ascii_case(own_stem.trim()) {
+        return "over own window".to_string();
+    }
+    format!("over {fg}.exe")
+}
+
+/// Read the foreground app and print the PROBLEM 243 line.
+///
+/// NOT on the hook callback — this runs on the Tauri async runtime, from
+/// `show_hud_payload`, after `win.show()` has already returned. The keyboard
+/// laws that ban `GetForegroundWindow` (PROBLEM 134/184) ban it *in the hook
+/// callback*, where it contends on win32k with the foreground app's own UI
+/// thread. Here the same call sits beside `SetWindowPos`, `SetWindowRgn` and a
+/// screen-pixel sample that this function already makes.
+fn log_shown_over() {
+    #[cfg(windows)]
+    {
+        let own = crate::hook::exclusions::own_stem();
+        let fg = unsafe { crate::hook::exclusions::foreground_stem() };
+        log::info!(
+            "guide_hud: shown {} — the ring is NOT gated on which app is in front. There is \
+             no own-window check anywhere on this path (PROBLEM 243): not in the hook's \
+             Space-down branch, not in the engine's SpaceDown arm, not here. If this line \
+             says \"over own window\" the requirement is met for that hold; if the ring was \
+             nonetheless invisible, suspect z-order or compositing, never a gate.",
+            shown_over_phrase(&fg, &own)
+        );
     }
 }
 
@@ -481,4 +693,71 @@ pub fn hide_guide_hud_pending(action_pending: bool) {
 /// Returns true if the HUD is currently displayed.
 pub fn is_visible() -> bool {
     HUD_VISIBLE.load(Ordering::Relaxed)
+}
+
+/// PROBLEM 243 — the Guide HUD must appear while Spaceadom's OWN dashboard is
+/// the foreground window, exactly as it does over any other app.
+///
+/// There is no gate to test, because the audit found none: the hook's
+/// Space-down branch (`hook/mod.rs`, "SPACE DOWN"), the engine's `SpaceDown`
+/// arm (`engine/mod.rs`) and `show_hud_payload` above all reach `win.show()`
+/// without ever asking what is in the foreground. What CAN be tested is the
+/// instrument that proves it in the log — and an instrument that cannot
+/// produce the answer "our own window" would be no instrument at all, which is
+/// the trap CLAUDE.md records twice ("a check that cannot produce a negative
+/// result is not a check").
+#[cfg(test)]
+mod shown_over_tests {
+    use super::shown_over_phrase;
+
+    /// The owner's scenario, in every form the exe stem really arrives in.
+    /// `foreground_stem` and `own_stem` both run their input through
+    /// `normalize_stem`, so both sides are already lowercase stems — but
+    /// `own_stem`'s documented FALLBACK is the hard-coded literal
+    /// `"spaceadom"`, which is reached when `current_exe()` fails, and a
+    /// case-sensitive comparison would then silently stop recognising us.
+    #[test]
+    fn our_own_dashboard_is_named_as_such() {
+        assert_eq!(shown_over_phrase("spaceadom", "spaceadom"), "over own window");
+        assert_eq!(shown_over_phrase("Spaceadom", "spaceadom"), "over own window");
+        assert_eq!(shown_over_phrase("spaceadom", "SPACEADOM"), "over own window");
+        assert_eq!(shown_over_phrase(" spaceadom ", "spaceadom"), "over own window");
+    }
+
+    /// The ordinary case — the ring over somebody else's window. Named, not
+    /// lumped into "not us": the whole point of the line is that the next log
+    /// says which app it was without anyone having to join two windows of
+    /// data (see the function's header).
+    #[test]
+    fn another_app_is_named_by_its_exe() {
+        assert_eq!(shown_over_phrase("brave", "spaceadom"), "over brave.exe");
+        assert_eq!(shown_over_phrase("explorer", "spaceadom"), "over explorer.exe");
+        // Not us: a different app whose name merely CONTAINS ours. Same
+        // narrowness the PROBLEM 218 self-exclusion guard is held to.
+        assert_eq!(
+            shown_over_phrase("spaceadom-helper", "spaceadom"),
+            "over spaceadom-helper.exe"
+        );
+    }
+
+    /// `foreground_stem` returns "" when it cannot read the foreground
+    /// process — a lock screen, a UAC prompt, a window closing underneath us.
+    /// That must NOT read as "our own window": an empty-matches-empty bug here
+    /// would report the requirement as met on exactly the holds where nothing
+    /// is known, which is worse than reporting nothing.
+    #[test]
+    fn an_unreadable_foreground_is_never_mistaken_for_us() {
+        assert_eq!(
+            shown_over_phrase("", "spaceadom"),
+            "over a window whose process could not be read"
+        );
+        assert_eq!(
+            shown_over_phrase("   ", "spaceadom"),
+            "over a window whose process could not be read"
+        );
+        // And the mirror: an unreadable OWN stem must not make every app on
+        // the machine look like us. `own_stem()` never returns empty, but the
+        // pure function is where that promise is pinned.
+        assert_eq!(shown_over_phrase("brave", ""), "over brave.exe");
+    }
 }

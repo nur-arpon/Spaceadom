@@ -18,6 +18,115 @@ pub fn config_path() -> PathBuf {
     crate::startup::data_dir().join("config.json")
 }
 
+// ---------------------------------------------------------------------------
+// THEME "auto" — PROBLEM 255, the Rust half
+// ---------------------------------------------------------------------------
+//
+// The theme pill stores the LITERAL string `"auto"`. Nothing resolves it away
+// before it reaches `config.json`, on purpose: "match Windows" is the user's
+// choice and it has to survive a restart, an OS theme flip and a config
+// round-trip intact. What that means is that every consumer of "which of the
+// three real palettes" has to resolve it, and there are now three of them —
+// the dashboard (`main.ts::resolveTheme`), the overlay
+// (`src/theme-resolve.ts`, shared by `overlay.ts`/`toast.ts`) and THIS ONE.
+//
+// Rust's copy exists for exactly one field: `dark_mode`. That bool is what
+// `save_config` emits as `theme-changed` and what `AppConfig` carries around,
+// and `config/mod.rs` recomputes it from `theme` on EVERY load. Before this,
+// the recompute was `cfg.theme != "earthy"`, which for a config whose theme is
+// `"auto"` — the default for every new install since PROBLEM 255 — set
+// `dark_mode = true` unconditionally, in daylight, on the second launch
+// onward. That is PROBLEM 255's own "found but could not fix" item 1.
+//
+// The three resolvers MUST agree. They are separated by process boundaries
+// (Rust, two webviews) so they cannot literally be one function; what they
+// can be is one RULE, written the same way three times, with this comment and
+// `main.ts::resolveTheme`'s doc pointing at each other.
+
+/// The literal the pill stores when the user picks "Auto".
+pub const THEME_AUTO: &str = "auto";
+
+/// **The pure rule.** Raw config value + "does the OS say dark?" → one of the
+/// three real palettes.
+///
+/// `os_dark == None` means the question could not be answered (the registry
+/// value is absent, unreadable, or this is not Windows) and resolves to
+/// Earthy. That is deliberately the same answer the frontend gives when
+/// `matchMedia` reports no dark preference: a missing signal has never meant
+/// anything but daylight in this app, and two halves that disagree about the
+/// fallback would put the dashboard and the overlay in different palettes on
+/// exactly the machines least able to explain why.
+///
+/// `"auto"` never resolves to Warcry, matching `main.ts::resolveTheme`:
+/// Windows has a light/dark preference, not an iron-and-war-banners one.
+pub(crate) fn resolve_theme(raw: &str, os_dark: Option<bool>) -> &'static str {
+    match raw {
+        "warcry" => "warcry",
+        "starry" => "starry",
+        "earthy" => "earthy",
+        // "auto", and anything unrecognised, including the empty string a
+        // pre-PROBLEM-144 config carries before the migration above runs.
+        _ => {
+            if os_dark.unwrap_or(false) {
+                "starry"
+            } else {
+                "earthy"
+            }
+        }
+    }
+}
+
+/// `dark_mode` for a raw theme value. One line, but named, because the
+/// "everything that is not Earthy is dark" rule is stated in four files and
+/// this is the one place Rust states it.
+pub(crate) fn dark_mode_for(raw: &str, os_dark: Option<bool>) -> bool {
+    resolve_theme(raw, os_dark) != "earthy"
+}
+
+/// **Does Windows currently want dark app surfaces?**
+///
+/// `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize` →
+/// `AppsUseLightTheme` (REG_DWORD, `1` = light, `0` = dark). Read-only, HKCU,
+/// no elevation — the same hive and the same "never write a Control Panel key
+/// on our own initiative" rule `set_hook_timeout` follows.
+///
+/// **`AppsUseLightTheme`, not `SystemUsesLightTheme`.** Windows keeps two
+/// independent switches ("Default app mode" and "Default Windows mode") and
+/// only the first governs how an application's own surfaces should look; the
+/// second is the taskbar and Start. A user who runs a light taskbar with dark
+/// apps is a common configuration, and reading the wrong value would fight
+/// them.
+///
+/// `None`, never a guessed default, when the value is absent or unreadable —
+/// so [`resolve_theme`] can apply ONE fallback rule instead of this function
+/// inventing a second one. The value genuinely is absent on some machines
+/// (a fresh install that has never opened the Personalisation page), and
+/// "absent" is not "light" as a matter of fact; it only happens to produce
+/// the same answer here.
+///
+/// **A note for anyone verifying this from the agent shell**: that shell runs
+/// inside an MSIX container which virtualises HKCU (CLAUDE.md, PROBLEM 143),
+/// so a value read or written from there may be the container's private copy
+/// rather than the machine's. That affects the SHELL, not the app — the
+/// installed `spaceadom.exe` has no package identity and no redirection view,
+/// and reads the real hive. Do not "fix" a discrepancy observed only from the
+/// agent shell.
+#[cfg(windows)]
+pub(crate) fn os_prefers_dark() -> Option<bool> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    let key = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        .ok()?;
+    let light: u32 = key.get_value("AppsUseLightTheme").ok()?;
+    Some(light == 0)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn os_prefers_dark() -> Option<bool> {
+    None
+}
+
 /// Load config from disk. On first run (file missing), attempt to parse V11 script,
 /// fall back to hardcoded defaults, and write the initial config.json.
 pub fn load_or_init() -> SharedConfig {
@@ -53,7 +162,17 @@ pub fn load_or_init() -> SharedConfig {
                     }
                     // The two must never disagree: `dark_mode` is what drives body.nocturne on
                     // the dashboard AND the overlay, and the overlay knows nothing about themes.
-                    cfg.dark_mode = cfg.theme != "earthy";
+                    //
+                    // PROBLEM 255 — this used to read `cfg.theme != "earthy"`,
+                    // which is TRUE for `"auto"` and therefore turned every new
+                    // install (whose default theme is now "auto") dark on its
+                    // second launch, in daylight, whatever Windows said. It
+                    // goes through `dark_mode_for` now, which asks the OS.
+                    // `cfg.theme` itself is left as the literal `"auto"` — the
+                    // user's CHOICE is "match Windows" and resolving it away
+                    // here would quietly convert that into a fixed palette the
+                    // next time the config was written back.
+                    cfg.dark_mode = dark_mode_for(&cfg.theme, os_prefers_dark());
                     // Write the migrated fields straight back, rather than waiting
                     // for the user's next settings change. A config whose file does
                     // not match the config the app is running is exactly the kind of
@@ -301,7 +420,17 @@ fn save_to_disk(config: &AppConfig, path: &PathBuf) -> std::io::Result<()> {
 /// after the product or bundle id: an uninstaller that removes
 /// `%APPDATA%\Spaceadom` or `%LOCALAPPDATA%\com.spaceadom.app` would take the
 /// backups with it, which is precisely the case they exist for.
+///
+/// PROBLEM 254 — that reasoning does not apply to a portable copy. There is
+/// no separate uninstall step to survive: the whole point of "portable" is
+/// one self-contained folder, so backups belong INSIDE `portable::data_root`
+/// with everything else, not off in `%LOCALAPPDATA%` where deleting the
+/// portable folder would leave them orphaned on the machine — the opposite
+/// of what a portable user expects when they delete the folder.
 pub fn backup_dir() -> PathBuf {
+    if crate::portable::is_portable() {
+        return crate::portable::data_root().join("backups");
+    }
     let base = std::env::var("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|_| crate::startup::data_dir());
@@ -401,6 +530,175 @@ fn write_backup(json: &str) {
 
     prune_backups(&dir, stamp);
     log::debug!("config: backup written to {}", target.display());
+}
+
+// ---------------------------------------------------------------------------
+// One profile as a file — export, import, and the pre-delete backup
+// ---------------------------------------------------------------------------
+
+/// Serialise ONE profile in the `ProfileExport` shape. Pretty-printed: this is
+/// a file a person may open, and a one-line 26-binding blob is not readable.
+pub fn profile_export_json(p: &Profile) -> Result<String, String> {
+    serde_json::to_string_pretty(&ProfileExport::of(p))
+        .map_err(|e| format!("Could not serialise the profile: {e}"))
+}
+
+/// Read a `.json` back into a `Profile`, or say why it is not one.
+///
+/// **THE ERROR STRINGS ARE THE FEATURE.** Import is the one path here where
+/// the input comes from outside the app entirely, so "that file is not a
+/// Spaceadom profile" has to be distinguishable from "that file is damaged" —
+/// a bare `serde_json` message names a byte offset, which tells a user
+/// nothing. Every branch below says what was expected in plain words.
+///
+/// The name is NOT validated here and NOT deduped here: the caller owns the
+/// live profile list and is the only thing that can know what "already taken"
+/// means. `parse` parses.
+pub fn parse_profile_export(raw: &str) -> Result<Profile, String> {
+    // The same BOM tolerance the main config load has (2026-08-10): PowerShell
+    // 5.1's `-Encoding UTF8` adds one and serde_json rejects it outright.
+    let raw = raw.trim_start_matches('\u{feff}');
+
+    let value: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|e| format!("That file is not valid JSON ({e})."))?;
+    let Some(obj) = value.as_object() else {
+        return Err("That file is not a Spaceadom profile — it is JSON, but not an object.".into());
+    };
+    let Some(marker) = obj.get("spaceadom_profile").and_then(|v| v.as_u64()) else {
+        // The single most likely wrong file is the user's whole config.json,
+        // which lives in the same folder as the backups — say so by name.
+        let hint = if obj.contains_key("profiles") {
+            " That looks like a whole config.json — Import takes ONE profile, exported \
+             from this popover."
+        } else {
+            ""
+        };
+        return Err(format!(
+            "That file is not a Spaceadom profile export.{hint}"
+        ));
+    };
+    if marker as u32 > ProfileExport::VERSION {
+        return Err(format!(
+            "That profile was exported by a NEWER version of Spaceadom (format {marker}; \
+             this build understands {}). Update Spaceadom and try again.",
+            ProfileExport::VERSION
+        ));
+    }
+
+    let export: ProfileExport = serde_json::from_value(value)
+        .map_err(|e| format!("That profile file is damaged and could not be read ({e})."))?;
+
+    if export.name.trim().is_empty() {
+        return Err("That profile file has no name in it.".into());
+    }
+    // An emoji that fails validation is DROPPED, not an error: the bindings are
+    // what the user came for, and refusing an otherwise-good import over a
+    // decoration would be the wrong trade. Logged so it is not silent.
+    let emoji = match export.emoji {
+        Some(e) if emoji_is_valid(&e) => Some(e),
+        Some(e) => {
+            log::warn!(
+                "import_profile: dropped an invalid emoji ({} char(s)) from '{}' — the \
+                 bindings were imported unchanged",
+                e.chars().count(),
+                export.name
+            );
+            None
+        }
+        None => None,
+    };
+
+    Ok(Profile {
+        name: export.name.trim().to_string(),
+        bindings: export.bindings,
+        emoji,
+    })
+}
+
+/// Write a timestamped copy of ONE profile beside the rolling config backups,
+/// and return where it went.
+///
+/// Called by `delete_profile` BEFORE the profile is removed. The 10-second
+/// Undo in the popover is the fast way back and covers the mis-click; this
+/// covers the other case — the user who notices next week, by which time the
+/// undo stack is long gone and `config-*.json` may have been pruned past it.
+///
+/// Best-effort by design: a backup failure must never stop a delete the user
+/// asked for. It logs at INFO because the path is the whole point — a backup
+/// nobody can find is not a backup (`log::debug` would not reach debug.log's
+/// default level).
+///
+/// The `profile-` prefix keeps these clear of `prune_backups`, which only ever
+/// matches `config-<stamp>.json`. These files are NOT pruned: one profile is a
+/// few KB and deletes are rare, so there is nothing to ration.
+pub fn write_profile_backup(p: &Profile) -> Option<PathBuf> {
+    let json = profile_export_json(p)
+        .map_err(|e| log::warn!("profile backup: {e}"))
+        .ok()?;
+    let dir = backup_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        log::warn!("profile backup: could not create {} ({e})", dir.display());
+        return None;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let target = dir.join(format!("profile-{}-{stamp}.json", sanitise_for_filename(&p.name)));
+    match std::fs::write(&target, &json) {
+        Ok(()) => {
+            log::info!(
+                "profile backup: wrote '{}' ({} bytes) to {} before deleting it",
+                p.name,
+                json.len(),
+                target.display()
+            );
+            Some(target)
+        }
+        Err(e) => {
+            log::warn!("profile backup: write to {} failed ({e})", target.display());
+            None
+        }
+    }
+}
+
+/// Make a profile name safe to put in a FILENAME.
+///
+/// PROBLEM 197 loosened profile names to "any 1-24 characters without control
+/// codes", and the reasoning it recorded was explicit: a name is never a
+/// filename. **This function is the one place that stopped being true**, so
+/// the constraint lives here and nowhere else — the name in `config.json` is
+/// still whatever the user typed.
+///
+/// Anything outside `[A-Za-z0-9._-]` becomes `_`. **The SEPARATORS are the
+/// part that matters**: `\`, `/` and `:` are what a traversal needs, and once
+/// they are substituted a surviving `..` is two literal characters in the
+/// middle of a filename, not a parent-directory hop. `<>"|?*` go the same way
+/// because Windows reserves them.
+///
+/// A stem left as nothing but padding — "🚀" (every character substituted) or
+/// ".." (nothing but dots) — becomes `profile`, so the result can never name a
+/// directory and never reads like a bug (`profile--1234.json`).
+fn sanitise_for_filename(name: &str) -> String {
+    let out: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+        .take(24)
+        .collect();
+    if out.chars().all(|c| matches!(c, '_' | '.' | '-')) {
+        "profile".to_string()
+    } else {
+        out
+    }
+}
+
+/// What the Export save dialog should suggest as a filename STEM (no `.json`).
+///
+/// Same sanitiser as the backup writer, deliberately: the two files are the
+/// same format, and a user who finds one in the backups folder and one in
+/// Documents should not have to work out that they are the same thing.
+pub fn suggested_export_filename(profile_name: &str) -> String {
+    sanitise_for_filename(profile_name)
 }
 
 /// PROBLEM 102 — keep backups SPREAD ACROSS TIME, not just the newest N.
@@ -563,6 +861,10 @@ fn parse_ahk_profiles(src: &str) -> Vec<schema::Profile> {
                 result.push(schema::Profile {
                     name: name.to_string(),
                     bindings,
+                    // The v11 AutoHotkey script has no emoji concept, so an
+                    // imported profile starts without one — which is exactly
+                    // the state `Profile::emoji` documents as normal.
+                    emoji: None,
                 });
             }
         }
@@ -572,8 +874,8 @@ fn parse_ahk_profiles(src: &str) -> Vec<schema::Profile> {
 }
 
 /// Parse `"key", ["app", "url"], "key2", ["app2", "url2"], ...`
-fn parse_map_body(body: &str) -> std::collections::HashMap<String, schema::KeyBinding> {
-    let mut map = std::collections::HashMap::new();
+fn parse_map_body(body: &str) -> schema::BindingMap {
+    let mut map = schema::BindingMap::new();
     // Tokenise on `"` delimiters
     let tokens: Vec<&str> = body.split('"').collect();
     // Structure: idx 0=whitespace, 1=key, 2=, [", 3=app, 4=", ",", 5=web, 6=...
@@ -616,6 +918,87 @@ fn parse_map_body(body: &str) -> std::collections::HashMap<String, schema::KeyBi
         }
     }
     map
+}
+
+/// PROBLEM 255 — the `"auto"` theme resolver, the Rust third of a rule that
+/// is also written in `main.ts::resolveTheme` and `src/theme-resolve.ts`.
+/// Pure: no registry, no filesystem, no `AppConfig`.
+#[cfg(test)]
+mod auto_theme_tests {
+    use super::*;
+
+    #[test]
+    fn a_named_theme_is_returned_untouched_whatever_the_os_says() {
+        for os in [None, Some(true), Some(false)] {
+            assert_eq!(resolve_theme("earthy", os), "earthy");
+            assert_eq!(resolve_theme("warcry", os), "warcry");
+            assert_eq!(resolve_theme("starry", os), "starry");
+        }
+    }
+
+    #[test]
+    fn auto_follows_the_os_and_never_becomes_warcry() {
+        assert_eq!(resolve_theme(THEME_AUTO, Some(true)), "starry");
+        assert_eq!(resolve_theme(THEME_AUTO, Some(false)), "earthy");
+    }
+
+    /// The fallback the three copies of this rule have to share. An
+    /// unanswerable OS question is daylight, NOT dark — a dashboard and an
+    /// overlay that disagreed about this would show two palettes at once on
+    /// exactly the machines least able to say why.
+    #[test]
+    fn an_unanswerable_os_question_is_daylight() {
+        assert_eq!(resolve_theme(THEME_AUTO, None), "earthy");
+        assert!(!dark_mode_for(THEME_AUTO, None));
+    }
+
+    /// The empty string is what a pre-PROBLEM-144 config carries before the
+    /// migration in `load_or_init` runs. It must not be able to crash or to
+    /// mean "dark" on its own.
+    #[test]
+    fn an_empty_or_unknown_theme_resolves_like_auto() {
+        assert_eq!(resolve_theme("", Some(true)), "starry");
+        assert_eq!(resolve_theme("", Some(false)), "earthy");
+        assert_eq!(resolve_theme("nocturne-2", Some(true)), "starry");
+    }
+
+    /// THE REGRESSION THIS FIX EXISTS FOR. `cfg.theme != "earthy"` — the old
+    /// one-liner — is `true` for `"auto"`, so every new install went dark on
+    /// its second launch regardless of the OS setting (PROBLEM 255's own
+    /// "found but could not fix" item 1).
+    #[test]
+    fn auto_in_daylight_is_not_dark_mode() {
+        assert!(
+            !dark_mode_for(THEME_AUTO, Some(false)),
+            "\"auto\" with a light OS must be dark_mode=false — the old \
+             `theme != \"earthy\"` recompute got this wrong for every new install"
+        );
+        assert!(dark_mode_for(THEME_AUTO, Some(true)));
+        // And the named themes still map the way the overlay has always
+        // expected: everything that is not Earthy sits on the nocturne base.
+        assert!(!dark_mode_for("earthy", Some(true)));
+        assert!(dark_mode_for("warcry", Some(false)));
+        assert!(dark_mode_for("starry", Some(false)));
+    }
+
+    /// The OS probe itself is not a pure function and cannot assert a value —
+    /// this machine's setting is whatever the owner chose. What it CAN assert
+    /// is that it answers without panicking and that its answer is usable, so
+    /// a broken registry path shows up as a test failure rather than as a
+    /// silent permanent `None` that reads exactly like "the user picked
+    /// light".
+    #[test]
+    fn the_os_probe_answers_without_panicking() {
+        let answer = os_prefers_dark();
+        // Whatever it says, feeding it back through the pure rule must land
+        // on one of the two palettes "auto" is allowed to produce.
+        let resolved = resolve_theme(THEME_AUTO, answer);
+        assert!(
+            resolved == "earthy" || resolved == "starry",
+            "\"auto\" resolved to {resolved}, which is not one of the two palettes it may \
+             ever produce"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -686,5 +1069,115 @@ mod backup_recovery_tests {
         write(&d, "a.json", "nope");
         write(&d, "b.json", r#"{"version":"#);
         assert!(newest_valid_backup_in(&d).is_none(), "must regenerate, not half-restore");
+    }
+}
+
+/// Export / Import / the pre-delete backup — the ONE profile file format.
+#[cfg(test)]
+mod profile_file_tests {
+    use super::*;
+
+    fn sample() -> Profile {
+        let mut b = crate::config::BindingMap::new();
+        b.insert("a".to_string(), KeyBinding { app: Some("brave.exe".into()), ..Default::default() });
+        b.insert(
+            "g".to_string(),
+            KeyBinding {
+                web_url: Some("https://github.com".into()),
+                browser_profile_dir: Some("Profile 1".into()),
+                browser_profile_name: Some("nur.arpon".into()),
+                ..Default::default()
+            },
+        );
+        Profile { name: "Founders".into(), bindings: b, emoji: Some("👨‍👩‍👧".into()) }
+    }
+
+    /// Export → Import must be lossless, INCLUDING the browser-profile pin
+    /// fields. Those three are optional on `KeyBinding` and were once deleted
+    /// by omission on a different round trip (see the `#[serde(default)]`
+    /// history on `KeyBinding::browser_exe`) — an export that quietly dropped
+    /// them would look perfect and lose the pin.
+    #[test]
+    fn a_profile_survives_export_and_import_intact() {
+        let p = sample();
+        let json = profile_export_json(&p).expect("export");
+        let back = parse_profile_export(&json).expect("import");
+
+        assert_eq!(back.name, "Founders");
+        assert_eq!(back.emoji.as_deref(), Some("👨‍👩‍👧"), "the ZWJ emoji must survive the file");
+        assert_eq!(back.bindings.len(), 2);
+        assert_eq!(back.bindings["a"].app.as_deref(), Some("brave.exe"));
+        assert_eq!(back.bindings["g"].browser_profile_dir.as_deref(), Some("Profile 1"));
+        assert_eq!(back.bindings["g"].browser_profile_name.as_deref(), Some("nur.arpon"));
+    }
+
+    /// THE REASON `spaceadom_profile` EXISTS. These files land in the same
+    /// folder as the rolling whole-config backups, and `newest_valid_backup_in`
+    /// tries to parse every `*.json` in there as an `AppConfig`. If a profile
+    /// export could parse as a config, a recovery would silently restore a
+    /// factory-default app with one profile in it.
+    #[test]
+    fn profile_export_is_not_a_config() {
+        let json = profile_export_json(&sample()).expect("export");
+        assert!(
+            serde_json::from_str::<AppConfig>(&json).is_err(),
+            "a profile export must NOT parse as a whole config — recovery reads this folder"
+        );
+        // And the other direction: a whole config must not import as a profile.
+        let cfg = serde_json::to_string(&AppConfig::default()).unwrap();
+        let err = parse_profile_export(&cfg).expect_err("a config is not a profile");
+        assert!(
+            err.contains("config.json"),
+            "the error must NAME the likely mistake, not just refuse: {err}"
+        );
+    }
+
+    #[test]
+    fn junk_is_refused_in_words_a_person_can_act_on() {
+        assert!(parse_profile_export("not json at all").unwrap_err().contains("valid JSON"));
+        assert!(parse_profile_export("[1,2,3]").unwrap_err().contains("not an object"));
+        assert!(parse_profile_export("{}").unwrap_err().contains("profile export"));
+        // A file from a future format version must say so rather than
+        // half-importing whatever fields happen to still line up.
+        let future = r#"{"spaceadom_profile":99,"name":"X","bindings":{}}"#;
+        let err = parse_profile_export(future).unwrap_err();
+        assert!(err.contains("NEWER version"), "{err}");
+    }
+
+    /// A bad emoji must not cost the user their bindings.
+    #[test]
+    fn an_invalid_emoji_is_dropped_but_the_bindings_import() {
+        let raw = r#"{"spaceadom_profile":1,"name":"X","emoji":"AB",
+                      "bindings":{"a":{"app":"x.exe","web_url":null,"label":null}}}"#;
+        let p = parse_profile_export(raw).expect("must still import");
+        assert!(p.emoji.is_none(), "two clusters is not an emoji");
+        assert_eq!(p.bindings.len(), 1, "the bindings are what the user came for");
+    }
+
+    /// PROBLEM 197 said a profile name is never a filename. `write_profile_backup`
+    /// is the one place that became untrue, so the sanitiser is what keeps it so.
+    #[test]
+    fn a_profile_name_can_never_escape_the_backup_folder() {
+        // The `..` survive — and that is FINE, which is the point worth
+        // recording. A traversal needs a SEPARATOR, and every `\` and `/` has
+        // become `_`, so what is left is two dots inside one filename.
+        assert_eq!(sanitise_for_filename(r"..\..\windows\system32"), ".._.._windows_system32");
+        assert_eq!(sanitise_for_filename("My Profile"), "My_Profile");
+        assert_eq!(sanitise_for_filename("a/b:c*d?"), "a_b_c_d_");
+        // A stem of nothing but padding must not name a directory.
+        assert_eq!(sanitise_for_filename(".."), "profile");
+        assert_eq!(sanitise_for_filename("."), "profile");
+        assert_eq!(sanitise_for_filename("🚀"), "profile", "an all-emoji name still needs a stem");
+        // Whatever comes out, joining it to the backup dir must stay INSIDE it.
+        for name in ["..", r"..\..\etc", "a/b", "🚀", "normal"] {
+            let joined = std::path::Path::new(r"C:\bk").join(sanitise_for_filename(name));
+            assert_eq!(
+                joined.parent(),
+                Some(std::path::Path::new(r"C:\bk")),
+                "'{name}' escaped the folder as {}",
+                joined.display()
+            );
+        }
+        assert!(sanitise_for_filename(&"x".repeat(80)).chars().count() <= 24);
     }
 }

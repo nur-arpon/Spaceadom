@@ -1,0 +1,84 @@
+name: Bug report
+description: Something in Spaceadom doesn't work the way it should.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. The more of this you can fill in, the
+        faster it can be reproduced and fixed — most Spaceadom bugs turn out
+        to depend on exact version numbers and the debug log, not on a
+        description alone.
+
+  - type: input
+    id: version
+    attributes:
+      label: Spaceadom version
+      description: >
+        Settings → About, or the version in the installer's filename
+        (e.g. Spaceadom_1.0.100_x64-setup.exe).
+      placeholder: "1.0.100"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: installer
+    attributes:
+      label: Which installer did you use?
+      options:
+        - setup.exe (NSIS, recommended, installs per-user)
+        - .msi (WiX, installs per-machine)
+        - Microsoft Store
+        - Built from source myself
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: windows-build
+    attributes:
+      label: Windows version / build
+      description: >
+        Settings → System → About → "OS build", or run `winver`.
+      placeholder: "Windows 11, build 26200"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+      placeholder: |
+        1. Held Space and tapped C
+        2. Expected Chrome to launch
+        3. Instead...
+    validations:
+      required: true
+
+  - type: textarea
+    id: debug-log
+    attributes:
+      label: debug.log
+      description: >
+        Open Settings → the gear icon → "Open log folder", then attach
+        `debug.log` from that folder (drag it into this box) or paste the
+        relevant lines. This is usually the single most useful thing you can
+        include — most Spaceadom bugs are diagnosed from this file, not from
+        a description alone. It does not contain what you typed; see
+        PRIVACY.md if you want to check what it does contain before sharing
+        it.
+      placeholder: Drag debug.log here, or paste the relevant lines.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked `all-versions/WHAT-CHANGED.md` and this isn't already a known, fixed issue in a newer version.
+          required: false
+        - label: I'm running the latest version, or I've noted above why not.
+          required: false

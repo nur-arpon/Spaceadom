@@ -17,7 +17,13 @@ reverses what this file said before 1.0.41. The task approach failed for a
 concrete reason worth keeping: a task created while elevated cannot be deleted
 by the non-elevated app (PROBLEM 61 removed elevation), so a stale task became
 permanent and launched an OLD build alongside the new one (PROBLEM 129). The
-app deletes legacy tasks and legacy Run names when it can.
+app deletes legacy tasks and legacy Run names when it can. **In code,
+`startup.rs::ensure_startup_task` still TRIES a `/RL LIMITED` Scheduled Task
+first and only falls back to the HKCU Run key when that creation fails** — on
+a standard non-admin account it always fails (PROBLEM 64: a non-elevated user
+cannot create a task in the Task Scheduler root folder), so the Run key is
+what actually runs on this machine and every other non-admin one; the
+sentence above describes the outcome, not the only code path.
 `V14_FIXES_AND_CODE.md` §PROBLEM 45 has the full table and the elevation
 flow. The repo folder is still `SpaceToggle-V14`; rename at git-init.
 
@@ -153,8 +159,128 @@ npm run tauri build  # setup.exe → src-tauri\target\release\bundle\nsis\
   `nsis.installMode = "currentUser"`, no UAC ever. This is the recommended one.
 - `.msi` (WiX) installs **per-machine** into Program Files, as every .msi up to
   1.0.40 did. It is built from a custom template, `src-tauri/wix/main.wxs`,
-  whose ONLY change from the stock one is `util:CloseApplication` — the fix for
-  PROBLEM 127's silent update deferral over a running app.
+  forked from tauri-bundler 2.9.4's stock file with **exactly FOUR changes,
+  each marked `SPACEADOM CHANGE n` in the file** (its own header comment is the
+  authority; read that before editing it):
+  1. `util:CloseApplication` **added** — PROBLEM 127's silent update deferral
+     over a running app. Since REVIEW FIXES 2026-09-05 (H2) it sends
+     `EndSessionMessage="yes"`, not `CloseMessage="yes"`: WM_CLOSE makes this
+     app hide to the tray, so the process survived and `TerminateProcess`
+     killed it — every MSI update ended in a hard kill of a healthy app.
+  2. `<Property Id="INSTALLDIR">` and its two `RegistrySearch` elements
+     **deleted** — PROBLEM 244/246. NSIS writes that HKCU key with its own
+     per-user directory, so a double-clicked `.msi` used to install INTO
+     `%LOCALAPPDATA%\Spaceadom` and register the per-user app's files as its
+     own components; `msiexec /X` of that product then deleted the running
+     app. With it gone, `INSTALLDIR` has one source and can only ever be
+     `C:\Program Files\Spaceadom`.
+  3. The "Keep your settings?" uninstall question and the two
+     `util:RemoveFolderEx` rows it gates **added** — PROBLEM 252, the MSI half
+     of PROBLEM 247's NSIS `installer-hooks.nsh`. One feature in four places.
+  4. `MajorUpgrade Schedule` **changed** from the stock
+     `afterInstallInitialize` to `afterInstallExecute` — REVIEW FIXES
+     2026-09-05 (H2). The stock order put `RemoveExistingProducts` at sequence
+     1501, 2,498 numbers before `WixCloseApplications` (3999) closed the
+     running app, so Windows Installer queued a delete-on-REBOOT against the
+     exe PATH, `InstallFiles` then wrote the NEW exe to that path, and the
+     next restart deleted it. Measured after the fix: 1501 → 6501.
+
+  Everything else is stock, deliberately, so a bundler upgrade can be diffed
+  against the new original rather than re-derived.
+
+**Building the `.msi` writes an MsiInstaller 1033 "installed the product" event
+into the Application log — it is NOT an install** (measured 2026-09-04 across
+45 versions). WiX's `light.exe` validates the package it just wrote by running
+it through the Windows Installer engine, which logs 11707 + 1033 five to ten
+seconds after the `.msi` file's own mtime, every single build. The tell that
+separates it from a real install is the **transaction pair**: a genuine
+install/uninstall is bracketed by 1040 "Beginning a Windows Installer
+transaction" and 1042 "Ending…", naming either the `.msi` path or the
+ProductCode. The build-time 1033s have neither. Do not read one as evidence
+that a ship step ran the `.msi` — no ship step does. (The one real per-machine
+MSI install on this machine was 2026-08-30 15:09, 1040/1042 naming a
+`Spaceadom_1.0.94_x64_en-US.msi` inside WhatsApp Desktop's transfers folder:
+the owner double-clicked a build he had shared. That install is what created
+the registration PROBLEM 244's `msiexec /X` then acted on.)
+
+**THE APP UPDATES ITSELF since 1.0.100 (PROBLEM 245).** Every installed copy
+polls `releases/latest/download/latest.json` on GitHub once a day (first
+check 15 s after launch, past the autostart settle, on the `st-updater`
+thread) and installs a newer release SILENTLY — `setup.exe /S /UPDATE /R
+/ARGS --autostart`, the plugin exits the process, the NSIS installer
+relaunches it quietly. Everything is in `src-tauri/src/updater.rs`. Rules:
+
+- **The signing key is NEVER committed.** `src-tauri/.tauri/spaceadom.key`
+  (+ `.password.txt`, + `.pub`) is gitignored, exactly like the Sentry DSN;
+  CI gets it from the `TAURI_SIGNING_PRIVATE_KEY` /
+  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets and release.yml fails loudly
+  without them. The PUBLIC key is baked into every exe
+  (`tauri.conf.json` → `plugins.updater.pubkey`), so **losing the private
+  key means no existing install can ever accept an update again** — back it
+  up somewhere that is not this repo. A local `npm run tauri build` only
+  signs when both env vars are set (key CONTENT or path, and password);
+  without them it builds fine and simply writes no `.sig`.
+- **Set those env vars from PowerShell, NEVER from the Bash tool.** The
+  password is base64, so about one in three starts with `/`, and MSYS2
+  rewrites a POSIX-looking value into `C:/Program Files/Git/…` before it
+  reaches a native `.exe` — as an ARGUMENT (`-p`) *and* as an exported
+  environment variable, quoted or not, with `MSYS_NO_PATHCONV=1` set or not.
+  The result is `Wrong password for that key` from a password that is
+  perfectly correct. This cost a day on 2026-09-05; the full account is in
+  `V14_FIXES_AND_CODE.md` § MEASUREMENT TRAP → RESOLUTION. **Any secret
+  handed to a native Windows binary goes through PowerShell.**
+- **An install is only ever updated by the kind of installer that made it.**
+  The app decides at runtime — `uninstall.exe` beside the exe = NSIS, an
+  HKLM `MsiExec /X` product registered for the exe's folder = MSI, neither
+  = never updated — and reads `latest.json` (setup.exe) or `latest-msi.json`
+  (.msi). Both manifests are written by
+  `scripts/write-updater-manifests.ps1`, from CI and from the local proof.
+  Feeding an NSIS install the `.msi` is PROBLEM 129/244; do not "simplify"
+  this to one manifest.
+- **The MSI leg is ON since PROBLEM 246** (`updater::MSI_AUTO_UPDATE = true`),
+  reversing what this file said while 1.0.100 was being built. The constraint
+  that kept it off is real and unchanged — a per-machine `.msi` cannot install
+  silently from a non-elevated process, because at UI level none (`/qn`,
+  `/quiet`) there is no client UI through which the Installer service can ask
+  for consent, so it simply fails. `/passive` is the LOWEST UI level at which
+  the UAC dialog can appear at all (measured from `/L*v` logs; the last UI
+  switch on the command line wins). The owner's decision on 2026-09-05 was to
+  accept **one UAC prompt per update** rather than leave a published channel
+  switched off. `updater.rs` composes and WAITS ON the msiexec command itself
+  rather than handing bytes to the plugin, for two reasons that are both
+  load-bearing: the plugin `exit(0)`s immediately, so a declined prompt would
+  leave the machine with no Spaceadom running at all; and
+  `plugins.updater.windows.installMode` is ONE value shared by both legs, so
+  switching it to `passive` for the MSI's sake would put a progress window on
+  every NSIS user's screen. Setting `MSI_AUTO_UPDATE = false` puts the leg back
+  to "detected, never driven" as a one-word change. **No live MSI update has
+  ever been observed** — see V14_FIXES_AND_CODE.md §PROBLEM 246's second-PC
+  recipe before claiming it works.
+- **The relaunch is the installer's `/R`, not `AppHandle::restart()`** —
+  PROBLEM 233: restart spawns before it exits and single-instance kills the
+  newcomer. Exit first, launch later. `on_before_exit` stops the hook.
+- **To test an update locally — THIS NEEDS A DEBUG BUILD SINCE REVIEW FIXES
+  2026-09-05 (MEDIUM).** `st-updater-endpoint.txt` beside the exe replaces the
+  manifest URL *and* turns on `danger_accept_invalid_certs`, in a directory
+  anything running as this user can write, so `updater::read_override()` is
+  gated on `cfg!(debug_assertions)` and **a release build ignores the file
+  entirely** — silently, because there is nothing to report about a file it
+  never reads. The recipe is therefore:
+  1. `cargo run` (or `npm run tauri dev`) a DEBUG build, and put
+     `st-updater-endpoint.txt` beside THAT exe — first line the manifest URL.
+     A self-signed HTTPS cert is accepted while the file exists; the shipped
+     config keeps `dangerousInsecureTransportProtocol` OFF.
+  2. Or, to exercise a real installed release exe, delete the
+     `cfg!(debug_assertions)` gate in `updater.rs::read_override` for the
+     duration of the experiment **and put it back** — never ship a build with
+     it lifted.
+
+  Delete the endpoint file afterwards either way. The 1.0.99 → 1.0.100 proof
+  in V14_FIXES_AND_CODE.md §PROBLEM 245 is the worked example, and it was run
+  BEFORE the gate existed — it drops the file beside an installed release exe,
+  which no longer does anything.
+- The escape hatch is `"auto_update": false` in config.json. No UI switch,
+  by the owner's decision.
 
 **A THIRD build target exists for the Microsoft Store: `npm run store`.**
 It overrides `webviewInstallMode` to `offlineInstaller`
@@ -167,6 +293,113 @@ normal installer path EMPTY. **So after `npm run store`, run
 `npm run tauri build` before installing locally** — otherwise
 `scripts/install-real.cmd` has nothing to install, which is deliberate: an
 obvious failure beats silently installing the 210 MB build (PROBLEM 165).
+
+**A FOURTH build target exists, and it produces a DIFFERENT PROGRAM:
+`npm run msix`** (PROBLEM 250). It packs the plain `npm run tauri build` release
+binary into `Spaceadom_<v>_x64.msix` for the Microsoft Store, using a
+hand-written `src-tauri/msix/AppxManifest.xml` and MakeAppx from the Windows
+SDK — Tauri v2 has no MSIX target and the one third-party tool for it was
+evaluated and declined. It needs three Partner Center values in a gitignored
+`src-tauri/msix/identity.json` (`identity.example.json` is the committed
+template). **NOT `npm run store`:** you cannot run an installer from inside a
+package, so the 210 MB offline-WebView2 build has nothing to contribute; the
+MSIX is 10 MB and takes WebView2 from the system Evergreen runtime.
+
+- **THE MSIX HAS RUN ON THIS MACHINE, on 2026-09-05** (attempt 2 in
+  `_probe/msix-test/`; log at `_probe/msix-test/log.txt` §"ATTEMPT 2"). The
+  packaged branches are verified — hook, overlay, ring, launch and the
+  StartupTask toggle all worked, and four defects were found and fixed; see
+  V14_FIXES_AND_CODE.md §PROBLEM 250 ▸ "LIVE TEST 2026-09-05". **AppData was
+  NOT virtualised** (the packaged copy read and wrote the real
+  `%APPDATA%\Spaceadom`) **and HKCU WAS** (its writes went to the package's
+  private `…\Packages\<PFN>\SystemAppData\Helium\User.dat` and never reached
+  the hive the shell reads). Do not re-derive either fact — the documented
+  rules behind them are quoted in `packaged.rs::migrate_legacy_data_once`.
+- **INSTALLING THE .MSIX HERE IS ALLOWED, BY THE PROVEN PROCEDURE BELOW, AND
+  BY NO OTHER.** This paragraph used to say "NEVER INSTALL THE .MSIX ON THIS
+  MACHINE". The hazard it named is real and unchanged — a packaged copy beside
+  the NSIS one is two `WH_KEYBOARD_LL` hooks fighting over the spacebar
+  (PROBLEM 129/141/236) — but the answer is to kill the NSIS copy first, not to
+  leave the packaged half of the app permanently untestable. Run every
+  machine-touching step through `explorer.exe` (PROBLEM 143), and run them in
+  this order:
+
+  ```powershell
+  # 1. The hazard: stop the NSIS copy FIRST. Nothing else may run before this.
+  taskkill /IM spaceadom.exe /F
+
+  # 2. Trust the local test cert. LocalMachine\TrustedPeople — CurrentUser
+  #    is NOT enough (attempt 1 failed there) and needs an admin shell once.
+  Import-Certificate -FilePath .\local-test-public.cer `
+      -CertStoreLocation Cert:\LocalMachine\TrustedPeople
+
+  # 3. Install, launch by AUMID, test.
+  Add-AppxPackage -Path <...>\Spaceadom_<v>_x64.msix
+  explorer.exe shell:AppsFolder\<PackageFamilyName>!Spaceadom
+
+  # 4. Remove it again, and relaunch the NSIS copy.
+  taskkill /IM spaceadom.exe /F
+  Remove-AppxPackage -Package <PackageFullName>
+  Start-Process "$env:LOCALAPPDATA\Spaceadom\spaceadom.exe" -ArgumentList '--autostart'
+  ```
+
+  Measured on 2026-09-05: `Remove-AppxPackage` took 1,340 ms and took the
+  StartupTask, `Program Files\WindowsApps\<full>`, `%LOCALAPPDATA%\Packages\<PFN>`
+  and the `SystemAppData\<PFN>` key with it; HKCU Run was never touched and the
+  config came back semantically identical. **Two things it leaves behind that
+  you must clean up by hand:** the test certificate in
+  `LocalMachine\TrustedPeople` (still present — the owner removes it), and
+  `%APPDATA%\Spaceadom\packaged-first-run.txt` + `packaged-migration\` written
+  by the old unconditional snapshot. `build-msix.ps1` still has no
+  `Add-AppxPackage` anywhere and still leaves the package unsigned unless you
+  pass `-Sign`; that stays deliberate — installing is an explicit act, never a
+  side effect of a build. The second-machine recipe in
+  `to-publish-in-microsoft-store/SUBMIT-CHECKLIST.md`, "Route B", is still the
+  right way to test a machine with no NSIS copy at all, which this one is not.
+- **A packaged Spaceadom behaves differently in four places, and every
+  difference is silent.** One runtime probe decides them all —
+  `packaged::is_packaged()` (`GetCurrentPackageFullName`, cached, logged at boot
+  behind the marker `package-identity-probe-msix-store-mode-spaceadom`, which is
+  the third line of every log). When packaged: **the in-app updater is inert**
+  (the Store owns updates; a downloaded `setup.exe` would install a second,
+  unpackaged copy); **autostart is the manifest's `windows.startupTask`, never
+  an HKCU Run value** (a Run value would name a `WindowsApps\…_<VERSION>_…`
+  path that the next Store update deletes); **config gets a one-time snapshot on
+  first packaged launch — ONLY when the resolved data dir is not already the
+  classic `%APPDATA%\Spaceadom`** (2026-09-05: it was, and the unconditional
+  version copied 1.3 MB from that folder into a subfolder of itself; it now
+  logs "AppData not virtualised — nothing to migrate" and writes nothing);
+  and **the rival-install banner offers directions, not a button** — a packaged
+  app must not elevate to delete files outside its package, and
+  `rival_install::repair` refuses independently of the banner. A FIFTH
+  difference was added on 2026-09-05: **a packaged copy does not touch
+  `NotifyIconSettings` at all**, because HKCU writes go to the package's
+  private hive and the shell never reads them — Store users promote the tray
+  icon themselves, and there is no supported API to do it for them.
+- **Windows owns "Run at startup" in a package and the app must not fight it.**
+  `RequestEnableAsync` is documented to refuse to override a user who switched
+  the app off in Task Manager. So the boot path reads the state and changes
+  nothing, and the Settings row goes INERT with a sentence naming who is holding
+  it off — the same `paintInert` treatment as "Show special keys". A switch that
+  flips back on its own is the failure this avoids.
+- **`packaged::STARTUP_TASK_ID` must equal the manifest's
+  `desktop:StartupTask/@TaskId`.** `StartupTask::GetAsync` fails with
+  `E_INVALIDARG` for an unknown id, which in a log is indistinguishable from
+  "the WinRT API is unavailable". `build-msix.ps1` checks the two against each
+  other and refuses to pack if they differ.
+- **The `.msix` goes to CI artifacts ONLY, never to a GitHub release asset.**
+  The Store owns MSIX distribution; a `.msix` on the releases page would hand
+  somebody a second copy beside the `setup.exe` they already have.
+- **The packaged branches HAVE executed, once, on 2026-09-05** — this bullet
+  used to say "none of them has ever executed. The package has never been
+  installed anywhere." Both sentences are now false; see the live-test bullet
+  above. What is still true and still needs the second-machine run in
+  SUBMIT-CHECKLIST.md: **a machine with NO unpackaged Spaceadom on it has never
+  run this package.** Everything measured on 2026-09-05 was measured beside an
+  existing NSIS install, and at least one finding depends on that — AppData
+  fell through to the real folder BECAUSE `%APPDATA%\Spaceadom` already
+  existed. A clean Store machine may well see its config land in the package's
+  private store instead, and nothing here has observed that.
 
 **Do not try to make the .msi per-user** (PROBLEM 139/140). It trips WiX ICE38,
 which demands an HKCU-registry KeyPath for every component installed into the
@@ -256,7 +489,8 @@ removes it with one permission prompt.
   two, and the second silently replaced the first for months (PROBLEM 131) —
   `set_hook` replaces, it does not chain unless you make it. If you add
   another, the last one installed wins and the loser leaves no trace.
-- **There ARE automated tests now** — 13, run with `cargo test --lib` from
+- **There ARE automated tests now** — 388 as of 1.0.100 (13 when this bullet
+  was written), run with `cargo test --lib` from
   `src-tauri`. They cover the self-updating-app path repair (PROBLEM 116) and
   the opacity floor arithmetic (PROBLEM 119). Everything else is still
   verified by hand on the real machine (see Testing laws). Add a test when
@@ -286,6 +520,12 @@ src-tauri/src/
                    (PROBLEM 61 removed it).
   display_watch.rs Rebuilds the overlay when the display setup changes
                    (PROBLEM 117/118) and re-homes an off-screen dashboard.
+  safe_mode.rs     PROBLEM 253 — the boot counter. Three launches in a row that
+                   started and never stayed alive 30s, and the NEXT one comes up
+                   with NO hook, NO overlay and a banner. A clean WM_ENDSESSION
+                   exit is explicitly excluded (see below).
+  diagnostics.rs   PROBLEM 253 — "Report a problem": one zip in
+                   %APPDATA%\Spaceadom\reports\. NEVER uploads anything.
   hook/conflicts.rs        Detects other keyboard programs. ONE matcher
                            (`is_known_process`) shared with:
   hook/conflict_close.rs   Closes one, on request only. Closed list, WM_CLOSE
@@ -372,14 +612,112 @@ overlay.html       The on-demand HUD/toast surface (see window rules below).
 
 ### Keyboard-hook laws (details in the skill)
 
-- Filter injected input ONLY by our `dwExtraInfo` cookie `0x7A7A7A7A`, never
-  by `LLKHF_INJECTED`.
-- Need two keys in guaranteed order → one `SendInput` batch; `SendInput` then
-  `CallNextHookEx` does not preserve order (the `hte`-for-`the` bug).
-- `GetAsyncKeyState` reports a key we SUPPRESS as UP — never build a failsafe
-  on it for hidden keys (stuck-modifier detection uses a timestamp latch).
-- Pass Space through when Ctrl/Alt/Win is physically held (IME, autocomplete,
-  window menu). Shift deliberately excluded.
+1. Filter injected input ONLY by our `dwExtraInfo` cookie `0x7A7A7A7A`, never
+   by `LLKHF_INJECTED`.
+2. Need two keys in guaranteed order → one `SendInput` batch; `SendInput` then
+   `CallNextHookEx` does not preserve order (the `hte`-for-`the` bug).
+3. `GetAsyncKeyState` reports a key we SUPPRESS as UP — never build a failsafe
+   on it for hidden keys (stuck-modifier detection uses a timestamp latch).
+4. Pass Space through when Ctrl/Alt/Win is physically held (IME, autocomplete,
+   window menu). Shift deliberately excluded.
+5. **REFERENCE HOOK GOES IN FIRST. DO NOT REORDER. DO NOT "SIMPLIFY"
+   `install_hooks()`.** Windows calls low-level hooks NEWEST-first —
+   `SetWindowsHookExW` inserts each new hook at the HEAD of the chain, so the
+   hook installed last is the one Windows calls first. `CallNextHookEx` is
+   synchronous, so that newest hook's `LowLevelHooksTimeout` clock has to
+   cover its own body PLUS the entire chain running underneath it, not just
+   itself. A witness/reference hook — installed only to prove the real hook
+   is still alive — is therefore the SLOWEST hook in the chain if it is
+   installed last, and Windows evicts the slowest hook first. A dead witness
+   can no longer report anything but "all quiet," so the deaf-detector reads
+   that as permanent health while the real watchdog keeps tearing down a hook
+   that is genuinely working — measured **514 times in one 3.8-hour session**
+   (baseline 2026-09-01, root-caused as PROBLEM 230, shipped fixed in 1.0.96
+   on 2026-09-04). **Symptom the owner sees:** shortcuts randomly stop
+   mid-hold, especially while the dashboard is focused. **The one-line test
+   that proves it's still fixed:** `grep "genuinely fired" debug.log | tail`
+   — the `(N total)` counter must keep climbing — and `grep -c "WATCHDOG — "
+   debug.log` must stay near 0. Full writeup, disproved hypotheses, and the
+   teach-back explanation: **`docs/IF-SHORTCUTS-DIE-AGAIN.md`.** **See law 7
+   for what an evicted hook looks like from inside the process afterwards —
+   the handle stays valid and the mouse hook keeps firing, which is why
+   `install_hooks()` re-installing all three is the only repair that exists.**
+6. **THE RING MUST SHOW OVER OUR OWN WINDOW — before ANY ship, hold Space
+   with the dashboard focused and grep `guide_hud: shown over own window`.**
+   The install-proof script MUST assert that line exists in the NEW build's
+   log (after that build's `Spaceadom build — version` banner), preceded by
+   a `hold start (hold #N)` line that also says `over own window` — a
+   PREVIEW from the "Check the ring" button prints the shown-over line too,
+   and proves nothing about the hook. Owner or agent holds Space; if the
+   agent cannot inject (it cannot, from the container — testing laws), the
+   ship report must say **UNPROVEN** in capitals. Why this is a law: 1.0.101
+   and 1.0.102 shipped "proved" on 2026-09-05 while every Space held inside
+   the dashboard was invisible to the keyboard hook (PROBLEM 257 — the mouse
+   hook on the same thread fired 2,705 times in the minute both keyboard
+   hooks fired 0). The 60-second `N of them while the Spaceadom window itself
+   had focus` line is a rate, not a proof; the per-hold line is the proof.
+   `grep "KEYBOARD DEAF, PROVEN" debug.log` names the occurrences.
+
+   **THERE IS NOW A FALLBACK, AND ITS PROOF LINE IS A DIFFERENT ONE
+   (PROBLEM 259).** `src/own-window-keys.ts` runs the tap/hold/combo state
+   machine in the DASHBOARD PAGE and feeds the Space to the engine through
+   `own_window_space_down` / `own_window_key` / `own_window_space_up`, because
+   the page still receives `keydown` for keys no hook in this process is
+   called for. So the ring and Space+letter can work inside the app **while
+   PROBLEM 257 is still happening**, and that is exactly why the two proofs
+   are kept apart:
+
+   | What fired | The pair to grep |
+   | --- | --- |
+   | The keyboard HOOK (law 6's proof) | `hold start (hold #N) … over own window` **then** `guide_hud: shown over own window` |
+   | The own-window FALLBACK | `own-window fallback:` **then** `guide_hud: shown over own window` |
+
+   The fallback's line deliberately does NOT contain the words `hold start`,
+   so it can never satisfy `install-proof.ps1`'s law-6 assertion. **A ring you
+   saw inside the dashboard is therefore no longer evidence that the hook is
+   alive** — read which of the two lines produced it before writing PASS, and
+   a ship report still says UNPROVEN when only the fallback line is there.
+   Rust refuses the injection unless our window is genuinely foreground and
+   the hook has not stamped a Space-down in the last 100 ms, so the two can
+   never both serve one press; if you ever see both lines for the same
+   keystroke, that dedupe has failed and it is a bug, not a curiosity.
+7. **A TIMED-OUT LL KEYBOARD HOOK STAYS INSTALLED AND IS NEVER CALLED AGAIN —
+   AND A *PROVEN*-DEAF VERDICT MUST NEVER BE BLOCKED BY A COOLDOWN
+   (PROBLEM 260).** Two facts, and every liveness gate in `hook/mod.rs`
+   depends on both. **(a)** When a `WH_KEYBOARD_LL` callback overruns
+   `LowLevelHooksTimeout` (`HKCU\Control Panel\Desktop`, 1000 ms by default),
+   Windows stops calling it and **leaves the handle valid** — no message, no
+   error, no return code, and `UnhookWindowsHookEx` on it still succeeds.
+   Inside the process an evicted hook and a hook nobody has typed into are the
+   same observation. This is law 5's eviction seen from the other side: law 5
+   is about *which* hook gets evicted, this is about what an evicted hook
+   looks like afterwards. **(b)** `WH_MOUSE_LL` is a **separate hook with its
+   own timeout record**, even on the same thread from the same pump, so it
+   keeps firing at 30–60 Hz while the keyboard hooks are dead. **The only
+   cure a process has is to change the chain: unhook and install afresh.**
+   Consequences that are law, not preference:
+   * **A live mouse callback may never veto a keyboard-deaf verdict.** It
+     proves the *pump*, not the hook — the same rule the reference hook was
+     corrected under on 2026-09-04 ("an instrument installed to witness a
+     failure must never vote that the failure did not happen").
+   * **Cooldowns throttle UNEVIDENCED alarms only.** The 60 s cooldown and the
+     "last repair delivered events" test exist for PROBLEM 236's churn and
+     keep that job in full — but a verdict proven from callback-only clocks
+     (`proven_keyboard_deaf`) bypasses both. Waiting is strictly worse than
+     repairing when the app is provably deaf. Do not "unify" the two paths.
+   * **A repair is an unhook plus a fresh `SetWindowsHookExW`, and the log
+     prints old → new HHOOK values to prove it.** Measured cost of not doing
+     this: 130 seconds of provable deafness on 2026-09-07 in which the
+     watchdog printed *nothing*, because `both_dead` needs the mouse to fall
+     silent and `kb_only_dead` needs a live reference — and neither was true.
+   * **A number printed beside the word "session" must read a counter nothing
+     drains.** `hook diagnostics` swaps its counters to zero every 60 s, which
+     is how `repair #1 this session` came to be printed three separate times
+     and be read as "the repair never happened".
+   Full writeup and the probe evidence: **PROBLEM 260** in
+   `V14_FIXES_AND_CODE.md` and the 2026-09-07 follow-up in
+   `docs/IF-SHORTCUTS-DIE-AGAIN.md`. The signature to grep:
+   `hook liveness split — primary_real:0 … reference:0 mouse:<nonzero>`.
 
 ## Testing laws
 
@@ -433,12 +771,73 @@ overlay.html       The on-demand HUD/toast surface (see window rules below).
   `config.json` read in this shell. Copy it out via `explorer.exe` first, and
   cross-check its byte size against what `debug.log` says was last saved; if
   they disagree you are reading a shadow.
+  **EXPLAINED 2026-09-05 (PROBLEM 250), and it is not arbitrary after all.** The
+  redirection is a **copy-on-write UNION view, not a redirect**: a file the
+  container has WRITTEN exists in its private store and shadows the real one;
+  a file it has never written is not there and READS STRAIGHT THROUGH to the
+  real user file. Measured, listing `%APPDATA%\Spaceadom` from this shell:
+  `config.json` 47,754 B dated 18 Aug (the private copy) beside `debug.log`
+  4,753,847 B and `picker-cache.json` 827,272 B both tracking today's clock (the
+  real files) — and the container's own
+  `…\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Spaceadom\` holds
+  `config.json` and **no** `debug.log`. So the rule generalises: **in this shell,
+  any file some in-container process has ever written to is stale; every other
+  file in the same folder is live.** That is why the folder cannot look stale as
+  a whole, and it is why per-file cross-checking is the only safe habit.
+  Separately, and worth knowing before reasoning about MSIX at all:
+  `GetCurrentPackageFullName` in this same shell returns
+  `APPMODEL_ERROR_NO_PACKAGE` — **a process can be inside the redirection view
+  with no package identity of its own**, so `packaged::is_packaged()` is not a
+  test for redirection and must never be used as one.
+- **SAFE MODE EXISTS SINCE PROBLEM 253, AND IT CAN LOOK LIKE A BUG.** If the
+  app comes up with the dashboard but Space does nothing, no Guide HUD, no
+  toasts, and `debug.log` has no `hook: rollover window` line — check the
+  banner and `grep safe-mode debug.log` BEFORE diagnosing a dead hook. Three
+  launches in a row that started and never stayed alive 30 seconds put the next
+  one in safe mode: no `WH_KEYBOARD_LL`, no overlay window, no display watcher.
+  The marker is
+  `safe-mode-entered-after-three-consecutive-startup-crashes-spaceadom`.
+  **To clear it:** press "Turn back on" in the banner (installs the hook
+  immediately, no restart), or delete `%APPDATA%\Spaceadom\boot-attempts.json`,
+  or set its `failed_starts` to 0 — through `explorer.exe`, never from the agent
+  shell (PROBLEM 143). **A clean shutdown never counts**: `session_end.rs` and
+  `lib.rs`'s `RunEvent` closure both call `safe_mode::note_clean_exit()`, and
+  removing either is how three reboots shortly after logon would disarm a
+  perfectly healthy app.
 - Never report anything as fixed/working/verified unless you observed it
   working. Label untested things untested. Ask the user to hand-test what
   injection can't reach.
 
 ## Hard rules
 
+- **MSIEXEC /X CAN DELETE THE LIVE APP.** An MSI product's file list may point
+  ANYWHERE, including the current install folder — `wix/main.wxs` resolves
+  `INSTALLDIR` from an HKCU `RegistrySearch` that NSIS fills with
+  `%LOCALAPPDATA%\Spaceadom`, so a double-clicked `.msi` installs INTO the
+  live per-user folder and registers those files as its own components. On
+  **2026-09-04** the PROBLEM 238 banner offered to remove a "leftover" HKLM
+  entry (`{C68DC702-9414-421F-A3E4-12EDBBAD76C5}`, DisplayVersion 1.0.94,
+  InstallLocation = the live folder); `repair()` ran `msiexec /X{GUID}`; the
+  Restart Manager failed to close the running 1.0.97 (RestartManager 10010,
+  "SID does not match") and Windows Installer deleted the product's registered
+  FILES anyway — the live `spaceadom.exe` — logging MsiInstaller 1034
+  "removed the product … status 0". The app vanished; only Roaming config
+  survived. **A "leftover entry" is removed from the REGISTRY ONLY, never
+  through the Installer.** `msiexec` may only ever be aimed at a product whose
+  recorded location is a different directory that is not an ancestor of ours,
+  and even then with `/qn REBOOT=ReallySuppress MSIRESTARTMANAGERCONTROL=Disable`
+  so Restart Manager can never close us. The decision lives in one pure,
+  unit-tested function (`rival_install::plan_removal`) — PROBLEM 244.
+  Generalise: **a removal that trusts a registry entry's own description of
+  what it owns is a removal aimed by the thing being removed.**
+- **AGENTS NEVER DELETE, RENAME OR OVERWRITE A FILE THEY DID NOT CREATE IN
+  THIS TASK** — stale-looking or not, `.tmp`/`.bak`/`.old` or not, "obviously
+  a leftover" or not. Report it and let the owner decide. A
+  `PROJECT_STATUS.md.tmp` was deleted by an agent on 2026-09-04 on exactly that
+  reasoning; the file it looked like a leftover of was 580 KB of append-only
+  log, and nothing but luck decided whether the `.tmp` was garbage or the only
+  copy of an in-flight write. The rule has no judgement clause on purpose:
+  "it looked stale" is the sentence that precedes every one of these.
 - Do NOT modify `D:\SpaceToggle-July_Revisit_2026`, `D:\GITHUB PROJECT`, or
   `D:\Neon` — read-only reference.
 - Never remove a CORE_AIM feature to make something build.

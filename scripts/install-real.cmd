@@ -17,7 +17,7 @@ setlocal
 set ROOT=D:\Claude-Projects\SpaceToggle-V14
 set OUT=%ROOT%\install-check.txt
 set PROOF=%ROOT%\install-proof.txt
-set SETUP=%ROOT%\src-tauri\target\release\bundle\nsis\Spaceadom_1.0.95_x64-setup.exe
+set SETUP=%ROOT%\src-tauri\target\release\bundle\nsis\Spaceadom_1.0.107_x64-setup.exe
 
 > "%OUT%" echo === install-real.cmd ===
 >>"%OUT%" echo when: %DATE% %TIME%
@@ -32,6 +32,17 @@ REM The NSIS PREINSTALL hook kills a running Spaceadom itself, but an update
 REM over a running app is the exact scenario that silently did nothing four
 REM times (PROBLEM 127). Belt and braces.
 taskkill /IM spaceadom.exe /F >nul 2>&1
+
+REM 1.0.98 (PROBLEM 244): stamp the exact moment the installer starts, so the
+REM postinstall probe can ask the Application event log a precise question —
+REM "did Windows Installer do ANYTHING while Spaceadom was being installed?" —
+REM rather than a vague "in the last half hour". It has to be precise because
+REM BUILDING the .msi minutes earlier legitimately logs MsiInstaller 1033
+REM (WiX light.exe validates by running the package through the installer
+REM engine), and a window wide enough to include the build would make a clean
+REM install look dirty. A check that cannot produce a truthful negative is not
+REM a check.
+powershell -NoProfile -Command "Get-Date -Format 'yyyy-MM-dd HH:mm:ss' | Set-Content -NoNewline '%ROOT%\_install-window-start.txt'"
 
 "%SETUP%" /S
 >>"%OUT%" echo installer exit code: %ERRORLEVEL%   (NEVER trust this alone)

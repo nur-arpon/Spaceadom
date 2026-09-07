@@ -1,7 +1,8 @@
 {
   "name": "spaceadom",
   "private": true,
-  "version": "1.0.95",
+  "version": "1.0.107",
+  "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,7 +11,10 @@
     "tauri": "tauri",
     "posttauri": "node scripts/archive-build.mjs",
     "store": "tauri build --config src-tauri/tauri.store.conf.json",
-    "poststore": "node scripts/label-store-build.mjs"
+    "poststore": "node scripts/label-store-build.mjs",
+    "msix": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-msix.ps1",
+    "portable": "node scripts/build-portable.mjs",
+    "test:own-window-keys": "node scripts/own-window-keys.test.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
