@@ -378,6 +378,11 @@ pub fn save(config: &AppConfig) -> Result<(), String> {
     // friends included; publishing at the save_config COMMAND would miss
     // them, which is PROBLEM 180's exact bug.
     crate::hook::publish_pointer_hud_activation(config);
+    // PROBLEM 263, the same PROBLEM 180 rule a sixth time — the middle-button
+    // ring trigger is read on the MOUSE callback as an atomic, so it has to be
+    // republished here, in the one funnel every mutation goes through, and
+    // seeded at the startup load in lib.rs.
+    crate::hook::publish_middle_button_ring(config);
     // PROBLEM 195, same rule a third time — the crash-reporting kill switch is
     // a runtime-checked atomic (the panic hook cannot take this struct's lock),
     // so it has to be republished on every save AND seeded at the startup load

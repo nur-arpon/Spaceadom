@@ -12,20 +12,36 @@ normal space. Rust + Tauri v2 backend, vanilla TypeScript + Vite frontend
 **Identity (since the 1.0.0 release pass, PROBLEM 45):** productName
 `Spaceadom`, identifier `com.spaceadom.app`, exe `spaceadom.exe`, data dir
 `%APPDATA%\Spaceadom`, install dir `%LOCALAPPDATA%\Spaceadom` (per-user).
-**Autostart is the HKCU Run value `Spaceadom`, NOT a Scheduled Task** — that
-reverses what this file said before 1.0.41. The task approach failed for a
-concrete reason worth keeping: a task created while elevated cannot be deleted
-by the non-elevated app (PROBLEM 61 removed elevation), so a stale task became
-permanent and launched an OLD build alongside the new one (PROBLEM 129). The
-app deletes legacy tasks and legacy Run names when it can. **In code,
-`startup.rs::ensure_startup_task` still TRIES a `/RL LIMITED` Scheduled Task
-first and only falls back to the HKCU Run key when that creation fails** — on
-a standard non-admin account it always fails (PROBLEM 64: a non-elevated user
-cannot create a task in the Task Scheduler root folder), so the Run key is
-what actually runs on this machine and every other non-admin one; the
-sentence above describes the outcome, not the only code path.
-`V14_FIXES_AND_CODE.md` §PROBLEM 45 has the full table and the elevation
-flow. The repo folder is still `SpaceToggle-V14`; rename at git-init.
+**Autostart is a per-user Scheduled Task named `Spaceadom` since 1.0.109
+(PROBLEM 266), registered by the app itself through the Task Scheduler COM
+API (`Register-ScheduledTask` from `startup.rs::register_task_script`), with a
+this-user-only logon trigger, `PT10S` delay, `RunLevel Limited`,
+`LogonType Interactive`, battery-safe, no time limit. The HKCU Run value
+`Spaceadom` is the FALLBACK only** — written when that registration is
+refused, and deleted by the app on the first launch that registers the task,
+which is how every existing install migrates. That reverses what this file
+said from 1.0.41 to 1.0.108 ("the Run value, NOT a task"), and the reason it
+said so is worth keeping in full, because both halves are still true:
+(1) `schtasks.exe /Create /SC ONLOGON` IS denied to a non-elevated user, on
+this machine and every other non-admin one — PROBLEM 64 measured that
+correctly and blamed the wrong thing (the root folder). The denial is the
+"at log on of ANY user" trigger schtasks writes and cannot narrow; the COM
+API's `-AtLogOn -User <me>` trigger is a different request and a standard
+user may make it (measured 2026-09-12, probes A–D in PROBLEM 266). Every
+other schtasks call the app makes (`/Query /XML`, `/Change`, `/Delete`)
+still works against the task the API registered. (2) A task created while
+ELEVATED cannot be deleted by the non-elevated app (PROBLEM 61 removed
+elevation), so a stale elevated task became permanent and launched an OLD
+build alongside the new one (PROBLEM 129) — that is why the task must be
+registered `Limited` by the non-elevated app and never by an installer or an
+admin shell, and why `ensure_startup_task` still triages an existing task
+(PROBLEM 75) and deletes legacy tasks and legacy Run names when it can. Why
+it matters: a Run value is started by the shell a minute or more after logon
+(80 s and 107 s measured on 1.0.107/1.0.108); the task fires 10 s after
+logon. **The logon-time gain has not been measured yet** — the task's first
+run is the owner's next logon. `V14_FIXES_AND_CODE.md` §PROBLEM 45 has the
+identity table and the elevation flow; §PROBLEM 266 has the task XML.
+The repo folder is still `SpaceToggle-V14`; rename at git-init.
 
 **Spaceadom = V13's engine + the Earthy design.** V13 (`..\SpaceToggle-V13`)
 is the functional baseline and stays untouched; Spaceadom installs beside it
@@ -101,8 +117,9 @@ Vite build input, so it never ships.
 
 **A control that does nothing is worse than a missing control.** That rule
 still stands; the example it used to give is stale. "Run at startup" now HAS a
-backend command (`set_startup_enabled`, which flips the HKCU Run value and
-persists the config in one call) and the toggle ships. The rule is what to
+backend command (`set_startup_enabled`, which persists the config and calls
+`apply_task_enabled` — `schtasks /Change /ENABLE|/DISABLE` on the task, or
+the HKCU Run value when no task exists — in one call) and the toggle ships. The rule is what to
 keep: add the command first, then the toggle.
 
 ## Required reading, in this order, before changing anything
@@ -555,6 +572,27 @@ src/overlay.ts +
 overlay.html       The on-demand HUD/toast surface (see window rules below).
 ```
 
+**THE RING HAS TWO TRIGGERS SINCE PROBLEM 263: holding Space, and holding the
+MIDDLE MOUSE BUTTON.** Both raise the same ring in the same centred place and
+run the same code from `HookEvent::SpaceDown` onwards — the middle-button event
+is normalised to `SpaceDown` at the top of `engine::dispatch`, so the ring, the
+cascade, pointer activation and the toast can never drift into two behaviours.
+Internally there are **three witnesses**, not two, because the own-window
+fallback (PROBLEM 259) is a third way for a Space hold to begin:
+`MODIFIER_ACTIVE`, `OWN_HOLD_ACTIVE` and `MIDDLE_HOLD_ACTIVE`. Two of them
+firing for one gesture would mean two rings, two launches and two toasts.
+**The arbitration that prevents it is stated in ONE place — the comment block
+headed `THE ARBITRATION — ONE PLACE, AND THIS IS IT` in `hook/mod.rs`,
+immediately above `MIDDLE_TAP_MS` — and enforced in exactly three, each of
+which names that comment: `middle_button_down_accepted` (rule A),
+`kb_hook_proc`'s Space-down branch (rule B) and guard 2c of
+`own_window_space_down_accepted` (rule C).** `hold_latched()` is the one
+function that knows there are three witnesses; every consumer goes through it.
+Separately, `hook/orbit_apps.rs` holds a built-in list of 3D, CAD and design
+programs where the middle button is handed straight back to Windows — **that
+list gates the MIDDLE BUTTON ONLY and is not the user's App exceptions**;
+Space keeps working inside SolidWorks.
+
 ### Window rules (hard-won; violating them re-opens fixed bugs)
 
 - Two windows: `settings` (dashboard, closes to tray) and `overlay`
@@ -671,6 +709,14 @@ overlay.html       The on-demand HUD/toast surface (see window rules below).
    | --- | --- |
    | The keyboard HOOK (law 6's proof) | `hold start (hold #N) … over own window` **then** `guide_hud: shown over own window` |
    | The own-window FALLBACK | `own-window fallback:` **then** `guide_hud: shown over own window` |
+   | The MIDDLE BUTTON (PROBLEM 263) | `middle-button ring: the-guide-hud-ring-was-raised-by-a-middle-mouse-button-hold-spaceadom` |
+
+   **The middle-button row can NEVER be law 6's proof and is not a third way to
+   satisfy it.** That gesture never produced a Space-down and the keyboard hook
+   was never asked anything, so a ring you raised with the middle button is
+   evidence about the MOUSE hook — which PROBLEM 260 established was never the
+   thing in doubt. Its line contains no `hold start` either, for the same
+   reason the fallback's does not.
 
    The fallback's line deliberately does NOT contain the words `hold start`,
    so it can never satisfy `install-proof.ps1`'s law-6 assertion. **A ring you

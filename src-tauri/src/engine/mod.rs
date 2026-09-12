@@ -198,7 +198,17 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
     // cannot drift into two behaviours. The only thing the origin changes is
     // the sentence the arm logs — see there.
     let via_own_window_page = matches!(event, HookEvent::OwnWindowSpaceDown);
-    let event = if via_own_window_page { HookEvent::SpaceDown } else { event };
+    // PROBLEM 263 — and the MIDDLE BUTTON's hold is the same event with a third
+    // witness. Normalised at the same door and for the same reason: ONE
+    // `SpaceDown` arm, so the ring, the cascade, the pointer and the SpaceUp
+    // path cannot drift into three behaviours. The only thing the trigger
+    // changes is the sentence the arm logs — see there.
+    let via_middle_button = matches!(event, HookEvent::MiddleButtonDown);
+    let event = if via_own_window_page || via_middle_button {
+        HookEvent::SpaceDown
+    } else {
+        event
+    };
 
     match event {
         // ---------------------------------------------------------------
@@ -263,6 +273,36 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
                          'hold start (hold #N) … over own window' line, which only the hook \
                          can produce.",
                         crate::hook::own_window_hold_count()
+                    );
+                } else if via_middle_button {
+                    // PROBLEM 263 — THE MIDDLE-BUTTON TRIGGER'S PER-HOLD LINE,
+                    // and the reason it exists is PROBLEM 259's reason exactly:
+                    // the ring now has THREE triggers and a log that cannot say
+                    // which one raised a given ring cannot answer any question
+                    // about it. Long, unique and full of literal words on
+                    // purpose — it is also the ASCII marker that proves this
+                    // feature is in a built exe (CLAUDE.md: use a long
+                    // `log::` FORMAT STRING as the marker, never a short
+                    // identifier).
+                    //
+                    // It deliberately does NOT contain the words `hold start`,
+                    // so it can never satisfy CLAUDE.md keyboard-hook law 6 /
+                    // `scripts/install-proof.ps1`. This Space-down never
+                    // happened and the keyboard hook was never asked anything;
+                    // a ring you saw after pressing the middle button is
+                    // evidence about the MOUSE hook and about nothing else.
+                    log::info!(
+                        "middle-button ring: the-guide-hud-ring-was-raised-by-a-middle-mouse-\
+                         button-hold-spaceadom — middle-button hold #{} began (hud hold \
+                         #{epoch}) {phrase}. The WM_MBUTTONDOWN was SUPPRESSED, so this \
+                         process owes the world a middle click if the button comes back up \
+                         inside the tap threshold; everything after this line is the ordinary \
+                         path — the ring, pointer activation, the cascade and the toast are \
+                         the same code the spacebar runs. THIS LINE IS NOT CLAUDE.md LAW 6's \
+                         PROOF: law 6 wants a 'hold start (hold #N) … over own window' line, \
+                         which only the keyboard hook can produce, and this gesture never \
+                         reached it. PROBLEM 263.",
+                        crate::hook::middle_hold_count()
                     );
                 } else {
                     log::info!(
@@ -456,6 +496,66 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
                  normalisation at the top of dispatch() has been broken; that hold \
                  did nothing"
             );
+        }
+
+        // PROBLEM 263 — unreachable for the same reason and written out for the
+        // same reason as the arm above it.
+        HookEvent::MiddleButtonDown => {
+            log::error!(
+                "engine: MiddleButtonDown reached the match — the PROBLEM 263 \
+                 normalisation at the top of dispatch() has been broken; that hold \
+                 did nothing"
+            );
+        }
+
+        // ---------------------------------------------------------------
+        // PROBLEM 263 — the middle button came up inside the tap threshold
+        // with nothing else claiming the press, so it was an ORDINARY MIDDLE
+        // CLICK and this process owes the world one.
+        //
+        // THE REPLAY RUNS FIRST, ABOVE THE HUD TEARDOWN. The click is the part
+        // the user is waiting for and its latency is already the length of
+        // their own press; `cancel_hud` is bookkeeping plus an event and can
+        // wait the microseconds. (There is nothing to race: the overlay is
+        // click-through by construction — `lib.rs::configure_overlay_window`
+        // fails CLOSED on `set_ignore_cursor_events` — so a ring that is
+        // briefly still on screen cannot intercept the replayed click.)
+        //
+        // WHY THIS IS NOT DONE IN THE CALLBACK: `SendInput` is a win32k call,
+        // and `ms_hook_proc` is the one hook in this process that makes none,
+        // which is exactly why it keeps firing while the keyboard hooks are
+        // evicted (keyboard law 7b). Spending its budget to save a channel
+        // hop would trade the feature against the app's own liveness.
+        // ---------------------------------------------------------------
+        HookEvent::MiddleButtonTap => {
+            let ok = crate::hook::replay_middle_click();
+            {
+                let mut s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
+                s.cancel_hud(false);
+            }
+            if ok {
+                log::info!(
+                    "middle-button ring: a-quick-middle-click-was-replayed-through-sendinput-\
+                     spaceadom — the press was shorter than the hold threshold and nothing \
+                     else claimed it, so the WM_MBUTTONDOWN this process swallowed has been \
+                     put back as a real middle click: down and up in ONE SendInput batch \
+                     (keyboard law 2 — SendInput followed by anything else does not preserve \
+                     order), tagged with the 0x7A7A7A7A cookie so our own mouse hook passes \
+                     it through. Middle-clicking a link still opens a tab and middle-clicking \
+                     a tab still closes it. PROBLEM 263."
+                );
+            } else {
+                log::warn!(
+                    "middle-button ring: SendInput did NOT insert the replayed middle click \
+                     — another thread blocked it partway (BlockInput, or UIPI while an \
+                     elevated window has focus), which is the same failure PROBLEM 227 \
+                     documents for the keyboard batches. THE USER'S MIDDLE CLICK DID NOT \
+                     HAPPEN. If the DOWN went in and the UP did not, a corrective \
+                     MOUSEEVENTF_MIDDLEUP has already been sent (NATIVE_SAFETY.md §3) — a \
+                     latched middle button is autoscroll running with no way to stop it, \
+                     which is the worst outcome this feature can produce. PROBLEM 263."
+                );
+            }
         }
     }
 }

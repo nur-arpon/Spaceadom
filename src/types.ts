@@ -146,6 +146,33 @@ export interface AppConfig {
    */
   pointer_hud_activation?: boolean;
   /**
+   * PROBLEM 263 — HOLD THE MIDDLE MOUSE BUTTON TO RAISE THE RING. **ON by
+   * default, by the owner's decision on 2026-09-08.**
+   *
+   * The ring has three triggers now: the keyboard hook's Space, the own-window
+   * fallback's Space (PROBLEM 259) and this. Holding the middle button raises
+   * the same ring in the same centred place; a QUICK middle click is replayed
+   * through `SendInput` so browsers still open links in a new tab.
+   *
+   * Read it as `!== false`, NEVER `=== true` — the same rule, for the same
+   * reason, as `pointer_hud_activation` directly above. Rust declares it
+   * `#[serde(default = "default_true")]`, the key is absent from every config
+   * written before this feature existed, and absent must read ON. `=== true`
+   * here would show the switch OFF for every existing user while Rust ran the
+   * feature — the switch and the app disagreeing, which is the one class of bug
+   * in this panel nobody can see from the outside.
+   *
+   * **THIS IS NOT THE ONLY GATE AND THE OTHER ONE IS NOT A SETTING.**
+   * `src-tauri/src/hook/orbit_apps.rs` holds a built-in list of 3D, CAD and
+   * design programs — SolidWorks, Fusion 360, Blender, AutoCAD, Photoshop,
+   * Figma and the rest — where middle-drag already orbits a model or pans a
+   * canvas, and inside those the middle button is handed straight back to
+   * Windows however this flag reads. That list is separate from the user's App
+   * exceptions and applies to the middle button ONLY: Space shortcuts inside
+   * SolidWorks are untouched by it.
+   */
+  middle_button_ring?: boolean;
+  /**
    * PROBLEM 209 — show the SPECIAL keys on the Space HUD's inner ring?
    * ON by default.
    *

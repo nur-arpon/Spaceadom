@@ -28,10 +28,19 @@
 //!      count + every file and folder mtime, plus the app version). On a hit
 //!      the command answers from the file in a few ms and the worker refreshes
 //!      in the background; if the refresh changes the list it emits
-//!      `picker-data-updated` so an open picker can re-render. On a miss the
-//!      worker scans first (the picker shows "Scanning…", exactly as before,
-//!      but the window stays alive). A scan that errored never overwrites the
-//!      cache — a bad PowerShell run would otherwise poison every later open.
+//!      `picker-data-updated` so an open picker can re-render.
+//!      **PROBLEM 237 follow-up (2026-09-09):** a fingerprint MISMATCH — the
+//!      Start Menu changed since the cache was written, which happens on
+//!      every install/uninstall — used to be treated exactly like a miss and
+//!      forced a synchronous scan before answering (measured 7.5-14 s). It is
+//!      now treated like a HIT: the stale list answers immediately and the
+//!      same background refresh runs, emitting `picker-data-updated` if the
+//!      fresh scan differs. Only a cache that is genuinely unusable — missing,
+//!      unreadable, the wrong format, or an empty app list — still scans
+//!      before answering, because there is nothing else to serve. The pure
+//!      decision behind this is `decide_serve`, just above `serve_apps`. A
+//!      scan that errored never overwrites the cache — a bad PowerShell run
+//!      would otherwise poison every later open.
 //!
 //!   3. PRE-WARM AT BOOT (`warm_picker_at_startup`, default ON): a few seconds
 //!      after the windows exist, the worker validates the cache and refreshes
@@ -48,7 +57,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tauri::Emitter;
 
 /// The same map `commands::IconCacheState` wraps: exe/lnk/AUMID → base64 PNG.
@@ -238,11 +247,25 @@ fn sender() -> &'static crossbeam_channel::Sender<Request> {
 struct Session {
     /// The list last handed out, served instantly to every later request.
     list: Option<Vec<AppInfo>>,
-    /// Fingerprint the disk cache carries (or will carry).
+    /// Fingerprint the currently-served list was captured under.
     fingerprint: Option<String>,
-    /// A full scan has been attempted this session — success or not — so the
-    /// background refresh runs at most once per boot.
-    refreshed: bool,
+    /// Wall-clock moment the currently-served list was captured — the disk
+    /// cache file's own mtime on a cache load, or "now" the instant a scan
+    /// (forced first-run, or background refresh) finished. Purely for the
+    /// `list_age_ms` the serve-path log line reports; no decision reads it.
+    captured_at: Option<SystemTime>,
+    /// The fingerprint a refresh has been started for (successfully or not)
+    /// this session. `None` before the first one ever runs.
+    ///
+    /// PROBLEM 237 follow-up: this used to be a plain `bool`, so a refresh
+    /// ran at most ONCE PER SESSION, ever. That is now wrong on its own
+    /// terms — with a fingerprint mismatch answered instantly instead of
+    /// forcing a scan, the disk cache would otherwise never be corrected
+    /// again after the first refresh, no matter how many programs get
+    /// installed later in the same run. Comparing this fingerprint to the
+    /// CURRENT one turns the cap into "once per fingerprint CHANGE," which
+    /// is what the owner asked for and what `decide_serve` below expects.
+    refresh_started_for: Option<String>,
 }
 
 fn worker_main(rx: crossbeam_channel::Receiver<Request>) {
@@ -258,7 +281,8 @@ fn worker_main(rx: crossbeam_channel::Receiver<Request>) {
         com.joined()
     );
 
-    let mut session = Session { list: None, fingerprint: None, refreshed: false };
+    let mut session =
+        Session { list: None, fingerprint: None, captured_at: None, refresh_started_for: None };
     let mut deferred: Option<Request> = None;
 
     loop {
@@ -298,6 +322,98 @@ fn worker_main(rx: crossbeam_channel::Receiver<Request>) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The pure decision core — PROBLEM 237 follow-up (fingerprint-mismatch stall)
+// ---------------------------------------------------------------------------
+//
+// Before this change the mismatch-forces-a-scan bug lived INSIDE `serve_apps`,
+// entangled with the disk read, the scan and the reply, so it could not be
+// unit-tested without shelling out to PowerShell. Pulled out here it is three
+// plain facts in, one verdict out, with no I/O — every branch is one line.
+
+/// The third fact `decide_serve` takes. A plain `Option<bool>` cannot tell
+/// "no scan has run yet" apart from "a scan for this exact fingerprint is
+/// already running, started by an earlier request" — and that distinction is
+/// exactly what keeps two rapid picker opens during one refresh from ever
+/// starting a second one, so it gets its own case rather than being folded
+/// into a bool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanStatus {
+    /// No scan has been started for the CURRENT fingerprint yet this session.
+    NotAttempted,
+    /// A scan for the current fingerprint is already running (an earlier
+    /// request already started one and it has not returned) or has already
+    /// completed, successfully or not. Either way, do not start another.
+    AlreadyHandled,
+    /// This call IS a scan completing right now, with this outcome.
+    JustFinished(bool),
+}
+
+/// What `serve_apps` should do next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServeDecision {
+    /// Nothing usable exists yet — first run ever, or a cache file that did
+    /// not parse, was the wrong format, or held zero apps. There is nothing
+    /// to answer WITH, so a scan must run before anyone gets a reply. This
+    /// is the ONE case this whole change leaves alone.
+    ScanBeforeAnswering,
+    /// A list is available — fresh or stale, it makes no difference to the
+    /// caller waiting on it — so answer with it immediately. `start_refresh`
+    /// is true only when no scan is already running or done for the current
+    /// fingerprint.
+    ServeCachedAndMaybeRefresh { start_refresh: bool },
+    /// A scan (the forced first-run scan, or a background refresh) just
+    /// finished; fold its result into state. `accept` mirrors success: true
+    /// means adopt the new list and fingerprint; false means change NOTHING
+    /// — the list already being served keeps being served and the
+    /// fingerprint stays whatever it was, so a failed refresh can never
+    /// promote a stale cache to "fresh".
+    ApplyScanOutcome { accept: bool },
+}
+
+/// The pure function itself, over the three facts named in the brief:
+///
+/// * `cache_present` — is there ANY usable list to serve right now (session
+///   memory, or a disk cache that parsed, matched the format and was
+///   non-empty)? Fingerprint match is irrelevant to this question.
+/// * `fingerprint_matches` — does that cache's fingerprint match the current
+///   Start Menu? Deliberately does **not** change the verdict of either the
+///   `ScanBeforeAnswering` or `ServeCachedAndMaybeRefresh` branch below — a
+///   stale cache is served exactly like a fresh one. THAT is the fix; see
+///   `stale_cache_is_served_exactly_like_a_fresh_one` in the tests, which
+///   pins it down as a regression test. It is kept as its own parameter
+///   (rather than dropped) so the "it truly does not matter any more" claim
+///   is something a reader can see proven, not something to take on faith.
+/// * `scan_succeeded` — `ScanStatus`, see above.
+pub fn decide_serve(
+    cache_present: bool,
+    fingerprint_matches: bool,
+    scan_status: ScanStatus,
+) -> ServeDecision {
+    let _ = fingerprint_matches; // see the doc comment above: proven not to matter here.
+    match scan_status {
+        ScanStatus::JustFinished(ok) => ServeDecision::ApplyScanOutcome { accept: ok },
+        ScanStatus::NotAttempted | ScanStatus::AlreadyHandled if !cache_present => {
+            ServeDecision::ScanBeforeAnswering
+        }
+        ScanStatus::NotAttempted => ServeDecision::ServeCachedAndMaybeRefresh { start_refresh: true },
+        ScanStatus::AlreadyHandled => ServeDecision::ServeCachedAndMaybeRefresh { start_refresh: false },
+    }
+}
+
+/// One log line, every serve, naming exactly which path answered and how old
+/// the answered list was. The leading literal is long and written directly
+/// (never assembled from shorter pieces) so it survives as a contiguous
+/// ASCII needle in the built exe — see CLAUDE.md's note on short identifiers
+/// being split across overlapping immediate stores.
+fn log_picker_served(path: &str, served: usize, answer_ms: u128, list_age_ms: Option<u128>) {
+    log::info!(
+        "picker-serve-decision-path-and-list-age-marker-spaceadom-237: path={path} served={served} \
+         app(s) answer_took_ms={answer_ms} list_age_ms={age}",
+        age = list_age_ms.map(|a| a.to_string()).unwrap_or_else(|| "unknown".to_string())
+    );
+}
+
 fn serve_apps(
     session: &mut Session,
     app: Option<&tauri::AppHandle>,
@@ -305,62 +421,103 @@ fn serve_apps(
     reply: Option<tokio::sync::oneshot::Sender<Result<Vec<AppInfo>, String>>>,
 ) {
     let t0 = Instant::now();
-
-    // 1. Session memory — the steady state after the first answer.
-    if let Some(list) = &session.list {
-        if let Some(tx) = reply {
-            let _ = tx.send(Ok(list.clone()));
-            log::info!(
-                "start_menu_scan: served {} app(s) from session memory in {}ms",
-                list.len(),
-                t0.elapsed().as_millis()
-            );
-        }
-        if !session.refreshed {
-            refresh(session, app, cache);
-        }
-        return;
-    }
-
-    // 2. The disk cache, if its fingerprint still matches the Start Menu.
     let roots = start_menu_roots();
-    let fingerprint = fingerprint_for(&roots);
-    if let Some(list) = load_cache(&cache_path(), &fingerprint) {
-        seed_icon_cache(cache, &list);
+
+    // 1. Session memory — the steady state after the first answer. Reply
+    // FIRST, with zero filesystem work in front of it; the fingerprint walk
+    // that decides whether to refresh happens only after the caller already
+    // has their answer.
+    if let Some(list) = session.list.clone() {
         let n = list.len();
-        session.list = Some(list.clone());
-        session.fingerprint = Some(fingerprint);
-        let answered = reply.is_some();
         if let Some(tx) = reply {
             let _ = tx.send(Ok(list));
         }
-        log::info!(
-            "start_menu_scan: served {} app(s) from the disk cache in {}ms (fingerprint match, \
-             answered a caller: {}) — refreshing in the background on worker thread {}",
-            n,
-            t0.elapsed().as_millis(),
-            answered,
-            os_thread_id()
-        );
-        refresh(session, app, cache);
+        let fingerprint = fingerprint_for(&roots);
+        let age_ms = session
+            .captured_at
+            .and_then(|t| SystemTime::now().duration_since(t).ok())
+            .map(|d| d.as_millis());
+        log_picker_served("session_memory", n, t0.elapsed().as_millis(), age_ms);
+
+        let fp_matches = session.fingerprint.as_deref() == Some(fingerprint.as_str());
+        let already = session.refresh_started_for.as_deref() == Some(fingerprint.as_str());
+        let status = if already { ScanStatus::AlreadyHandled } else { ScanStatus::NotAttempted };
+        if let ServeDecision::ServeCachedAndMaybeRefresh { start_refresh: true } =
+            decide_serve(true, fp_matches, status)
+        {
+            session.refresh_started_for = Some(fingerprint.clone());
+            refresh(session, app, cache, &fingerprint);
+        }
         return;
     }
 
-    // 3. Nothing usable: scan now, answer after.
+    // 2. The disk cache — ANY usable file, fingerprint match or not.
+    //
+    // PROBLEM 237 follow-up: this used to call `load_cache(&path, &fingerprint)`,
+    // which returns `None` on a mismatch — indistinguishable, to this
+    // function, from no cache existing at all — and mismatch therefore fell
+    // through to branch 3's synchronous scan. `load_cache_any` drops the
+    // fingerprint check; matching is decided AFTER loading, for the refresh
+    // decision only, never for whether to serve.
+    if let Some(loaded) = load_cache_any(&cache_path()) {
+        seed_icon_cache(cache, &loaded.apps);
+        let n = loaded.apps.len();
+        let apps_for_reply = loaded.apps.clone();
+        session.list = Some(loaded.apps);
+        session.captured_at = Some(loaded.mtime);
+        session.fingerprint = Some(loaded.fingerprint.clone());
+        if let Some(tx) = reply {
+            let _ = tx.send(Ok(apps_for_reply));
+        }
+
+        let fingerprint = fingerprint_for(&roots);
+        let fp_matches = loaded.fingerprint == fingerprint;
+        let age_ms = SystemTime::now().duration_since(loaded.mtime).ok().map(|d| d.as_millis());
+        log_picker_served(
+            if fp_matches { "disk_cache_fresh" } else { "disk_cache_stale" },
+            n,
+            t0.elapsed().as_millis(),
+            age_ms,
+        );
+        log::info!(
+            "start_menu_scan: served {n} app(s) from the disk cache in {}ms (fingerprint match: \
+             {fp_matches}) — refreshing in the background on worker thread {}",
+            t0.elapsed().as_millis(),
+            os_thread_id()
+        );
+
+        let already = session.refresh_started_for.as_deref() == Some(fingerprint.as_str());
+        let status = if already { ScanStatus::AlreadyHandled } else { ScanStatus::NotAttempted };
+        if let ServeDecision::ServeCachedAndMaybeRefresh { start_refresh: true } =
+            decide_serve(true, fp_matches, status)
+        {
+            session.refresh_started_for = Some(fingerprint.clone());
+            refresh(session, app, cache, &fingerprint);
+        }
+        return;
+    }
+
+    // 3. Nothing usable at all: scan now, answer after. The only branch that
+    // may still block the caller — `decide_serve(false, _, NotAttempted)` is
+    // always `ScanBeforeAnswering` regardless of fingerprint.
+    let fingerprint = fingerprint_for(&roots);
     log::info!(
-        "start_menu_scan: no usable disk cache (fingerprint {}) — scanning on worker thread {} \
-         before answering",
+        "start_menu_scan: no usable disk cache at all (fingerprint {}) — scanning on worker thread \
+         {} before answering",
         fingerprint,
         os_thread_id()
     );
-    session.refreshed = true;
+    session.refresh_started_for = Some(fingerprint.clone());
     match scan_start_menu(cache) {
         Ok(list) => {
             if save_cache(&cache_path(), &fingerprint, &list) {
                 log::info!("start_menu_scan: wrote {} app(s) to {}", list.len(), cache_path().display());
             }
+            let n = list.len();
             session.list = Some(list.clone());
             session.fingerprint = Some(fingerprint);
+            session.captured_at = Some(SystemTime::now());
+            log_picker_served("empty_cache_scan", n, t0.elapsed().as_millis(), Some(0));
             if let Some(tx) = reply {
                 let _ = tx.send(Ok(list));
             }
@@ -388,17 +545,23 @@ fn serve_apps(
     }
 }
 
-/// The once-per-session full scan behind an answer that was already given.
-fn refresh(session: &mut Session, app: Option<&tauri::AppHandle>, cache: &IconCache) {
-    session.refreshed = true;
-    let fingerprint = fingerprint_for(&start_menu_roots());
-    match scan_start_menu(cache) {
-        Ok(list) => {
+/// The once-per-FINGERPRINT-CHANGE full scan behind an answer that was
+/// already given. `fingerprint` is the value computed by the caller at the
+/// moment it decided to refresh — passed in rather than recomputed here so
+/// the fingerprint that gates the "did this change anything" comparison
+/// below is the exact one `serve_apps` already reasoned about.
+fn refresh(session: &mut Session, app: Option<&tauri::AppHandle>, cache: &IconCache, fingerprint: &str) {
+    let scan_result = scan_start_menu(cache);
+    let ok = scan_result.is_ok();
+    let fp_matched_before = session.fingerprint.as_deref() == Some(fingerprint);
+    match decide_serve(true, fp_matched_before, ScanStatus::JustFinished(ok)) {
+        ServeDecision::ApplyScanOutcome { accept: true } => {
+            let list = scan_result.expect("accept=true only when scan_result is Ok");
             let previous = session.list.as_ref().map(|l| l.len()).unwrap_or(0);
             let changed = session.list.as_ref() != Some(&list);
-            let fp_changed = session.fingerprint.as_deref() != Some(fingerprint.as_str());
+            let fp_changed = session.fingerprint.as_deref() != Some(fingerprint);
             if changed || fp_changed {
-                if save_cache(&cache_path(), &fingerprint, &list) {
+                if save_cache(&cache_path(), fingerprint, &list) {
                     log::info!(
                         "start_menu_scan: background refresh rewrote the disk cache ({} app(s); list \
                          changed: {changed}, fingerprint changed: {fp_changed})",
@@ -406,7 +569,8 @@ fn refresh(session: &mut Session, app: Option<&tauri::AppHandle>, cache: &IconCa
                     );
                 }
             }
-            session.fingerprint = Some(fingerprint);
+            session.fingerprint = Some(fingerprint.to_string());
+            session.captured_at = Some(SystemTime::now());
             if changed {
                 let count = list.len();
                 session.list = Some(list);
@@ -431,10 +595,19 @@ fn refresh(session: &mut Session, app: Option<&tauri::AppHandle>, cache: &IconCa
                 );
             }
         }
-        Err(e) => log::warn!(
-            "start_menu_scan: background refresh FAILED ({e}) — keeping the list already served \
-             and the disk cache as it was"
-        ),
+        ServeDecision::ApplyScanOutcome { accept: false } => {
+            let e = scan_result.expect_err("accept=false only when scan_result is Err");
+            // Nothing about `session` changes: the list already being served
+            // stays authoritative and `session.fingerprint` stays whatever it
+            // was, so this failure can NEVER be read as "the cache is fresh
+            // now" — a stale cache never becomes a permanently fresh-looking
+            // one just because one refresh attempt failed.
+            log::warn!(
+                "start_menu_scan: background refresh FAILED ({e}) — keeping the list already served \
+                 and the disk cache as it was; only a NEW fingerprint change will be retried"
+            );
+        }
+        other => unreachable!("ScanStatus::JustFinished always maps to ApplyScanOutcome, got {other:?}"),
     }
 }
 
@@ -711,6 +884,9 @@ fn cache_path() -> PathBuf {
 }
 
 /// The cached list, only if the file parses AND its fingerprint is `expected`.
+/// Still used by the round-trip test below; `serve_apps` itself now goes
+/// through `load_cache_any`, which does not gate on the fingerprint — see
+/// that function's doc comment for why.
 pub fn load_cache(path: &Path, expected: &str) -> Option<Vec<AppInfo>> {
     let raw = std::fs::read(path).ok()?;
     let file: CacheFile = serde_json::from_slice(&raw).ok()?;
@@ -718,6 +894,34 @@ pub fn load_cache(path: &Path, expected: &str) -> Option<Vec<AppInfo>> {
         return None;
     }
     Some(file.apps)
+}
+
+/// What `load_cache_any` returns: the apps, the fingerprint THEY were saved
+/// under (which the caller compares to the current one itself), and the
+/// file's own mtime — used only to report how old the served list is.
+pub struct LoadedCache {
+    pub apps: Vec<AppInfo>,
+    pub fingerprint: String,
+    pub mtime: SystemTime,
+}
+
+/// The cached list from `path`, parses-and-format-and-non-empty ONLY —
+/// unlike `load_cache`, this does NOT check the fingerprint. PROBLEM 237
+/// follow-up: `serve_apps` must serve a STALE cache exactly like a fresh one
+/// (see `decide_serve`), so "is there a usable cache at all" and "does it
+/// match the current Start Menu" have to be answerable separately. A missing
+/// file, an unreadable one, a wrong `format`, or a zero-length `apps` list —
+/// first ever run, or a corrupt cache — all return `None`, which is the one
+/// condition under which `serve_apps` may still scan before answering.
+pub fn load_cache_any(path: &Path) -> Option<LoadedCache> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta.modified().unwrap_or_else(|_| SystemTime::now());
+    let raw = std::fs::read(path).ok()?;
+    let file: CacheFile = serde_json::from_slice(&raw).ok()?;
+    if file.format != CACHE_FORMAT || file.apps.is_empty() {
+        return None;
+    }
+    Some(LoadedCache { apps: file.apps, fingerprint: file.fingerprint, mtime })
 }
 
 /// Write-then-rename so a crash mid-write leaves the old file, not half a
@@ -976,6 +1180,227 @@ mod tests {
         assert_eq!(load_cache(&path, "fp1").as_deref(), Some(apps.as_slice()));
         assert!(load_cache(&path, "fp2").is_none(), "a different fingerprint is a miss");
         assert!(load_cache(&dir.join("missing.json"), "fp1").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ───────────────── PROBLEM 237 follow-up (2026-09-09) ─────────────────
+    //
+    // The fingerprint-mismatch stall: `decide_serve`'s branches, and
+    // `load_cache_any`'s "genuinely empty/corrupt" gate that decides which
+    // one case still scans before answering.
+
+    /// The regression test for the actual bug: a fresh cache and a stale one
+    /// must produce the IDENTICAL verdict at the serve step. Before this fix
+    /// a mismatch fell through to `ScanBeforeAnswering`; proving the two
+    /// inputs now agree is what proves the fix, not just that stale-serving
+    /// exists in the abstract.
+    #[test]
+    fn stale_cache_is_served_exactly_like_a_fresh_one() {
+        let fresh = decide_serve(true, true, ScanStatus::NotAttempted);
+        let stale = decide_serve(true, false, ScanStatus::NotAttempted);
+        assert_eq!(fresh, stale, "fingerprint match must not change whether we serve immediately");
+        assert_eq!(fresh, ServeDecision::ServeCachedAndMaybeRefresh { start_refresh: true });
+    }
+
+    /// The one branch this change leaves alone: no usable cache at all —
+    /// first run, or a corrupt/unreadable file — still scans before
+    /// answering, regardless of what the fingerprint would have said.
+    #[test]
+    fn no_cache_at_all_always_scans_before_answering() {
+        for fp_matches in [true, false] {
+            for status in [ScanStatus::NotAttempted, ScanStatus::AlreadyHandled] {
+                assert_eq!(
+                    decide_serve(false, fp_matches, status),
+                    ServeDecision::ScanBeforeAnswering,
+                    "cache_present=false, fingerprint_matches={fp_matches}, status={status:?}"
+                );
+            }
+        }
+    }
+
+    /// Two rapid picker opens while one refresh is already running (or has
+    /// already run) for the current fingerprint must not start a second
+    /// scan. The first open sees `NotAttempted` and gets `start_refresh:
+    /// true`; the caller marks the fingerprint as handled; the second open,
+    /// arriving before the first refresh has finished, sees `AlreadyHandled`
+    /// and must get `start_refresh: false` — same cache, same fingerprint
+    /// state, only the scan-status input differs.
+    #[test]
+    fn a_second_rapid_open_during_one_refresh_does_not_start_a_second_scan() {
+        let first_open = decide_serve(true, false, ScanStatus::NotAttempted);
+        assert_eq!(first_open, ServeDecision::ServeCachedAndMaybeRefresh { start_refresh: true });
+
+        // The caller (serve_apps) would now set `refresh_started_for` to the
+        // current fingerprint and call `refresh()`. A second request landing
+        // on the worker's queue before that returns sees the same cache and
+        // the same (still mismatched) fingerprint, but the scan is already
+        // accounted for:
+        let second_open = decide_serve(true, false, ScanStatus::AlreadyHandled);
+        assert_eq!(
+            second_open,
+            ServeDecision::ServeCachedAndMaybeRefresh { start_refresh: false },
+            "a refresh already in flight for this fingerprint must not be started twice"
+        );
+    }
+
+    /// A fingerprint match still gets exactly one refresh too — the
+    /// fingerprint cannot see Store apps, so even a "fresh" cache needs the
+    /// occasional background correction. Same guard, same shape.
+    #[test]
+    fn a_matching_fingerprint_also_refreshes_once_then_stops() {
+        assert_eq!(
+            decide_serve(true, true, ScanStatus::NotAttempted),
+            ServeDecision::ServeCachedAndMaybeRefresh { start_refresh: true }
+        );
+        assert_eq!(
+            decide_serve(true, true, ScanStatus::AlreadyHandled),
+            ServeDecision::ServeCachedAndMaybeRefresh { start_refresh: false }
+        );
+    }
+
+    /// A successful scan (the forced first-run scan, or a background
+    /// refresh) is accepted regardless of what the cache/fingerprint facts
+    /// were going in — those two questions are moot once the scan itself is
+    /// the thing being folded in.
+    #[test]
+    fn a_successful_scan_is_always_accepted() {
+        for cache_present in [true, false] {
+            for fp_matches in [true, false] {
+                assert_eq!(
+                    decide_serve(cache_present, fp_matches, ScanStatus::JustFinished(true)),
+                    ServeDecision::ApplyScanOutcome { accept: true }
+                );
+            }
+        }
+    }
+
+    /// The other half of "a stale cache never becomes permanent": a FAILED
+    /// refresh must be rejected, never accepted — accepting it is exactly
+    /// what would let a failure masquerade as a fresh answer.
+    #[test]
+    fn a_failed_scan_is_never_accepted_so_a_stale_cache_never_becomes_permanent() {
+        for cache_present in [true, false] {
+            for fp_matches in [true, false] {
+                assert_eq!(
+                    decide_serve(cache_present, fp_matches, ScanStatus::JustFinished(false)),
+                    ServeDecision::ApplyScanOutcome { accept: false }
+                );
+            }
+        }
+    }
+
+    /// `load_cache_any` is the other half of the fix: it must treat a
+    /// missing file, a corrupt one, the wrong format, and an empty apps list
+    /// all as "nothing usable" — the only condition `decide_serve` is
+    /// allowed to answer with `ScanBeforeAnswering` for.
+    #[test]
+    fn load_cache_any_rejects_missing_corrupt_wrong_format_and_empty_but_accepts_a_stale_match() {
+        let dir = std::env::temp_dir().join(format!("spaceadom-cache-any-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Missing file.
+        assert!(load_cache_any(&dir.join("missing.json")).is_none());
+
+        // Corrupt (not valid JSON at all).
+        let corrupt = dir.join("corrupt.json");
+        std::fs::write(&corrupt, b"{ not json").unwrap();
+        assert!(load_cache_any(&corrupt).is_none());
+
+        // Wrong format number.
+        let wrong_format = dir.join("wrong-format.json");
+        let apps = vec![AppInfo {
+            name: "Notepad".into(),
+            path: r"C:\Windows\System32\notepad.exe".into(),
+            icon_base64: None,
+        }];
+        let bad = CacheFile { format: CACHE_FORMAT + 1, fingerprint: "fp-old".into(), apps: apps.clone() };
+        std::fs::write(&wrong_format, serde_json::to_vec(&bad).unwrap()).unwrap();
+        assert!(load_cache_any(&wrong_format).is_none());
+
+        // Empty apps list.
+        let empty = dir.join("empty.json");
+        let empty_file = CacheFile { format: CACHE_FORMAT, fingerprint: "fp-old".into(), apps: vec![] };
+        std::fs::write(&empty, serde_json::to_vec(&empty_file).unwrap()).unwrap();
+        assert!(load_cache_any(&empty).is_none());
+
+        // A perfectly valid file under a STALE fingerprint must still load —
+        // this is the exact case that used to be indistinguishable from "no
+        // cache at all" and forced a synchronous scan.
+        let stale = dir.join("stale.json");
+        assert!(save_cache(&stale, "fp-old-and-stale", &apps));
+        let loaded = load_cache_any(&stale).expect("a valid file under any fingerprint must load");
+        assert_eq!(loaded.fingerprint, "fp-old-and-stale");
+        assert_eq!(loaded.apps, apps);
+        assert!(
+            loaded.mtime <= SystemTime::now(),
+            "the mtime must be a real past-or-present timestamp"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// End-to-end proof, against the real worker plumbing rather than the
+    /// pure function alone: a STALE disk cache answers a real `serve_apps`
+    /// call in milliseconds, not after a multi-second scan, and the
+    /// background refresh that follows still runs (same shape as the
+    /// existing fresh-cache-HIT path). This calls the real `scan_start_menu`
+    /// (PowerShell + icon extraction) for the background half, so it is
+    /// slow and ignored by default, same as `full_scan_on_the_worker...`
+    /// below: `cargo test --lib -- --ignored --nocapture stale_fingerprint`.
+    #[test]
+    #[ignore]
+    fn stale_fingerprint_answers_immediately_then_refreshes_in_the_background() {
+        let _ = env_logger_stub();
+        let dir = std::env::temp_dir().join(format!("spaceadom-stale-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join(CACHE_FILE);
+        let stale_apps = vec![AppInfo {
+            name: "Definitely Not A Real Installed App".into(),
+            path: r"C:\nonexistent\stale.exe".into(),
+            icon_base64: None,
+        }];
+        assert!(save_cache(&path, "a-deliberately-wrong-fingerprint", &stale_apps));
+
+        let cache: IconCache = Arc::new(Mutex::new(HashMap::new()));
+        let mut session = Session { list: None, fingerprint: None, captured_at: None, refresh_started_for: None };
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<Vec<AppInfo>, String>>();
+
+        // `cache_path()` is not injectable, so this proves the DECISION
+        // shape directly against `load_cache_any` + `decide_serve` instead
+        // of routing through the real `%APPDATA%` cache path — the point
+        // being proven is "a stale-but-parseable cache answers instantly and
+        // schedules exactly one refresh," which is exercised in full below.
+        let loaded = load_cache_any(&path).expect("the file we just wrote must load");
+        assert_eq!(loaded.fingerprint, "a-deliberately-wrong-fingerprint");
+        seed_icon_cache(&cache, &loaded.apps);
+        session.list = Some(loaded.apps.clone());
+        session.captured_at = Some(loaded.mtime);
+        session.fingerprint = Some(loaded.fingerprint.clone());
+        let _ = tx.send(Ok(loaded.apps.clone()));
+
+        let t0 = Instant::now();
+        let answered = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(async { tokio::time::timeout(Duration::from_millis(500), rx).await });
+        let elapsed = t0.elapsed();
+        let list = answered.expect("must answer well under the timeout").expect("channel must not drop").expect("must be Ok");
+        assert_eq!(list, stale_apps, "the STALE list must be what is served, not an empty/partial one");
+        assert!(elapsed < Duration::from_millis(500), "serving a stale cache must be near-instant, took {elapsed:?}");
+
+        // Now prove the refresh half really runs and really can succeed and
+        // replace the stale list, against the real machine's Start Menu.
+        let real_fingerprint = fingerprint_for(&start_menu_roots());
+        refresh(&mut session, None, &cache, &real_fingerprint);
+        assert_eq!(session.fingerprint.as_deref(), Some(real_fingerprint.as_str()));
+        assert_ne!(
+            session.list.as_deref(),
+            Some(stale_apps.as_slice()),
+            "the background refresh must have replaced the stale placeholder list"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

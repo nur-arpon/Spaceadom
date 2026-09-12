@@ -387,7 +387,42 @@ $bytes = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($Exe))
 #         episode. Before 1.0.107 the clock reset on every quiet tick, so with
 #         the mouse moving the bound could never expire and this line could not
 #         print at all.
-foreach ($m in 'rival install', 'start_menu_scan:', 'hud-band-count-changed', 'restored to TRUE FULLSCREEN', 'picker_worker: st-picker-scan started (os thread ', 'rival install: REFUSING the elevated removal for ', 'updater: install kind decided', 'installing SILENTLY now (setup.exe /S /UPDATE /R /ARGS', 'theme: watching the Windows app light/dark setting every ', 'rival install: this PACKAGED copy found an unpackaged per-user install beside it (PROBLEM 250 follow-up ', 'safe-mode: this process is the surviving single instance ', 'the one-time config snapshot would copy config.json and the backups into a subfolder', 'callback-only counters (PROBLEM 236): nothing but a hook proc can move them', 'the primary keyboard hook saw this Space-down and delivered it', 'own-window fallback: Space-down came from the dashboard page (PROBLEM 257 fallback), hook silent', 'The keyboard hook did NOT see this Space; the page did, and', "PROVEN' and 'own-window fallback:'.", 'MECHANISM (PROBLEM 260): when a WH_KEYBOARD_LL callback overruns LowLevelHooksTimeout', "the old line read a 60s counter and printed '#1' three times). Handles: keyboard ", ' consecutive forced repair(s) delivered no keyboard callback, so the backoff is engaged and the next repair waits ', 'own-window fallback: the re-hook tore down a live fallback hold (PROBLEM 261) ', 'own-window fallback: reaping a fallback Space-hold (', "Left standing this is a ring on screen with the pointer still arming chips behind it, which is PROBLEM 218's failure on the path PROBLEM 218's reaper cannot see", 'own-window-holds-reaped(page stopped talking mid-hold):', 'stale-hold-reaped-because-the-keyboard-is-proven-deaf-spaceadom', 'modifier-active-latched-past-the-bound-with-no-keyboard-callbacks-spaceadom', 'repair-tore-down-a-hold-that-predated-it-spaceadom', 'deferral-episode-bound-expired-proceeding-with-the-repair-spaceadom') {
+# 1.0.108's set (2026-09-12 - PROBLEM 263 middle-button ring, PROBLEM 237
+# follow-up picker stale-cache serve, PROBLEM 265 overlay early boot).
+# TWENTY-EIGHT CONTROLS: the whole 1.0.107 list, 1.0.107's own four promoted
+# to controls because 1.0.107 is the installed build this release is measured
+# against. All 28 were re-grepped against src-tauri/src (continuations
+# rejoined) before this list was written: 28/28 present, nothing retired.
+# The last THREE are NEW in 1.0.108 and must read False against the installed
+# 1.0.107. Each is the LEADING piece of a `log::info!` format string (the text
+# before the first `{}`), so format_args! keeps it as one contiguous &'static
+# str in .rodata. Each stops short of any em dash that follows it:
+#   'middle-button ring: the-guide-hud-ring-was-raised-by-a-middle-mouse-button-hold-spaceadom'
+#       - engine/mod.rs, the MiddleDown -> SpaceDown normalisation at the top
+#         of `dispatch`. Printed once per middle-button hold. NEVER law 6's
+#         proof (CLAUDE.md law 6: the keyboard hook was never asked anything).
+#   'picker-serve-decision-path-and-list-age-marker-spaceadom-237:'
+#       - picker_worker.rs `log_picker_served`, printed on every picker
+#         answer with which path served it and how old the list was.
+#   'overlay usable for the Guide HUD'
+#       - lib.rs, the `overlay: configured` line now carries the ms since
+#         process start (overlay_boot::since_start), PROBLEM 265.
+# 1.0.109's set (2026-09-12 - PROBLEM 266, the logon task registered through
+# the Task Scheduler COM API instead of schtasks.exe /Create). THIRTY-ONE
+# CONTROLS: the whole 1.0.108 list, 1.0.108's own three promoted to controls
+# because 1.0.108 is the installed build this release is measured against.
+# The last ONE is NEW in 1.0.109 and must read False against the installed
+# 1.0.108. It is the LEADING piece of a `log::info!` format string in
+# startup.rs (the text before the em dash and the first `{}`), so format_args!
+# keeps it as one contiguous &'static str in .rodata:
+#   'startup: logon task registered for this user via the Task Scheduler API'
+#       - startup.rs `ensure_startup_task`, printed once per launch when
+#         Register-ScheduledTask (per-user AtLogOn trigger, Limited run level,
+#         PT10S delay) succeeded; the HKCU Run value is removed right after.
+#         Before 1.0.109 every non-admin install fell to the Run key because
+#         `schtasks /Create /SC ONLOGON` writes an any-user trigger that only an
+#         administrator may create (PROBLEM 64's real cause).
+foreach ($m in 'rival install', 'start_menu_scan:', 'hud-band-count-changed', 'restored to TRUE FULLSCREEN', 'picker_worker: st-picker-scan started (os thread ', 'rival install: REFUSING the elevated removal for ', 'updater: install kind decided', 'installing SILENTLY now (setup.exe /S /UPDATE /R /ARGS', 'theme: watching the Windows app light/dark setting every ', 'rival install: this PACKAGED copy found an unpackaged per-user install beside it (PROBLEM 250 follow-up ', 'safe-mode: this process is the surviving single instance ', 'the one-time config snapshot would copy config.json and the backups into a subfolder', 'callback-only counters (PROBLEM 236): nothing but a hook proc can move them', 'the primary keyboard hook saw this Space-down and delivered it', 'own-window fallback: Space-down came from the dashboard page (PROBLEM 257 fallback), hook silent', 'The keyboard hook did NOT see this Space; the page did, and', "PROVEN' and 'own-window fallback:'.", 'MECHANISM (PROBLEM 260): when a WH_KEYBOARD_LL callback overruns LowLevelHooksTimeout', "the old line read a 60s counter and printed '#1' three times). Handles: keyboard ", ' consecutive forced repair(s) delivered no keyboard callback, so the backoff is engaged and the next repair waits ', 'own-window fallback: the re-hook tore down a live fallback hold (PROBLEM 261) ', 'own-window fallback: reaping a fallback Space-hold (', "Left standing this is a ring on screen with the pointer still arming chips behind it, which is PROBLEM 218's failure on the path PROBLEM 218's reaper cannot see", 'own-window-holds-reaped(page stopped talking mid-hold):', 'stale-hold-reaped-because-the-keyboard-is-proven-deaf-spaceadom', 'modifier-active-latched-past-the-bound-with-no-keyboard-callbacks-spaceadom', 'repair-tore-down-a-hold-that-predated-it-spaceadom', 'deferral-episode-bound-expired-proceeding-with-the-repair-spaceadom', 'middle-button ring: the-guide-hud-ring-was-raised-by-a-middle-mouse-button-hold-spaceadom', 'picker-serve-decision-path-and-list-age-marker-spaceadom-237:', 'overlay usable for the Guide HUD', 'startup: logon task registered for this user via the Task Scheduler API') {
   Add-Content $Out ("rust marker '{0}': {1}" -f $m, ($bytes -match [regex]::Escape($m)))
 }
 

@@ -42,6 +42,565 @@ can fail and the write still runs.
 ================================================================================
 -->
 
+## 2026-09-12 — Claude (1.0.109 ship agent) — **SHIPPED PROBLEM 266 (the logon task is registered through the Task Scheduler COM API; the HKCU Run value is gone) AS 1.0.109.** Built signed (NSIS + MSI + both `.sig`), MSIX built unsigned and NOT installed, NSIS installed on this machine and proved. Gates: 607/0 tests, clippy 0, tsc 0. **The task is registered, enabled, per-user, +10 s, least-privilege, and the Run value is removed — all measured through `explorer.exe`. The thing it was built to change, the seconds between logon and process start, cannot be measured until the owner logs off and on again. Law 6 and the middle-button ring are UNPROVEN on this build.**
+
+**WHAT THIS ENTRY IS.** The build-and-install half of PROBLEM 266, whose code
+change (`src-tauri/src/startup.rs` only: `register_task_script`,
+`run_powershell`, `TASK_DELAY = "PT10S"`, `harden_task_settings` folded into
+the registration, two unit tests) was already on the tree, uncommitted, when
+this session began. Changed by this session: the three version files
+(`package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`;
+`Cargo.lock` followed via the build), the `set SETUP=` line in
+`scripts/install-real.cmd`, the marker list in `scripts/install-proof.ps1`
+(1.0.108's three promoted to controls, one new appended, comment block added),
+`V14_FIXES_AND_CODE.md` (PROBLEM 266 entry + a correction note under
+PROBLEM 64), `CLAUDE.md` (the autostart paragraph near the top rewritten), and
+the three owner-facing docs. Probe scripts and every raw output are kept at
+`D:\Claude-Projects\_probe\p109\` (outside the repo), beside the owner's own
+`task-probe*` files, which were read and not touched.
+
+**THE SYMPTOM, in numbers.** Winlogon 7001 (logon) at **11:19:57**; the
+1.0.108 `logger initialised` line at **11:21:43.898** — **107 s**. The
+1.0.107 boot at 10:39:09 → 10:40:29: 80 s. Both were HKCU Run launches,
+because `startup: task create failed (ERROR: Access is denied.) — using HKCU
+Run autostart instead` printed on every launch since 1.0.3 (7 times in the
+current log). PROBLEM 64 had blamed the Task Scheduler root folder; the
+owner's probes this morning (`_probe\p109\task-probe*.txt`) showed
+`schtasks /Create /SC ONLOGON` denied with and without `/RU`, while
+`Register-ScheduledTask` with `New-ScheduledTaskTrigger -AtLogOn -User
+$env:USERNAME` and a `-LogonType Interactive -RunLevel Limited` principal
+registered fine non-elevated, and `schtasks /Change /Run /Query /Delete` all
+worked on the result. The denial was the ANY-USER trigger schtasks writes, not
+the folder.
+
+**GATES, on the tree before the bump.** `npx tsc --noEmit` 0. `cargo test
+--lib` **607 passed, 0 failed, 6 ignored** in 1.13 s. `cargo clippy
+--all-targets` **0 warnings**. `npm run build` clean (vite 1.76 s).
+
+**THE CONTAINER DIFFERENTIAL, measured before anything was trusted (PROBLEM
+143).** Same path string, two readers:
+
+| Reader | `%LOCALAPPDATA%\Spaceadom\spaceadom.exe` | `%APPDATA%\Spaceadom\config.json` |
+| --- | --- | --- |
+| agent shell (in container) | **1.0.53, 14,109,184 B, 2026-08-18** | 47,761 B, SHA `7491…0EEE` |
+| `explorer.exe`-launched probe | **1.0.108, 21,930,496 B, 2026-09-12 11:00:30** | 87,867 B, SHA `0F3B…1D70` |
+
+Two different files at one path in both columns; every machine-facing
+reading below came through the second reader. (The real config grew from
+87,839 B at the 1.0.108 ship to 87,867 B at 11:15:41 — the owner's save
+between the two ships wrote `middle_button_ring: true`.)
+
+**THE MARKER DIFFERENTIAL, all three columns read through `explorer.exe`.**
+Marker: `startup: logon task registered for this user via the Task Scheduler
+API` — the leading `&'static str` of the new `log::info!` in `startup.rs`,
+stopping before the em dash. 31 controls = the whole 1.0.108 list; negative
+control = a string never written into any build.
+
+| Where | Reading |
+| --- | --- |
+| Installed **1.0.108** (21,930,496 B) before install | 31/31 controls **True**, new marker **False**, negative False |
+| Fresh **1.0.109** `target\release\spaceadom.exe` (21,929,984 B) before install | 31/31 **True**, new marker **True**, negative False |
+| Installed **1.0.109** (21,929,984 B) after install | 31/31 **True**, new marker **True**, negative False; `install-proof.ps1`: 32/32 Rust markers True, 30/30 bundle markers True |
+
+**ARTIFACTS**, all under `src-tauri\target\release\bundle\`, signed from the
+PowerShell tool with the key path and password read into the two env vars
+(never echoed; the Bash tool would have rewritten a `/`-leading password —
+CLAUDE.md):
+
+- `nsis\Spaceadom_1.0.109_x64-setup.exe` — **8,592,256 B**, 11:39:11 (+ `.sig` 424 B, 11:39:27)
+- `msi\Spaceadom_1.0.109_x64_en-US.msi` — **13,778,944 B**, 11:39:20 (+ `.sig` 424 B, 11:39:27)
+- `msix\Spaceadom_1.0.109_x64.msix` — **10,998,486 B**, 11:39:40, identity `LOCALTEST.Spaceadom 1.0.109.0`, validation passed (9 files in, 10 out), **unsigned, NOT installed**. Built with `pwsh.exe -File scripts/build-msix.ps1`.
+
+The repo's `posttauri` hook (`scripts/archive-build.mjs`) ran as on every
+build: it copied both installers into `all-versions/` and **removed the
+1.0.108 setup.exe and .msi from `share-spaceadom/`** — a script-driven
+deletion, recorded because the agent rule forbids the agent doing it by hand.
+The two `.sig` files were then copied into `all-versions/` beside the
+installers by this session (`cp -n`; nothing overwritten; both archived
+installers `cmp` identical to the bundle originals).
+
+**STARTUP STATE BEFORE THE INSTALL (the PROBLEM 266 baseline),** read via
+explorer with installed 1.0.108 running as PID 35456 (the 11:21:43 autostart
+process): `schtasks /Query /TN Spaceadom /XML` → `ERROR: The system cannot
+find the file specified.` (exit 1). HKCU Run `Spaceadom` =
+`"C:\Users\beamu\AppData\Local\Spaceadom\spaceadom.exe" --autostart`.
+`whoami` = `arpons\beamu`.
+
+**THE INSTALL, via one `explorer.exe`-launched wrapper
+(`_probe\p109\install-109.cmd`)** that snapshotted config + PID, called the
+repo's `scripts\install-real.cmd`, waited 45 s, and ran `postcheck.ps1`.
+Installer exit code 0, which proves nothing; what follows does.
+
+- **FileVersion 1.0.109**, 21,929,984 B, at `%LOCALAPPDATA%\Spaceadom\spaceadom.exe`; the log banner names the same byte count.
+- **New PID: 35456** (1.0.108, started 11:21:43) **→ 36260** (started 11:43:55).
+- **Startup 1,178 ms** (logger 11:43:55.531 → `dashboard_ready` 11:43:56.709), a MANUAL launch by `install-real.cmd`. 1.0.108's manual launch was 895 ms; not investigated — the difference is inside the webview boot (`+484ms` page-side), and the 266 thread had not run yet.
+- `overlay: configured … overlay usable for the Guide HUD 1026 ms after app start (PROBLEM 265)`; `picker-serve-decision-path-and-list-age-marker-spaceadom-237: path=disk_cache_stale served=248 app(s) answer_took_ms=85` — both 1.0.108 features printed again on this boot.
+- **Config SHA-256 identical across the install:** `0F3B09061E3692BD5420B3AEC258B4CF73F37643DDC5CF8B99F43B3B664D1D70`, 87,867 B, lastWrite 11:15:41 both before and after; semantic map compare 74,127 == 74,127 identical; 5 profiles both sides; `run_at_startup: true`, `middle_button_ring: true`.
+- **0 MsiInstaller / RestartManager events inside the install window** (stamped 11:43:49), 0 of ids 1033/1040/1042. **Control:** 10 events in the preceding 2 h — the 11707+1033 pairs from `light.exe` validating the 1.0.108 `.msi` (11:01:00) and the 1.0.109 one (11:39:27), plus a Microsoft GameInput 1040/1042 transaction at 11:20:00 that is Windows' own. Without that non-zero control the 0 would be unreadable.
+- **Overlay ALIVE:** 1 × `overlay: configured`, 0 `REBUILD FAILED`, 0 `OVERLAY_DISABLED`. **Hook:** 1 × `WH_KEYBOARD_LL + WH_MOUSE_LL installed`, 0 reference-install failures, 0 `KEYBOARD DEAF`, 0 `FORCED REPAIR` since the banner. Safe mode not entered; `safe-mode: alive 30s — boot counter reset to 0`. Rival scan: one Spaceadom. Updater kind **Nsis**; `1.0.109 is the newest release on the manifest`. 0 `[ERROR]`/panics; 8 `[WARN]` (spacedesk + PowerToys conflict notices, `overlay-js: listeners registered OK`).
+- **Installed exe newer than newest `dist2` file (11:37:09): True.** The `mtime > setup.exe` criterion reads False for the reason the 1.0.108 entry documents — NSIS preserves the packed file's 11:38:52 timestamp.
+
+**THE PROBLEM 266 PROOF.** 1.7 s after the banner, on the `st-startup-task`
+thread:
+
+```text
+11:43:57.304  startup: logon task registered for this user via the Task Scheduler API — 'Spaceadom' → C:\Users\beamu\AppData\Local\Spaceadom\spaceadom.exe (logon +PT10S, least-privilege, battery-safe)
+11:43:57.305  startup: HKCU Run autostart removed
+11:43:57.413  startup: task 'Spaceadom' enabled
+```
+
+`schtasks /Query /TN Spaceadom /XML` (via explorer) now exits 0. Fields
+found, each by regex against the XML: `<Command>` = the installed exe path
+**True**; `<Arguments>--autostart</Arguments>` **True**; `<UserId>` inside
+`<LogonTrigger>` (`ARPONS\beamu`) **True**; `<Delay>PT10S</Delay>` **True**;
+`<LogonType>InteractiveToken</LogonType>` **True**;
+`<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>` **True**;
+`<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>` **True**;
+`<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>` **True**;
+`<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>` **True**;
+`<StartWhenAvailable>true</StartWhenAvailable>` **True**. `/Query /FO LIST /V`:
+`Status: Ready`, `Scheduled Task State: Enabled`, `Logon Mode: Interactive
+only`, `Run As User: beamu`, `Task To Run: …\spaceadom.exe --autostart`.
+**HKCU Run `Spaceadom`: GONE** — `<absent>` at 11:44:40 and again at 11:45:24;
+`_proof-only.cmd` re-run after the boot prints `Run key:` empty. (The
+`install-proof.ps1` pass inside `install-real.cmd` still printed the Run value,
+because it runs BEFORE the app is started; the removal is the app's own, on
+its first launch — that IS the migration path for every existing install.)
+
+**A MEASUREMENT TRAP, met and resolved in the same session:** two of the
+probe's XML regexes read **False** — `<RunLevel>LeastPrivilege</RunLevel>` and
+`<Settings><Enabled>true</Enabled>`. `schtasks /Query /XML` omits elements
+that hold their DEFAULT value, and both do. A follow-up explorer-launched
+probe (`taskcheck.ps1`) through the COM cmdlets read `Principal.RunLevel:
+Limited`, `Settings.Enabled: True`, `State: Ready`, trigger
+`MSFT_TaskLogonTrigger Enabled True UserId ARPONS\beamu Delay PT10S`, and
+`Export-ScheduledTask` printed `<RunLevel>LeastPrivilege</RunLevel>` and
+`<Enabled>true</Enabled>` explicitly. Same class as CLAUDE.md's marker rule:
+a False from a check that cannot see what it is looking for is not a finding.
+
+**UNPROVEN, IN CAPITALS.** Counted in the real `debug.log` since the 1.0.109
+banner at line 7608 (64 lines at probe time):
+
+```text
+hold start (hold #<DIGIT>) … over own window            0   (law 6 half 1)
+guide_hud: shown over own window                        0   (law 6 half 2)
+own-window fallback:                                    0   (PROBLEM 259, informational)
+middle-button ring: the-guide-hud-ring-was-raised-...   0   (PROBLEM 263)
+```
+
+- **THE LOGON-TIME IMPROVEMENT IS UNMEASURED.** The task's `Last Run Time` is `11/30/1999` — it has never fired. It fires at the owner's next logon; that boot's `logger initialised` timestamp minus the Winlogon 7001 timestamp is the number this release exists to change (1.0.107: 80 s; 1.0.108: 107 s; expected ~12 s). Until then the ship report says the task is REGISTERED, not that startup is FASTER.
+- **LAW 6 IS UNPROVEN.** `_proof-only.cmd`, re-run after the boot: *"FAIL - no 'hold start ... over own window' line since the 1.0.109 banner … Until this reads PASS the ship report MUST say UNPROVEN."* An agent cannot inject input from this container (testing laws); it stays UNPROVEN until the owner holds Space with the dashboard focused and the pair appears.
+- **THE MIDDLE-BUTTON RING IS UNPROVEN ON 1.0.109** (0 lines since the banner). It DID run on installed 1.0.108: 41 `middle-button ring:` lines in the whole log, 11:13:26 → 11:30:06, the first `middle-button hold #1 began (hud hold #4) over brave.exe` — the first hardware evidence PROBLEM 263 has, and it belongs to that entry; the owner's six-item checklist there is still the place to record what he saw.
+- **Whole-log controls** for the 0s above: `guide_hud: shown over own window` 9, `hold start (hold #N)` 2,931, `own-window fallback:` 2,933, `KEYBOARD DEAF` 3,653, `startup: task create failed` 7, `startup: HKCU Run autostart set` 7.
+- **NO MSI AND NO MSIX INSTALL WAS PERFORMED**, deliberately. Nothing was committed, tagged or pushed; the pen drive was not touched; the owner's `config.json` was never written.
+
+**FILES THIS SESSION CREATED** (all under `D:\Claude-Projects\_probe\p109\`):
+`markers.ps1`, `markers-controls.txt`, `markers-new.txt`,
+`precheck.ps1/.cmd/.txt`, `fresh.ps1/.cmd/.txt`, `postcheck.ps1/.txt`,
+`install-109.cmd`, `taskcheck.ps1/.cmd/.txt`, `pre2.txt`, `config-pre.json`,
+`config-pre2.json`, `config-post.json`, `npm-build.log`, `tauri-build.log`,
+`msix-build.log`, `proof-only-after-boot.txt`, `fixes-266.md`, `status-109.md`,
+`whatchanged-109.md`, `readme-109.txt`, the `*.new.*` temp copies of each doc,
+and the `_*-done.txt` / `_install-rc.txt` sentinels. In the repo: the 1.0.109
+installers + `.sig`s in `all-versions/`, and the build outputs.
+
+
+## 2026-09-12 — Claude (1.0.108 ship agent) — **SHIPPED PROBLEM 263 (middle-button ring) + PROBLEM 237 follow-up (stale-cache serve) + PROBLEM 265 (overlay early boot) AS 1.0.108.** Built signed (NSIS + MSI + both `.sig`), MSIX built unsigned and NOT installed, NSIS installed on this machine and proved. Gates: 605/0 tests, clippy 0, tsc 0. **One of the three shipped behaviours (the picker stale-cache serve) measured live on the first boot; the overlay early-boot line printed but its autostart improvement is unmeasured until the next logon; the middle-button ring and law 6 are UNPROVEN on hardware.**
+
+**WHAT THIS ENTRY IS.** The build-and-install half of the three entries below
+(2026-09-12 finishing pass, 2026-09-10 PROBLEM 263, and the PROBLEM 265 / 237
+follow-up work), all of which ended "no build, no install". No feature code was
+changed in this session. Changed by this session: the three version files
+(`package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`;
+`Cargo.lock` followed via the build), the `set SETUP=` line in
+`scripts/install-real.cmd`, the marker list in `scripts/install-proof.ps1`
+(1.0.107's four promoted to controls, three new appended, comment block
+added), and the three owner-facing docs. Probe scripts and every raw output
+are kept at `D:\Claude-Projects\_probe\p108\` (outside the repo).
+
+**GATES, on the tree before the bump.** `npx tsc --noEmit` 0. `cargo test
+--lib` **605 passed, 0 failed, 6 ignored** in 1.13 s. `cargo clippy
+--all-targets` **0 warnings**. `npm run build` clean (vite 838 ms).
+
+**THE CONTAINER DIFFERENTIAL, measured before anything was trusted (PROBLEM
+143).** Same path string, two readers:
+
+| Reader | `%LOCALAPPDATA%\Spaceadom\spaceadom.exe` | `%APPDATA%\Spaceadom\config.json` |
+| --- | --- | --- |
+| agent shell (in container) | **1.0.53, 14,109,184 B, 2026-08-18** | 47,761 B, SHA `7491…0EEE` |
+| `explorer.exe`-launched probe | **1.0.107, 21,947,904 B, 2026-09-07 14:50:58** | 87,839 B, SHA `F439…687A` |
+
+Two different files at one path in both columns; every machine-facing
+reading below came through the second reader.
+
+**THE MARKER DIFFERENTIAL, all three columns read through `explorer.exe`.**
+
+| Where | Reading |
+| --- | --- |
+| Installed **1.0.107** (21,947,904 B) before install | 28 controls **True**, three new markers **False** |
+| Fresh **1.0.108** `target\release\spaceadom.exe` (21,930,496 B) before install | three new **True**, 4 controls **True**, negative control **False** |
+| Installed **1.0.108** (21,930,496 B) after install | three new **True**, 4 controls **True**, negative control **False**; `install-proof.ps1`: 31/31 Rust markers True, 30/30 bundle markers True |
+
+The three, each the leading `&'static str` piece of a `log::info!` format
+string: `middle-button ring:
+the-guide-hud-ring-was-raised-by-a-middle-mouse-button-hold-spaceadom`
+(engine/mod.rs), `picker-serve-decision-path-and-list-age-marker-spaceadom-237:`
+(picker_worker.rs), `overlay usable for the Guide HUD` (lib.rs). All 28
+controls were re-grepped against `src-tauri/src` with `\`-newline
+continuations rejoined before the list was written: 28/28 present, nothing
+retired.
+
+**ARTIFACTS**, all under `src-tauri\target\release\bundle\`, signed from the
+PowerShell tool with the key and password read into the two env vars (never
+echoed; the Bash tool would have rewritten a `/`-leading password — CLAUDE.md):
+
+- `nsis\Spaceadom_1.0.108_x64-setup.exe` — **8,586,974 B**, 11:00:45 (+ `.sig` 424 B, 11:01:01)
+- `msi\Spaceadom_1.0.108_x64_en-US.msi` — **13,774,848 B**, 11:00:54 (+ `.sig` 424 B, 11:01:01)
+- `msix\Spaceadom_1.0.108_x64.msix` — **10,990,889 B**, 11:02:06, identity `LOCALTEST.Spaceadom 1.0.108.0`, validation passed (9 files in, 10 out), **unsigned, NOT installed**. Built with `pwsh.exe -File scripts/build-msix.ps1`.
+
+The repo's own `posttauri` hook (`scripts/archive-build.mjs`) ran as it does
+on every build: it copied both installers into `all-versions/` and **removed
+the stale 1.0.107 setup.exe and .msi from `share-spaceadom/`** — a
+script-driven deletion, recorded here because the agent rule forbids the
+agent doing it by hand. The `.sig` files were then copied into `all-versions/`
+beside the installers by this session (no previous ship kept them there; no
+existing file was overwritten).
+
+**THE INSTALL, via one `explorer.exe`-launched wrapper
+(`_probe\p108\install-108.cmd`)** that snapshotted config + PID, called the
+repo's `scripts\install-real.cmd`, waited 40 s, and ran `postcheck.ps1`.
+Installer exit code 0, which proves nothing; what follows does.
+
+- **FileVersion 1.0.108**, 21,930,496 B, at `%LOCALAPPDATA%\Spaceadom\spaceadom.exe`; the log banner names the same byte count. Run key present, `--autostart`.
+- **New PID: 9480** (1.0.107, started 10:40:29) **→ 12444** (started 11:03:52).
+- **Startup 895 ms** (logger 11:03:52.598 → `dashboard_ready` 11:03:53.493), a MANUAL launch by `install-real.cmd`. The like-for-like baseline is the 1.0.107 ship entry's manual launch: **691 ms**. (1.0.107's 10:40 boot this morning read 10,581 ms on the same measure, but that was an `--autostart` launch with the 10 s settle — NOT comparable; every 1.0.107 boot in the current log is an autostart one.)
+- **PROBLEM 265: THE LINE WORKS, THE IMPROVEMENT IS UNMEASURED.** `overlay: configured (on-demand, click-through) — overlay usable for the Guide HUD 746 ms after app start (PROBLEM 265)` printed on the first boot — so the marker, `mark_process_start()` and `since_start()` all run. But this was a manual launch, on which the overlay never waited in any version (`create_app_windows` runs immediately without `--autostart`), so 746 ms does not demonstrate the 10 s → 1.2 s change. Every 1.0.107 boot in the current log is an `--autostart` one and every one took ~10.4 s to `overlay: configured` (07:32:19→29.810, 09:03:38→48.926, 11:18:17→27.893, 18:48:50→19:02.341, 10:40:29→39.773). **The `OVERLAY_SETTLE` (1.2 s) autostart branch has not executed yet; it runs at the owner's next logon, and that boot's `overlay usable … N ms` line is the measurement this feature is waiting for.** A first draft of the owner docs compared 746 ms against 10,467 ms as if they were the same path; both docs were corrected in this session before the entry was written.
+- **PROBLEM 237 follow-up, MEASURED:** `picker-serve-decision-path-and-list-age-marker-spaceadom-237: path=disk_cache_stale served=248 app(s) answer_took_ms=35 list_age_ms=1386233` — the first-boot-of-a-new-version fingerprint mismatch that used to force a synchronous scan was served from the 23-minute-old disk cache in **35 ms**, then `background refresh rewrote the disk cache (248 app(s); list changed: false, fingerprint changed: true)` 1.9 s later. The identical moment on 1.0.107's first boot at 10:40: `no usable disk cache (fingerprint v1|1.0.107|…) — scanning on worker thread` → `found 248 app(s) in 7353ms`.
+- **Config SHA-256 identical across the install:** `F4391A80CB767BE5B096431881D773F1567A78E6C2C2428195BFF882F1C4687A`, 87,839 B, lastWrite 10:57:45 both before and after; semantic map compare 74,103 == 74,103 identical; 5 profiles both sides. `middle_button_ring` is not yet a key in the file (serde `default_true`; it is written on the next save).
+- **0 MsiInstaller / RestartManager events inside the install window** (stamped 11:03:46), 0 of ids 1033/1040/1042. **Control:** 2 events in the preceding 2 h — 11707 + 1033 at **11:01:00**, `light.exe` validating the `.msi` it wrote at 11:00:54, exactly the build-time pair CLAUDE.md documents. Without that non-zero control the 0 would be unreadable.
+- **Overlay ALIVE:** 1 × `overlay: configured`, 0 `REBUILD FAILED`, 0 `OVERLAY_DISABLED`. **Hook:** 1 × `WH_KEYBOARD_LL + WH_MOUSE_LL installed`, 0 reference-install failures. Safe mode not entered; `safe-mode: alive 30s — boot counter reset to 0`. Rival scan: one Spaceadom. Updater kind **Nsis**; it checked GitHub and found `1.0.108 is the newest release on the manifest`. 0 `[ERROR]`/panics since the banner; 10 `[WARN]` (spacedesk + PowerToys conflict notices ×2 each, `overlay-js: listeners registered OK`, and one deaf verdict — next bullet).
+- **Observed, not new:** at 11:04:06, 14 s after boot, `hook: KEYBOARD DEAF, PROVEN (PROBLEM 260) — reason InputUnaccountedFor … Foreground: WindowsTerminal.exe … FORCED REPAIR #1 … reinstall ok: true`, handles changed on all three hooks. The foreground window was the console this install ran from. The 60 s diagnostics line then read `keyboard-deaf-rehooks:1 watchdog-reinstalls:1`, everything else 0. This is PROBLEM 260's designed repair firing once; it is reported because it happened, not because it is 1.0.108's.
+
+**THE `mtime > newest build file` CRITERION READS FALSE, AND HERE IS WHY IT
+IS NOT A FAILURE.** Installed exe mtime **11:00:30**; `setup.exe` 11:00:45;
+newest bundle file (`.msix`) 11:02:06. NSIS preserves the packed file's
+timestamp, and tauri patched `target\release\spaceadom.exe` at 11:00:30 for the
+NSIS bundle *before* `makensis` wrapped it (the same exe was patched again for
+the MSI and finally touched at 11:01:01, which is why the loose fresh exe reads
+later than the installed one). 1.0.107 showed the identical pattern (installed
+14:50:58 vs setup.exe 14:51:09). The check that CAN fail — and is the one
+`install-proof.ps1` asserts — is **installed exe newer than the newest `dist2`
+file (10:58:39): True**, which proves the exe embedded this session's bundle.
+Together with the version stamp, the byte count matching the fresh exe and
+the banner, and the marker matrix, the installed file is this build.
+
+**UNPROVEN, IN CAPITALS.** Counted in the real `debug.log` since the 1.0.108
+banner at line 6723 (68 lines at probe time):
+
+```text
+middle-button ring: the-guide-hud-ring-was-raised-...   0   (PROBLEM 263 — nobody has held the middle button)
+hold start (hold #<DIGIT>) … over own window            0   (law 6 half 1)
+guide_hud: shown over own window                        0   (law 6 half 2)
+own-window fallback:                                    0   (PROBLEM 259, informational)
+```
+
+- **LAW 6 IS UNPROVEN.** `_proof-only.cmd`, re-run after the boot, reads: *"FAIL - no 'hold start ... over own window' line since the 1.0.108 banner … Until this reads PASS the ship report MUST say UNPROVEN."* An agent cannot inject input from this container (testing laws); this is an untaken measurement, not a failure. It stays UNPROVEN until the owner holds Space with the dashboard focused and the pair appears.
+- **THE MIDDLE-BUTTON RING HAS NEVER RUN ON HARDWARE.** Its per-hold marker is in the exe and has printed 0 times. One physical middle-button hold writes it. The owner's six-item hardware checklist in PROBLEM 263 is untouched and still open. Per CLAUDE.md law 6 that line, when it appears, is evidence about the MOUSE hook only and never satisfies law 6.
+- **Whole-log control caveat:** `guide_hud: shown over own window` counts **0 across the entire current `debug.log`** (4.5 MB; the log has rotated since the 1.0.107 entry counted 52), so that pattern currently has no positive control in this file; `hold start (hold #<DIGIT>)` has 2,812, `own-window fallback:` 2,812, `KEYBOARD DEAF` 3,519.
+- **NO MSI AND NO MSIX INSTALL WAS PERFORMED**, deliberately. Nothing was committed, tagged or pushed; the pen drive was not touched.
+
+**FILES THIS SESSION CREATED** (all under `D:\Claude-Projects\_probe\p108\`):
+`precheck.ps1/.cmd/.txt`, `fresh.ps1/.cmd/.txt`, `postcheck.ps1/.txt`,
+`install-108.cmd`, `pre2.txt`, `config-pre.json`, `config-pre2.json`,
+`config-post.json`, `tauri-build.log`, `msix-build.log`, `whatchanged-108.md`,
+`readme-108.txt`, `status-108.md`, the three `*.new.*` temp copies, and the
+`_*-done.txt` / `_install-rc.txt` sentinels. In the repo: the 1.0.108
+installers + `.sig`s in `all-versions/`, and the build outputs.
+
+## 2026-09-12 — Claude (middle-button finishing pass) — **PROBLEM 263 closed out on paper: the spec was re-checked item by item against the tree; ONE gap found and fixed (the preview harness had no "Middle button opens the ring" row) and CORE_AIM.md got its sentence.** Code-only — **no build, no install, NOTHING RUN ON REAL HARDWARE.**
+
+The 2026-09-10 agent died while verifying its last item (a bound letter tapped
+under a middle hold). That path was already correct: `kb_hook_proc`'s combo
+branch gates on `hook_hold || MIDDLE_HOLD_ACTIVE`, so `KeyCombo::Alpha` reaches
+`engine::handle_alpha` with no Space latch set, and every Space-only piece in
+that branch is gated on `hook_hold` alone. The rest of the nine-item spec —
+centred ring via the `SpaceDown` normalisation, the one-batch cookie-tagged
+replay from the engine side, the default-true field in both first-install
+tests, the CAD/3D list gating the middle button only, the exceptions / bypass /
+fullscreen gates, the one-place arbitration tested in both orders, the reaper
+and repair teardowns, the per-hold marker line, and an atomics-only callback —
+was found done and is itemised at the end of PROBLEM 263 in
+`V14_FIXES_AND_CODE.md`. Changed: `src/preview.ts` (row added, two stagger
+indices renumbered), `CORE_AIM.md` (one bullet under Visual HUDs). Gates:
+`cargo test --lib` 605 / 0, clippy 0, tsc 0, vite build clean. The owner's
+six-item hardware checklist in PROBLEM 263 is untouched and still open.
+
+## 2026-09-10 — Claude (middle-button-ring agent) — **PROBLEM 263: the ring got a SECOND trigger. Holding the MIDDLE MOUSE BUTTON raises the same Guide HUD ring in the same centred place; a quick middle click is replayed so browsers still open links in a new tab; 3D and CAD programs never see any of it.** Resumed a half-finished feature from a patch. Code-only — **no build, no install, NOTHING RUN ON REAL HARDWARE.**
+
+**HOW THIS SESSION STARTED, because it explains what is and is not mine.** An
+earlier agent built most of this and died mid-edit leaving the tree not
+compiling. The owner reverted the 7 modified tracked files and saved that
+agent's work as `_probe/mmb-halfdone-2026-09-10.patch` (83,971 bytes, `git diff`
+format). `src-tauri/src/hook/orbit_apps.rs` was UNTRACKED, so it was never in
+the patch and survived on disk. `git apply` took the patch cleanly on the first
+try — no conflicts, no hunk-by-hunk work needed.
+
+**WHAT THE PATCH ALREADY CONTAINED** (all of it good, and kept): the whole Rust
+mechanism — the two `ms_hook_proc` branches, the suppression, the tap/hold split
+at release, the single-batch cookie-tagged `SendInput` replay with its
+short-count repair, the three-witness arbitration and its one commented
+statement, the third stale-hold reaper with PROBLEM 262's deafness-aware path,
+teardown in both repair paths, the config field with `default = "default_true"`
+published from both ends, the engine's normalisation and its three log markers,
+and `orbit_apps.rs` with its table and 6 tests.
+
+**WHAT WAS MISSING AND IS MINE:** every test of the feature's own logic (the
+patch added **zero** — the 562 the tree reported were 556 baseline plus
+`orbit_apps`' 6), the `middle_button_ring` assertions in BOTH first-install
+tests, the entire Settings row and its bookkeeping, and all three documentation
+entries.
+
+**THE TWO COMPILE ERRORS WERE ONE TYPO, and that is the transferable part.**
+
+```
+error: expected one of `...`, `..=`, `..`, `:`, or `|`, found `)`   (hook/mod.rs:4872)
+error[E0061]: this function takes 9 arguments but 8 arguments were supplied  (hook/mod.rs:5200)
+```
+
+They read as two unrelated faults 328 lines apart. They are not. While adding
+the 8th parameter to `own_window_space_down_accepted`, a stray `false` was left
+in the parameter list — `middle_hold_active: bool,` then `false) -> bool {`. The
+parser cannot read `false` as a parameter NAME, reports the syntax error, and
+then **recovers by treating it as a ninth PATTERN**, which gives the function an
+arity of 9 — so the call site, correctly passing 8, is flagged E0061. Deleting
+one token fixed both. **THE CONDITION UNDER WHICH THIS MISLEADS YOU:** an agent
+that starts with the "concrete" E0061 and adds a ninth argument at the call site
+makes the code worse and the tree still does not build. *After a parse error
+inside a signature, every arity and type error downstream of it is suspect —
+`rustc` recovers by inventing plausible items, and its recovery is itself the
+source of the second diagnostic. Fix the first syntax error and re-run before
+believing anything that follows it.*
+
+**ONE PIECE OF THE INHERITED CODE WAS WRONG AND I DELETED IT.**
+`middle_trigger_armed()` folded two gates into one bool and was documented in
+`orbit_apps.rs`'s header as *the* place the watcher gate lives — **while nothing
+in the process ever called it.** The crate carries `#![allow(dead_code)]` at
+`lib.rs:1`, so neither rustc nor clippy ever mentioned it and the clippy gate
+reads 0 warnings either way. Deleted, and the header corrected to name
+`middle_button_down_accepted`. Two things were wrong and only one was the
+deadness: collapsing "the feature is switched off" and "no 3D/CAD verdict has
+ever been measured" into one bool means a decline can no longer say which
+reason declined it, and those are the two a user most needs told apart.
+**Record the condition: a crate-wide `#![allow(dead_code)]` means the compiler
+will never tell you a documented entry point is dead.**
+
+**A TEST I WROTE WRONG, kept as a comment in the file because the mistake is
+worth more than the test.** The first version of the arbitration test walked all
+eight latch combinations and asserted the two witnesses never both accept. It
+FAILED on the all-clear row — and **the code was right and my assertion was
+wrong.** From rest both witnesses are legitimately willing; that is what "either
+trigger may start a ring" means. What makes them exclusive is that whoever goes
+first LATCHES, and the latch is what the other one reads. Exclusivity is a
+property of the SEQUENCE, so the test had to become a sequence. *A
+mutual-exclusion test that never advances the state is testing a coincidence,
+not an invariant.*
+
+**THE ARBITRATION, stated once and enforced in three places** (the full block is
+in `hook/mod.rs` above `MIDDLE_TAP_MS`): **A** — a middle hold may not start
+while either Space hold is live, so the `WM_MBUTTONDOWN` passes straight through
+untouched; **B** — a Space pressed while a middle hold is live is an ordinary
+space, handed to the OS beside the existing Ctrl/Alt/Win pass-through; **C** —
+the own-window fallback refuses a hold while a middle hold is live. The three
+are exclusive by construction, not by timing: each asks about a latch already
+set before the competing path can be entered.
+
+**THE 3D/CAD LIST FAILS CLOSED, and this is the design decision most likely to
+be "simplified" later.** `st-exclusion-watcher` is explicitly allowed to fail to
+spawn (PROBLEM 124). If it never runs, `ORBIT_ACTIVE` sits `false` all session —
+not because no CAD program is in front but because **nothing ever looked** — and
+the middle button would be swallowed inside SolidWorks forever, silently. So
+`WATCHER_ALIVE` is its own gate: **no watcher, no middle-button trigger**, and
+the app behaves exactly as it did before the feature existed. *When a guard and
+the feature it guards can fail independently, the feature must be the one that
+fails.*
+
+**THE LIST IS NOT THE USER'S APP EXCEPTIONS AND MUST NEVER BE MERGED WITH THEM.**
+`exclusions.rs` stands the WHOLE app down inside a listed app, Space included.
+`orbit_apps.rs` stands the MIDDLE BUTTON down and nothing else — inside
+SolidWorks the Space shortcuts, the ring and Space+letter keep working exactly
+as they do everywhere. Merging them would silently delete a user's Space
+shortcuts in twenty programs. ~85 exe stems, exact-stem matched through the one
+shared `normalize_stem` (no substring matching — `edge` is Siemens Solid Edge
+and must not match `msedge`, which is one of the two places the owner most wants
+this feature; there is a test asserting it). Known gaps written down rather than
+hidden: **Onshape in a browser tab** cannot be detected by a foreground-exe
+probe and WILL raise the ring there, and **Godot** ships a versioned exe an
+exact-stem table cannot name.
+
+**GATES, all green:** `cargo test --lib` **605 passed / 0 failed** (556
+baseline + orbit_apps' 6 = 562 when this session began; **26 of the 43 added
+since are this feature's**, the other 17 belonging to two agents working in
+parallel on `picker_worker.rs` and `overlay_boot.rs` — the suite total is a
+shared number and claiming the whole delta would have been the easy error),
+`cargo clippy --all-targets`
+**0**, `npx tsc --noEmit` **0**, `npm run build` clean.
+
+**WHAT NOBODY HAS OBSERVED, IN CAPITALS: NOTHING IN THIS FEATURE HAS RUN ON REAL
+HARDWARE. NO BUILD, NO INSTALL.** A test suite cannot press a mouse button.
+Everything green above proves a DECISION; none of it proves a GESTURE. The
+owner's checklist is at the end of PROBLEM 263 in `V14_FIXES_AND_CODE.md`; the
+one item no test can ever replace is **item 4** — open SolidWorks or Blender,
+confirm middle-drag still orbits, and then confirm **Space shortcuts still work
+in the same app**, which is the single assertion that separates this list from
+the App-exceptions list. Markers to grep, all long ASCII format strings usable
+on a built exe: `the-guide-hud-ring-was-raised-by-a-middle-mouse-button-hold-spaceadom`,
+`a-quick-middle-click-was-replayed-through-sendinput-spaceadom`,
+`middle-button-ring-standing-down-for-a-3d-or-cad-program-spaceadom`,
+`reaping-a-latched-middle-button-hold-spaceadom` (this last one should be
+**empty** — a hit is a bug report, not health).
+
+**A trap for the next reader of law 6:** the middle-button hold line deliberately
+does NOT contain the words `hold start`, so it can never satisfy
+`install-proof.ps1`. **A ring raised by the middle button is evidence about the
+MOUSE hook and nothing else** — that Space-down never happened and the keyboard
+hook was never asked anything. Same separation PROBLEM 259 drew for the
+own-window fallback, same reason.
+
+**NOT BUILT, DELIBERATELY, by the owner's decision:** cursor-anchored placement,
+icons-only chips, per-app three-way exception scope, favourites-vs-all. A later
+task.
+
+## 2026-09-10 — Claude (startup-feel agent) — **PROBLEM 265: the Guide HUD could not draw for the first ten seconds of every logon. The OVERLAY now comes up at ~1.2 s; the DASHBOARD still waits the full 10 s.** Code-only — no build, no install, nothing run on real hardware.
+
+**THE MEASURED DEFECT** (owner's live `debug.log`, autostart 2026-09-10
+09:55:16): hook installed 27 ms in; `autostart launch — hook and engine are
+LIVE now…` at 09:55:16.442; **`hold start (hold #1)` at 09:55:16.718 — 320 ms
+after launch**; `guide_hud: still starting` at 09:55:17.177 and again at
+09:55:20.523. Four Space holds in the first sixteen seconds and **not one
+letter pressed** — the owner was waiting for the ring, saw nothing, and
+concluded the app was asleep. He only pressed a letter at 09:55:32.200
+(`engine: combo Space+c received`), and the launch completed 2 ms later. So the
+shortcuts were live from the first second and the app had no way to say so.
+His comparison: Raycast's window is pre-built and answers its hotkey instantly.
+
+**WHAT THE TEN SECONDS ACTUALLY PROTECT, established before changing anything.**
+PROBLEM 59's hazard is a *webview* hazard, not a "visible window fighting the
+shell" hazard — at a cold logon `CreateCoreWebView2Controller` fails with
+`HRESULT(0x80070490) ERROR_NOT_FOUND` and Tauri destroys the host window. That
+covers the overlay as much as the dashboard, so "the overlay is small,
+transparent and never focused, therefore it is exempt" is **not** true and was
+not used. PROBLEM 76 is not a hazard at all: it *cut* the wait 30 s → 10 s
+because a long wait made the app look dead. PROBLEM 215 moved the hook out from
+behind the wait and recorded the leftover trade as "silent but functional, which
+the owner accepted" — that acceptance is what this entry withdraws.
+
+**WHAT IS DIFFERENT ABOUT THE OVERLAY, and it is the whole argument.** It is the
+only window in this app with a self-healing rebuild path behind it: PROBLEM 59's
+existence-check rebuild inside `create_app_windows` (still runs at the 10 s
+mark), `display_watch`'s self-heal poll (PROBLEM 117/118/214) and
+`guide_hud`'s `heal_now()`. Nothing in the app rebuilds a *dashboard*. So the
+worst case of attempting the overlay early is **exactly today's behaviour** — it
+loses the cold-boot race at 1.2 s and the existing 10 s path rebuilds it — while
+the best case is a ring on the first hold. The dashboard's wait is untouched.
+
+**WHAT CHANGED.**
+
+- New `src-tauri/src/overlay_boot.rs`. `OVERLAY_SETTLE = 1200 ms`; a pure
+  `plan(BootFacts) -> OverlayBoot` deciding CreateNow / WaitLonger / NothingToDo
+  (SafeMode, AlreadyThere, FullCreationDone, NotAnAutostartLaunch), safe mode
+  checked FIRST so PROBLEM 253 can never be undone by a speed-up;
+  `create_overlay_now` (main thread, `WebviewWindowBuilder::from_config`, then
+  the shared `configure_overlay_window`, then PROBLEM 86's own-hwnd
+  registration); `request_now` for a hold that arrives first.
+- `lib.rs` — the `st-window-settle` thread now has two phases: overlay at 1.2 s,
+  everything else at the unchanged 10 s (`AUTOSTART_SETTLE.saturating_sub(...)`).
+- `guide_hud/mod_impl.rs` — the "still starting" branch now ASKS for the overlay
+  to be built instead of only logging, and its wording says out loud that the
+  shortcut and Space+letter still work and only the ring is missing.
+- `configure_overlay_window` logs `overlay usable for the Guide HUD N ms after
+  app start` — one grep answers "how fast was the ring available this boot?".
+  Timed from a new `overlay_boot::mark_process_start()`, the first statement in
+  `run()`.
+
+**Space+letter during the settle was already unaffected — verified by grep, not
+by hardware.** `crate::windows_created()` has exactly ONE consumer in the whole
+crate (`guide_hud/mod_impl.rs:441`, the drawing branch). `engine::handle_alpha`
+reads config and dispatches to `smart_cascade` without touching a window.
+
+**GATES.** `cargo test --lib` 604 passed / 1 failed / 6 ignored — the failure is
+`hook::middle_button_arbitration_tests::no_interleaving_lets_two_witnesses_both_take_one_gesture`
+in `hook/mod.rs`, a file **another agent was editing in the same minute**
+(mtime 10:25:09 against my last edit at 10:24:14). It is not mine and not
+reachable from anything I touched. All 10 `overlay_boot` tests pass.
+`cargo clippy --all-targets` 0 warnings 0 errors. `npx tsc --noEmit` clean.
+
+**WHAT THE OWNER MUST HAND-TEST AFTER THE NEXT BUILD — NOTHING HERE HAS RUN ON
+REAL HARDWARE.** Log off and back on. From the moment the tray icon appears,
+hold Space. The ring must appear. Then
+`grep "overlay usable for the Guide HUD" debug.log` — the number must be
+roughly 1200-2500 ms, not ~10000. `grep "guide_hud: still starting"` should be
+empty or a single line. If `overlay-early: the overlay could not be created`
+appears, the cold-boot WebView2 race is real on this machine at 1.2 s and the
+10 s rebuild covered it — say so and the constant gets raised, which is a
+one-word change.
+
+— Claude (startup-feel agent), 2026-09-10
+
+
+## 2026-09-09 — Claude (picker worker agent) — **PROBLEM 237 follow-up: a fingerprint MISMATCH no longer forces a synchronous scan.** A stale disk cache now answers instantly and refreshes in the background, exactly like a fresh one; only a genuinely empty/corrupt cache still scans first. Code-only — no build, no install, no live cold-cache run.
+
+**THE MEASURED PROBLEM** (owner's live `debug.log`, 2026-09-09): the picker
+open right after installing or uninstalling any program — which changes the
+Start-Menu fingerprint — blocked for `start_menu_scan: found N app(s) in
+7531ms (powershell 1888ms, icons 5642ms)`, once `14076ms` on a cold shell icon
+cache. Every other open answers in 12-18 ms. 237 fixed the STA/threading half
+of the original block; it never noticed that a fingerprint MISMATCH reads as
+"no cache" to `load_cache`, so it fell through to the exact forced-scan branch
+237 was written to remove.
+
+**THE FIX**, all in `src-tauri/src/picker_worker.rs`: a new pure function,
+`decide_serve` (line 388), over three facts — cache present?, fingerprint
+matches?, has a scan just finished (and did it succeed)? — decides whether to
+serve immediately (fresh OR stale, identical verdict) or must scan first
+(only when nothing usable exists at all: missing, corrupt, wrong format, or
+an empty apps list — checked by the new `load_cache_any`, line 916, which
+loads the cache WITHOUT checking the fingerprint). `serve_apps` (line 417)
+now answers from ANY usable disk cache before computing the current
+fingerprint at all, then decides in the background whether to refresh.
+`Session.refreshed: bool` (once ever) became `Session.refresh_started_for:
+Option<String>` (once per fingerprint CHANGE) — the old cap would have let
+one boot-time refresh permanently exhaust itself, leaving every LATER install
+this session served from an ever-more-stale cache with no correction. A
+failed refresh routes through `decide_serve(_, _, ScanStatus::JustFinished(false))`
+→ `ApplyScanOutcome { accept: false }`, which touches nothing in `Session` —
+so a stale cache can never be mistaken for a fresh one just because one
+refresh attempt failed. One new log line per serve,
+`picker-serve-decision-path-and-list-age-marker-spaceadom-237: path=… served=…
+answer_took_ms=… list_age_ms=…`, names which of `session_memory`,
+`disk_cache_fresh`, `disk_cache_stale`, or `empty_cache_scan` answered and how
+old the list was.
+
+**GATES.** `cargo test --lib` **569 passed, 0 failed, 6 ignored** (was
+556/0/5 before this pass — +13/+1, other work having landed on the branch
+too; this task's own contribution is +6 tests / +1 newly-ignored one).
+`cargo clippy --all-targets` **0 warnings, 0 errors**. `npx tsc --noEmit`
+clean (no frontend file touched — this was a backend-only fix). Full detail,
+the pure function's code, and every test's file:line: `V14_FIXES_AND_CODE.md`
+§PROBLEM 237, new subsection "PROBLEM 237 follow-up, 2026-09-09".
+
+**NOT VERIFIED: no live cold-cache run was exercised.** No build, no install,
+no `debug.log` read from the owner's machine — every number above is from
+`cargo test --lib`, including one `#[ignore]`d end-to-end test that shells out
+to the real `scan_start_menu` (`stale_fingerprint_answers_immediately_then_refreshes_in_the_background`,
+picker_worker.rs:1353). The 7,531 ms / 14,076 ms figures above are the
+PRE-existing measurements that motivated this fix, not a before/after
+comparison on real hardware. To confirm on the real machine once shipped:
+install or uninstall anything, open the picker, and grep `debug.log` for
+`picker-serve-decision-path-and-list-age-marker-spaceadom-237: path=disk_cache_stale`
+appearing with an `answer_took_ms` in the same range as a normal
+`disk_cache_fresh` hit (single digits to low tens of ms), not a multi-second
+one.
+
 ## 2026-09-07 — Claude (1.0.107 ship agent) — **SHIPPED PROBLEM 262 AS 1.0.107.** Built signed (NSIS + MSI + .sig), MSIX built unsigned and NOT installed, NSIS installed on this machine and proved. Gates: 556/0 tests, clippy 0/0, tsc 0, vite OK. **ALL FOUR NEW BEHAVIOURS ARE UNPROVEN ON HARDWARE.**
 
 **WHAT THIS ENTRY IS.** The build-and-install half of the PROBLEM 262 entry

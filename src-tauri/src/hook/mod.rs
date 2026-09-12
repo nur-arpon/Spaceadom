@@ -11,6 +11,10 @@ pub mod exclusions;
 pub mod conflicts;
 pub mod conflict_close;
 pub mod pointer;
+/// PROBLEM 263 — the BUILT-IN middle-button exclusion list (3D/CAD/design
+/// programs where middle-drag already orbits or pans). Separate from the
+/// user's App exceptions by design; see the module header.
+pub mod orbit_apps;
 
 use crossbeam_channel::Sender;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -78,6 +82,29 @@ pub enum HookEvent {
     /// does NOT contain `hold start (hold #N)` — a fallback hold can never
     /// satisfy the install proof.
     OwnWindowSpaceDown,
+    /// PROBLEM 263 — the MIDDLE MOUSE BUTTON went down and this process
+    /// swallowed it, so a ring is owed. The engine treats it exactly like
+    /// `SpaceDown` — same HUD timer, same chips, same cascade, same toast —
+    /// and the ONLY difference is the sentence it logs.
+    ///
+    /// A separate variant for the same reason `OwnWindowSpaceDown` is one: the
+    /// per-hold `hold start (hold #N)` line is CLAUDE.md keyboard-hook law 6's
+    /// proof that the KEYBOARD hook is alive, and `scripts/install-proof.ps1`
+    /// reads it as such. A middle-button hold never touched the keyboard hook,
+    /// so its line carries the `middle-button ring:` marker instead and
+    /// deliberately does NOT contain the words `hold start`. After this change
+    /// the ring has THREE possible triggers and the log can always say which
+    /// one raised it.
+    MiddleButtonDown,
+    /// PROBLEM 263 — the middle button came back up before the hold threshold
+    /// and nothing else claimed the press, so it was an ORDINARY MIDDLE CLICK
+    /// and this process owes the world one.
+    ///
+    /// The replay is a `SendInput` and this variant is how it leaves the
+    /// callback: `ms_hook_proc` may not make a win32k call (see the header
+    /// there and PROBLEM 58/134/184), so the batch is composed and sent on the
+    /// ENGINE thread, where it is also legal to log about it.
+    MiddleButtonTap,
 }
 
 // ---------------------------------------------------------------------------
@@ -1048,9 +1075,15 @@ pub fn drain_hook_diagnostics() {
     let dh = DEAF_HOLDS_REAPED.swap(0, Ordering::Relaxed);
     let lb = LATCH_BOUND_CLEARS.swap(0, Ordering::Relaxed);
     let rt = REPAIR_HOLD_TEARDOWNS.swap(0, Ordering::Relaxed);
+    // PROBLEM 263 — the middle-button trigger's two numbers. `mt` is ordinary
+    // middle clicks replayed through SendInput (health — it is what proves a
+    // quick click still works); `mr` is middle holds the reaper had to tear
+    // down, which is the fingerprint of a lost WM_MBUTTONUP and should be read
+    // as a bug report.
+    let (mt, mr) = drain_middle_counters();
     if fs == 0 && by == 0 && ro == 0 && st == 0 && un == 0 && dr == 0 && rh == 0 && os == 0
         && dm == 0 && ex == 0 && sr == 0 && pi == 0 && od == 0 && fr == 0 && dh == 0
-        && lb == 0 && rt == 0
+        && lb == 0 && rt == 0 && mt == 0 && mr == 0
     {
         return;
     }
@@ -1062,7 +1095,9 @@ pub fn drain_hook_diagnostics() {
          stale-holds-reaped(lost Space-UP):{sr} keyboard-deaf-rehooks(Space down, no callback):{od}          own-window-holds-reaped(page stopped talking mid-hold):{fr} \
          deaf-holds-reaped(hook not called at all):{dh} \
          modifier-latch-bound-clears(latched past {MAX_MODIFIER_HOLD_MS}ms with no callbacks):{lb} \
-         repair-hold-teardowns(hold predated a re-hook):{rt}"
+         repair-hold-teardowns(hold predated a re-hook):{rt} \
+         middle-clicks-replayed(quick press, put back through SendInput):{mt} \
+         middle-holds-reaped(lost WM_MBUTTONUP):{mr}"
     );
     if ro > 0 {
         // The advice here used to say "set a SLOWER typing speed (a slower
@@ -1536,15 +1571,25 @@ fn tear_down_hold_across_repair(what: &str) {
     }
     // Does its own pointer reset, but ONLY if it owned a hold (see there).
     let had_own_hold = disarm_own_window_hold();
-    if !had_hook_hold && !had_own_hold {
+    // PROBLEM 263 — and the THIRD witness, on the identical argument. A middle
+    // hold's `WM_MBUTTONUP` is delivered by the MOUSE hook, and `install_hooks`
+    // replaces that one too, so a hold latched a moment ago belongs to a hook
+    // that no longer exists and its release can never arrive. Left standing it
+    // is a ring nothing can hide AND — because THE ARBITRATION's rules B and C
+    // both refuse a Space hold while `MIDDLE_HOLD_ACTIVE` is set — no new ring
+    // could be raised by any trigger. That is PROBLEM 262's wedge, reachable
+    // from a third direction.
+    let had_middle_hold = disarm_middle_hold();
+    if !had_hook_hold && !had_own_hold && !had_middle_hold {
         return;
     }
     REPAIR_HOLD_TEARDOWNS.fetch_add(1, Ordering::Relaxed);
     let hud_was_up = crate::guide_hud::is_visible();
     log::warn!(
         "hook: repair-tore-down-a-hold-that-predated-it-spaceadom — {what} replaced the hook \
-         chain while a Space-hold was still latched (hook hold: {had_hook_hold}, own-window \
-         fallback hold: {had_own_hold}; HUD was up: {hud_was_up}). That hold's Space-UP belongs \
+         chain while a hold was still latched (hook hold: {had_hook_hold}, own-window \
+         fallback hold: {had_own_hold}, middle-button hold: {had_middle_hold}; HUD was up: \
+         {hud_was_up}). That hold's release belongs \
          to a hook that no longer exists, so it can never arrive and the latch is unfalsifiable \
          from here on. Tearing it down: pointer latches reset, ring hidden. Left standing it is \
          a ring nothing can hide AND — because guard 2 of the own-window fallback refuses a new \
@@ -2270,6 +2315,20 @@ const _WHEEL_DELTA: i32 = 120;
 const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
+/// PROBLEM 263 — the middle button, which is now a second ring trigger.
+const WM_MBUTTONDOWN: u32 = 0x0207;
+const WM_MBUTTONUP: u32 = 0x0208;
+
+/// PROBLEM 263 — OUR cookie on the middle click we replay through `SendInput`.
+///
+/// The SAME `0x7A7A7A7A` the keyboard injections carry (keyboard law 1: filter
+/// injected input ONLY by our own `dwExtraInfo` cookie, never by
+/// `LLKHF_INJECTED` / `LLMHF_INJECTED` — blanket-ignoring the OS flag silently
+/// disables the app for anyone using a macro mouse, an on-screen keyboard,
+/// Remote Desktop or a laptop driver that stamps INJECTED onto physical input).
+/// `MSLLHOOKSTRUCT::dwExtraInfo` is a `usize`, so it is declared once here
+/// rather than re-typed at the two sites that use it.
+const MAGIC_INJECTED_MOUSE: usize = 0x7A7A7A7A;
 
 // ---------------------------------------------------------------------------
 // Thread-local sender (set once when the hook thread starts)
@@ -2837,6 +2896,11 @@ unsafe fn watchdog_check(
     // call is the fast one. `true` — the pump ticks once a second, so the
     // foreground probe here is already inside its own throttle.
     let _ = reap_own_window_hold(true);
+    // PROBLEM 263 — and the middle button's, third in the row and for the third
+    // time the same reason: two homes, two different failure modes. `true` for
+    // the same reason as the line above — a 1 s pump tick is already inside the
+    // deafness probe's own budget.
+    let _ = reap_middle_hold(true);
 
     // PROBLEM 236 — a deferral belongs to ONE hold. The moment there is no hold
     // (Space-up, or the reaper immediately above) the episode is over, so the
@@ -3626,6 +3690,19 @@ unsafe fn watchdog_check(
              its ring is being hidden below, so its pointer latches go with it."
         );
     }
+    // PROBLEM 263 — and not the MIDDLE BUTTON's latch either. `install_hooks()`
+    // replaces the MOUSE hook as well, so the WM_MBUTTONUP that would end this
+    // hold belongs to a hook that no longer exists. Leaving it latched would
+    // also make THE ARBITRATION refuse every new Space hold (rules B and C both
+    // read this flag), so the ring would stop appearing at all — PROBLEM 262's
+    // symptom, reached from a third direction.
+    if disarm_middle_hold() {
+        log::info!(
+            "middle-button ring: the re-hook tore down a live middle-button hold (PROBLEM 263) \
+             — its ring is being hidden below, so its pointer latches go with it, and the \
+             arbitration latch that would have refused every new hold is cleared with it."
+        );
+    }
 
     // PROBLEM 177, second half — and it must not leave the HUD stuck either.
     //
@@ -3916,7 +3993,17 @@ unsafe extern "system" fn kb_hook_proc(
     // ask whether Space is held — it reports a key we SUPPRESS as UP, which is
     // the exact lie that once broke every shortcut in the app. `MODIFIER_ACTIVE`
     // is our own bookkeeping and is the only honest answer.
-    if is_down && vk != VK_SPACE && !MODIFIER_ACTIVE.load(Ordering::Relaxed) {
+    //
+    // PROBLEM 263 — and a key pressed while the MIDDLE BUTTON is holding the
+    // ring is a command for the same reason, so it is excluded the same way.
+    // One extra relaxed load, and only on keystrokes that have already passed
+    // the three tests above (i.e. ordinary typing), which is the cheapest place
+    // it could sit.
+    if is_down
+        && vk != VK_SPACE
+        && !MODIFIER_ACTIVE.load(Ordering::Relaxed)
+        && !MIDDLE_HOLD_ACTIVE.load(Ordering::Relaxed)
+    {
         LAST_USER_TYPING.store(now, Ordering::Relaxed);
         LAST_USER_TYPING_VK.store(vk as u32, Ordering::Relaxed);
     }
@@ -4075,6 +4162,16 @@ unsafe extern "system" fn kb_hook_proc(
         if other_modifier_down() {
             return CallNextHookEx(None, n_code, w_param, l_param);
         }
+        // PROBLEM 263 — THE ARBITRATION, RULE B (stated in full beside
+        // `MIDDLE_TAP_MS`): a middle-button hold already owns a ring, so this
+        // Space is an ORDINARY SPACE. Handed to the OS exactly like the
+        // Ctrl/Alt/Win case directly above and for the same reason — a press
+        // this branch declines sets no latch, swallows nothing and owes no up,
+        // so the two triggers can never both serve one gesture. One relaxed
+        // load, on the Space-down branch only.
+        if MIDDLE_HOLD_ACTIVE.load(Ordering::Relaxed) {
+            return CallNextHookEx(None, n_code, w_param, l_param);
+        }
         if !MODIFIER_ACTIVE.load(Ordering::Relaxed) {
             MODIFIER_ACTIVE.store(true, Ordering::Relaxed);
             SPACE_ABORTED.store(false, Ordering::Relaxed);
@@ -4111,7 +4208,27 @@ unsafe extern "system" fn kb_hook_proc(
     // ===================================================================
     // COMBO KEYS (only when modifier is active)
     // ===================================================================
-    if MODIFIER_ACTIVE.load(Ordering::Relaxed) && is_down {
+    // PROBLEM 263 — a MIDDLE-BUTTON hold gets the combo branch too, because
+    // "tapping a bound letter while the button is held launches that key, the
+    // same as Space+letter" is half of what makes the second trigger worth
+    // having. Two relaxed loads instead of one on the key-down path.
+    //
+    // `hook_hold` is kept as its own name and every Space-SPECIFIC piece below
+    // is gated on it. Three of them, and each would be a real bug if it ran for
+    // a middle hold:
+    //   * `SPACE_COMBO_SEEN` is `reap_stale_hold`'s stand-down evidence. Setting
+    //     it for a hold the Space reaper is not watching is harmless today and
+    //     is exactly the kind of shared-flag drift PROBLEM 219 was about.
+    //   * `MAX_MODIFIER_HOLD_MS` is measured from `SPACE_DOWN_TS`, which for a
+    //     middle hold is some previous Space press or 0 — it would fire
+    //     instantly and clear a latch it does not own.
+    //   * the ROLLOVER window and `MARGIN_COMMAND` both measure Space-down →
+    //     key-down, i.e. "was this typing?". The middle button is not a typing
+    //     key, so there is no rollover to apply and no margin to record; doing
+    //     either would inject a phantom space and poison PROBLEM 95's histogram
+    //     with a delay that means nothing.
+    let hook_hold = MODIFIER_ACTIVE.load(Ordering::Relaxed);
+    if (hook_hold || MIDDLE_HOLD_ACTIVE.load(Ordering::Relaxed)) && is_down {
         // PROBLEM 219 — FIRST, above every branch that can return, because
         // this fact is true of the hold no matter what we decide to do with
         // the key. Space-down was handled and returned above, so this is
@@ -4120,7 +4237,13 @@ unsafe extern "system" fn kb_hook_proc(
         // Space's repeat for the rest of the hold. One relaxed store on a
         // branch that already loaded `MODIFIER_ACTIVE` — no new callback cost
         // (PROBLEM 58). See `SPACE_COMBO_SEEN` for the log evidence.
-        SPACE_COMBO_SEEN.store(true, Ordering::Relaxed);
+        //
+        // PROBLEM 263 — `hook_hold` only. A middle hold produces no Space
+        // auto-repeat for this flag to stand down, and it is not the hold
+        // `reap_stale_hold` is watching.
+        if hook_hold {
+            SPACE_COMBO_SEEN.store(true, Ordering::Relaxed);
+        }
 
         // --- FAILSAFE: has the modifier been latched on for an absurd time? ---
         //
@@ -4154,8 +4277,14 @@ unsafe extern "system" fn kb_hook_proc(
         // happened to reach this line. Same constant, same value, now at module
         // scope so `reap_stale_hold` enforces it too — from the pump and from
         // `st-hud-pointer`, neither of which needs the hook to be alive.
+        //
+        // PROBLEM 263 — `hook_hold` only, and this one would be a live bug
+        // otherwise: `SPACE_DOWN_TS` belongs to the Space hold, so under a
+        // middle hold `latched_ms` is the age of some previous Space press (or
+        // of the epoch), the bound fires on the first key, and the branch then
+        // clears a latch it does not own.
         let latched_ms = now.saturating_sub(SPACE_DOWN_TS.load(Ordering::Relaxed));
-        if latched_ms > MAX_MODIFIER_HOLD_MS {
+        if hook_hold && latched_ms > MAX_MODIFIER_HOLD_MS {
             STUCK_MODIFIER.fetch_add(1, Ordering::Relaxed);
             MODIFIER_ACTIVE.store(false, Ordering::Relaxed);
             SPACE_INTERCEPTED.store(false, Ordering::Relaxed);
@@ -4168,7 +4297,14 @@ unsafe extern "system" fn kb_hook_proc(
         // saturating_sub: SPACE_DOWN_TS can legitimately be 0 or stale if
         // MODIFIER_ACTIVE was forced on by a path that never stamped it.
         let held_ms = now.saturating_sub(space_ts);
-        let in_rollover = rollover > 0 && is_alpha_or_digit(vk) && held_ms < rollover;
+        // PROBLEM 263 — `hook_hold` only. The rollover window exists because
+        // Space is a TYPING key and a fast typist's "the" must not become a
+        // command; the middle button types nothing, so there is no prose to
+        // protect and no space to re-inject. Without this term a middle hold
+        // would fall into `inject_space_then_key` and type a space the user
+        // never asked for.
+        let in_rollover =
+            hook_hold && rollover > 0 && is_alpha_or_digit(vk) && held_ms < rollover;
 
         // --- A REAL OS SHORTCUT THAT OVERLAPS A HELD SPACE MUST WIN ---
         //
@@ -4305,7 +4441,17 @@ unsafe extern "system" fn kb_hook_proc(
         if let Some(combo) = combo_opt {
             // NO LOGGING HERE — see the PROBLEM 58 banner above. The engine
             // logs "combo Space+X received" the moment it handles this event.
-            record_margin(&MARGIN_COMMAND, held_ms); // PROBLEM 95
+            // PROBLEM 263 — `hook_hold` only. PROBLEM 95's histogram measures
+            // Space-down → key-down so the owner can see how close real typing
+            // comes to the command threshold; a middle hold's `held_ms` is not
+            // that measurement and would silently poison the data.
+            if hook_hold {
+                record_margin(&MARGIN_COMMAND, held_ms); // PROBLEM 95
+            }
+            // NOT gated: `SPACE_ABORTED` means "something else claimed this
+            // press", which is true of both holds and is exactly what stops a
+            // middle release from ALSO replaying a click (see
+            // `middle_press_was_a_click`).
             SPACE_ABORTED.store(true, Ordering::Relaxed);
             send_event(HookEvent::KeyCombo(combo));
             return LRESULT(1); // suppress key
@@ -4363,6 +4509,33 @@ unsafe extern "system" fn ms_hook_proc(
         return LRESULT(1);
     }
 
+    // PROBLEM 263 — THE MIDDLE BUTTON'S RELEASE, and it sits here for exactly
+    // the reason the line above it does: WHOEVER EATS THE DOWN OWES THE UP.
+    //
+    // We suppressed the `WM_MBUTTONDOWN`, so this up has no matching down in
+    // the app underneath. Every gate below can flip mid-hold — the user
+    // alt-tabs into an excluded app, a game goes fullscreen, bypass is switched
+    // on from the tray — and all of them `return CallNextHookEx`. Put this
+    // branch under any of them and the release of a press we already ate leaks
+    // to an app that never saw the press, AND the ring stays up with no
+    // teardown coming, which is PROBLEM 218's stranded HUD on a third path.
+    //
+    // The cookie test is FIRST: our own replayed click (see
+    // `replay_middle_click`) must never be read as a new press, or the replay
+    // would raise a ring and owe another replay, forever. Keyboard law 1 — our
+    // cookie, never the OS's INJECTED flag.
+    if msg == WM_MBUTTONUP {
+        let ms = &*(l_param.0 as *const MSLLHOOKSTRUCT);
+        if ms.dwExtraInfo != MAGIC_INJECTED_MOUSE
+            && MIDDLE_UP_OWED.swap(false, Ordering::Relaxed)
+        {
+            if let Some(ev) = on_middle_button_up(ms_now) {
+                send_event(ev);
+            }
+            return LRESULT(1);
+        }
+    }
+
     // --- App exceptions: same gate as kb_hook_proc, before anything is eaten.
     // MODIFIER_ACTIVE can still be TRUE from a Space held just before the
     // switch, and without this the wheel would stay swallowed for the first
@@ -4370,7 +4543,45 @@ unsafe extern "system" fn ms_hook_proc(
     if EXCLUDED_ACTIVE.load(Ordering::Relaxed) {
         return CallNextHookEx(None, n_code, w_param, l_param);
     }
-    // PROBLEM 261 — "is a hold latched?", asked of BOTH witnesses.
+
+    // PROBLEM 263 — THE MIDDLE BUTTON'S PRESS: the ring's second trigger.
+    //
+    // ABOVE the `hold_latched` gate below, because the whole point of this
+    // branch is to run when NO hold is latched — it is what CREATES one. Below
+    // the App-exceptions gate, because the user's own exception list stands the
+    // entire app down and this is part of the app.
+    //
+    // COST ON THE COMMON PATH: one `u32` comparison per mouse event. Every
+    // atomic load, the cookie read and the pure gate are inside the branch, so
+    // a mouse-move pays nothing at all (PROBLEM 58's envelope).
+    if msg == WM_MBUTTONDOWN {
+        let ms = &*(l_param.0 as *const MSLLHOOKSTRUCT);
+        if ms.dwExtraInfo != MAGIC_INJECTED_MOUSE
+            && middle_button_down_accepted(
+                MIDDLE_BUTTON_RING.load(Ordering::Relaxed),
+                orbit_apps::WATCHER_ALIVE.load(Ordering::Relaxed),
+                orbit_apps::ORBIT_ACTIVE.load(Ordering::Relaxed),
+                // EXCLUDED_ACTIVE already returned above; passed as `false`
+                // rather than dropped so the pure gate lists every reason in
+                // one readable place and its test can walk all of them.
+                false,
+                BYPASS_MODE.load(Ordering::Relaxed),
+                FULLSCREEN_ACTIVE.load(Ordering::Relaxed),
+                // THE ARBITRATION, rule A.
+                MODIFIER_ACTIVE.load(Ordering::Relaxed),
+                OWN_HOLD_ACTIVE.load(Ordering::Relaxed),
+                MIDDLE_HOLD_ACTIVE.load(Ordering::Relaxed),
+            )
+        {
+            on_middle_button_down(ms_now.max(1));
+            return LRESULT(1); // suppress: the app must not start autoscroll
+        }
+        // Declined — hand it to the app underneath byte-identically to a build
+        // that never had this feature. Nothing was eaten, so nothing is owed.
+        return CallNextHookEx(None, n_code, w_param, l_param);
+    }
+
+    // PROBLEM 261 — "is a hold latched?", asked of ALL THREE witnesses.
     //
     // This used to read `MODIFIER_ACTIVE` alone, and that single load is the
     // whole of the owner's 1.0.105 report: with the dashboard focused the
@@ -4388,6 +4599,7 @@ unsafe extern "system" fn ms_hook_proc(
     if !hold_latched(
         MODIFIER_ACTIVE.load(Ordering::Relaxed),
         OWN_HOLD_ACTIVE.load(Ordering::Relaxed),
+        MIDDLE_HOLD_ACTIVE.load(Ordering::Relaxed),
     ) {
         return CallNextHookEx(None, n_code, w_param, l_param);
     }
@@ -4647,6 +4859,7 @@ fn foreground_is_own_window() -> bool {
 
 /// THE GUARD, as a pure function — every reason the fallback may decline, in
 /// one place that a test can walk.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn own_window_space_down_accepted(
     foreground_is_own_window: bool,
     bypass_active: bool,
@@ -4655,6 +4868,7 @@ pub(crate) fn own_window_space_down_accepted(
     dedupe_ms: u64,
     own_hold_age_ms: Option<u64>,
     own_hold_max_ms: u64,
+    middle_hold_active: bool,
 ) -> bool {
     // Guard 1 — the fallback exists for exactly one situation.
     if !foreground_is_own_window {
@@ -4672,6 +4886,15 @@ pub(crate) fn own_window_space_down_accepted(
     // hold; the age is the press that latched it (or one whose latch was
     // dropped by a gate, which is still a press we must not duplicate).
     if hook_hold_latched {
+        return false;
+    }
+    // Guard 2c — PROBLEM 263, THE ARBITRATION rule C. Guard 2 asks about the
+    // hook; this asks the identical question about the third witness. A middle
+    // button already holding a ring owns the gesture, so a Space pressed inside
+    // the dashboard while it is held is an ordinary space — exactly what rule B
+    // makes it everywhere else. Without this, the ONE window where the hook is
+    // deaf would be the one window where the two triggers could both fire.
+    if middle_hold_active {
         return false;
     }
     // Guard 2b — PROBLEM 262 item 5. THE FALLBACK-VS-FALLBACK DEDUPE, which
@@ -4711,16 +4934,20 @@ pub(crate) fn own_window_hold_is_ours(own_hold_age_ms: Option<u64>, max_hold_ms:
 // a mouse, a hook or a window.
 // ---------------------------------------------------------------------------
 
-/// Is SOME Space-hold latched right now? The mouse callback's gate and the
-/// poller's `live` term both used to read `MODIFIER_ACTIVE` alone; this is the
-/// one place that knows there are two witnesses.
+/// Is SOME hold latched right now? The mouse callback's gate and the poller's
+/// `live` term both used to read `MODIFIER_ACTIVE` alone; this is the one
+/// place that knows there are now THREE witnesses.
 ///
-/// `||`, not `^`: the two are mutually exclusive by guard 2 for a single
-/// press, but a fallback hold that is being torn down while the hook takes a
-/// fresh one is a legal transient, and during it a hold IS latched.
+/// `||`, not `^`: they are mutually exclusive for a single press (see
+/// `THE ARBITRATION` below), but a hold being torn down while another is taken
+/// is a legal transient, and during it a hold IS latched.
 #[inline(always)]
-pub(crate) fn hold_latched(hook_latched: bool, own_hold_active: bool) -> bool {
-    hook_latched || own_hold_active
+pub(crate) fn hold_latched(
+    hook_latched: bool,
+    own_hold_active: bool,
+    middle_hold_active: bool,
+) -> bool {
+    hook_latched || own_hold_active || middle_hold_active
 }
 
 /// WHICH hold a poller tick belongs to. The stamp is the identity of a hold
@@ -4732,9 +4959,23 @@ pub(crate) fn hold_latched(hook_latched: bool, own_hold_active: bool) -> bool {
 /// `SPACE_DOWN_TS` — a stamp from some previous hook hold, or 0 at boot —
 /// would hand the tracker a cursor position the user parked minutes ago and
 /// arm a chip the user never pointed at.
+///
+/// PROBLEM 263 adds the middle-button stamp on the same rule and at the same
+/// precedence-by-recency: a middle hold can only START when neither of the
+/// other two is latched (THE ARBITRATION, below), so at most one of the three
+/// `*_active` flags is true for any real press, and the order below only ever
+/// decides a teardown transient.
 #[inline(always)]
-pub(crate) fn hold_ts_for(hook_ts: u64, own_hold_active: bool, own_ts: u64) -> u64 {
-    if own_hold_active && own_ts != 0 {
+pub(crate) fn hold_ts_for(
+    hook_ts: u64,
+    own_hold_active: bool,
+    own_ts: u64,
+    middle_hold_active: bool,
+    middle_ts: u64,
+) -> u64 {
+    if middle_hold_active && middle_ts != 0 {
+        middle_ts
+    } else if own_hold_active && own_ts != 0 {
         own_ts
     } else {
         hook_ts
@@ -4851,20 +5092,23 @@ pub(crate) fn own_hold_active() -> bool {
     OWN_HOLD_ACTIVE.load(Ordering::Relaxed)
 }
 
-/// The poller's hold identity, resolved across both witnesses.
+/// The poller's hold identity, resolved across all three witnesses.
 pub(crate) fn current_hold_ts() -> u64 {
     hold_ts_for(
         SPACE_DOWN_TS.load(Ordering::Relaxed),
         OWN_HOLD_ACTIVE.load(Ordering::Relaxed),
         OWN_HOLD_TS.load(Ordering::Relaxed),
+        MIDDLE_HOLD_ACTIVE.load(Ordering::Relaxed),
+        MIDDLE_DOWN_TS.load(Ordering::Relaxed),
     )
 }
 
-/// Is a hold latched by EITHER witness? The poller's `live` term.
+/// Is a hold latched by ANY witness? The poller's `live` term.
 pub(crate) fn any_hold_latched() -> bool {
     hold_latched(
         MODIFIER_ACTIVE.load(Ordering::Relaxed),
         OWN_HOLD_ACTIVE.load(Ordering::Relaxed),
+        MIDDLE_HOLD_ACTIVE.load(Ordering::Relaxed),
     )
 }
 
@@ -4961,6 +5205,7 @@ pub(crate) fn own_window_space_down() -> bool {
         OWN_WINDOW_DEDUPE_MS,
         own_hold_age_ms(),
         OWN_WINDOW_MAX_HOLD_MS,
+        MIDDLE_HOLD_ACTIVE.load(Ordering::Relaxed),
     ) {
         return false;
     }
@@ -5033,6 +5278,626 @@ pub(crate) fn own_window_space_up(had_combo: bool) -> bool {
 /// The hold number, for the one log line the fallback prints per hold.
 pub(crate) fn own_window_hold_count() -> u32 {
     OWN_WINDOW_HOLDS.load(Ordering::Relaxed)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PROBLEM 263 — THE MIDDLE MOUSE BUTTON AS A SECOND RING TRIGGER
+//
+// Hold the middle mouse button and the Guide HUD ring comes up, in exactly the
+// place and shape holding Space raises it. Release over a chip and it launches;
+// tap a bound letter while holding and that launches; left-click a chip and
+// that launches. None of that is new code — the ring and the engine do not care
+// which gesture raised them, and this section's whole job is to be a THIRD
+// witness that speaks the same language the other two already speak.
+//
+// ───────────────────────────────────────────────────────────────────────────
+// THE ARBITRATION — ONE PLACE, AND THIS IS IT.
+//
+// Three witnesses can now say "a hold is live": the keyboard hook
+// (`MODIFIER_ACTIVE`), the own-window fallback (`OWN_HOLD_ACTIVE`, PROBLEM
+// 259/261) and the middle button (`MIDDLE_HOLD_ACTIVE`). Two of them firing for
+// one gesture would mean two rings, two launches and two toasts. The rule is
+// stated once, here, and enforced in exactly three places that each name this
+// comment:
+//
+//   A. A MIDDLE-BUTTON HOLD MAY NOT START WHILE EITHER SPACE HOLD IS LIVE.
+//      `middle_button_down_accepted` refuses when `MODIFIER_ACTIVE` or
+//      `OWN_HOLD_ACTIVE` is set, so the `WM_MBUTTONDOWN` passes straight
+//      through to the app underneath, untouched. Holding Space and clicking the
+//      middle button is therefore byte-identical to what it was before this
+//      feature existed.
+//   B. A SPACE PRESS WHILE A MIDDLE HOLD IS LIVE IS AN ORDINARY SPACE.
+//      `kb_hook_proc`'s SPACE-DOWN branch returns `CallNextHookEx` when
+//      `MIDDLE_HOLD_ACTIVE` is set, beside the existing `other_modifier_down()`
+//      pass-through and for the same reason: it never sets `MODIFIER_ACTIVE`,
+//      never swallows the key, and never owes an up. Space types a space.
+//   C. THE OWN-WINDOW FALLBACK REFUSES A HOLD WHILE A MIDDLE HOLD IS LIVE.
+//      A new guard in `own_window_space_down_accepted`, alongside guard 2's
+//      identical question about the hook.
+//
+// The three are mutually exclusive by construction, not by timing: each asks
+// about a latch that is already set before the competing path can be entered.
+// `hold_latched` is the one function that knows there are three of them, and
+// every consumer (the mouse gate, the pointer poller's `live` term, the hold
+// identity) goes through it.
+//
+// ───────────────────────────────────────────────────────────────────────────
+// TAP vs HOLD, AND WHY THE CLICK IS REPLAYED RATHER THAN PASSED
+//
+// The `WM_MBUTTONDOWN` is SUPPRESSED. It has to be: letting it through starts
+// the browser's autoscroll (or the CAD program's orbit) at the same instant we
+// start a ring, and the two cannot share the gesture. So this code owes the
+// world a middle click whenever the press turns out to have been one — the
+// exact contract `SPACE_INTERCEPTED` carries for the spacebar, and the exact
+// reason `MIDDLE_UP_OWED` exists: **whoever eats the down owes the up.**
+//
+// The decision is made at RELEASE, not by a timer, which is what makes it a
+// true mirror of Space: Space-down starts the HUD timer, and a Space released
+// before the ring appears simply types a space and cancels the pending show.
+// So a middle press injects `MiddleButtonDown` immediately (the ring timer
+// starts, `guide_hud_delay_ms` and all), and the release decides:
+//
+//   * released inside `MIDDLE_TAP_MS` with nothing else claiming the press →
+//     `MiddleButtonTap`: the engine replays a real middle click, down and up in
+//     ONE `SendInput` batch (keyboard law 2), tagged with the `0x7A7A7A7A`
+//     cookie so our own hook passes it through, and cancels the pending ring.
+//     Browsers still open links in a new tab and still close tabs.
+//   * anything else → the ordinary Space-release path: `PointerActivate` if a
+//     chip is armed, `SpaceUp` otherwise.
+//
+// "Nothing else claiming the press" is `SPACE_ABORTED`, and reusing that flag
+// rather than inventing one is the point: it is already set by a combo, by the
+// wheel and by arming a chip, which is precisely the set of things that must
+// stop a click being replayed. It is the same flag, asking the same question,
+// that decides whether a Space release types a space.
+//
+// THE TRADE, ACCEPTED BY THE OWNER: holding the middle button past
+// `MIDDLE_TAP_MS` raises the ring instead of starting browser autoscroll. The
+// mitigation is `orbit_apps.rs` (3D, CAD and design programs never see this at
+// all) plus the switch in Settings.
+//
+// ───────────────────────────────────────────────────────────────────────────
+// NOTHING HERE MAY BE READ FROM THE CALLBACK EXCEPT AN ATOMIC
+//
+// Every decision function below is pure. The callback loads atomics, calls one
+// of them, and stores atomics. The replay `SendInput`, the exclusion lookup and
+// every log line happen on the engine thread or on a poller — never inside
+// `ms_hook_proc`, which is the one hook in this process that makes no win32k
+// call at all and is therefore the one that survives when the keyboard hooks
+// are evicted (keyboard law 7b). Do not spend its budget.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// How long the middle button may be held before the press stops being a
+/// click.
+///
+/// 250 ms. A deliberate click is 60–150 ms; Windows' own double-click window
+/// is 500 ms, so 250 sits clear of one and inside the other. It is also below
+/// the 300 ms default `guide_hud_delay_ms`, which means a click that is going
+/// to be replayed has normally not drawn a ring at all — the two thresholds
+/// were chosen to compose, and a user who shortens the HUD delay below this
+/// simply sees the ring flash before their click lands, exactly as a slow
+/// Space tap flashes the ring before typing its space.
+///
+/// The two ways to be wrong are not symmetric. Too LOW and a slow clicker's
+/// click is swallowed and replaced by a ring — visible, annoying, recoverable.
+/// Too HIGH and a genuine hold fires a click into the app underneath —
+/// visible, and possibly destructive. 250 errs toward the first.
+pub(crate) const MIDDLE_TAP_MS: u64 = 250;
+
+/// The middle hold's own stuck-latch bound, mirroring `MAX_MODIFIER_HOLD_MS`
+/// and `OWN_WINDOW_MAX_HOLD_MS`. Same value as both, and for the same reason:
+/// people hold the trigger and READ the ring.
+///
+/// A middle hold whose `WM_MBUTTONUP` never arrives — alt-tab into an elevated
+/// window (UIPI stops delivering to a non-elevated hook), the app under the
+/// cursor crashing, an RDP disconnect, the hook being evicted — is
+/// unfalsifiable from inside the process the moment the mouse callback stops
+/// being called. This bound is the last thing standing between that and a ring
+/// nothing can hide. See `middle_hold_reap_reason`.
+pub(crate) const MIDDLE_MAX_HOLD_MS: u64 = 30_000;
+
+/// How long the MOUSE callback must have been silent, while the OS was
+/// accepting input it cannot account for, before a latched middle hold is torn
+/// down on deafness evidence alone.
+///
+/// 3000 ms — the same figure as `HOLD_DEAF_SILENCE_MS`, and chosen the same
+/// way: a hold is the one state where a false positive costs a live press, so
+/// this path is asked for twice the silence the no-hold forced repair is.
+pub(crate) const MIDDLE_DEAF_SILENCE_MS: u64 = 3_000;
+
+/// PROBLEM 263 — is the middle-button trigger switched on?
+///
+/// The config mirror, read on the mouse callback as one relaxed load. Starts
+/// FALSE even though the SETTING defaults to ON, for the identical reason
+/// spelled out on `POINTER_HUD_ACTIVATION`: this atomic is the runtime mirror,
+/// not the default. Seeding it `true` would mean a config that says OFF is
+/// briefly honoured as ON — a window in which a middle click could be
+/// swallowed by a feature the user turned off.
+pub static MIDDLE_BUTTON_RING: AtomicBool = AtomicBool::new(false);
+
+/// Publish the middle-button setting for the hook.
+///
+/// PROBLEM 180's rule, sixth instance: MUST be called from BOTH the startup
+/// config load (lib.rs) AND `config::save` — the one funnel every mutation
+/// path goes through, `reset_config` and friends included. The atomic starts
+/// false, so skipping the startup call is the silent failure where the feature
+/// works all session and then reads OFF for the entire next launch.
+pub fn publish_middle_button_ring(cfg: &crate::config::AppConfig) {
+    let on = cfg.middle_button_ring;
+    let prev = MIDDLE_BUTTON_RING.swap(on, Ordering::Relaxed);
+    if prev != on {
+        log::info!(
+            "hook: the middle-button ring trigger is now {} (PROBLEM 263)",
+            if on { "ON" } else { "OFF" }
+        );
+    }
+}
+
+/// Tick of the `WM_MBUTTONDOWN` this process swallowed, or 0 for "no middle
+/// hold". Written by the mouse callback and by the teardown paths.
+static MIDDLE_DOWN_TS: AtomicU64 = AtomicU64::new(0);
+
+/// The latch. `true` from the swallowed `WM_MBUTTONDOWN` until the release,
+/// the reaper or a repair ends it.
+///
+/// **IT IS NOT `MODIFIER_ACTIVE`, AND IT MUST NEVER BE.** `MODIFIER_ACTIVE`
+/// means "the keyboard hook is holding a Space it swallowed": it is what the
+/// hook's Space-UP branch clears, what `reap_stale_hold`'s auto-repeat evidence
+/// is about, what `proven_keyboard_deaf` suppresses itself on, and what THE
+/// ARBITRATION reads to decide who owns a press. A middle hold that set it
+/// would owe a Space-up nobody is going to send (PROBLEM 262's exact wedge),
+/// and would make itself invisible to arbitration rule B. Same decision, same
+/// reasoning, as `OWN_HOLD_ACTIVE` — see the comment there.
+static MIDDLE_HOLD_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// We swallowed a `WM_MBUTTONDOWN`, so we owe its `WM_MBUTTONUP`.
+///
+/// The middle-button twin of `SPACE_INTERCEPTED` and of `pointer::CLICK_EATEN`,
+/// and it is checked ABOVE every gate in `ms_hook_proc` for the reason PROBLEM
+/// 218 wrote down for the keyboard: a gate that flips mid-hold must not be able
+/// to strand the up-half of a press whose down-half we already ate.
+static MIDDLE_UP_OWED: AtomicBool = AtomicBool::new(false);
+
+/// How many middle-button holds have begun this session. The number in the log
+/// line, so "which gesture raised this ring?" is answerable by grep.
+static MIDDLE_HOLDS: AtomicU32 = AtomicU32::new(0);
+
+/// Middle presses replayed as ordinary clicks. Drained into the 60 s
+/// diagnostics line.
+static MIDDLE_TAPS_REPLAYED: AtomicU32 = AtomicU32::new(0);
+
+/// Middle holds the reaper had to tear down. Non-zero is the fingerprint of a
+/// lost `WM_MBUTTONUP`; read it as a bug report, not as health.
+static MIDDLE_HOLDS_REAPED: AtomicU32 = AtomicU32::new(0);
+
+/// THE MIDDLE-BUTTON DOWN GATE, as a pure function — every reason the trigger
+/// may decline, in ONE place a test can walk. There is no second gate and there
+/// must never be one.
+///
+/// **There WAS a second one, briefly, and deleting it is a decision worth
+/// recording (2026-09-10).** A helper `middle_trigger_armed()` folded
+/// `feature_on && watcher_alive` into a single bool, and `orbit_apps.rs`'s
+/// header documented it as *the* place the watcher gate lives — while nothing
+/// in the process ever called it. The crate carries `#![allow(dead_code)]`
+/// (lib.rs line 1), so neither rustc nor clippy said a word. Two things were
+/// wrong with it and only one was the deadness: collapsing two independent
+/// reasons into one bool means a caller that declines can no longer say WHICH
+/// reason declined it, and "the feature is switched off" and "no 3D/CAD verdict
+/// has ever been measured" are the two reasons a user is most likely to have to
+/// tell apart. They are separate parameters here for exactly that reason.
+/// Generalise: **a documented entry point that nothing calls is worse than no
+/// entry point — a reader who greps it finds a function and cannot tell whether
+/// the gate runs.**
+///
+/// Ordered cheapest-first, and each argument is a single relaxed atomic load at
+/// the call site. Nothing here queries a window, allocates or locks.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn middle_button_down_accepted(
+    feature_on: bool,
+    watcher_alive: bool,
+    orbit_app_active: bool,
+    user_excluded: bool,
+    bypass_active: bool,
+    fullscreen_active: bool,
+    hook_hold_latched: bool,
+    own_hold_active: bool,
+    middle_hold_active: bool,
+) -> bool {
+    // The switch in Settings. Off means the middle button is a middle button.
+    if !feature_on {
+        return false;
+    }
+    // No 3D/CAD verdict has ever been measured — see `orbit_apps::WATCHER_ALIVE`.
+    // Fail toward stock behaviour, never toward eating the orbit gesture.
+    if !watcher_alive {
+        return false;
+    }
+    // The BUILT-IN list: SolidWorks, Blender, AutoCAD and the rest keep their
+    // middle-drag orbit. This is NOT the user's App exceptions and it gates the
+    // middle button ONLY — Space still works in there.
+    if orbit_app_active {
+        return false;
+    }
+    // The user's OWN App exceptions gate this exactly as they gate everything
+    // else. Inside an app the user listed, Spaceadom decides nothing at all.
+    if user_excluded {
+        return false;
+    }
+    // Bypass mode means "Spaceadom is paused". A trigger that ignored it would
+    // make the pause control a lie. The escape hatch out of bypass is Space+`.`
+    // and the control in Settings, neither of which needs this.
+    if bypass_active {
+        return false;
+    }
+    // The fullscreen/game gate, same as everywhere else.
+    if fullscreen_active {
+        return false;
+    }
+    // THE ARBITRATION, rule A — a Space hold from EITHER witness owns the
+    // gesture, and the middle button passes straight through untouched.
+    if hook_hold_latched || own_hold_active {
+        return false;
+    }
+    // And a middle hold cannot start twice. `WM_MBUTTONDOWN` can repeat if a
+    // release was lost; the second one is not a new press.
+    !middle_hold_active
+}
+
+/// Should the release replay a real middle click?
+///
+/// `aborted` is `SPACE_ABORTED`: set by a combo, by the wheel and by arming a
+/// chip — the exact set of things that mean "something else claimed this
+/// press". Identical in shape to the `!SPACE_ABORTED` test that decides whether
+/// a Space release types a space, and deliberately so.
+#[inline(always)]
+pub(crate) fn middle_press_was_a_click(held_ms: u64, tap_ms: u64, aborted: bool) -> bool {
+    held_ms < tap_ms && !aborted
+}
+
+/// Why the middle-hold reaper tore a hold down. Named rather than boolean so
+/// the log says which instrument spoke and a test can assert the reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MiddleHoldReap {
+    /// The mouse callback is not being called at all, so the `WM_MBUTTONUP`
+    /// that would end this hold can never arrive. PROBLEM 262's lesson applied
+    /// to the other hook: *an instrument that can only be read by the thing
+    /// that has failed is not an instrument.*
+    MouseDeaf,
+    /// `MIDDLE_MAX_HOLD_MS` elapsed. Nothing proved anything; the hold is
+    /// simply older than any real one.
+    Expired,
+}
+
+/// THE MIDDLE-HOLD REAPER'S DECISION, pure.
+///
+/// **`GetAsyncKeyState(VK_MBUTTON)` IS NOT AN OPTION HERE, AND THAT IS
+/// KEYBOARD LAW 3, NOT AN OVERSIGHT.** We SUPPRESS the `WM_MBUTTONDOWN`, so
+/// Windows never records the button as pressed and `GetAsyncKeyState` reports
+/// it UP for the whole of a perfectly live hold. Building the liveness test on
+/// it would tear down every hold on its first tick — the identical mistake that
+/// once broke every shortcut in this app (see the FAILSAFE comment in
+/// `kb_hook_proc`). The evidence below is our own bookkeeping and the OS's own
+/// input clock, never the key state of a key we are hiding.
+///
+/// `MouseDeaf` is checked first because it fires at 3 s and `Expired` at 30 s:
+/// in practice the bound only ever speaks when deafness could not be proven
+/// (the user genuinely stopped touching the machine mid-hold, so there is no
+/// unaccounted-for input to prove anything with).
+pub(crate) fn middle_hold_reap_reason(
+    active: bool,
+    hold_age_ms: u64,
+    max_hold_ms: u64,
+    ms_callback_silence_ms: Option<u64>,
+    os_input_age_ms: u64,
+    deaf_silence_ms: u64,
+    os_input_max_age_ms: u64,
+) -> Option<MiddleHoldReap> {
+    if !active {
+        return None;
+    }
+    // PROOF: the OS accepted input recently AND our mouse callback has been
+    // silent far longer than that. The callback stamps `LAST_MS_CALLBACK` on
+    // EVERY mouse event above every gate, so silence past the threshold means
+    // it was not entered at all — the hook is installed and is not being
+    // called (keyboard law 7a, seen from the mouse hook's side).
+    //
+    // `None` is UNKNOWN, never proof (PROBLEM 228): a callback that has not
+    // fired since the last install cannot be measured, and that case belongs to
+    // the bound below.
+    if os_input_age_ms <= os_input_max_age_ms
+        && matches!(ms_callback_silence_ms, Some(ms) if ms >= deaf_silence_ms)
+    {
+        return Some(MiddleHoldReap::MouseDeaf);
+    }
+    if hold_age_ms > max_hold_ms {
+        return Some(MiddleHoldReap::Expired);
+    }
+    None
+}
+
+/// Everything a hook Space-down sets that the ring and pointer activation
+/// depend on, applied for a MIDDLE-BUTTON hold.
+///
+/// IDEMPOTENT BY CONSTRUCTION, like `arm_own_window_hold`: every line is a
+/// store of a constant, so running it twice for one press leaves exactly what
+/// running it once leaves.
+///
+/// WHAT IS DELIBERATELY ABSENT, and each omission is a decision:
+/// * `MODIFIER_ACTIVE` — see `MIDDLE_HOLD_ACTIVE`. It is the arbiter; it may
+///   not be a party.
+/// * `SPACE_INTERCEPTED` — no Space was swallowed, so none is owed. Setting it
+///   would make the next real Space-up inject a phantom space.
+/// * `SPACE_TICK_TS` / `SPACE_REPEATS` / `SPACE_COMBO_SEEN` — the keyboard
+///   auto-repeat evidence `reap_stale_hold` measures. A middle hold produces
+///   none of it; writing those would feed that reaper evidence it never saw.
+#[inline(always)]
+fn arm_middle_hold(now: u64) {
+    // Stamp BEFORE the latch, so the poller can never read active-with-no-ts.
+    MIDDLE_DOWN_TS.store(now, Ordering::Relaxed);
+    MIDDLE_UP_OWED.store(true, Ordering::Relaxed);
+    // A fresh hold starts unaborted, or `pointer::apply_to`'s CAS refuses every
+    // arm for the whole hold. The hook's Space-down branch does exactly this
+    // store for exactly this reason.
+    SPACE_ABORTED.store(false, Ordering::Relaxed);
+    // A fresh hold must not inherit the last hold's armed chip or wheel-block.
+    pointer::on_space_down();
+    MIDDLE_HOLD_ACTIVE.store(true, Ordering::SeqCst);
+}
+
+/// The exact inverse, and the ONLY way `MIDDLE_HOLD_ACTIVE` becomes false.
+///
+/// Returns whether this call owned the teardown — a `swap`-based claim, so the
+/// release path, the reaper, the repair and the watchdog can all race and only
+/// one of them logs or hides a ring.
+///
+/// `MIDDLE_UP_OWED` is cleared here, and the trade is deliberate. Leaving it
+/// set would mean the NEXT genuine middle click — one whose down we passed
+/// through — has its UP eaten, which breaks a click the user is entitled to.
+/// Clearing it means a physical up that arrives after a teardown reaches the
+/// app with no matching down, which for the middle button is inert (nothing
+/// starts a drag on an up). Same choice, same reasoning, as
+/// `pointer::reset_on_eviction` makes for `CLICK_EATEN`.
+fn disarm_middle_hold() -> bool {
+    let owned = MIDDLE_HOLD_ACTIVE.swap(false, Ordering::SeqCst);
+    MIDDLE_DOWN_TS.store(0, Ordering::Relaxed);
+    MIDDLE_UP_OWED.store(false, Ordering::Relaxed);
+    if owned {
+        // An armed chip or a half-eaten click must not outlive the hold that
+        // created it. ONLY when we owned one: `ARMED_INDEX` and `CLICK_EATEN`
+        // are SHARED with the Space paths, and a stray teardown must not disarm
+        // a chip a healthy Space hold armed.
+        pointer::reset_on_eviction();
+    }
+    owned
+}
+
+/// Is the middle button holding a ring right now? One relaxed load; called on
+/// the KEYBOARD callback (arbitration rule B), so it may never be more.
+#[inline(always)]
+pub(crate) fn middle_hold_active() -> bool {
+    MIDDLE_HOLD_ACTIVE.load(Ordering::Relaxed)
+}
+
+fn middle_hold_age_ms() -> Option<u64> {
+    let ts = MIDDLE_DOWN_TS.load(Ordering::Relaxed);
+    if ts == 0 {
+        return None;
+    }
+    Some(tick_count().saturating_sub(ts))
+}
+
+/// PROBLEM 263 — the middle hold's stale-hold reaper, twin of
+/// `reap_stale_hold` and `reap_own_window_hold`.
+///
+/// Called from `st-hud-pointer` (an independent thread — the whole point is to
+/// still be running when the hook thread's own hooks have been evicted) and
+/// from the hook pump's `WM_TIMER` branch (so it still runs when that watcher
+/// failed to spawn, PROBLEM 124). Two homes, two different failure modes; both
+/// are off every callback, so logging here is legal.
+///
+/// `probe` is the caller's throttle: the deafness evidence costs two Win32
+/// calls and is only useful at the resolution of a 3 s bound.
+pub fn reap_middle_hold(probe: bool) -> bool {
+    if !MIDDLE_HOLD_ACTIVE.load(Ordering::Relaxed) {
+        // Cheapest possible exit, and it must stay first: with no hold latched
+        // there is nothing to prove and no Win32 call worth making.
+        return false;
+    }
+    let (ms_silence, os_input_age) = if probe {
+        middle_deaf_evidence()
+    } else {
+        // Not measured. `None` + a huge input age can never satisfy the
+        // deafness arm, which leaves only the 30 s bound — exactly the
+        // behaviour an unthrottled tick would have had before the probe.
+        (None, u64::MAX)
+    };
+    let Some(reason) = middle_hold_reap_reason(
+        true,
+        middle_hold_age_ms().unwrap_or(u64::MAX),
+        MIDDLE_MAX_HOLD_MS,
+        ms_silence,
+        os_input_age,
+        MIDDLE_DEAF_SILENCE_MS,
+        FORCED_INPUT_MAX_AGE_MS,
+    ) else {
+        return false;
+    };
+    let age = middle_hold_age_ms().unwrap_or(0);
+    // Claim it before anything else: the poller, the pump and a late
+    // `WM_MBUTTONUP` all race here, and a double teardown would emit two
+    // `guide-hud-hide` events.
+    if !disarm_middle_hold() {
+        return false;
+    }
+    let hud_was_up = crate::guide_hud::is_visible();
+    MIDDLE_HOLDS_REAPED.fetch_add(1, Ordering::Relaxed);
+    log::warn!(
+        "middle-button ring: reaping-a-latched-middle-button-hold-spaceadom ({reason:?}) — the \
+         middle button raised a ring {age}ms ago and its WM_MBUTTONUP never arrived (HUD was up: \
+         {hud_was_up}). That happens when the button comes up over a window this non-elevated \
+         hook is not delivered to (UIPI), when the app under the cursor dies mid-press, on an RDP \
+         disconnect, or when the mouse hook itself stops being called. Left standing it is a ring \
+         nothing can hide, with the pointer still arming chips behind it — PROBLEM 218's failure \
+         on a path PROBLEM 218's reaper cannot see, because that one measures the KEYBOARD hook's \
+         auto-repeat and a middle hold produces none. Note what is NOT used to decide this: \
+         GetAsyncKeyState(VK_MBUTTON) reports a button we SUPPRESS as UP (keyboard law 3), so it \
+         would tear down every live hold on its first tick. PROBLEM 263."
+    );
+    SPACE_ABORTED.store(false, Ordering::Relaxed);
+    crate::guide_hud::hide_guide_hud();
+    true
+}
+
+/// The deafness evidence a middle hold needs, gathered OFF every callback.
+///
+/// Returns `(ms_callback_silence_ms, os_input_age_ms)`. Scoped to the current
+/// install exactly as `deaf_evidence_for_reap` scopes its clocks — a callback
+/// stamp from before the last `install_hooks()` says nothing about this hook.
+#[cfg(windows)]
+fn middle_deaf_evidence() -> (Option<u64>, u64) {
+    let t = tick_count();
+    let installed_at = HOOKS_INSTALLED_AT.load(Ordering::Relaxed);
+    if t.saturating_sub(installed_at) < INSTALL_GRACE_MS {
+        // A hook that has not had a fair chance to be called cannot be proven
+        // deaf — the same first rule `proven_keyboard_deaf` opens with.
+        return (None, u64::MAX);
+    }
+    let cb = LAST_MS_CALLBACK.load(Ordering::Relaxed);
+    let silence = (cb != 0 && cb >= installed_at).then(|| t.saturating_sub(cb));
+    (silence, millis_since_last_input())
+}
+
+#[cfg(not(windows))]
+fn middle_deaf_evidence() -> (Option<u64>, u64) {
+    (None, u64::MAX)
+}
+
+/// The middle button went down and we swallowed it. Called from the mouse
+/// callback: atomics and one `send_event`, nothing else.
+///
+/// Split out of `ms_hook_proc` so the whole arming step is one named thing the
+/// reader can check against `arm_own_window_hold`, and so the callback body
+/// stays a list of guards.
+#[inline(always)]
+fn on_middle_button_down(now: u64) {
+    arm_middle_hold(now);
+    MIDDLE_HOLDS.fetch_add(1, Ordering::Relaxed);
+    send_event(HookEvent::MiddleButtonDown);
+}
+
+/// The middle button came up and we owe its release. Called from the mouse
+/// callback; returns the event to send, or `None` when there is nothing to say.
+#[inline(always)]
+fn on_middle_button_up(now: u64) -> Option<HookEvent> {
+    let ts = MIDDLE_DOWN_TS.load(Ordering::Relaxed);
+    let held = if ts == 0 { u64::MAX } else { now.saturating_sub(ts) };
+    let aborted = SPACE_ABORTED.load(Ordering::Relaxed);
+    let click = middle_press_was_a_click(held, MIDDLE_TAP_MS, aborted);
+    // PROBLEM 206 gesture A, mirrored from the hook's Space-UP branch and in
+    // the same order: consume the arm FIRST, then tear the hold down. A chip
+    // armed under a middle hold launches on release exactly as it does under a
+    // Space hold, through the SAME `take_armed_key`.
+    //
+    // A click can never have armed anything — arming sets `SPACE_ABORTED`, and
+    // `click` is false whenever that is set — so the two branches cannot both
+    // be true. Asked in this order anyway, because "cannot happen" is how a
+    // launch and a replayed click end up both firing.
+    let ev = if click {
+        MIDDLE_TAPS_REPLAYED.fetch_add(1, Ordering::Relaxed);
+        HookEvent::MiddleButtonTap
+    } else {
+        match pointer::take_armed_key() {
+            Some(ch) => HookEvent::PointerActivate(ch),
+            None => HookEvent::SpaceUp { modifier_fired: aborted },
+        }
+    };
+    if !disarm_middle_hold() {
+        // Something else (the reaper, a repair) already ended this hold. We
+        // still owed the up and have now eaten it, but there is no ring left to
+        // take down and no click to replay for a press that is no longer ours.
+        return None;
+    }
+    Some(ev)
+}
+
+/// PROBLEM 263 — replay the middle click this process swallowed.
+///
+/// ONE `SendInput` BATCH, DOWN AND UP TOGETHER — keyboard law 2. `SendInput`
+/// followed by anything else does not preserve order (the `hte`-for-`the` bug),
+/// and a down that lands without its up leaves the middle button latched in
+/// whatever has focus, which for a browser is autoscroll running with no way to
+/// stop it. `send_keys_raw`'s corrective-KEYUP repair only knows about keyboard
+/// events, so this batch's atomicity is the only protection there is: it is one
+/// call, and a short insert is reported rather than half-repaired.
+///
+/// Tagged with the `0x7A7A7A7A` cookie, so `ms_hook_proc` recognises it as ours
+/// and passes it through instead of treating it as a fresh press.
+///
+/// NO CURSOR MOVE IS SENT. Without `MOUSEEVENTF_ABSOLUTE`/`MOVE` the click
+/// lands wherever the cursor is NOW, which is where the user let go. If they
+/// moved the mouse during the press the click lands at the release point rather
+/// than the press point — for a click that is the right answer (the app sees a
+/// clean down+up at one place) and for a drag it does not matter, because a
+/// drag is not a click and never reaches here.
+///
+/// ENGINE THREAD ONLY. This is a win32k call and `ms_hook_proc` is the one hook
+/// in this process that makes none — see THE ARBITRATION's closing paragraph.
+#[cfg(windows)]
+pub(crate) fn replay_middle_click() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+        MOUSEINPUT,
+    };
+    let mk = |flags| INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: MAGIC_INJECTED_MOUSE,
+            },
+        },
+    };
+    let batch = [mk(MOUSEEVENTF_MIDDLEDOWN), mk(MOUSEEVENTF_MIDDLEUP)];
+    let sent = unsafe { SendInput(&batch, std::mem::size_of::<INPUT>() as i32) } as usize;
+    if sent == batch.len() {
+        return true;
+    }
+    // PROBLEM 227's discipline, applied to the one mouse batch this app sends.
+    // `SendInput` inserts events ONE AT A TIME and stops at the first one
+    // another thread blocks, returning a SHORT COUNT — and a short count of
+    // exactly 1 here means the DOWN went in and the UP did not, which leaves
+    // the middle button physically latched in whatever has focus. For a browser
+    // that is autoscroll running with no way to stop it: the worst outcome this
+    // feature can produce. `unreleased_keys_into` cannot help — it decodes
+    // keyboard events — so the repair is written out, and it is one event
+    // because the batch is two.
+    if sent == 1 {
+        let up = [mk(MOUSEEVENTF_MIDDLEUP)];
+        let _ = unsafe { SendInput(&up, std::mem::size_of::<INPUT>() as i32) };
+    }
+    false
+}
+
+#[cfg(not(windows))]
+pub(crate) fn replay_middle_click() -> bool {
+    true
+}
+
+/// The hold number, for the one line the middle-button trigger prints per hold.
+pub(crate) fn middle_hold_count() -> u32 {
+    MIDDLE_HOLDS.load(Ordering::Relaxed)
+}
+
+/// Drained into the 60 s diagnostics line beside `STALE_HOLDS_REAPED`.
+pub(crate) fn drain_middle_counters() -> (u32, u32) {
+    (
+        MIDDLE_TAPS_REPLAYED.swap(0, Ordering::Relaxed),
+        MIDDLE_HOLDS_REAPED.swap(0, Ordering::Relaxed),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -6761,8 +7626,7 @@ mod repair_teardown_tests {
             None,
             OWN_WINDOW_DEDUPE_MS,
             None,
-            OWN_WINDOW_MAX_HOLD_MS
-        ));
+            OWN_WINDOW_MAX_HOLD_MS, false));
         // One live, of any age inside the bound — including the same
         // millisecond, which is the shape that was actually logged.
         for age in [0u64, 1, 200, OWN_WINDOW_MAX_HOLD_MS] {
@@ -6774,8 +7638,7 @@ mod repair_teardown_tests {
                     None,
                     OWN_WINDOW_DEDUPE_MS,
                     Some(age),
-                    OWN_WINDOW_MAX_HOLD_MS
-                ),
+                    OWN_WINDOW_MAX_HOLD_MS, false),
                 "a fallback hold {age}ms old already owns this press"
             );
         }
@@ -6790,8 +7653,7 @@ mod repair_teardown_tests {
             None,
             OWN_WINDOW_DEDUPE_MS,
             Some(OWN_WINDOW_MAX_HOLD_MS + 1),
-            OWN_WINDOW_MAX_HOLD_MS
-        ));
+            OWN_WINDOW_MAX_HOLD_MS, false));
     }
 
     /// And the same thing through the real latch, so the wiring is exercised
@@ -6809,8 +7671,7 @@ mod repair_teardown_tests {
             None,
             OWN_WINDOW_DEDUPE_MS,
             super::own_hold_age_ms(),
-            OWN_WINDOW_MAX_HOLD_MS
-        ));
+            OWN_WINDOW_MAX_HOLD_MS, false));
         // Leave the statics as they were found.
         super::disarm_own_window_hold();
         OWN_HOLD_TS.store(0, Ordering::Relaxed);
@@ -6830,14 +7691,11 @@ mod own_window_fallback_tests {
     #[test]
     fn a_deaf_hook_over_our_own_window_hands_the_hold_to_the_page() {
         assert!(own_window_space_down_accepted(
-            true, false, false, None, OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS
-        ));
+            true, false, false, None, OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS, false));
         assert!(own_window_space_down_accepted(
-            true, false, false, Some(60_000), OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS
-        ));
+            true, false, false, Some(60_000), OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS, false));
         assert!(own_window_space_down_accepted(
-            true, false, false, Some(OWN_WINDOW_DEDUPE_MS), OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS
-        ));
+            true, false, false, Some(OWN_WINDOW_DEDUPE_MS), OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS, false));
     }
 
     /// GUARD 2, THE ONE THAT MATTERS. A healthy hook stamped this same physical
@@ -6847,8 +7705,7 @@ mod own_window_fallback_tests {
         for age in [0u64, 1, 50, OWN_WINDOW_DEDUPE_MS - 1] {
             assert!(
                 !own_window_space_down_accepted(
-                    true, false, false, Some(age), OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS
-                ),
+                    true, false, false, Some(age), OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS, false),
                 "the hook stamped a Space-down {age}ms ago — the page's is the same press"
             );
         }
@@ -6860,11 +7717,9 @@ mod own_window_fallback_tests {
     #[test]
     fn a_hook_hold_already_in_flight_blocks_the_page_however_old_it_is() {
         assert!(!own_window_space_down_accepted(
-            true, false, true, Some(9_000), OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS
-        ));
+            true, false, true, Some(9_000), OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS, false));
         assert!(!own_window_space_down_accepted(
-            true, false, true, None, OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS
-        ));
+            true, false, true, None, OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS, false));
     }
 
     /// GUARD 1. Nothing else in the process may reach the engine through this
@@ -6873,8 +7728,7 @@ mod own_window_fallback_tests {
     #[test]
     fn nothing_is_accepted_while_another_window_has_the_foreground() {
         assert!(!own_window_space_down_accepted(
-            false, false, false, None, OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS
-        ));
+            false, false, false, None, OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS, false));
     }
 
     /// Bypass means Space is an ordinary space everywhere, and "everywhere"
@@ -6882,8 +7736,7 @@ mod own_window_fallback_tests {
     #[test]
     fn bypass_mode_switches_the_fallback_off_too() {
         assert!(!own_window_space_down_accepted(
-            true, true, false, None, OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS
-        ));
+            true, true, false, None, OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS, false));
     }
 
     /// GUARD 3. A key or a release with no fallback hold behind it is a stray:
@@ -6972,17 +7825,25 @@ mod own_window_pointer_tests {
     /// alone is a gate the fallback can never open.
     #[test]
     fn a_fallback_hold_is_a_latched_hold_even_though_the_callback_never_ran() {
-        assert!(!hold_latched(false, false), "no hold at all");
-        assert!(hold_latched(true, false), "an ordinary hook hold");
+        assert!(!hold_latched(false, false, false), "no hold at all");
+        assert!(hold_latched(true, false, false), "an ordinary hook hold");
         assert!(
-            hold_latched(false, true),
+            hold_latched(false, true, false),
             "A FALLBACK HOLD. This is the assertion that was false in 1.0.105: the mouse \
              callback returned before note_cursor and before WM_LBUTTONDOWN, and the \
              poller's `live` term was false, so nothing could ever arm inside the dashboard."
         );
         // Both, briefly, while one hold is torn down as another begins. A hold
         // IS latched during that transient — `||`, never `^`.
-        assert!(hold_latched(true, true));
+        assert!(hold_latched(true, true, false));
+        // PROBLEM 263 — THE THIRD WITNESS. Without this term the mouse
+        // callback returns before `note_cursor` and before the WM_LBUTTONDOWN
+        // branch for the whole of a middle-button hold, which is 1.0.105's
+        // failure exactly: a ring on screen the cursor cannot aim at and a
+        // click that cannot launch anything.
+        assert!(hold_latched(false, false, true), "a middle-button hold");
+        assert!(hold_latched(false, true, true));
+        assert!(hold_latched(true, false, true));
     }
 
     /// The quiet fourth gate. `SPACE_DOWN_TS` identifies WHICH hold a poller
@@ -6994,16 +7855,24 @@ mod own_window_pointer_tests {
     #[test]
     fn a_fallback_hold_is_identified_by_its_own_stamp_not_the_last_hook_holds() {
         // No fallback hold: the hook's stamp, unchanged.
-        assert_eq!(hold_ts_for(9_000, false, 0), 9_000);
-        assert_eq!(hold_ts_for(9_000, false, 4_242), 9_000);
+        assert_eq!(hold_ts_for(9_000, false, 0, false, 0), 9_000);
+        assert_eq!(hold_ts_for(9_000, false, 4_242, false, 0), 9_000);
         // A fallback hold owns the identity.
-        assert_eq!(hold_ts_for(9_000, true, 12_345), 12_345);
+        assert_eq!(hold_ts_for(9_000, true, 12_345, false, 0), 12_345);
         // Boot: the hook has never stamped one. Without the fallback's stamp
         // the floor would be 0 and EVERY stale cursor position would qualify.
-        assert_eq!(hold_ts_for(0, true, 12_345), 12_345);
+        assert_eq!(hold_ts_for(0, true, 12_345, false, 0), 12_345);
         // Latched with no stamp is a torn state, not a hold — fall back to the
         // hook's stamp rather than publish 0 as a floor.
-        assert_eq!(hold_ts_for(9_000, true, 0), 9_000);
+        assert_eq!(hold_ts_for(9_000, true, 0, false, 0), 9_000);
+        // PROBLEM 263 — a MIDDLE-BUTTON hold owns the identity on exactly the
+        // same rule, and its stamp must win over a stale hook stamp for exactly
+        // the same reason: the tracker would otherwise pair it with a cursor
+        // position the user parked minutes ago and arm a chip nobody aimed at.
+        assert_eq!(hold_ts_for(9_000, false, 0, true, 777), 777);
+        assert_eq!(hold_ts_for(0, false, 0, true, 777), 777);
+        // Latched with no stamp is a torn state here too.
+        assert_eq!(hold_ts_for(9_000, false, 0, true, 0), 9_000);
     }
 
     /// Brief item 3, the PROBLEM 218 class on the fallback's own latch. The
@@ -7127,5 +7996,563 @@ mod own_window_pointer_tests {
 
         // Leave the world as it was found.
         SPACE_ABORTED.store(false, Ordering::SeqCst);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PROBLEM 263 — THE MIDDLE-BUTTON RING TRIGGER.
+//
+// Everything below is a PURE state-machine test. The gesture itself cannot be
+// tested here — `SendInput` returns success and the hook sees nothing from a
+// containerised agent shell (CLAUDE.md testing laws), and this suite has no
+// mouse, no hook and no window. So the decisions were written as pure
+// functions precisely so this file could walk every branch of them, and what
+// these tests prove is the DECISION, never the gesture.
+//
+// NOTHING IN THIS FEATURE HAS RUN ON REAL HARDWARE.
+// ---------------------------------------------------------------------------
+
+/// THE DOWN GATE — every reason the middle button may decline to raise a ring.
+///
+/// One test per gate, plus one that walks all of them, because the failure this
+/// guards against is not "a gate is wrong", it is "a gate was quietly dropped
+/// during a refactor and nothing noticed". A gate with no test of its own is a
+/// gate whose deletion is invisible.
+#[cfg(test)]
+mod middle_button_gate_tests {
+    use super::middle_button_down_accepted;
+
+    /// The one accepting shape, named so the other tests can be read as deltas
+    /// from it: feature on, watcher alive, no exclusion of either kind, not
+    /// bypassed, not fullscreen, and no hold latched anywhere.
+    const OPEN: [bool; 9] = [true, true, false, false, false, false, false, false, false];
+
+    fn call(a: [bool; 9]) -> bool {
+        middle_button_down_accepted(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8])
+    }
+
+    /// Every gate open is the only combination that may ever return true.
+    #[test]
+    fn a_plain_middle_press_with_every_gate_open_raises_the_ring() {
+        assert!(call(OPEN));
+    }
+
+    /// THE SETTINGS SWITCH. Off means the middle button is a middle button —
+    /// `ms_hook_proc` returns `CallNextHookEx` and the app underneath receives
+    /// a press byte-identical to a build that never had this feature.
+    #[test]
+    fn the_settings_switch_off_hands_the_button_straight_back() {
+        let mut a = OPEN;
+        a[0] = false;
+        assert!(!call(a));
+    }
+
+    /// THE FAIL-CLOSED GATE, AND THE MOST IMPORTANT TEST IN THIS FILE.
+    ///
+    /// `st-exclusion-watcher` is explicitly ALLOWED to fail to spawn (PROBLEM
+    /// 124). If it never runs, `ORBIT_ACTIVE` sits `false` for the whole
+    /// session — not because no CAD program is in front, but because nothing
+    /// ever looked. Without this gate the middle button would then be swallowed
+    /// inside SolidWorks, Blender and AutoCAD, silently, for as long as the app
+    /// is running.
+    ///
+    /// The rule it encodes: **when a guard and the feature it guards can fail
+    /// independently, the feature must be the one that fails.**
+    #[test]
+    fn no_exclusion_watcher_means_no_trigger_at_all() {
+        let mut a = OPEN;
+        a[1] = false;
+        assert!(
+            !call(a),
+            "with no 3D/CAD verdict ever measured the trigger must stand down — a false \
+             ORBIT_ACTIVE is 'nobody looked', not 'no CAD program'"
+        );
+        // And it is not rescued by the feature being switched on, which is the
+        // shape the bug would actually take.
+        a[0] = true;
+        assert!(!call(a));
+    }
+
+    /// THE BUILT-IN LIST. Middle-drag orbits the model in SolidWorks, Fusion
+    /// 360, Blender and their neighbours; swallowing it there would delete a
+    /// workflow rather than add a feature. This gate is `orbit_apps.rs` and it
+    /// is SEPARATE from the user's own exceptions — see the next test.
+    #[test]
+    fn a_3d_or_cad_program_keeps_its_orbit_gesture() {
+        let mut a = OPEN;
+        a[2] = true;
+        assert!(!call(a));
+    }
+
+    /// THE USER'S OWN APP EXCEPTIONS, which stand the WHOLE app down. Passed as
+    /// a separate parameter from the built-in list even though `ms_hook_proc`
+    /// has already returned on `EXCLUDED_ACTIVE` before this function is
+    /// reached, so that the gate lists every reason in one readable place — and
+    /// so this assertion exists to be broken if that early return is ever moved.
+    #[test]
+    fn the_users_own_app_exceptions_gate_this_like_everything_else() {
+        let mut a = OPEN;
+        a[3] = true;
+        assert!(!call(a));
+    }
+
+    /// Bypass mode is "Spaceadom is paused". A trigger that ignored it would
+    /// make the pause control a lie.
+    #[test]
+    fn bypass_mode_makes_the_middle_button_a_middle_button() {
+        let mut a = OPEN;
+        a[4] = true;
+        assert!(!call(a));
+    }
+
+    /// The fullscreen/game gate, reused rather than re-derived. A middle click
+    /// in a shooter is a weapon, not a ring.
+    #[test]
+    fn the_fullscreen_game_gate_covers_this_trigger_too() {
+        let mut a = OPEN;
+        a[5] = true;
+        assert!(!call(a));
+    }
+
+    /// A `WM_MBUTTONDOWN` can repeat when a release was lost. The second one is
+    /// not a new press, and accepting it would arm a second hold whose teardown
+    /// nothing owes.
+    #[test]
+    fn a_repeated_down_cannot_start_a_second_hold() {
+        let mut a = OPEN;
+        a[8] = true;
+        assert!(!call(a));
+    }
+
+    /// EVERY GATE IS INDEPENDENTLY SUFFICIENT. Walked as a loop so that adding a
+    /// tenth reason without adding its test still fails here — the arity changes
+    /// and this file stops compiling, which is the point.
+    #[test]
+    fn every_gate_alone_is_enough_to_decline() {
+        // Indices 0 and 1 decline when FALSE; 2..=8 decline when TRUE.
+        for i in 0..2 {
+            let mut a = OPEN;
+            a[i] = false;
+            assert!(!call(a), "parameter {i} must decline on its own when false");
+        }
+        for i in 2..9 {
+            let mut a = OPEN;
+            a[i] = true;
+            assert!(!call(a), "parameter {i} must decline on its own when true");
+        }
+    }
+}
+
+/// THE ARBITRATION — three witnesses, one gesture, tested IN BOTH ORDERS.
+///
+/// The rule is stated in full beside `MIDDLE_TAP_MS`; these tests are the half
+/// of it that is pure. Rule B lives inside `kb_hook_proc`'s Space-down branch
+/// and cannot be called from here, so what is tested is the LATCH that branch
+/// reads — see `rule_b_is_a_latch_and_this_is_the_latch_it_reads`.
+#[cfg(test)]
+mod middle_button_arbitration_tests {
+    use super::{
+        middle_button_down_accepted, own_window_space_down_accepted, OWN_WINDOW_DEDUPE_MS,
+        OWN_WINDOW_MAX_HOLD_MS,
+    };
+
+    /// ORDER ONE: A SPACE HOLD IS LIVE, THEN THE MIDDLE BUTTON GOES DOWN.
+    ///
+    /// Rule A. From EITHER Space witness — the keyboard hook's `MODIFIER_ACTIVE`
+    /// or the own-window fallback's `OWN_HOLD_ACTIVE` — and from both at once,
+    /// which is a legal teardown transient rather than a contradiction.
+    /// Declining means the press is never eaten, so nothing is owed and the app
+    /// underneath sees a completely ordinary middle click.
+    #[test]
+    fn rule_a_a_space_hold_from_either_witness_refuses_the_middle_button() {
+        let open = [true, true, false, false, false, false, false, false, false];
+        for (hook, own) in [(true, false), (false, true), (true, true)] {
+            let mut a = open;
+            a[6] = hook;
+            a[7] = own;
+            assert!(
+                !middle_button_down_accepted(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8]),
+                "a live Space hold (hook: {hook}, fallback: {own}) owns the gesture — the \
+                 middle button must pass straight through"
+            );
+        }
+    }
+
+    /// ORDER TWO: A MIDDLE HOLD IS LIVE, THEN SPACE GOES DOWN.
+    ///
+    /// Rule C, the fallback's half. Guard 2c asks about the middle button the
+    /// identical question guard 2 asks about the hook. Without it, the ONE
+    /// window where the keyboard hook is deaf (PROBLEM 257, the dashboard) would
+    /// be the one window where two triggers could both serve one gesture — two
+    /// rings, two launches, two toasts.
+    #[test]
+    fn rule_c_a_live_middle_hold_refuses_the_own_window_fallback() {
+        // The shape that WOULD be accepted, so the delta is only the middle
+        // hold: our window in front, bypass off, hook silent, no fallback hold.
+        assert!(own_window_space_down_accepted(
+            true, false, false, None, OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS, false
+        ));
+        assert!(
+            !own_window_space_down_accepted(
+                true, false, false, None, OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS, true
+            ),
+            "a middle-button hold already owns a ring — this Space is an ordinary space"
+        );
+    }
+
+    /// AND THE TWO ORDERS AS A SEQUENCE, which is the property that actually
+    /// matters and is the one thing neither test above states on its own.
+    ///
+    /// **A NOTE ON A TEST THAT WAS WRITTEN WRONG FIRST, because the mistake is
+    /// more instructive than the test (2026-09-10).** The first version of this
+    /// walked all eight latch combinations and asserted
+    /// `!(middle_taken && fallback_taken)` on each. It failed — correctly — on
+    /// the all-clear row, and the code was right and the assertion was wrong.
+    /// From a clean state BOTH witnesses are legitimately willing; that is not
+    /// a double-fire, it is what "either trigger may start a ring" means. What
+    /// makes them exclusive is not that they disagree from the same snapshot,
+    /// it is that **whoever goes first LATCHES, and the latch is what the other
+    /// one reads.** Exclusivity is a property of the sequence, so the test has
+    /// to be a sequence. Generalise: *a mutual-exclusion test that never
+    /// advances the state is testing a coincidence, not an invariant.*
+    #[test]
+    fn whichever_witness_goes_first_locks_the_other_out() {
+        // Nothing latched: both are willing, and that is correct.
+        let middle_from_clean =
+            middle_button_down_accepted(true, true, false, false, false, false, false, false, false);
+        let fallback_from_clean = own_window_space_down_accepted(
+            true, false, false, None, OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS, false,
+        );
+        assert!(middle_from_clean && fallback_from_clean, "from rest, either may start a ring");
+
+        // ORDER ONE — the middle button got there first, so its latch is set.
+        // Rule C: the fallback must now refuse. (Rule B, the hook's half of the
+        // same instant, is the branch `rule_b_is_a_latch_…` covers.)
+        assert!(
+            !own_window_space_down_accepted(
+                true, false, false, None, OWN_WINDOW_DEDUPE_MS, None, OWN_WINDOW_MAX_HOLD_MS, true,
+            ),
+            "middle first: the fallback must be locked out (rule C)"
+        );
+
+        // ORDER TWO — a Space hold got there first, from EITHER witness, so its
+        // latch is set. Rule A: the middle button must now refuse, and its
+        // WM_MBUTTONDOWN passes through untouched.
+        for (hook, own) in [(true, false), (false, true)] {
+            assert!(
+                !middle_button_down_accepted(
+                    true, true, false, false, false, false, hook, own, false,
+                ),
+                "space first (hook:{hook} fallback:{own}): the middle button must be locked out \
+                 (rule A)"
+            );
+        }
+
+        // AND THE LATCH THAT DOES THE LOCKING IS NOT SELF-CLEARING: a second
+        // WM_MBUTTONDOWN arriving under a live middle hold (a lost release, an
+        // auto-repeating driver) is not a new press either.
+        assert!(!middle_button_down_accepted(
+            true, true, false, false, false, false, false, false, true
+        ));
+    }
+
+    /// RULE B is enforced by an early `CallNextHookEx` inside `kb_hook_proc`,
+    /// which needs a real hook to call and cannot be reached from a test. What
+    /// CAN be pinned down is the thing that branch reads, and this is it: the
+    /// accessor `middle_hold_active()` and the atomic behind it are the entire
+    /// mechanism, so if a refactor ever changed what rule B consults, this
+    /// assertion is the one that would have to be edited to keep passing.
+    ///
+    /// Kept in the same module as rules A and C on purpose: the arbitration is
+    /// three rules or it is nothing, and a reader who found only two here would
+    /// reasonably conclude Space-during-a-middle-hold was never considered.
+    #[test]
+    fn rule_b_is_a_latch_and_this_is_the_latch_it_reads() {
+        use super::{middle_hold_active, MIDDLE_HOLD_ACTIVE};
+        use std::sync::atomic::Ordering;
+        let restore = MIDDLE_HOLD_ACTIVE.load(Ordering::SeqCst);
+        MIDDLE_HOLD_ACTIVE.store(true, Ordering::SeqCst);
+        assert!(middle_hold_active(), "kb_hook_proc's rule-B branch reads exactly this");
+        MIDDLE_HOLD_ACTIVE.store(false, Ordering::SeqCst);
+        assert!(!middle_hold_active());
+        MIDDLE_HOLD_ACTIVE.store(restore, Ordering::SeqCst);
+    }
+}
+
+/// TAP vs HOLD, and the replay decision — the same function, because they are
+/// the same decision seen from two sides.
+///
+/// The contract this protects is the one the owner named: *a quick middle click
+/// must still behave normally everywhere.* We SUPPRESS the `WM_MBUTTONDOWN`, so
+/// a wrong answer here does not degrade a feature, it eats a click the user is
+/// entitled to.
+#[cfg(test)]
+mod middle_tap_vs_hold_tests {
+    use super::{middle_press_was_a_click, MIDDLE_TAP_MS};
+
+    /// A deliberate click is 60-150 ms. All of it must be replayed.
+    #[test]
+    fn a_quick_click_is_replayed() {
+        for held in [0u64, 1, 60, 100, 150, MIDDLE_TAP_MS - 1] {
+            assert!(
+                middle_press_was_a_click(held, MIDDLE_TAP_MS, false),
+                "{held}ms is a click and this process owes the world one"
+            );
+        }
+    }
+
+    /// Past the threshold the press was a HOLD: it raised a ring, and firing a
+    /// middle click into the app underneath as well would be the double-fire in
+    /// its most damaging form (a click the user never made, at a place they were
+    /// only pointing).
+    #[test]
+    fn a_hold_past_the_threshold_is_never_replayed() {
+        for held in [MIDDLE_TAP_MS, MIDDLE_TAP_MS + 1, 1_000, 30_000, u64::MAX] {
+            assert!(
+                !middle_press_was_a_click(held, MIDDLE_TAP_MS, false),
+                "{held}ms is a hold — no click may be replayed"
+            );
+        }
+    }
+
+    /// THE BOUNDARY IS EXCLUSIVE, and it is written down because `<` versus `<=`
+    /// here is a one-character change no other test would catch: exactly
+    /// `MIDDLE_TAP_MS` is a HOLD.
+    #[test]
+    fn the_boundary_belongs_to_the_hold() {
+        assert!(middle_press_was_a_click(MIDDLE_TAP_MS - 1, MIDDLE_TAP_MS, false));
+        assert!(!middle_press_was_a_click(MIDDLE_TAP_MS, MIDDLE_TAP_MS, false));
+    }
+
+    /// `SPACE_ABORTED` means SOMETHING ELSE CLAIMED THIS PRESS — a combo was
+    /// typed, the wheel was turned, or a chip was armed. Every one of those is a
+    /// reason a click must not also fire, and reusing the flag rather than
+    /// inventing one is what keeps this identical to the `!SPACE_ABORTED` test
+    /// that decides whether a Space release types a space.
+    ///
+    /// Note it beats the duration on BOTH sides of the boundary: a chip armed
+    /// 40 ms in still cancels the replay.
+    #[test]
+    fn anything_else_claiming_the_press_cancels_the_replay() {
+        for held in [0u64, 40, MIDDLE_TAP_MS - 1, MIDDLE_TAP_MS, 5_000] {
+            assert!(
+                !middle_press_was_a_click(held, MIDDLE_TAP_MS, true),
+                "{held}ms with something else claiming the press must never replay a click"
+            );
+        }
+    }
+
+    /// A SPEC TEST ON THE TWO THRESHOLDS, not on a function.
+    ///
+    /// `MIDDLE_TAP_MS` (250) sits below the default `guide_hud_delay_ms` (300),
+    /// which is what makes a replayed click one the user never saw a ring for.
+    /// They were chosen to compose, and nothing else in the codebase records
+    /// that relationship — if someone raises the tap threshold to 400 ms
+    /// "because clicks are slow", every ordinary middle click starts flashing a
+    /// ring before it lands, and no other test would say a word.
+    #[test]
+    fn the_tap_threshold_stays_below_the_default_ring_delay() {
+        let default_delay = crate::config::AppConfig::default().guide_hud_delay_ms;
+        assert_eq!(default_delay, 300, "the default this constant was chosen against");
+        assert!(
+            MIDDLE_TAP_MS < default_delay,
+            "a click that is going to be replayed must normally not have drawn a ring: \
+             MIDDLE_TAP_MS ({MIDDLE_TAP_MS}) must stay under guide_hud_delay_ms ({default_delay})"
+        );
+        // And clear of Windows' own 500 ms double-click window, so a double
+        // middle-click is two replayed clicks rather than one click and a ring.
+        assert!(MIDDLE_TAP_MS < 500);
+    }
+}
+
+/// THE STALE-HOLD REAPER for the middle button — the hard requirement that a
+/// middle-button hold can never latch forever.
+///
+/// Why a THIRD reaper rather than a branch in one of the two that exist:
+/// `reap_stale_hold` measures KEYBOARD auto-repeat (PROBLEM 218) and a middle
+/// hold produces none; `reap_own_window_hold` measures the foreground window.
+/// This one measures whether the MOUSE callback is being called at all, because
+/// the `WM_MBUTTONUP` that ends the hold is delivered by that hook and by
+/// nothing else. Merging any two of them means one shape losing its evidence.
+#[cfg(test)]
+mod middle_hold_reaper_tests {
+    use super::{
+        middle_hold_reap_reason, MiddleHoldReap, FORCED_INPUT_MAX_AGE_MS, MIDDLE_DEAF_SILENCE_MS,
+        MIDDLE_MAX_HOLD_MS,
+    };
+
+    fn reap(active: bool, age: u64, silence: Option<u64>, os_input_age: u64) -> Option<MiddleHoldReap> {
+        middle_hold_reap_reason(
+            active,
+            age,
+            MIDDLE_MAX_HOLD_MS,
+            silence,
+            os_input_age,
+            MIDDLE_DEAF_SILENCE_MS,
+            FORCED_INPUT_MAX_AGE_MS,
+        )
+    }
+
+    /// PROBLEM 262's lesson applied to the other hook: the OS is accepting input
+    /// right now, and our mouse callback — which stamps its clock above EVERY
+    /// gate, so silence means it was not entered at all — has said nothing for
+    /// far longer. The hook is installed and is not being called, so the release
+    /// that would end this hold can never arrive.
+    #[test]
+    fn a_hold_whose_release_can_never_arrive_is_torn_down_on_deafness() {
+        assert_eq!(
+            reap(true, 500, Some(MIDDLE_DEAF_SILENCE_MS), 0),
+            Some(MiddleHoldReap::MouseDeaf),
+            "half a second into a hold, with proof the hook is deaf, is enough"
+        );
+        assert_eq!(
+            reap(true, 500, Some(MIDDLE_DEAF_SILENCE_MS + 5_000), FORCED_INPUT_MAX_AGE_MS),
+            Some(MiddleHoldReap::MouseDeaf)
+        );
+    }
+
+    /// DEAFNESS NEEDS BOTH HALVES, and neither alone is evidence of anything. A
+    /// silent callback on an idle machine is a user who walked away; recent OS
+    /// input with a callback that is keeping up is a healthy hold.
+    #[test]
+    fn deafness_needs_both_halves_and_neither_alone_proves_it() {
+        // Recent input, but the callback is keeping up — healthy.
+        assert_eq!(reap(true, 500, Some(0), 0), None);
+        assert_eq!(reap(true, 500, Some(MIDDLE_DEAF_SILENCE_MS - 1), 0), None);
+        // Callback silent, but the OS has had no input either — nobody is
+        // touching the machine, which proves nothing about the hook.
+        assert_eq!(
+            reap(true, 500, Some(60_000), FORCED_INPUT_MAX_AGE_MS + 1),
+            None,
+            "an idle machine mid-hold is not a deaf hook"
+        );
+    }
+
+    /// UNKNOWN IS NEVER PROOF (PROBLEM 228). A callback that has not fired since
+    /// the last `install_hooks()` cannot be measured, so its silence is `None` —
+    /// and `None` must fall through to the bound, never to a verdict.
+    #[test]
+    fn an_unmeasurable_callback_is_unknown_not_deaf() {
+        assert_eq!(reap(true, 500, None, 0), None);
+        assert_eq!(reap(true, 500, None, FORCED_INPUT_MAX_AGE_MS), None);
+        // ...and the bound still reaches it, which is the whole point of having
+        // a bound as well as a verdict.
+        assert_eq!(
+            reap(true, MIDDLE_MAX_HOLD_MS + 1, None, 0),
+            Some(MiddleHoldReap::Expired)
+        );
+    }
+
+    /// THE LAST RESORT, and the reason a middle hold can never latch forever
+    /// even when nothing can be proven about anything: 30 s, exclusive.
+    #[test]
+    fn the_thirty_second_bound_is_the_backstop() {
+        assert_eq!(reap(true, MIDDLE_MAX_HOLD_MS, None, u64::MAX), None);
+        assert_eq!(
+            reap(true, MIDDLE_MAX_HOLD_MS + 1, None, u64::MAX),
+            Some(MiddleHoldReap::Expired)
+        );
+        assert_eq!(
+            reap(true, u64::MAX, None, u64::MAX),
+            Some(MiddleHoldReap::Expired),
+            "the unmeasurable-age case (MIDDLE_DOWN_TS == 0 under a live latch) must reap, not sit"
+        );
+    }
+
+    /// Deafness is checked FIRST because it fires at 3 s and the bound at 30 s.
+    /// When both are true the log must say which instrument spoke, and the
+    /// answer must be the one that actually detected something.
+    #[test]
+    fn deafness_outranks_mere_expiry_when_both_are_true() {
+        assert_eq!(
+            reap(true, MIDDLE_MAX_HOLD_MS + 10_000, Some(MIDDLE_DEAF_SILENCE_MS), 0),
+            Some(MiddleHoldReap::MouseDeaf)
+        );
+    }
+
+    /// NO HOLD, NOTHING TO REAP — the first line of the function and the one
+    /// that keeps this off the poller's hot path. Asserted for every evidence
+    /// shape, because "active" being ignored is exactly the bug that would tear
+    /// down a hold that does not exist and hide a ring somebody else raised.
+    #[test]
+    fn nothing_is_reaped_when_no_middle_hold_is_latched() {
+        for silence in [None, Some(0), Some(60_000)] {
+            for age in [0u64, MIDDLE_MAX_HOLD_MS + 1, u64::MAX] {
+                assert_eq!(reap(false, age, silence, 0), None);
+            }
+        }
+    }
+
+    /// The two bounds are the same figures as their Space-side twins, and that
+    /// is a decision (people hold the trigger and READ the ring), not a
+    /// coincidence. Written down so that changing one alone is a visible act.
+    #[test]
+    fn the_bounds_match_their_space_side_twins() {
+        assert_eq!(MIDDLE_MAX_HOLD_MS, super::OWN_WINDOW_MAX_HOLD_MS);
+        assert_eq!(MIDDLE_MAX_HOLD_MS, super::MAX_MODIFIER_HOLD_MS);
+        assert_eq!(MIDDLE_DEAF_SILENCE_MS, super::HOLD_DEAF_SILENCE_MS);
+    }
+}
+
+/// THE LATCH ITSELF — arm, disarm, and the debt in between.
+///
+/// These are the only middle-button tests that touch process-wide state. They
+/// are confined to the `MIDDLE_*` atomics, which nothing else in this suite
+/// reads or writes, so they cannot flake against a test running in parallel —
+/// and they deliberately do NOT assert on `SPACE_ABORTED`, `MODIFIER_ACTIVE` or
+/// `pointer::ARMED_INDEX`, which are shared with the Space paths and with the
+/// own-window tests. What those omissions cost is one reading of
+/// `arm_middle_hold`; what asserting them would cost is a suite that fails once
+/// a week for no reason.
+#[cfg(test)]
+mod middle_hold_latch_tests {
+    use super::{
+        arm_middle_hold, disarm_middle_hold, middle_hold_active, MIDDLE_DOWN_TS,
+        MIDDLE_HOLD_ACTIVE, MIDDLE_UP_OWED,
+    };
+    use std::sync::atomic::Ordering;
+
+    /// One test, not five, because these are sequential states of one machine
+    /// and splitting them would let two of the pieces run concurrently against
+    /// the same atomics.
+    #[test]
+    fn a_middle_hold_arms_owes_an_up_and_can_only_be_torn_down_once() {
+        // Arm.
+        arm_middle_hold(4_242);
+        assert!(middle_hold_active(), "the ring's latch is set");
+        assert_eq!(MIDDLE_DOWN_TS.load(Ordering::SeqCst), 4_242, "stamped");
+        assert!(
+            MIDDLE_UP_OWED.load(Ordering::SeqCst),
+            "WHOEVER EATS THE DOWN OWES THE UP — the WM_MBUTTONDOWN was suppressed"
+        );
+
+        // Arming again for the same press must leave exactly what one arm
+        // leaves: `arm_middle_hold` is idempotent by construction (every line is
+        // a store of a constant), which is what lets the release path, the
+        // reaper and a repair race without corrupting the state.
+        arm_middle_hold(4_242);
+        assert!(middle_hold_active());
+        assert_eq!(MIDDLE_DOWN_TS.load(Ordering::SeqCst), 4_242);
+
+        // Tear down. The FIRST caller owns it — that `swap`-based claim is what
+        // stops the release path, the reaper, the watchdog and a repair from
+        // each hiding the ring and emitting a `guide-hud-hide`.
+        assert!(disarm_middle_hold(), "the first teardown owns the hold");
+        assert!(!middle_hold_active());
+        assert_eq!(MIDDLE_DOWN_TS.load(Ordering::SeqCst), 0);
+        assert!(
+            !MIDDLE_UP_OWED.load(Ordering::SeqCst),
+            "the debt is cleared with the hold: leaving it set would eat the UP of the NEXT \
+             genuine middle click, one whose down we passed through"
+        );
+
+        // And a second teardown owns nothing.
+        assert!(!disarm_middle_hold(), "a second teardown owns nothing");
+        assert!(!middle_hold_active());
+
+        // Leave the world as it was found.
+        MIDDLE_HOLD_ACTIVE.store(false, Ordering::SeqCst);
+        MIDDLE_DOWN_TS.store(0, Ordering::SeqCst);
+        MIDDLE_UP_OWED.store(false, Ordering::SeqCst);
     }
 }

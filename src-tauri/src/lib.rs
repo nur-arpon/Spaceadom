@@ -43,6 +43,11 @@ mod logger;
 /// the in-app updater, autostart, the config's real location, and the
 /// rival-install banner's one-click repair.
 mod packaged;
+/// PROBLEM 265 — WHEN the overlay window may be created, and the one pure
+/// function that decides it. The dashboard keeps the full autostart settle
+/// (PROBLEM 59/76/215); the Guide HUD's window no longer does, because it is
+/// the only window in the app with a self-healing rebuild path behind it.
+mod overlay_boot;
 mod picker_worker;
 /// PROBLEM 224 — takes `WM_ENDSESSION` before tao can set its runner to
 /// `Destroyed`, which is the whole of the "cannot move state from Destroyed"
@@ -320,7 +325,8 @@ pub fn windows_created() -> bool {
 /// from a settle thread after the same 10s, ON THE MAIN THREAD.
 ///
 /// What the user gets at logon: hook armed and tray icon present within the
-/// first second; the dashboard and the overlay ten seconds later.
+/// first second; **the overlay at `overlay_boot::OVERLAY_SETTLE` (PROBLEM
+/// 265)**; the dashboard ten seconds later.
 ///
 /// WHAT HAPPENS IF SPACE IS HELD DURING THE SETTLE WINDOW — decided, not
 /// accidental: the shortcut WORKS (launch, focus, minimise, boss key, PiP are
@@ -328,7 +334,14 @@ pub fn windows_created() -> bool {
 /// the overlay window does not exist yet, so every show path takes its
 /// `if let Some(win)` miss and returns without emitting. `guide_hud` logs one
 /// calm line saying the app is still settling rather than shouting an error.
-/// Silent but functional, which is the accepted trade.
+///
+/// PROBLEM 265 SHRANK THAT WINDOW FROM TEN SECONDS TO ABOUT ONE, AND WITHDREW
+/// "silent but functional" AS AN ACCEPTED TRADE. The owner held Space four
+/// times in the first sixteen seconds of a logon, saw no ring, and concluded
+/// his shortcuts were dead — a log line nobody reads is not the app being
+/// honest with its user. The overlay is now built by `overlay_boot`, ahead of
+/// this function, and a hold that still finds no overlay asks for one to be
+/// built immediately instead of waiting out the timer.
 ///
 /// PROBLEM 74 IS UNTOUCHED. This function never shows a window. The dashboard
 /// still appears only when the frontend calls `dashboard_ready`, or from the
@@ -771,7 +784,24 @@ pub fn configure_overlay_window(overlay: &tauri::WebviewWindow) {
     match overlay.set_ignore_cursor_events(true) {
         Ok(()) => {
             guide_hud::OVERLAY_DISABLED.store(false, std::sync::atomic::Ordering::Relaxed);
-            log::info!("overlay: configured (on-demand, click-through)");
+            // PROBLEM 265 — THE ONE LINE THAT ANSWERS "how long after logon
+            // could the ring have been drawn?".
+            //
+            // Here and nowhere else, because this is the single point every
+            // creation path goes through (the early overlay phase, the full
+            // `create_app_windows`, the PROBLEM 59 cold-boot rebuild and
+            // `display_watch`'s rebuild) AND it is the point at which the
+            // overlay is genuinely USABLE: the window exists, click-through was
+            // applied, and `OVERLAY_DISABLED` was just cleared. Logging it any
+            // earlier would time a window that still fails closed.
+            //
+            // A rebuild hours into a session prints a large number, correctly —
+            // the number is "since app start", not "how long the build took".
+            log::info!(
+                "overlay: configured (on-demand, click-through) — overlay usable for the \
+                 Guide HUD {} ms after app start (PROBLEM 265)",
+                overlay_boot::since_start().as_millis()
+            );
         }
         Err(e) => {
             // PROBLEM 217 — the target moves this line off the automatic log
@@ -813,6 +843,12 @@ pub fn run() {
     // windows-app-manifest.xml for the accepted UIPI limitation.
     // (The logon task itself is registered later, in setup(), from the
     // persisted run_at_startup setting.)
+
+    // PROBLEM 265 — start the clock the "overlay usable after N ms" line is
+    // measured against. First statement with any effect in the whole process,
+    // deliberately: every number it produces is only as honest as this call is
+    // early. It logs nothing (the logger does not exist yet).
+    overlay_boot::mark_process_start();
 
     // ----------------------------------------------------------------
     // 2. Logger (must come before any log:: calls)
@@ -1098,6 +1134,11 @@ pub fn run() {
     // feature works all session and then reads OFF for the entire next launch
     // until the user touches any setting.
     hook::publish_pointer_hud_activation(&shared_config.read().unwrap_or_else(|p| p.into_inner()));
+    // PROBLEM 263 — seed the middle-button ring trigger, same both-ends rule.
+    // The atomic starts false, so skipping this line is the silent failure
+    // where the feature works all session and then reads OFF for the entire
+    // next launch until the user touches any setting.
+    hook::publish_middle_button_ring(&shared_config.read().unwrap_or_else(|p| p.into_inner()));
     // PROBLEM 195, and the same both-ends rule a third time: `SENDING_ENABLED`
     // starts FALSE, so this is the line that actually turns crash reporting on
     // for a user who has not opted out. Without it nothing would be sent until
@@ -1596,17 +1637,42 @@ pub fn run() {
             // the windows wait, and only on an autostart launch.
             if autostart_launch() {
                 log::info!(
-                    "autostart launch — hook and engine are LIVE now; only the window/webview \
-                     creation waits {}s for the shell to settle (PROBLEM 59/76/215). A Space \
-                     hold before then still launches, focuses and minimises; it simply draws \
-                     no HUD.",
+                    "autostart launch — hook and engine are LIVE now; the OVERLAY (the Guide \
+                     HUD's window) is built {} ms in and the DASHBOARD waits {}s for the shell \
+                     to settle (PROBLEM 59/76/215/265). A Space hold before the overlay exists \
+                     still launches, focuses and minimises; it simply draws no HUD, and it asks \
+                     for the overlay to be built at once.",
+                    overlay_boot::OVERLAY_SETTLE.as_millis(),
                     AUTOSTART_SETTLE.as_secs()
                 );
                 let settle_handle = app_handle.clone();
                 if std::thread::Builder::new()
                     .name("st-window-settle".into())
                     .spawn(move || {
-                        std::thread::sleep(AUTOSTART_SETTLE);
+                        // PROBLEM 265 — PHASE 1: the OVERLAY, and only the
+                        // overlay. It is the window the user can SEE the absence
+                        // of, and the only one with a self-healing rebuild path
+                        // (create_app_windows' PROBLEM 59 check below, then
+                        // display_watch) if this early attempt loses the
+                        // cold-boot WebView2 race. Failing here costs nothing
+                        // that was not already being paid.
+                        std::thread::sleep(overlay_boot::OVERLAY_SETTLE);
+                        let ho = settle_handle.clone();
+                        if let Err(e) = settle_handle
+                            .run_on_main_thread(move || overlay_boot::create_overlay_now(&ho, false))
+                        {
+                            log::warn!(
+                                "setup: could not reach the main thread to create the overlay \
+                                 early ({e}) — the full window creation below still builds it"
+                            );
+                        }
+
+                        // PHASE 2: everything else, at the original mark. The
+                        // dashboard's wait is UNCHANGED — PROBLEM 59's hazard is
+                        // untouched for the window that has no way back from it.
+                        std::thread::sleep(
+                            AUTOSTART_SETTLE.saturating_sub(overlay_boot::OVERLAY_SETTLE),
+                        );
                         let h = settle_handle.clone();
                         // ON THE MAIN THREAD: window creation is not thread-safe
                         // anywhere in Win32, and this is the same hop the

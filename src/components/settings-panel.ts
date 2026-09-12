@@ -445,6 +445,13 @@ function render(): void {
   // feature — the switch and the app disagreeing, which is the one class of
   // bug in this panel nobody can see from the outside.
   const hudPointer = appConfig.pointer_hud_activation !== false;
+  // PROBLEM 263 — hold the middle mouse button to raise the ring. `!== false`
+  // for the SAME reason as `hudPointer` directly above, not by copying it: Rust
+  // ships this `default = "default_true"` and the key is absent from every
+  // config on disk, so `=== true` would show the switch off for every existing
+  // user while the feature ran. The 3D/CAD safety net is NOT this flag — it is
+  // the built-in list in `hook/orbit_apps.rs`, which is not a setting.
+  const middleRing = appConfig.middle_button_ring !== false;
   // PROBLEM 209 — show the specials on the HUD's inner ring. `!== false`
   // again, but for the OTHER reason: this is existing behaviour becoming
   // optional, so an old config must keep the ring it has always had. Same
@@ -559,15 +566,22 @@ function render(): void {
         ${groupHeadingHtml("ring", "The Space ring")}
         <div class="set-rows">
           ${toggleRow("hudpointer", "Point to launch", hudPointer, 6)}
+          <!-- PROBLEM 263 — the ring's second trigger, and it sits HERE, next
+               to "Point to launch", for two reasons. Both rows are about the
+               MOUSE's part in the ring, so they read as a pair; and this is
+               the only gap in the section that does not come between the pill
+               and the specials switch (see the note directly below, which is
+               a constraint, not a preference). -->
+          ${toggleRow("middlering", "Middle button opens the ring", middleRing, 7)}
           <!-- THE PILL AND THE SPECIALS SWITCH STAY ADJACENT. Double is the
                state in which the specials switch has nothing to do, and a
                reason a control is greyed out has to be visible FROM that
                control — put another row between these two and it stops
                being. (The old three-row chain this replaced needed the same
                rule for two dependencies; there is only one left.) -->
-          ${ringRow(ring, 7)}
-          ${specialsRow(hudSpecials, specialsInert, 8)}
-          ${toggleRow("flight", "Guide-to-toast motion", flight, 9)}
+          ${ringRow(ring, 8)}
+          ${specialsRow(hudSpecials, specialsInert, 9)}
+          ${toggleRow("flight", "Guide-to-toast motion", flight, 10)}
           ${sliderRow("huddelay", "Guide HUD delay", appConfig.guide_hud_delay_ms, 100, 1000, 50, "ms")}
         </div>
       </div>
@@ -646,7 +660,7 @@ function render(): void {
       <div class="divider" style="margin:14px 0 10px;"></div>
       ${groupHeadingHtml("privacy", "Privacy")}
       <div class="set-rows">
-        ${toggleRow("sendlogs", "Don't send logs", dontSendLogs, 10)}
+        ${toggleRow("sendlogs", "Don't send logs", dontSendLogs, 11)}
       </div>
     </div>
 
@@ -1075,6 +1089,31 @@ function render(): void {
     else sfx.toggleOff("hudpointer");
     await persistConfig();
     refireRingPreview();
+    render();
+  });
+
+  // PROBLEM 263 — the middle-button ring trigger. Same shape as "hudpointer"
+  // directly above, and for the same reason: the whole feature lives in Rust
+  // (the WM_MBUTTONDOWN branch of the mouse callback, gated on an atomic
+  // `hook::MIDDLE_BUTTON_RING` that `config::save` republishes), so
+  // persistConfig() is the entire wiring. No dedicated command, nothing to
+  // apply locally.
+  wireToggle("middlering", async () => {
+    if (!appConfig) return;
+    // `!== false`, matching the read in render(). Rust ships this
+    // `default = "default_true"`, so an ABSENT key is ON and the first click
+    // must turn it OFF — `=== true` here would make that first click a no-op
+    // for every user who has ever run an older build, which is all of them.
+    appConfig.middle_button_ring = !(appConfig.middle_button_ring !== false);
+    if (appConfig.middle_button_ring) sfx.toggleOn("middlering");
+    else sfx.toggleOff("middlering");
+    await persistConfig();
+    // NO `refireRingPreview()` HERE, deliberately, and this is the one line
+    // that differs from the handler above. The preview shows what the ring
+    // LOOKS like; this setting changes how it is OPENED, and re-firing a
+    // preview the switch cannot alter would tell the user their change did
+    // something to the picture. `flight`'s handler omits it for the same
+    // reason. See `refireRingPreview`'s own comment for what does belong.
     render();
   });
 
@@ -2031,6 +2070,13 @@ const DESC: Record<string, string> = {
     "When a shortcut fires while the Space ring is open, the little message flies out of the ring instead of simply appearing. It looks good and it takes about a second. Off is quicker and quieter.",
   hudpointer:
     "While the Space guide is open, move your cursor out towards an app — you don't have to reach it, just point that way — and it lights up. Let go of Space, or click, and that app opens. Stay near the middle of the ring and nothing is picked, so letting go there types a space as usual.",
+  // PROBLEM 263 — three sentences, in the order a worried user asks the
+  // questions: what does it do, have you broken my middle click, and what
+  // about my CAD program. The third one is not a footnote — it is the reason
+  // this switch can be on by default, and a user who works in SolidWorks needs
+  // to read it here rather than discover it.
+  middlering:
+    "Hold the middle mouse button — the scroll wheel, pressed down — and the same ring opens in the same place as holding Space. Aim at an app and let go to open it. A normal quick middle click still works exactly as before: links still open in a new tab, tabs still close. 3D and CAD programs are left alone, because middle-drag already spins the model there — SolidWorks, Fusion 360, Blender, AutoCAD and the rest are on a built-in list, along with drawing apps like Photoshop and Figma where it pans the canvas. Your Space shortcuts keep working in all of them.",
   // The ring pill and the specials switch are ONE system, so their two
   // descriptions have to tell the same story from both ends — each says the
   // inner ring is the shared resource, and each says what to change to get the

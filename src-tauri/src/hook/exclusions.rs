@@ -185,6 +185,27 @@ pub fn start_exclusion_watcher() {
                     let detected = !list.is_empty() && is_excluded(&name, &list);
                     crate::hook::EXCLUDED_ACTIVE.store(detected, Ordering::Relaxed);
 
+                    // PROBLEM 263 — the BUILT-IN middle-button exclusion list
+                    // rides on this thread, and on this tick's `foreground_stem`
+                    // probe, which is the expensive part and is already paid
+                    // for. Two lists, one probe, one 500 ms cadence.
+                    //
+                    // DELIBERATELY NOT MERGED WITH `detected` ABOVE. That
+                    // verdict stands the WHOLE app down (Space included);
+                    // `orbit_apps` stands the MIDDLE BUTTON down and nothing
+                    // else, so a user's Space shortcuts keep working in
+                    // SolidWorks. Feeding one into the other would silently
+                    // delete those shortcuts in twenty programs.
+                    //
+                    // It also runs when the probe PANICKED and `name` is empty:
+                    // `is_orbit_app("")` is false, so the trigger stays live —
+                    // the same fail-toward-not-excluded direction as the line
+                    // above — and `WATCHER_ALIVE` is still armed, which is what
+                    // it is for (a watcher that is running and reading nothing
+                    // is not the failure that gate exists for; a watcher that
+                    // never spawned is).
+                    crate::hook::orbit_apps::publish(&name);
+
                     // Logging here is legal and useful: this is the POLLER
                     // thread, not the hook callback. One line each way, on
                     // CHANGE only — an alt-tab must never spam anything, and

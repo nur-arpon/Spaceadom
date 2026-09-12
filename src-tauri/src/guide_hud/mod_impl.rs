@@ -445,11 +445,27 @@ fn show_hud_payload(epoch: u64, payload: GuideHudPayload) {
             // shortcut itself still works, only the drawing is absent. Say so
             // calmly — an ERROR here would train the owner to ignore the line
             // that means something.
+            //
+            // PROBLEM 265 — AND THE HOLD NOW ASKS FOR THE OVERLAY TO BE BUILT.
+            // A calm log line is the right SEVERITY and was the wrong ACTION:
+            // the owner held Space four times in sixteen seconds at a logon,
+            // saw nothing, and concluded the app was asleep. Asking for the app
+            // is asking for its UI — the tray's "Open Settings" and the
+            // single-instance handler have skipped the settle for that reason
+            // since PROBLEM 215, and a Space hold is that same request aimed at
+            // the overlay. This does NOT rescue the hold that made it (a webview
+            // takes far longer than a hold to boot), and it is not meant to: it
+            // is the difference between one hold paying a one-off cost and every
+            // hold until the timer draws nothing. With the overlay's own settle
+            // at ~1.2s this branch should be all but unreachable.
             log::info!(
                 "guide_hud: still starting — the overlay webview is not built yet \
-                 (autostart settle, PROBLEM 59/76/215). The shortcut works; no HUD is \
-                 drawn for this hold."
+                 (autostart settle, PROBLEM 59/76/215). The shortcut works — this hold still \
+                 launches, focuses and minimises, and Space+letter is unaffected; only the \
+                 ring is missing. Asking for the overlay to be built now rather than waiting \
+                 out the timer (PROBLEM 265)."
             );
+            crate::overlay_boot::request_now(handle);
         } else {
             // PROBLEM 214 — the window is gone while the flag still says the
             // overlay is fine. Nothing on this side of the app can rebuild it,

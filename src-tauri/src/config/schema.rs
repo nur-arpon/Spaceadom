@@ -333,6 +333,43 @@ pub struct AppConfig {
     #[serde(default = "default_true")]
     pub pointer_hud_activation: bool,
 
+    /// PROBLEM 263 — HOLD THE MIDDLE MOUSE BUTTON TO RAISE THE RING. **ON by
+    /// default, by the owner's decision on 2026-09-08.**
+    ///
+    /// The ring now has three triggers: the keyboard hook's Space, the
+    /// own-window fallback's Space (PROBLEM 259) and this. Holding the middle
+    /// button raises the same ring in the same place; releasing over a chip
+    /// launches it, a letter tapped during the hold launches that binding, and
+    /// a QUICK middle click is replayed through `SendInput` so browsers still
+    /// open links in a new tab and close tabs. The arbitration that stops two
+    /// triggers ever serving one gesture is stated once, in `hook/mod.rs` beside
+    /// `MIDDLE_TAP_MS`.
+    ///
+    /// Mirrored into `hook::MIDDLE_BUTTON_RING` by
+    /// `publish_middle_button_ring`, which MUST be called from BOTH the startup
+    /// load (lib.rs) and `config::save` — PROBLEM 180's rule, sixth instance.
+    ///
+    /// **THIS IS NOT THE ONLY GATE, AND THE OTHER ONE IS NOT A SETTING.**
+    /// `hook/orbit_apps.rs` holds a BUILT-IN list of 3D, CAD and design
+    /// programs — SolidWorks, Fusion 360, Blender, AutoCAD, Photoshop, Figma
+    /// and the rest — where middle-drag already orbits a model or pans a
+    /// canvas. Inside those the middle button is handed straight back to
+    /// Windows however this flag reads. That list is SEPARATE from
+    /// `excluded_apps` and applies to the middle button ONLY: a user's Space
+    /// shortcuts inside SolidWorks are untouched by it.
+    ///
+    /// `default = "default_true"`, NOT a bare `#[serde(default)]`, and the
+    /// frontend reads `!== false` — same shape and same reason as
+    /// `pointer_hud_activation` above: the owner asked for this ON, and a
+    /// bool's `Default` is `false`, so the bare attribute would deliver the
+    /// feature to nobody who already runs the app. It is the second field in
+    /// this struct to ship a NEW behaviour ON, knowingly overriding the
+    /// new-behaviour-defaults-off convention `hud_toast_flight` follows. Do not
+    /// "restore the convention" — that is a decision being reversed, and it
+    /// needs the owner. `first_install_tests` checks BOTH paths.
+    #[serde(default = "default_true")]
+    pub middle_button_ring: bool,
+
     /// Show the SPECIAL keys on the Space HUD's inner ring? ON by default.
     ///
     /// Display only. The eight specials (Esc, the backtick PiP, the Boss Key
@@ -665,6 +702,12 @@ impl Default for AppConfig {
             // `default = "default_true"` on the field; first_install_tests
             // holds both to it.
             pointer_hud_activation: true,
+            // PROBLEM 263 — ON, by the owner's decision on 2026-09-08; the
+            // second field here to ship a NEW behaviour on. Must agree with the
+            // `default = "default_true"` on the field; first_install_tests
+            // holds both to it. The 3D/CAD safety net is NOT this flag — it is
+            // the built-in list in hook/orbit_apps.rs, which is not a setting.
+            middle_button_ring: true,
             // PROBLEM 209 — ON. The specials ring has always been drawn; this
             // setting only lets someone turn it off. An existing config must
             // keep what it had.
@@ -1296,6 +1339,25 @@ mod first_install_tests {
             d.pointer_hud_activation,
             "pointer HUD activation must be ON at first install (owner's decision, 2026-08-27)"
         );
+        // PROBLEM 263 — the middle-button ring trigger, ON at first install by
+        // the owner's decision on 2026-09-08. The THIRD assertion here to
+        // knowingly override the new-behaviour-defaults-off convention the
+        // `hud_toast_flight` assertion above enforces, and it is deliberate for
+        // the same reason as `pointer_hud_activation`: he wants it met, not
+        // found. If this ever fails because someone "restored the convention",
+        // that is a decision being reversed and it needs the owner.
+        //
+        // NOTE WHAT THIS DOES *NOT* SAY. It is not an assertion that the middle
+        // button is swallowed everywhere on a fresh install — `orbit_apps.rs`'s
+        // built-in list stands the trigger down inside every 3D, CAD and design
+        // program, and `middle_button_down_accepted` refuses outright until the
+        // exclusion watcher has completed one probe. This flag is the SWITCH,
+        // not the behaviour.
+        assert!(
+            d.middle_button_ring,
+            "holding the middle mouse button must raise the ring at first install \
+             (owner's decision, 2026-09-08 — PROBLEM 263)"
+        );
         // PROBLEM 209 — the specials ring has been drawn since the HUD
         // existed; making it optional must not change what a first install
         // looks like.
@@ -1365,6 +1427,7 @@ mod first_install_tests {
         obj.remove("theme");
         obj.remove("hud_toast_flight");
         obj.remove("pointer_hud_activation");
+        obj.remove("middle_button_ring");
         obj.remove("hud_show_specials");
         obj.remove("hud_band_count");
         obj.remove("hud_magnetic_layout");
@@ -1412,6 +1475,19 @@ mod first_install_tests {
             c.pointer_hud_activation,
             "a config predating pointer_hud_activation must now read as ON \
              (owner's decision, 2026-08-27) — this is the path the flip travels"
+        );
+        // PROBLEM 263 — AND THIS IS THE PATH THE MIDDLE-BUTTON DEFAULT ACTUALLY
+        // TRAVELS, for the reason the `pointer_hud_activation` block directly
+        // above spells out at length: EVERY config on disk today predates this
+        // key, so `Default` alone would deliver the feature to nobody. A bool's
+        // `Default` is `false`, so a bare `#[serde(default)]` here would ship a
+        // feature that is on in the code, off for every existing user, and
+        // shown as ON by a Settings row reading `!== false` — wrong in three
+        // places at once, and silent in all three.
+        assert!(
+            c.middle_button_ring,
+            "a config predating middle_button_ring must read as ON — this is the path the \
+             owner's 2026-09-08 decision actually travels (PROBLEM 263)"
         );
         // PROBLEM 209 — and the opposite direction of the same rule: the
         // specials ring has always been drawn, so a config that never heard

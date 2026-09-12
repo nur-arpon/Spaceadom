@@ -73,11 +73,20 @@ import { openReportDialog } from "./report-dialog";
  * `sendlogs` was ADDED in the same pass: it had NEVER had an entry, so the
  * one switch in the panel that concerns what leaves the machine was silently
  * performing the fallback character (see `toggleChar` below).
+ *
+ * 2026-09-10 — `middlering` ADDED with the row itself (PROBLEM 263), rather
+ * than discovered missing five versions later the way `sendlogs` was. It is
+ * `rng` on the character's own terms, not because it sits next to
+ * `hudpointer` in the panel: press the middle button and the ring goes out,
+ * release it and the launch comes back — the same "something went out and
+ * came back" round trip point-to-launch is `rng` for, performed by the hand
+ * instead of the cursor.
  */
 const TOGGLE_CHAR: Record<string, string> = {
   engine: "thr", fun: "fun", sound: "rng",
   startup: "orb", motion: "wrp", hideboard: "orb",
   flight: "wrp", hudpointer: "rng", hudspecials: "orb", sendlogs: "rng",
+  middlering: "rng",
 };
 
 /**

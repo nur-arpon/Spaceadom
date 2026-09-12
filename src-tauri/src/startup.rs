@@ -60,10 +60,13 @@ const RUN_VALUE: &str = "Spaceadom";
 
 /// PROBLEM 64 — the fallback that makes "Run at startup" actually work.
 ///
-/// A standard, non-elevated user CANNOT create a task in the Task Scheduler
-/// ROOT folder: `schtasks /Create` returns `ERROR: Access is denied.` — even
-/// with `/RL LIMITED` and a brand-new task name. Verified directly on this
-/// machine. Since PROBLEM 61 removed self-elevation, the app is ALWAYS
+/// A standard, non-elevated user CANNOT create a task with `schtasks.exe
+/// /Create /SC ONLOGON`: it returns `ERROR: Access is denied.` — even with
+/// `/RL LIMITED` and a brand-new task name. Verified directly on this
+/// machine. (PROBLEM 266 corrected the WHY: it is not the root folder but
+/// the "any user" logon trigger schtasks writes; a per-user trigger through
+/// the COM API registers fine, see `register_task_script`. This fallback is
+/// kept for the machines where even that is refused.) Since PROBLEM 61 removed self-elevation, the app is ALWAYS
 /// non-elevated, so on every non-admin machine the logon task was never
 /// created and "Run at startup" (ON by default) silently did nothing. The
 /// only evidence was one ERROR line in debug.log that nobody reads.
@@ -148,35 +151,56 @@ fn is_dev_build(exe: &std::path::Path) -> bool {
     p.contains(r"\target\release\") || p.contains(r"\target\debug\")
 }
 
-/// Fix the Task Scheduler defaults that silently sabotage a tray utility:
-/// won't start on battery, stops when unplugged, and killed after 3 days.
-/// (PROBLEM 59 — schtasks.exe has no flags for these.)
+/// PROBLEM 266 — how long after logon the task starts the app.
+///
+/// PROBLEM 59 chose 30 s to dodge the cold-boot WebView2 race. Since then the
+/// overlay got three self-heal paths and the dashboard a retry, and the app
+/// itself waits a further 10 s before building the dashboard on an autostart
+/// launch. 10 s here keeps a margin for Edge/WebView2's brokers to come up
+/// while making the ring usable ~12 s after logon instead of ~100 s.
 #[cfg(windows)]
-fn harden_task_settings() {
-    use std::os::windows::process::CommandExt;
-    let ps = format!(
-        "$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries \
-         -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) \
-         -StartWhenAvailable -MultipleInstances IgnoreNew; \
-         Set-ScheduledTask -TaskName '{TASK_NAME}' -Settings $s | Out-Null"
-    );
-    let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &ps])
-        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-        .output();
-    match out {
-        Ok(o) if o.status.success() => {
-            log::info!("startup: task settings hardened (battery-safe, no time limit)")
-        }
-        _ => log::warn!(
-            "startup: could not harden task settings — the task still runs, but Windows \
-             may refuse to start it on battery or stop it after 3 days"
-        ),
-    }
+const TASK_DELAY: &str = "PT10S";
+
+/// PROBLEM 266 — the PowerShell that registers the logon task for THIS user
+/// through the Task Scheduler COM API (`Register-ScheduledTask`), which a
+/// non-elevated user IS allowed to do — unlike `schtasks.exe /Create`, whose
+/// `/SC ONLOGON` writes an "at log on of ANY user" trigger that only an
+/// administrator may create. That, not the root folder, was PROBLEM 64's
+/// "Access is denied": measured 2026-09-12 on the owner's machine, both
+/// `schtasks /Create` forms (with and without `/RU`) denied, while this
+/// script registered, and `schtasks /Change /Run /Query /Delete` all worked
+/// on the task it made. So the Run-key fallback — which Windows starts a
+/// minute or more after logon — is no longer the path every install takes.
+///
+/// The PROBLEM 59 settings (battery-safe, no 3-day time limit) are part of
+/// the same registration; there is no second PowerShell round trip.
+/// Pure so the tests can read it; the exe path is single-quoted for
+/// PowerShell, `'` doubled.
+#[cfg(windows)]
+fn register_task_script(exe: &str, delay: &str) -> String {
+    let exe_q = exe.replace('\'', "''");
+    format!(
+        "$ErrorActionPreference='Stop'; \
+         $a = New-ScheduledTaskAction -Execute '{exe_q}' -Argument '--autostart'; \
+         $t = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME; $t.Delay = '{delay}'; \
+         $p = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited; \
+         $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries \
+         -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable -MultipleInstances IgnoreNew; \
+         Register-ScheduledTask -TaskName '{TASK_NAME}' -Action $a -Trigger $t -Principal $p \
+         -Settings $s -Force | Out-Null"
+    )
 }
 
-#[cfg(not(windows))]
-fn harden_task_settings() {}
+/// Run a PowerShell script with a hidden window and return its output.
+#[cfg(windows)]
+fn run_powershell(script: &str) -> Option<std::process::Output> {
+    use std::os::windows::process::CommandExt;
+    std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()
+}
 
 /// Run schtasks.exe with a hidden window and return its output.
 #[cfg(windows)]
@@ -367,7 +391,6 @@ pub fn ensure_startup_task(run_at_startup: bool) {
     // user double-clicking the app, so the dashboard opened in the user's face
     // at every boot (reported on a tester's laptop) AND the 30s cold-boot wait
     // never happened. Both autostart paths must agree on the flag.
-    let tr = format!("\"{exe_str}\" --autostart");
     // PROBLEM 59 — the cold-boot WebView2 race.
     //
     // Launching at logon puts us in a fight with Edge/WebView2's own broker
@@ -376,40 +399,30 @@ pub fn ensure_startup_task(run_at_startup: bool) {
     // window, and the app runs on with NO dashboard and NO overlay — so the
     // Guide HUD never appears and nothing looks clickable. Every manual launch
     // on the tester's machine succeeded; only the cold-boot one failed.
+    // The trigger delay (TASK_DELAY) plus the in-app retry cover it.
     //
-    // /DELAY 30 seconds costs nothing and removes most of that race. Combined
-    // with the in-app retry, a cold boot no longer produces a dead app.
+    // PROBLEM 61 — RunLevel Limited, not Highest. A Highest task fails to
+    // register (or registers and cannot start) on a standard non-admin
+    // account, and on an admin account it makes the app run elevated at logon
+    // but non-elevated from the Start Menu — two different WebView2 user-data
+    // and UIPI behaviours for the same app. WH_KEYBOARD_LL needs neither.
     //
-    // Note: /DELAY is only valid for ONLOGON (and ONSTART) triggers.
-    match schtasks(&[
-        "/Create", "/F",
-        "/TN", TASK_NAME,
-        "/TR", &tr,
-        "/SC", "ONLOGON",
-        // PROBLEM 61 — LIMITED, not HIGHEST. A Highest task fails to register
-        // (or registers and cannot start) on a standard non-admin account, and
-        // on an admin account it makes the app run elevated at logon but
-        // non-elevated from the Start Menu — two different WebView2 user-data
-        // and UIPI behaviours for the same app. WH_KEYBOARD_LL needs neither.
-        "/RL", "LIMITED",
-        "/DELAY", "0000:30",
-    ]) {
+    // PROBLEM 266 — registered through the COM API (see register_task_script),
+    // because schtasks.exe /Create is what a non-elevated user is denied.
+    match run_powershell(&register_task_script(&exe_str, TASK_DELAY)) {
         Some(o) if o.status.success() => {
-            log::info!("startup: task '{TASK_NAME}' → {exe_str} (logon +30s, least-privilege)");
+            log::info!(
+                "startup: logon task registered for this user via the Task Scheduler API — \
+                 '{TASK_NAME}' → {exe_str} (logon +{TASK_DELAY}, least-privilege, battery-safe)"
+            );
             // The task is authoritative when it exists — drop any Run-key
             // fallback so the app cannot be started twice at logon.
             set_run_key(false);
-            // Task Scheduler's DEFAULTS are wrong for a tray utility and are
-            // applied silently: it refuses to start on battery, stops the task
-            // if the machine goes onto battery, and TERMINATES it after 3 days.
-            // schtasks.exe cannot express these, so patch the registration via
-            // PowerShell's ScheduledTask cmdlets. Best-effort: if it fails the
-            // task still works, just with the poor defaults.
-            harden_task_settings();
         }
         Some(o) => {
-            // PROBLEM 64 — the NORMAL path on a non-admin machine, not an
-            // edge case. Do not treat this as fatal: fall back to HKCU Run.
+            // PROBLEM 64 — still possible (policy, a task of the same name
+            // owned by another user, a broken ScheduledTasks module). Not
+            // fatal: fall back to HKCU Run.
             log::warn!(
                 "startup: task create failed ({}) — using HKCU Run autostart instead",
                 String::from_utf8_lossy(&o.stderr).trim()
@@ -418,7 +431,7 @@ pub fn ensure_startup_task(run_at_startup: bool) {
             return;
         }
         None => {
-            log::warn!("startup: could not run schtasks — using HKCU Run autostart instead");
+            log::warn!("startup: could not run powershell — using HKCU Run autostart instead");
             set_run_key(run_at_startup);
             return;
         }
@@ -951,5 +964,28 @@ mod tests {
         assert!(!notify_icon_entry_matches(NSIS, ""));
         assert!(!notify_icon_entry_matches("", ""));
         assert!(!notify_icon_entry_matches("spaceadom.exe", NSIS));
+    }
+
+    // PROBLEM 266 — the registration script is the only thing between a
+    // 12-second and a 100-second wait for the ring after logon.
+    #[test]
+    fn register_task_script_is_per_user_least_privilege_and_autostart() {
+        let s = register_task_script(NSIS, "PT10S");
+        assert!(s.contains("New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME"));
+        assert!(s.contains("$t.Delay = 'PT10S'"));
+        assert!(s.contains("-RunLevel Limited"));
+        assert!(s.contains("-LogonType Interactive"));
+        assert!(s.contains("-Argument '--autostart'"));
+        assert!(s.contains(&format!("-Execute '{NSIS}'")));
+        assert!(s.contains("-AllowStartIfOnBatteries"));
+        assert!(s.contains("-ExecutionTimeLimit ([TimeSpan]::Zero)"));
+        assert!(s.contains(&format!("-TaskName '{TASK_NAME}'")));
+        assert!(!s.contains("schtasks"));
+    }
+
+    #[test]
+    fn register_task_script_escapes_single_quotes_in_the_exe_path() {
+        let s = register_task_script(r"C:\Users\O'Brien\spaceadom.exe", TASK_DELAY);
+        assert!(s.contains(r"-Execute 'C:\Users\O''Brien\spaceadom.exe'"));
     }
 }

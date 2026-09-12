@@ -2480,6 +2480,8 @@ tested end-to-end; "the task code is unchanged" proved nothing once the
 process stopped being elevated. Also: **error lines in a log nobody reads are
 not error handling** — a failed registration must fall back, not just log.
 
+**CORRECTION 2026-09-12 (PROBLEM 266).** The root cause above is wrong in one word: it is not the ROOT FOLDER a non-elevated user is denied, it is the any-user logon trigger `schtasks /Create /SC ONLOGON` writes. The same user registers the same task in the same root folder without error through `Register-ScheduledTask` with a per-user `-AtLogOn -User` trigger (measured on this machine, probes A–D in PROBLEM 266), so since 1.0.109 the task IS the autostart and the Run value below is the fallback it was always meant to be. The fallback code, the `--autostart` flag and every rule in this entry stand.
+
 ---
 
 ## PROBLEM 65 — hook eviction was permanent; a watchdog now reinstalls
@@ -22064,6 +22066,219 @@ success.** `Ok([])` and `Err` differ by one character at the call site and by
   `_exitTimer` and `startTour()` calls `cancelPendingExit()` first, which
   cancels it and finishes the teardown synchronously.
 
+### PROBLEM 237 follow-up, 2026-09-09 — a fingerprint MISMATCH was still treated as "no cache," forcing the exact synchronous scan this problem was written to remove
+
+**This is the gap 237 itself left open.** 237 fixed the STA/threading half of
+the block and made a cache HIT instant. It never touched what a cache MISS
+means, and a fingerprint mismatch (the Start Menu changed since the cache was
+written — i.e. every single install or uninstall) IS a miss under
+`load_cache`'s definition, so it fell straight through to the forced
+synchronous scan 237 was supposed to have eliminated.
+
+**Symptom, from the owner's live `debug.log`, 2026-09-09.** The picker open
+immediately after installing or uninstalling a program blocked for
+`start_menu_scan: found N app(s) in 7531ms … (powershell 1888ms, icons
+5642ms)`, and once, on a cold shell icon cache, `14076ms … (icons 10902ms)`.
+Every OTHER open in the same log answers in 12-18 ms. So the app is instant
+except in exactly the moment a user would most want to check whether their
+newly-installed app arrived in the picker — the worst possible time to make
+them wait fourteen seconds.
+
+**Root cause.** `serve_apps`'s branch 2 called
+`load_cache(&cache_path(), &fingerprint)`, which returns `None` on EITHER a
+missing/corrupt file OR a fingerprint mismatch — the two are indistinguishable
+to the caller. Branch 3 (forced scan before answering) cannot tell "there is
+truly nothing to serve" apart from "there is a perfectly good, slightly stale
+list sitting right there," so it treated both the same way: scan first, then
+answer.
+
+**The fix.** Serve a stale cache exactly like a fresh one — answer
+immediately, refresh on the worker in the background, emit
+`picker-data-updated` if the refreshed list differs — and reserve the
+forced-scan-before-answering path for the one case that genuinely has nothing
+to serve: no file, an unreadable one, the wrong cache format, or an empty app
+list.
+
+**The decision is now a pure function**, `picker_worker::decide_serve`
+(`src-tauri/src/picker_worker.rs:388`), independent of I/O, COM, or the
+channel, over three facts:
+
+```rust
+pub enum ScanStatus {
+    NotAttempted,        // no scan started yet for the current fingerprint
+    AlreadyHandled,       // one is running or done for it — never start a second
+    JustFinished(bool),   // a scan just completed, with this outcome
+}
+
+pub enum ServeDecision {
+    ScanBeforeAnswering,                              // nothing to serve at all
+    ServeCachedAndMaybeRefresh { start_refresh: bool }, // fresh OR stale — same verdict
+    ApplyScanOutcome { accept: bool },                 // fold a finished scan back in
+}
+
+pub fn decide_serve(cache_present: bool, fingerprint_matches: bool, scan_status: ScanStatus) -> ServeDecision {
+    let _ = fingerprint_matches; // proven not to matter here — that IS the fix
+    match scan_status {
+        ScanStatus::JustFinished(ok) => ServeDecision::ApplyScanOutcome { accept: ok },
+        ScanStatus::NotAttempted | ScanStatus::AlreadyHandled if !cache_present => ServeDecision::ScanBeforeAnswering,
+        ScanStatus::NotAttempted => ServeDecision::ServeCachedAndMaybeRefresh { start_refresh: true },
+        ScanStatus::AlreadyHandled => ServeDecision::ServeCachedAndMaybeRefresh { start_refresh: false },
+    }
+}
+```
+
+`fingerprint_matches` is kept as a real parameter, deliberately unused inside
+the function, rather than dropped — the test
+`stale_cache_is_served_exactly_like_a_fresh_one` (picker_worker.rs:1198) calls
+`decide_serve` once with `true` and once with `false` and asserts the two
+verdicts are IDENTICAL, which is the actual regression test for this bug: a
+reader can see the "it truly does not matter any more" claim proved, not just
+asserted in a comment.
+
+**What decides "cache present."** `load_cache_any`
+(`src-tauri/src/picker_worker.rs:916`), new, alongside the existing
+`load_cache` (kept, still used by the disk-cache-fingerprint round-trip test).
+Unlike `load_cache` it does NOT check the fingerprint — only that the file
+parses, is the current `CACHE_FORMAT`, and its `apps` list is non-empty. A
+missing file, a corrupt one, an old format, or an empty list all return
+`None`, which is the only input that makes `decide_serve` return
+`ScanBeforeAnswering`. It also returns the file's own mtime (`LoadedCache.mtime`)
+so the serve-path log line can report how old the answer is.
+
+**`serve_apps` (`picker_worker.rs:417`), branch 2, before vs after:**
+
+```rust
+// BEFORE — a mismatch is indistinguishable from "nothing usable"
+if let Some(list) = load_cache(&cache_path(), &fingerprint) { /* … */ }
+// falls through to branch 3's forced scan on ANY mismatch
+
+// AFTER — any usable file answers immediately; the fingerprint only
+// decides whether/what to log and whether a refresh is due
+if let Some(loaded) = load_cache_any(&cache_path()) {
+    session.list = Some(loaded.apps.clone());
+    session.captured_at = Some(loaded.mtime);
+    session.fingerprint = Some(loaded.fingerprint.clone());
+    if let Some(tx) = reply { let _ = tx.send(Ok(loaded.apps)); }   // ANSWER IS OUT
+    let fingerprint = fingerprint_for(&roots);                      // computed AFTER replying
+    let fp_matches = loaded.fingerprint == fingerprint;
+    // decide_serve(...) → ServeCachedAndMaybeRefresh{start_refresh:true} either way
+    refresh(session, app, cache, &fingerprint);                     // background, same as a HIT
+}
+```
+
+The reply is sent BEFORE the fresh fingerprint is even computed, in both this
+branch and the session-memory branch (branch 1) — the fingerprint walk (fs
+stat only, no COM, ~1 ms per the existing measurement in `fingerprint_for`'s
+own doc comment) and the refresh decision happen strictly after the caller
+already has an answer. The answer path stays exactly as free of COM work as
+237 left it; nothing about the STA worker's lifetime changed.
+
+**"One refresh per session" had to become "one refresh per fingerprint
+change," and here is why that is not scope creep.** `Session.refreshed: bool`
+(a lifetime-of-the-process flag) is now `Session.refresh_started_for:
+Option<String>`, the fingerprint a refresh has been attempted for. Reasoning:
+once ANY refresh had ever run — including the boot pre-warm's routine one —
+the old `bool` was permanently spent, so a program installed an hour into a
+running session would be served from a now-stale disk cache with NO refresh
+ever attempted again for the rest of that run, silently defeating this very
+fix outside of the boot-then-immediately-open scenario. Comparing the stored
+fingerprint to the CURRENT one on every request (branch 1 and branch 2 alike)
+turns the cap into "once per fingerprint CHANGE," which is what the owner's
+brief asked for when the two policies conflicted, and it is the only change
+in this pass to a rule 237 had already shipped.
+
+**A failed refresh can never make a stale cache look fresh.** `refresh()`
+(`picker_worker.rs:553`) now routes its own success/failure through
+`decide_serve(_, _, ScanStatus::JustFinished(ok))`. On `ApplyScanOutcome {
+accept: false }` NOTHING in `Session` changes — not `list`, not
+`fingerprint`, not the disk file — so the next request still sees the OLD
+fingerprint as current and (once the Start Menu next changes) gets its own
+fresh attempt; a failure is never mistaken for "this fingerprint is now
+confirmed fresh." Test:
+`a_failed_scan_is_never_accepted_so_a_stale_cache_never_becomes_permanent`
+(picker_worker.rs:1281).
+
+**Two rapid opens during one refresh.** The worker is a single thread
+draining one channel, so two scans can never literally overlap in this
+codebase — but the DECISION must still say so, both for correctness if that
+ever changes and because the brief asked for it as a named branch. Modelled
+with `ScanStatus::AlreadyHandled`: the first open sees `NotAttempted`, gets
+`start_refresh: true`, and the caller immediately records
+`refresh_started_for = Some(fingerprint)`; a second open landing before that
+refresh returns sees the identical cache and fingerprint state but
+`AlreadyHandled`, and gets `start_refresh: false`. Test:
+`a_second_rapid_open_during_one_refresh_does_not_start_a_second_scan`
+(picker_worker.rs:1229).
+
+**The log line asked for.** `log_picker_served`
+(`src-tauri/src/picker_worker.rs:409`) — one call per serve, naming the path
+(`session_memory`, `disk_cache_fresh`, `disk_cache_stale`,
+`empty_cache_scan`) and the served list's age in ms. The marker is written
+directly as the leading literal of the format string (never assembled from
+shorter pieces), long enough to survive as a contiguous ASCII needle per this
+file's own note on short identifiers being split across overlapping immediate
+stores:
+
+```text
+picker-serve-decision-path-and-list-age-marker-spaceadom-237: path=disk_cache_stale served=247 app(s) answer_took_ms=1 list_age_ms=86412000
+```
+
+### How it was verified
+
+| Gate | Result |
+| --- | --- |
+| `cargo test --lib` | **569 passed / 0 failed / 6 ignored** (was 563/0/5 before this pass — +6 tests, +1 newly ignored) |
+| `cargo clippy --all-targets` | 0 warnings |
+| `npx tsc --noEmit` | clean (no frontend file touched) |
+
+New tests, all in `picker_worker.rs`'s `tests` module: `stale_cache_is_served_exactly_like_a_fresh_one`
+(1198, the regression test), `no_cache_at_all_always_scans_before_answering`
+(1209), `a_second_rapid_open_during_one_refresh_does_not_start_a_second_scan`
+(1229), `a_matching_fingerprint_also_refreshes_once_then_stops` (1250),
+`a_successful_scan_is_always_accepted` (1266),
+`a_failed_scan_is_never_accepted_so_a_stale_cache_never_becomes_permanent`
+(1281), `load_cache_any_rejects_missing_corrupt_wrong_format_and_empty_but_accepts_a_stale_match`
+(1297, exercises every `load_cache_any` rejection plus one accepted stale
+load), and one `#[ignore]`d end-to-end test,
+`stale_fingerprint_answers_immediately_then_refreshes_in_the_background`
+(1353, ~5-14 s — shells out to the real `scan_start_menu` for its second half;
+`cargo test --lib -- --ignored --nocapture stale_fingerprint`) that writes a
+real stale cache file, proves `serve_apps`'s reply channel receives the STALE
+list in under 500 ms via a channel-timeout race, then calls the real
+`refresh()` against the machine's actual Start Menu and asserts the served
+list changed and the fingerprint was adopted.
+
+**NOT VERIFIED: no live cold-cache run was exercised.** This pass changed no
+frontend file, built nothing, and installed nothing — every number above is
+from `cargo test --lib`, not from `debug.log` on the owner's machine. The
+14,076 ms / 7,531 ms figures quoted above are the PRE-existing measurements
+that motivated this fix, not a before/after comparison; nobody has yet
+installed a program on the real machine, opened the picker, and confirmed the
+`disk_cache_stale` log line fires with an answer in the 12-18 ms range instead
+of the multi-second one. The lines to grep for once this ships:
+`picker-serve-decision-path-and-list-age-marker-spaceadom-237: path=disk_cache_stale`
+immediately followed, within the same open, by nothing more than the existing
+`start_menu_scan: found N app(s) in …ms … on worker thread` line for the
+BACKGROUND refresh (which may still take several seconds — that is expected
+and no longer visible to the user).
+
+### Generalise this
+
+- **A cache-miss branch that cannot tell "empty" from "stale" will always
+  treat a stale answer as no answer at all.** The fix here was not "scan
+  faster" or "cache more" — it was giving the miss branch a THIRD legitimate
+  outcome (`ScanStatus`/`ServeDecision`'s three-way split) instead of forcing
+  every non-hit down the same one path.
+- **A refresh policy scoped to "once per session" is really "once per input
+  that would ever make a refresh worth doing."** Session-lifetime flags are a
+  trap for anything whose triggering condition can recur mid-session; the
+  fix is to key the flag on the condition (the fingerprint), not on the
+  process's lifetime.
+- **Keep a parameter that the fix proves irrelevant, and test that it is.**
+  Dropping `fingerprint_matches` from `decide_serve` once it stopped
+  affecting the verdict would have hidden the exact fact this bug depended
+  on getting wrong.
+
 ---
 
 ## PROBLEM 236 — 1.0.96's remaining watchdog alarms are all `both_dead`, and `both_dead` is decided from two clocks the repair itself writes
@@ -33245,3 +33460,1123 @@ Specifically unproven until it is on the machine:
    `own-window fallback:` line after it.
 3. That `Holds protected this session:` never again prints more than once per
    hold.
+
+---
+
+## PROBLEM 265 — the Guide HUD could not draw for the first ten seconds of every logon, and the app had no way to tell the user its shortcuts were already working
+
+**NUMBERING NOTE.** Two other agents were working in this repo in the same
+hour; 263 and 264 may be claimed by them. If this collides, renumber it — the
+content is what matters.
+
+**Symptom.** The owner's live `debug.log`, autostart at 2026-09-10 09:55:16:
+
+```
+09:55:16.425  hook installed (27 ms in)
+09:55:16.442  autostart launch — hook and engine are LIVE now; only the
+              window/webview creation waits 10s for the shell to settle
+              (PROBLEM 59/76/215)
+09:55:16.718  hold start (hold #1)                     <- 320 ms after launch
+09:55:17.177  guide_hud: still starting — the overlay webview is not built yet
+09:55:20.523  guide_hud: still starting — the overlay webview is not built yet
+09:55:32.200  engine: combo Space+c received           <- the first LETTER, 16s in
+09:55:32.202  (launch completed)
+```
+
+Four Space holds in the first sixteen seconds and **not one letter pressed**.
+The shortcuts worked from the first second; the owner could not tell, because
+nothing was drawn, so he waited. He compares this unfavourably with Raycast,
+whose window is pre-built and answers its hotkey instantly.
+
+**Root cause.** Not a bug — an accepted trade that turned out to cost more than
+it was priced at. PROBLEM 215 split the autostart settle so the hook and the
+engine come up immediately and only the WINDOWS wait, and recorded the
+consequence honestly: *"the shortcut WORKS … and NOTHING is drawn … Silent but
+functional, which is the accepted trade."* The overlay — the Guide HUD's window
+— was on the wrong side of that split, tied to the dashboard's ten seconds by
+nothing except being declared in the same `tauri.conf.json` array.
+
+### What the ten seconds actually protect — established BEFORE changing anything
+
+**PROBLEM 59** (`## PROBLEM 59 — WebView2 fails to attach on cold boot, and the
+app lied about it`) is a **webview** hazard, not a "visible window fighting the
+shell at logon" hazard:
+
+> "A race at logon. The app launches from the Scheduled Task before the WebView2
+> runtime has finished its own initialisation, so the webview creation fails with
+> `HRESULT(0x80070490)` — `ERROR_NOT_FOUND`. Tauri reported the *window* as
+> created; only the *webview inside it* was missing."
+
+and, restated in `lib.rs::create_app_windows`'s own doc comment:
+
+> "at a cold logon the WebView2 runtime is often not serviceable yet,
+> `CreateCoreWebView2Controller` fails with HRESULT(0x80070490) ERROR_NOT_FOUND,
+> Tauri destroys the host window, and the user gets an app with no dashboard and
+> no Guide HUD while the log claims success."
+
+**So the hazard genuinely covers the OVERLAY as well as the dashboard.** The
+tempting shortcut — "the overlay is small, transparent, never activated, never
+focused, therefore it is exempt" — is NOT supported by the evidence and was not
+used. Every property in that list is about focus and compositing; none of them
+is about whether `CreateCoreWebView2Controller` can attach.
+
+**PROBLEM 76** is not a hazard at all. It is the entry that *shortened* the
+wait, for this exact reason:
+
+> "The 30s blanket delay stacked on the ~100s Windows already takes to reach the
+> Run key. The user opened the laptop, pressed Space+key into a dead hook during
+> that window, and reasonably concluded 'didn't start'."
+
+> "`lib.rs`: autostart wait 30s → **10s**. The blanket sleep predates the two
+> real cold-boot defences (webview-existence rebuild, PROBLEM 59; ready beacon,
+> PROBLEM 74) and no longer needs to carry the risk alone."
+
+and its generalisation:
+
+> "*'It didn't start' from a user is a claim about what they could SEE, not about
+> the process list.*"
+
+That is the 2026-09-10 report word for word, four weeks later.
+
+**PROBLEM 215** is the one that must not be re-opened in the other direction:
+
+> "a wait that exists to protect **WebView2** was also delaying
+> **`WH_KEYBOARD_LL`**, which has nothing to do with WebView2. Ten seconds of
+> dead shortcuts, every reboot, for no reason."
+
+> "*A delay added to protect one subsystem must be scoped to that subsystem.*"
+
+It also already established the precedent this fix leans on:
+
+> "**Two paths that must not have to wait out the settle.** Asking for the app IS
+> asking for its UI, so both create the windows immediately" — the tray's
+> "Open Settings" and the single-instance handler.
+
+### The asymmetry that makes the overlay safe to try early
+
+The hazard applies to both windows. What does NOT apply to both is the
+**recovery**. Since PROBLEM 59 was written, the overlay — and only the overlay —
+acquired three independent ways back from a failed attach:
+
+1. `create_app_windows`'s PROBLEM 59 existence check, which still runs at the
+   full `AUTOSTART_SETTLE` and rebuilds any missing webview with an explicit
+   builder (`lib.rs`, "setup: webview '{label}' DOES NOT EXIST").
+2. `display_watch`'s self-heal poll — PROBLEM 117/118, and PROBLEM 214 defect 4:
+   *"a WebView2 that was not serviceable yet at a cold boot. Every one of those
+   used to persist until the user restarted the app. None of them do now."*
+3. `guide_hud`'s `display_watch::heal_now()` when a hold finds no overlay after
+   the windows exist.
+
+**Nothing in this app rebuilds a dashboard** after `create_app_windows` has run.
+
+Therefore: the **worst case of attempting the overlay early is today's
+behaviour** — the attempt loses the cold-boot race at 1.2 s, logs a WARN, and
+the existing 10 s path builds it exactly when it would have anyway. The best
+case is a ring on the first hold. The dashboard, which has no way back, keeps
+the full ten seconds unchanged.
+
+### Exact files
+
+| File | Change |
+| --- | --- |
+| `src-tauri/src/overlay_boot.rs` | **NEW.** `OVERLAY_SETTLE`, the pure `plan()`, `create_overlay_now()`, `request_now()`, `mark_process_start()`/`since_start()`, 10 tests. |
+| `src-tauri/src/lib.rs:50` | `mod overlay_boot;` |
+| `src-tauri/src/lib.rs` (`run()`, before the logger) | `overlay_boot::mark_process_start();` |
+| `src-tauri/src/lib.rs` (`configure_overlay_window`, click-through `Ok(())` arm) | the "overlay usable … N ms after app start" measurement line |
+| `src-tauri/src/lib.rs` (PROBLEM 215's split, `st-window-settle`) | two phases instead of one |
+| `src-tauri/src/lib.rs` (`create_app_windows` doc comment) | records that "silent but functional" was withdrawn |
+| `src-tauri/src/guide_hud/mod_impl.rs:441` | the "still starting" branch now asks for the build, and says what still works |
+
+### The actual code
+
+**The decision, pure and tested** (`overlay_boot.rs`):
+
+```rust
+pub const OVERLAY_SETTLE: Duration = Duration::from_millis(1200);
+
+pub struct BootFacts {
+    pub autostart: bool, pub safe_mode: bool, pub windows_created: bool,
+    pub overlay_exists: bool, pub demanded: bool, pub since_start: Duration,
+}
+pub enum Skip { SafeMode, AlreadyThere, FullCreationDone, NotAnAutostartLaunch }
+pub enum OverlayBoot { CreateNow, WaitLonger(Duration), NothingToDo(Skip) }
+
+pub fn plan(f: BootFacts) -> OverlayBoot {
+    if f.safe_mode      { return OverlayBoot::NothingToDo(Skip::SafeMode); }
+    if f.overlay_exists { return OverlayBoot::NothingToDo(Skip::AlreadyThere); }
+    if f.windows_created{ return OverlayBoot::NothingToDo(Skip::FullCreationDone); }
+    if !f.autostart     { return OverlayBoot::NothingToDo(Skip::NotAnAutostartLaunch); }
+    if f.demanded || f.since_start >= OVERLAY_SETTLE { return OverlayBoot::CreateNow; }
+    OverlayBoot::WaitLonger(OVERLAY_SETTLE - f.since_start)
+}
+```
+
+The order is load-bearing. **Safe mode is checked first** so a speed-up can never
+undo PROBLEM 253 — a launch that has already died three times must still come up
+with no overlay, and that is the machine that could least afford a fourth. A
+`demanded` hold beats the clock but never beats safe mode.
+
+**The creation, main thread only, through the same guards as every other path:**
+
+```rust
+match tauri::WebviewWindowBuilder::from_config(app, &wc).and_then(|b| b.build()) {
+    Ok(w) => {
+        log::info!("overlay-early: window 'overlay' created {} ms after app start, …");
+        crate::configure_overlay_window(&w);   // transparent, hidden, NoActivate,
+                                               // DWM border cleared, click-through
+                                               // that STILL FAILS CLOSED
+        #[cfg(windows)]
+        if let Ok(h) = w.hwnd() { crate::engine::actions::opacity::register_own_hwnd(h.0 as isize); }
+    }
+    Err(e) => log::warn!(
+        "overlay-early: the overlay could not be created {} ms after app start ({e}) — \
+         this is survivable … it is most likely PROBLEM 59's cold-boot WebView2 race, and \
+         the {}s window creation below rebuilds it, after which display_watch self-heals it \
+         for the rest of the session. The app is in exactly the state it was in before this \
+         optimisation existed."),
+}
+```
+
+`from_config`, not a hand-written builder — PROBLEM 81 is what a hand-copied
+builder produced (*"an opaque, decorated, focus-stealing rectangle"*), and it is
+what PROBLEM 215 chose for the same reason.
+
+**The settle thread, before → after** (`lib.rs`, PROBLEM 215's split):
+
+```rust
+// BEFORE
+.spawn(move || {
+    std::thread::sleep(AUTOSTART_SETTLE);
+    let h = settle_handle.clone();
+    if let Err(e) = settle_handle.run_on_main_thread(move || { create_app_windows(&h); }) { … }
+})
+
+// AFTER
+.spawn(move || {
+    // PHASE 1 — the OVERLAY, and only the overlay.
+    std::thread::sleep(overlay_boot::OVERLAY_SETTLE);
+    let ho = settle_handle.clone();
+    if let Err(e) = settle_handle
+        .run_on_main_thread(move || overlay_boot::create_overlay_now(&ho, false)) { log::warn!(…); }
+
+    // PHASE 2 — everything else, at the ORIGINAL mark. The dashboard's wait is UNCHANGED.
+    std::thread::sleep(AUTOSTART_SETTLE.saturating_sub(overlay_boot::OVERLAY_SETTLE));
+    let h = settle_handle.clone();
+    if let Err(e) = settle_handle.run_on_main_thread(move || { create_app_windows(&h); }) { … }
+})
+```
+
+`saturating_sub`, so setting `OVERLAY_SETTLE` larger than `AUTOSTART_SETTLE` can
+only collapse phase 2 to "immediately", never underflow.
+
+**The hold that arrives anyway** (`guide_hud/mod_impl.rs`):
+
+```rust
+} else if !crate::windows_created() {
+    log::info!(
+        "guide_hud: still starting — the overlay webview is not built yet (autostart settle, \
+         PROBLEM 59/76/215). The shortcut works — this hold still launches, focuses and \
+         minimises, and Space+letter is unaffected; only the ring is missing. Asking for the \
+         overlay to be built now rather than waiting out the timer (PROBLEM 265)."
+    );
+    crate::overlay_boot::request_now(handle);
+}
+```
+
+`request_now` hops to the main thread behind an `ATTEMPT_QUEUED` guard cleared by
+its own closure, so one hold per second cannot queue one closure per hold and a
+failed attempt can still be retried by a later hold. **It does not rescue the
+hold that made it** — a webview takes far longer than a hold to boot — and it is
+not meant to. It is the difference between *one* hold paying a one-off cost and
+*every* hold until the timer drawing nothing. That was the honest answer to
+"should the first hold trigger the build?": yes, and it is still not instant.
+
+**The measurement, in the one place every creation path passes through**
+(`lib.rs::configure_overlay_window`, the `set_ignore_cursor_events` `Ok(())` arm
+— which is the exact point at which the overlay is genuinely USABLE: window
+exists, click-through applied, `OVERLAY_DISABLED` just cleared):
+
+```rust
+log::info!(
+    "overlay: configured (on-demand, click-through) — overlay usable for the Guide HUD \
+     {} ms after app start (PROBLEM 265)",
+    overlay_boot::since_start().as_millis()
+);
+```
+
+One grep — `grep "overlay usable for the Guide HUD" debug.log` — answers "how
+long after logon could the ring have been drawn?" for every path, including the
+PROBLEM 59 rebuild and every `display_watch` rebuild.
+
+### Space+letter during the settle was ALREADY unaffected — verified by grep, not by hardware
+
+`crate::windows_created()` has exactly **one** consumer in the entire crate:
+`guide_hud/mod_impl.rs:441`, the drawing branch. `engine::handle_alpha`
+(`engine/mod.rs:640`) logs `engine: combo Space+{ch} received`, reads the config
+and dispatches to `smart_cascade`; it never touches a window, the overlay or that
+flag. The owner's own log is consistent with it — his Space+c at 09:55:32
+completed in 2 ms. So the fix changes what is DRAWN and changes nothing about
+what is DONE.
+
+### How it was verified
+
+- `cargo test --lib` — **604 passed, 1 failed, 6 ignored.** All 10 `overlay_boot`
+  tests pass. The one failure is
+  `hook::middle_button_arbitration_tests::no_interleaving_lets_two_witnesses_both_take_one_gesture`
+  in `src/hook/mod.rs`, which **another agent was editing in the same minute**
+  (mtime 10:25:09 versus my last edit at 10:24:14). It is not reachable from
+  anything changed here.
+- `cargo clippy --all-targets` — 0 warnings, 0 errors.
+- `npx tsc --noEmit` — clean (no TypeScript was changed).
+- The PROBLEM 59/76/215 reading above is quoted from this file, not remembered.
+
+**NOTHING HERE HAS RUN ON REAL HARDWARE. NO BUILD, NO INSTALL.** What only the
+owner can confirm, on the installed build:
+
+1. Log off and back on. From the moment the tray icon appears, hold Space. **The
+   ring must appear.**
+2. `grep "overlay usable for the Guide HUD" debug.log` — the number must be
+   roughly 1200-2500 ms, not ~10000.
+3. `grep "guide_hud: still starting" debug.log` — empty, or one line.
+4. If `overlay-early: the overlay could not be created` appears, the cold-boot
+   WebView2 race is real on this machine at 1.2 s. That is survivable by
+   construction (the 10 s rebuild covers it), and the answer is to raise
+   `OVERLAY_SETTLE` — a one-number change with a name.
+5. Unplug and replug the second display once. `display: overlay rebuilt for the
+   new display configuration` must still appear (PROBLEM 117/118 is untouched,
+   but it is cheap to confirm).
+
+**Generalise this.** *A shared wait is only as well-scoped as the SLOWEST thing
+behind it needs — check whether the things behind it are equally exposed and
+equally recoverable.* PROBLEM 215 scoped the wait away from the hook because the
+hook had nothing to do with WebView2. This is the next cut of the same rule: two
+things that ARE both exposed to a hazard can still deserve different waits, if
+one of them has a proven recovery and the other does not. And second: *"the app
+logged it" is not "the app told the user".* `guide_hud: still starting` was
+correct, calm, well-worded and completely useless to a man holding his spacebar
+and watching nothing happen.
+
+---
+
+## PROBLEM 263 — the Guide HUD ring gained a SECOND trigger: holding the MIDDLE MOUSE BUTTON raises the same ring in the same place, a quick middle click is replayed so browsers still open links in a new tab, and 3D/CAD programs never see any of it (built 2026-09-10, gates green, **NOTHING RUN ON REAL HARDWARE — no build, no install**)
+
+**This is a FEATURE, not a defect**, so the usual Symptom → Root cause shape is
+adapted: the "symptom" is the owner's request, the "root cause" section is the
+set of decisions that were forced by existing laws rather than chosen freely,
+and "how it was verified" is unusually honest about what a gate can and cannot
+say about a mouse gesture. There IS a genuine bug writeup in here, though — see
+**"THE TWO COMPILE ERRORS"** near the end, which is one typo that produced two
+errors that look unrelated.
+
+### WHAT THE OWNER ASKED FOR
+
+Holding the middle mouse button raises the Guide HUD ring exactly as holding
+Space does, in the same centred position. A quick middle click must still behave
+normally everywhere. On by default, with a built-in exclusion list covering 3D
+and CAD work. The user's App exceptions, bypass mode and the fullscreen/game
+gate all apply. While the ring is up everything works as it does for Space —
+aim and release to launch, left-click a chip, tap a bound letter. One Settings
+row. Explicitly NOT in scope, by his decision: cursor-anchored placement,
+icons-only chips, per-app three-way exception scope, favourites-vs-all.
+
+### THE FOUR DECISIONS THAT WERE NOT FREE
+
+Each of these was forced by a law already in this file or in CLAUDE.md. They are
+written down because every one of them looks like an arbitrary complication
+until you know which law produced it.
+
+**1. THE `WM_MBUTTONDOWN` MUST BE SUPPRESSED, WHICH MEANS THE CLICK MUST BE
+REPLAYED.** Letting the down through starts the browser's autoscroll (or the CAD
+program's orbit) at the same instant the ring starts; the two cannot share the
+gesture. So the app owes the world a middle click whenever the press turns out
+to have been one — the exact contract `SPACE_INTERCEPTED` carries for the
+spacebar. **Whoever eats the down owes the up.** The replay is ONE `SendInput`
+batch, down and up together, because keyboard law 2 says `SendInput` followed by
+anything else does not preserve order, and because a down that lands without its
+up leaves the middle button latched in whatever has focus — for a browser that
+is autoscroll running with no way to stop it, the worst outcome this feature can
+produce. It is tagged with the `0x7A7A7A7A` cookie so our own mouse hook passes
+it through rather than reading it as a fresh press (keyboard law 1 — our cookie,
+never the OS's `INJECTED` flag).
+
+**2. THE DECISION IS MADE AT RELEASE, NOT BY A TIMER.** That is what makes it a
+true mirror of Space: Space-down starts the HUD timer, and a Space released
+before the ring appears types a space and cancels the pending show. So a middle
+press injects `MiddleButtonDown` immediately and the RELEASE decides — released
+inside `MIDDLE_TAP_MS` with nothing else claiming the press means replay a real
+click; anything else takes the ordinary Space-release path.
+
+**3. THE REPLAY RUNS ON THE ENGINE THREAD, NEVER IN THE CALLBACK.** `SendInput`
+is a win32k call. `ms_hook_proc` is the one hook in this process that makes no
+win32k call at all, which is precisely why it keeps firing while the keyboard
+hooks are evicted (keyboard law 7b). Spending its budget to save a channel hop
+would trade the feature against the app's own liveness. PROBLEM 58's envelope
+holds without exception: the callback loads atomics, calls a pure function, and
+stores atomics.
+
+**4. THE FEATURE FAILS CLOSED WHEN ITS GUARD FAILS.** The 3D/CAD verdict is
+published by `st-exclusion-watcher`, which is explicitly ALLOWED to fail to
+spawn (PROBLEM 124). If it never runs, `ORBIT_ACTIVE` sits `false` for the whole
+session — not because no CAD program is in front, but because **nothing ever
+looked**. So `middle_button_down_accepted` requires `WATCHER_ALIVE` as its own
+separate gate: no watcher, no middle-button trigger, and the app behaves exactly
+as it did before this feature existed. *When a guard and the feature it guards
+can fail independently, the feature must be the one that fails.*
+
+### THE ARBITRATION — THREE WITNESSES, ONE GESTURE
+
+The ring now has three ways to be raised: the keyboard hook's Space
+(`MODIFIER_ACTIVE`), the own-window fallback's Space (`OWN_HOLD_ACTIVE`, PROBLEM
+259/261) and the middle button (`MIDDLE_HOLD_ACTIVE`). Two of them firing for
+one gesture would mean two rings, two launches and two toasts.
+
+**The rule is stated ONCE, in `src-tauri/src/hook/mod.rs` in the block headed
+`THE ARBITRATION — ONE PLACE, AND THIS IS IT`, immediately above
+`MIDDLE_TAP_MS`.** It is enforced in exactly three places, each of which names
+that comment:
+
+| Rule | Where | What it does |
+| --- | --- | --- |
+| **A** — a middle hold may not start while EITHER Space hold is live | `middle_button_down_accepted` | refuses, so the `WM_MBUTTONDOWN` passes straight through untouched; holding Space and middle-clicking is byte-identical to a build without this feature |
+| **B** — a Space press while a middle hold is live is an ORDINARY SPACE | `kb_hook_proc`'s SPACE-DOWN branch | returns `CallNextHookEx`, beside the existing `other_modifier_down()` pass-through and for the same reason: sets no latch, swallows nothing, owes no up |
+| **C** — the own-window fallback refuses a hold while a middle hold is live | guard 2c in `own_window_space_down_accepted` | the identical question guard 2 asks about the hook |
+
+The three are mutually exclusive **by construction, not by timing**: each asks
+about a latch that is already set before the competing path can be entered.
+`hold_latched(hook, own, middle)` is the one function that knows there are three
+of them, and every consumer — the mouse gate, the pointer poller's `live` term,
+the hold identity in `hold_ts_for` — goes through it.
+
+### THE EXCLUSION TABLE — `src-tauri/src/hook/orbit_apps.rs` (NEW FILE)
+
+Middle-drag ORBITS the model in every 3D and CAD program and PANS the canvas in
+the 2D design tools underneath them. Swallowing the middle button there would
+not add a feature, it would delete somebody's day's workflow. Three things about
+the table are deliberate:
+
+1. **IT IS SEPARATE FROM THE USER'S APP EXCEPTIONS AND APPLIES TO THE
+   MIDDLE-BUTTON TRIGGER ONLY.** `hook/exclusions.rs` stands the WHOLE app down
+   inside an app the user listed — Space included. This one does nothing of the
+   kind: inside SolidWorks the Space shortcuts, the ring, Space+letter and every
+   special key keep working exactly as they do everywhere else. Merging the two
+   lists would silently delete a user's Space shortcuts in twenty programs.
+2. **IT IS EXACT-STEM MATCHING**, through the one shared
+   `exclusions::normalize_stem`. No prefix matching, no substring matching. A
+   substring rule would make `edge` (Siemens Solid Edge) match `msedge` and
+   quietly kill the feature in a browser, which is one of the two places the
+   owner most wants it. There is a test asserting exactly that.
+3. **IT IS READ ON A POLLER THREAD, NEVER IN THE CALLBACK.** The verdict is
+   published into one `AtomicBool` by `st-exclusion-watcher`, which already
+   resolves the foreground exe stem every 500 ms for the user's own exception
+   list. Two lists, one probe, one cadence. The cost is up to 500 ms of latency
+   after an alt-tab INTO a listed app — the same latency the user's own App
+   exceptions have always had.
+
+The table, grouped by what gesture each family is protecting:
+
+| Family | Stems |
+| --- | --- |
+| 3D / CAD / BIM (middle-drag orbits or pans the model) | `sldworks` `edrawings` `fusion360` `fusion` `inventor` `acad` `acadlt` `revit` `roamer` `alias` `cnext` `catstart` `3dexperience` `parametric` `proe` `ugraf` `nx` `edge` `rhino` `sketchup` `vectorworks` `archicad` `bricscad` `draftsight` `librecad` `freecad` `openscad` `onshape` `blender` `maya` `3dsmax` `cinema 4d` `houdini` `houdinifx` `modo` `zbrush` `keyshot` `toolbag` `substance painter` `substance designer` `adobe substance 3d painter` `adobe substance 3d designer` |
+| PCB / electronics CAD (pans the board) | `kicad` `pcbnew` `eeschema` `gerbview` `x2` (Altium) `dxp` |
+| Game engines (pans the scene view) | `unity` `unrealeditor` `ue4editor` `godot` |
+| Slicers, mesh and scientific viewers (orbits) | `ultimaker-cura` `prusa-slicer` `bambustudio` `orcaslicer` `simplify3d` `meshmixer` `meshlab` `cloudcompare` `paraview` `comsol` `ansys` `ansyswbu` |
+| 2D design canvases (middle-drag PANS the artboard) — **judged in, not asked for; easiest group to prune** | `photoshop` `illustrator` `indesign` `figma` `krita` `gimp` `inkscape` `affinity photo` `affinity designer` `affinity publisher` `clipstudiopaint` `aseprite` `paint.net` `qgis-bin` `arcgispro` |
+
+Two entries look wrong and are kept on purpose, each with the reasoning in the
+file: **`edge`** is Siemens Solid Edge and does not collide with Microsoft Edge
+(`msedge`); **`fusion`** is generic-looking because Autodesk renamed Fusion 360
+after 2024, and the cost of a false hit is one program without the ring.
+
+**KNOWN GAPS, WRITTEN DOWN RATHER THAN PRETENDED AWAY** (they are in the file's
+header too): **Onshape** is a WEB app — the entry covers the Electron wrapper,
+but Onshape in a browser tab is indistinguishable from any other tab to a
+foreground-exe probe and the middle button WILL raise the ring there; the
+answer, if it ever matters, is the Settings switch, not a browser-title probe.
+**Godot** ships as a VERSIONED exe (`Godot_v4.2-stable_win64.exe`), so an
+exact-stem table cannot name it; listed anyway for renamed copies. Anything a
+user installs under a renamed exe is invisible to the table — that is what the
+user's own App exceptions and the switch are for.
+
+### EXACT FILES
+
+| File | What changed |
+| --- | --- |
+| `src-tauri/src/hook/orbit_apps.rs` | **NEW.** The table, `is_orbit_app`, `ORBIT_ACTIVE`, `WATCHER_ALIVE`, `publish`, and 6 tests |
+| `src-tauri/src/hook/mod.rs` | `HookEvent::{MiddleButtonDown, MiddleButtonTap}`; `WM_MBUTTONDOWN`/`WM_MBUTTONUP`/`MAGIC_INJECTED_MOUSE` constants; the two `ms_hook_proc` branches; `MIDDLE_TAP_MS`/`MIDDLE_MAX_HOLD_MS`/`MIDDLE_DEAF_SILENCE_MS`; `MIDDLE_BUTTON_RING`, `MIDDLE_DOWN_TS`, `MIDDLE_HOLD_ACTIVE`, `MIDDLE_UP_OWED` and three counters; `middle_button_down_accepted`, `middle_press_was_a_click`, `middle_hold_reap_reason`, `arm_middle_hold`, `disarm_middle_hold`, `reap_middle_hold`, `on_middle_button_down`, `on_middle_button_up`, `replay_middle_click`; arbitration rule B in `kb_hook_proc`; `hold_latched`/`hold_ts_for` widened to three witnesses; teardown in both repair paths; THE ARBITRATION comment block; 5 new test modules |
+| `src-tauri/src/hook/exclusions.rs` | `orbit_apps::publish(&name)` on the existing 500 ms watcher tick — two lists, one probe |
+| `src-tauri/src/hook/pointer.rs` | `reap_middle_hold(probe_fg)` on the `st-hud-pointer` poller, third in the row beside the other two reapers |
+| `src-tauri/src/engine/mod.rs` | `MiddleButtonDown` normalised to `SpaceDown` at the top of `dispatch()`; the per-hold log line; the `MiddleButtonTap` arm that replays the click |
+| `src-tauri/src/config/schema.rs` | `middle_button_ring: bool` with `#[serde(default = "default_true")]`, the `Default` entry, and assertions in BOTH first-install tests |
+| `src-tauri/src/config/mod.rs` | `publish_middle_button_ring(config)` in `save` |
+| `src-tauri/src/lib.rs` | `publish_middle_button_ring` at the startup load |
+| `src/types.ts` | `middle_button_ring?: boolean` |
+| `src/components/settings-panel.ts` | the `middlering` row, its `DESC` copy, its `wireToggle` handler, stagger renumbering |
+| `src/components/controls.ts` | `middlering: "rng"` in `TOGGLE_CHAR` |
+
+### THE ACTUAL CODE — the parts a reader would otherwise have to search for
+
+**The mouse callback's two branches.** Note where they sit relative to the
+gates, which is the whole of their correctness:
+
+```rust
+// THE RELEASE — ABOVE every gate, because whoever eats the down owes the up.
+// Every gate below can flip mid-hold (alt-tab into an excluded app, a game
+// goes fullscreen, bypass switched on from the tray) and all of them
+// `return CallNextHookEx`. Put this branch under any of them and the release
+// of a press we already ate leaks to an app that never saw the press, AND the
+// ring stays up with no teardown coming.
+if msg == WM_MBUTTONUP {
+    let ms = &*(l_param.0 as *const MSLLHOOKSTRUCT);
+    if ms.dwExtraInfo != MAGIC_INJECTED_MOUSE          // keyboard law 1
+        && MIDDLE_UP_OWED.swap(false, Ordering::Relaxed)
+    {
+        if let Some(ev) = on_middle_button_up(ms_now) { send_event(ev); }
+        return LRESULT(1);
+    }
+}
+
+// --- App exceptions gate returns here ---
+
+// THE PRESS — ABOVE the `hold_latched` gate, because the whole point of this
+// branch is to run when NO hold is latched: it is what CREATES one. Below the
+// App-exceptions gate, because that stands the entire app down.
+//
+// COST ON THE COMMON PATH: one u32 comparison per mouse event. Every atomic
+// load, the cookie read and the pure gate are INSIDE the branch, so a
+// mouse-move pays nothing at all (PROBLEM 58's envelope).
+if msg == WM_MBUTTONDOWN {
+    let ms = &*(l_param.0 as *const MSLLHOOKSTRUCT);
+    if ms.dwExtraInfo != MAGIC_INJECTED_MOUSE
+        && middle_button_down_accepted(
+            MIDDLE_BUTTON_RING.load(Ordering::Relaxed),
+            orbit_apps::WATCHER_ALIVE.load(Ordering::Relaxed),
+            orbit_apps::ORBIT_ACTIVE.load(Ordering::Relaxed),
+            false,                                     // EXCLUDED_ACTIVE returned above
+            BYPASS_MODE.load(Ordering::Relaxed),
+            FULLSCREEN_ACTIVE.load(Ordering::Relaxed),
+            MODIFIER_ACTIVE.load(Ordering::Relaxed),   // THE ARBITRATION, rule A
+            OWN_HOLD_ACTIVE.load(Ordering::Relaxed),
+            MIDDLE_HOLD_ACTIVE.load(Ordering::Relaxed),
+        )
+    {
+        on_middle_button_down(ms_now.max(1));
+        return LRESULT(1);   // suppress: the app must not start autoscroll
+    }
+    return CallNextHookEx(None, n_code, w_param, l_param);
+}
+```
+
+**The release decision.** `SPACE_ABORTED` is reused rather than a new flag being
+invented, and that is the point: it is already set by a combo, by the wheel and
+by arming a chip — precisely the set of things that must stop a click being
+replayed. It is the same flag, asking the same question, that decides whether a
+Space release types a space.
+
+```rust
+fn on_middle_button_up(now: u64) -> Option<HookEvent> {
+    let ts = MIDDLE_DOWN_TS.load(Ordering::Relaxed);
+    let held = if ts == 0 { u64::MAX } else { now.saturating_sub(ts) };
+    let aborted = SPACE_ABORTED.load(Ordering::Relaxed);
+    let click = middle_press_was_a_click(held, MIDDLE_TAP_MS, aborted);
+    // Consume the arm FIRST, then tear the hold down — mirrored from the
+    // hook's Space-UP branch and in the same order. A chip armed under a
+    // middle hold launches on release through the SAME `take_armed_key`.
+    let ev = if click {
+        MIDDLE_TAPS_REPLAYED.fetch_add(1, Ordering::Relaxed);
+        HookEvent::MiddleButtonTap
+    } else {
+        match pointer::take_armed_key() {
+            Some(ch) => HookEvent::PointerActivate(ch),
+            None => HookEvent::SpaceUp { modifier_fired: aborted },
+        }
+    };
+    if !disarm_middle_hold() { return None; }   // the reaper or a repair beat us
+    Some(ev)
+}
+
+#[inline(always)]
+pub(crate) fn middle_press_was_a_click(held_ms: u64, tap_ms: u64, aborted: bool) -> bool {
+    held_ms < tap_ms && !aborted
+}
+```
+
+That `PointerActivate(ch)` arm is item 5 of the brief in one line: **the release
+is wired to pointer activation's existing release path**, not to a copy of it.
+
+**The replay**, with the one repair `send_keys_raw` cannot perform:
+
+```rust
+let batch = [mk(MOUSEEVENTF_MIDDLEDOWN), mk(MOUSEEVENTF_MIDDLEUP)];
+let sent = unsafe { SendInput(&batch, size_of::<INPUT>() as i32) } as usize;
+if sent == batch.len() { return true; }
+// PROBLEM 227's discipline. SendInput inserts events ONE AT A TIME and stops
+// at the first one another thread blocks, returning a SHORT COUNT — and a
+// short count of exactly 1 means the DOWN went in and the UP did not, leaving
+// the middle button physically latched. `unreleased_keys_into` cannot help
+// (it decodes KEYBOARD events), so the repair is written out.
+if sent == 1 {
+    let up = [mk(MOUSEEVENTF_MIDDLEUP)];
+    let _ = unsafe { SendInput(&up, size_of::<INPUT>() as i32) };
+}
+false
+```
+
+**Why `GetAsyncKeyState(VK_MBUTTON)` is not the reaper's liveness test, and it
+is keyboard law 3 rather than an oversight.** We SUPPRESS the
+`WM_MBUTTONDOWN`, so Windows never records the button as pressed and
+`GetAsyncKeyState` reports it UP for the whole of a perfectly live hold.
+Building the test on it would tear down every hold on its first tick — the
+identical mistake that once broke every shortcut in this app. The reaper's
+evidence is our own bookkeeping and the OS's own input clock instead:
+
+```rust
+pub(crate) fn middle_hold_reap_reason(
+    active: bool, hold_age_ms: u64, max_hold_ms: u64,
+    ms_callback_silence_ms: Option<u64>, os_input_age_ms: u64,
+    deaf_silence_ms: u64, os_input_max_age_ms: u64,
+) -> Option<MiddleHoldReap> {
+    if !active { return None; }
+    // PROOF: the OS accepted input recently AND our mouse callback — which
+    // stamps LAST_MS_CALLBACK on EVERY event above every gate — has been
+    // silent far longer. `None` is UNKNOWN, never proof (PROBLEM 228).
+    if os_input_age_ms <= os_input_max_age_ms
+        && matches!(ms_callback_silence_ms, Some(ms) if ms >= deaf_silence_ms)
+    { return Some(MiddleHoldReap::MouseDeaf); }
+    if hold_age_ms > max_hold_ms { return Some(MiddleHoldReap::Expired); }
+    None
+}
+```
+
+That is PROBLEM 262's deafness-aware path, applied to the OTHER hook: *an
+instrument that can only be read by the thing that has failed is not an
+instrument.* It runs from `st-hud-pointer` (an independent thread) and from the
+hook pump's `WM_TIMER` branch (so it still runs when that watcher failed to
+spawn) — two homes, two different failure modes, both off every callback.
+
+**A repair tears it down**, in both repair paths, because `install_hooks()`
+replaces the MOUSE hook too and the `WM_MBUTTONUP` that would end the hold
+belongs to a hook that no longer exists:
+
+```rust
+let had_middle_hold = disarm_middle_hold();
+if !had_hook_hold && !had_own_hold && !had_middle_hold { return; }
+```
+
+Left standing it is not merely a stuck ring: **rules B and C both read
+`MIDDLE_HOLD_ACTIVE`, so a latched middle hold would refuse every new Space hold
+from either witness and the ring would stop appearing at all.** That is PROBLEM
+262's wedge, reachable from a third direction, and it is why the teardown is not
+optional.
+
+**The one log line per hold**, and it is deliberately a long unique ASCII format
+string so it works as an exe marker (CLAUDE.md: use a long `log::` FORMAT
+STRING, never a short identifier):
+
+```
+middle-button ring: the-guide-hud-ring-was-raised-by-a-middle-mouse-button-hold-spaceadom
+```
+
+It deliberately does NOT contain the words `hold start`, so it can never satisfy
+CLAUDE.md keyboard-hook law 6 / `scripts/install-proof.ps1`. **A ring raised by
+the middle button is evidence about the MOUSE hook and about nothing else** —
+that Space-down never happened and the keyboard hook was never asked anything.
+This is the same separation PROBLEM 259 drew for the own-window fallback, and
+for the same reason. The other two markers:
+
+```
+middle-button ring: a-quick-middle-click-was-replayed-through-sendinput-spaceadom
+middle-button ring: reaping-a-latched-middle-button-hold-spaceadom
+orbit-apps: middle-button-ring-standing-down-for-a-3d-or-cad-program-spaceadom
+```
+
+### THE TWO COMPILE ERRORS — ONE TYPO, TWO SYMPTOMS THAT LOOK UNRELATED
+
+The previous agent died mid-edit leaving the tree not compiling, with:
+
+```
+error: expected one of `...`, `..=`, `..`, `:`, or `|`, found `)`   (mod.rs:4872)
+error[E0061]: this function takes 9 arguments but 8 arguments were supplied  (mod.rs:5200)
+```
+
+They read as two independent faults — a syntax error in one place and an arity
+mismatch 328 lines away. **They are one typo.** While adding the 8th parameter
+to `own_window_space_down_accepted` (arbitration rule C), a stray `false` was
+left in the parameter list:
+
+```rust
+    middle_hold_active: bool,
+false) -> bool {              // <-- the entire bug
+```
+
+The parser cannot read `false` as a parameter *name*, so it reports the syntax
+error — then **recovers by treating `false` as a ninth PATTERN**, giving the
+function an arity of 9. The call site, correctly passing 8, is then flagged as
+E0061. The fix is deleting one token; both errors go together.
+
+**Generalise this.** *After a parse error inside a signature, every arity and
+type error downstream of it is suspect — `rustc` recovers by inventing plausible
+items, and its recovery is itself the source of the second diagnostic. Fix the
+first syntax error and re-run before believing any error that follows it.* An
+agent that starts by "fixing" the E0061 — by adding a ninth argument at the call
+site — makes the code worse and the tree still does not build.
+
+### ONE PIECE OF THE INHERITED CODE WAS WRONG AND WAS DELETED
+
+`middle_trigger_armed()` folded `feature_on && watcher_alive` into a single
+bool, and `orbit_apps.rs`'s header documented it as *the* place the watcher gate
+lives — **while nothing in the process ever called it.** The crate carries
+`#![allow(dead_code)]` at `lib.rs:1`, so neither rustc nor clippy said a word,
+and the `--all-targets` clippy gate passes at zero warnings either way. Two
+things were wrong and only one was the deadness: collapsing two independent
+reasons into one bool means a caller that declines can no longer say WHICH
+reason declined it, and "the feature is switched off" versus "no 3D/CAD verdict
+has ever been measured" are the two a user is most likely to have to tell apart.
+They are separate parameters of `middle_button_down_accepted` for exactly that
+reason. **Generalise: a documented entry point that nothing calls is worse than
+no entry point — a reader who greps it finds a function and cannot tell whether
+the gate runs. And a crate-wide `#![allow(dead_code)]` means the compiler will
+never tell you.**
+
+### THE SETTINGS ROW
+
+`src/components/settings-panel.ts`, in "The Space ring", directly after "Point
+to launch" — both rows are about the MOUSE's part in the ring, and it is the
+only gap in that section that does not come between the ring pill and the
+specials switch (which are one system and must stay adjacent). Bookkeeping
+completed in the same pass rather than discovered missing later the way
+`sendlogs` was: `DESC.middlering` (three sentences, in the order a worried user
+asks the questions — what does it do, have you broken my middle click, what
+about my CAD program), `TOGGLE_CHAR.middlering = "rng"` (the press sends the
+ring out and the release brings the launch back — the same round trip
+point-to-launch is `rng` for), the `wireToggle` handler, and the stagger indices
+of every following row renumbered. There is no PREVIEW table for a plain toggle;
+`refireRingPreview()` is deliberately NOT called, because this setting changes
+how the ring is OPENED and not what it looks like.
+
+### HOW IT WAS VERIFIED — AND WHAT THAT IS WORTH
+
+Gates, all green after the work:
+
+| Gate | Result |
+| --- | --- |
+| `cargo test --lib` | **605 passed, 0 failed.** The tree reported 562 when this session began (556 baseline + `orbit_apps`' 6). **26 of the 43 added since are this feature's**; the other 17 are two agents working in parallel on `picker_worker.rs` and `overlay_boot.rs` (PROBLEM 265), whose changes were in the tree when these gates ran. Counting the whole delta as mine would have been the easy error — the suite total is a shared number. |
+| `cargo clippy --all-targets` | **0** warnings, 0 errors |
+| `npx tsc --noEmit` | **0** errors |
+| `npm run build` | clean |
+
+43 new pure state-machine tests across five modules: the down gate (one test per
+gate plus a loop proving each is independently sufficient), the arbitration in
+both orders, tap-vs-hold and the replay decision including the exclusive
+boundary, the reaper (deafness needs both halves, unknown is never proof, the
+30 s backstop, the MouseDeaf-outranks-Expired ordering), and the latch itself.
+
+**NOTHING IN THIS FEATURE HAS RUN ON REAL HARDWARE. NO BUILD, NO INSTALL.**
+A test suite cannot press a mouse button. Everything above proves a DECISION;
+none of it proves a GESTURE. What only the owner can confirm, on an installed
+build:
+
+1. Hold the middle button over the desktop. **The ring must appear**, centred,
+   exactly where a Space hold puts it. `grep the-guide-hud-ring-was-raised-by-a-middle debug.log`
+2. Aim at a chip and release. The app must launch — this exercises
+   `PointerActivate` from a witness that has never fed it before.
+3. **Middle-click a link in a browser.** It must open in a new tab. Then
+   middle-click a tab: it must close. `grep a-quick-middle-click-was-replayed debug.log`
+4. Open SolidWorks or Blender (or Photoshop/Figma). Middle-drag must orbit/pan
+   exactly as it always has, and `grep middle-button-ring-standing-down debug.log`
+   must show the stand-down. **Then hold Space in the same app — the shortcuts
+   must still work.** That is the one assertion separating this list from the
+   user's App exceptions, and no test can make it.
+5. Hold Space and click the middle button — nothing must happen but an ordinary
+   middle click (rule A). Then hold the middle button and press Space — a space
+   must be typed (rule B).
+6. `grep reaping-a-latched-middle-button-hold debug.log` should be EMPTY. A
+   non-zero count is a bug report, not health: it means a `WM_MBUTTONUP` was
+   lost.
+
+**A note for whoever tests item 1 inside the Spaceadom dashboard itself:** the
+middle-button line is not law 6's proof and never can be. Law 6 wants
+`hold start (hold #N) … over own window`, which only the keyboard hook can
+produce. A ring you raised with the middle button says the MOUSE hook is alive,
+which PROBLEM 260 established was never in doubt.
+
+**Generalise this.** Two rules came out of the work rather than into it. First,
+*when a feature and the guard that makes it safe can fail independently, the
+feature must be the one that fails* — `WATCHER_ALIVE` is a whole gate that
+exists for a thread that is allowed not to start. Second, *a mutual-exclusion
+test that never advances the state is testing a coincidence, not an invariant.*
+The first version of the arbitration test walked all eight latch combinations
+and asserted the two witnesses never both accept; it failed on the all-clear
+row, and **the code was right and the test was wrong** — from rest both
+witnesses are legitimately willing, and what makes them exclusive is that
+whoever goes first LATCHES. Exclusivity is a property of the sequence, so the
+test had to become a sequence.
+
+### 2026-09-12 FINISHING PASS (a third agent; the 2026-09-10 one died at its last checklist item)
+
+Every item of the spec was re-read against the tree rather than the entry
+above, and one gap was found. **The preview harness had no row.** The paragraph
+under THE SETTINGS ROW says "there is no PREVIEW table for a plain toggle",
+which is true of `settings-panel.ts` and was read as "nothing to mirror" — but
+`src/preview.ts` renders its own copy of "The Space ring" for `preview.html`,
+and `hudpointer` is in it while `middlering` was not. PROBLEM 239's lesson
+(a row nobody renders is a row nobody screenshots) applied verbatim. Added
+`switchRow("middlering", "Middle button opens the ring", true, 1)` directly
+under "Point to launch" and renumbered the two stagger indices below it; NOT
+added to `RING_AFFECTING`, for the same reason the panel's handler fires no
+`refireRingPreview()`. Also added the one sentence `CORE_AIM.md` was owed
+(under Visual HUDs).
+
+What was checked and found already complete, with the line that proves it:
+the middle event is normalised to `SpaceDown` at the top of `engine::dispatch`
+(same centred ring, no cursor anchoring anywhere in `guide_hud/`); the tap is
+replayed from the engine's `MiddleButtonTap` arm through `replay_middle_click`
+— one two-event `SendInput` batch stamped `MAGIC_INJECTED_MOUSE` =
+`0x7A7A7A7A`, never in the callback; `middle_button_ring` is
+`default = "default_true"` and asserted in BOTH `first_install_tests` paths;
+`orbit_apps::ORBIT_APPS` carries SolidWorks, Fusion, Inventor, AutoCAD, CATIA,
+Creo, NX, Rhino, SketchUp, Blender, Maya, 3ds Max, Revit, Onshape, FreeCAD,
+KiCad, Altium, Unity and Unreal and is read ONLY in the `WM_MBUTTONDOWN`
+branch; `EXCLUDED_ACTIVE` returns above that branch and `BYPASS_MODE` /
+`FULLSCREEN_ACTIVE` are arguments to `middle_button_down_accepted`;
+**a bound letter under a middle hold reaches `engine::handle_alpha`** because
+`kb_hook_proc`'s combo branch is gated on
+`hook_hold || MIDDLE_HOLD_ACTIVE` and every Space-specific piece inside it
+(`SPACE_COMBO_SEEN`, `MAX_MODIFIER_HOLD_MS`, rollover, PROBLEM 95's margin) is
+gated on `hook_hold` alone — nothing more was needed there; the arbitration is
+one comment block above `MIDDLE_TAP_MS` enforced at rules A/B/C and tested in
+both orders plus as a sequence; the reaper (`reap_middle_hold`, PROBLEM 262's
+deafness-aware shape), the forced repair (`disarm_middle_hold` in
+`install_hooks`) and the watchdog teardown all clear the latch, with the reaper
+and the single-owner teardown under test; one `middle-button ring:` marker
+line per hold; the two new `ms_hook_proc` branches contain relaxed atomic
+loads, the cookie read, the pure gate and `send_event` — nothing heavier.
+
+Gates after the pass: `cargo test --lib` **605 passed / 0 failed**, `cargo
+clippy --all-targets` **0**, `npx tsc --noEmit` **0**, `npm run build` clean.
+**STILL NOTHING RUN ON REAL HARDWARE — no Tauri build, no install.** The
+owner's six-item checklist above is unchanged and still open.
+
+
+---
+
+## PROBLEM 266 — the app took a MINUTE OR MORE to start after logon because every install fell back to the HKCU Run value: `schtasks /Create /SC ONLOGON` is denied to a non-elevated user (the "any user" trigger it writes needs admin, not the root folder PROBLEM 64 blamed), while `Register-ScheduledTask` with a per-user `-AtLogOn -User` trigger registers fine — 1.0.109 registers the task through the Task Scheduler COM API, delays it 10 s, and removes the Run value (found 2026-09-12 on installed 1.0.108; shipped and proved on this machine as 1.0.109 the same day; the logon-time gain itself is unmeasured until the owner's next logon)
+
+**Symptom.** The owner's live `debug.log` plus the System event log,
+2026-09-12, both reads of the 1.0.108 build that was installed at 11:03:
+
+```
+System log   11:19:40   Kernel-Boot 27          (LastBootUpTime 11:19:40)
+System log   11:19:57   Winlogon 7001           (user logon)
+debug.log    11:21:43.898  SpaceToggle OS logger initialised          ← +106.9 s after logon
+debug.log    11:21:43.946  autostart launch — hook and engine are LIVE now …
+debug.log    11:21:43.981 [WARN] startup: task create failed (ERROR: Access is denied.) — using HKCU Run autostart instead
+debug.log    11:21:43.982  startup: HKCU Run autostart set -> "C:\Users\beamu\AppData\Local\Spaceadom\spaceadom.exe" --autostart
+```
+
+The 1.0.107 boot earlier the same morning: Winlogon 7001 at **10:39:09**,
+logger initialised at **10:40:29.397** — 80 s. Raycast, started by its own
+Scheduled Task on the same machine, was up in about 20 s. The app has no
+control over WHEN Windows runs an HKCU Run value: since Windows 8 the shell
+starts Run entries after its own startup apps, throttled and deprioritised
+("Startup apps" in Task Manager is the same list), and on this machine that
+was 80–107 s. Everything PROBLEM 265 did to make the ring drawable 1.2 s after
+process start was sitting behind a process start that came a minute and a
+half late.
+
+The `task create failed (ERROR: Access is denied.)` warn line has printed on
+**every** launch since 1.0.3 — 7 times in the current log alone — and
+PROBLEM 64 documented it as "the NORMAL path on a non-admin machine, not an
+edge case". That sentence is what this problem overturns.
+
+**Root cause.** PROBLEM 64 said a non-elevated user "cannot create a task in
+the Task Scheduler root folder". That was the wrong noun. The thing a
+non-elevated user cannot create is the trigger `schtasks.exe /Create /SC
+ONLOGON` writes: with no `/RU`, and equally WITH `/RU <user>`, schtasks emits
+a `<LogonTrigger>` with **no `<UserId>`** — "at log on of ANY user" — and a
+task that fires for any user on the machine is, reasonably, an administrator's
+to make. Task Scheduler answers `ERROR: Access is denied.` and schtasks has no
+switch that narrows the trigger to the calling user. The COM API has exactly
+that: `New-ScheduledTaskTrigger -AtLogOn -User <me>` writes
+`<LogonTrigger><UserId>DOMAIN\me</UserId>`, and a task that only fires at MY
+logon, under MY interactive token, at `LeastPrivilege`, in the root folder, is
+something a standard user may register.
+
+Measured on the owner's account (a Medium-integrity, non-elevated shell
+launched through `explorer.exe`; `whoami /groups` → `Mandatory Label\Medium
+Mandatory Level`), scripts and raw output in
+`D:\Claude-Projects\_probe\p109\task-probe*.txt`:
+
+| Probe | Command | Result |
+| --- | --- | --- |
+| A | `schtasks /Create /SC ONLOGON /RL LIMITED /TN SpaceadomProbeA …` (no `/RU`) | `ERROR: Access is denied.` exit 1 |
+| B | same, `/RU beamu` | `ERROR: Access is denied.` exit 1 |
+| C | `Register-ScheduledTask` with `New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME`, `New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited` | **registered OK**; `Export-ScheduledTask` shows `<LogonTrigger><UserId>ARPONS\beamu</UserId><Delay>PT10S</Delay>`, `<RunLevel>LeastPrivilege</RunLevel>`; `Unregister-ScheduledTask` OK |
+| D | register as in C, then **schtasks** `/Change /DISABLE`, `/Change /ENABLE`, `/Run`, `/Query /XML`, `/Delete /F` on it | all five **exit 0** with `SUCCESS:` |
+
+Probe D matters as much as C: every OTHER schtasks call `startup.rs` makes
+(`task_state()` reads `/Query /XML`, `apply_task_enabled` uses `/Change`, the
+mismatched-task branch uses `/Delete`) keeps working against a task the COM
+API made, so only the CREATE step had to change. The root-folder theory
+predicted C would fail too. It did not, so the theory is dead.
+
+Why the old defaults also had to go: PROBLEM 59's `/DELAY 0000:30` was chosen
+in 1.0.3 to dodge the cold-boot WebView2 race with nothing else defending
+against it. Since then the overlay has three self-heal paths (PROBLEM 117/118,
+135, 265), the dashboard has its own retry, and an `--autostart` launch already
+waits 10 s before building the dashboard. 30 s of trigger delay on top of that
+would have handed back a third of the gain.
+
+**Exact file.** `src-tauri/src/startup.rs` only. No frontend change, no config
+field, no new command. (`scripts/install-proof.ps1` gained the marker line as
+every release does.)
+
+**The actual code.**
+
+*Before* (1.0.3 → 1.0.108): the create step, and a SECOND PowerShell round
+trip to fix the settings schtasks cannot express —
+
+```rust
+let tr = format!("\"{exe_str}\" --autostart");
+match schtasks(&[
+    "/Create", "/F",
+    "/TN", TASK_NAME,
+    "/TR", &tr,
+    "/SC", "ONLOGON",
+    "/RL", "LIMITED",
+    "/DELAY", "0000:30",
+]) {
+    Some(o) if o.status.success() => {
+        log::info!("startup: task '{TASK_NAME}' → {exe_str} (logon +30s, least-privilege)");
+        set_run_key(false);
+        harden_task_settings();           // Set-ScheduledTask … -AllowStartIfOnBatteries …
+    }
+    Some(o) => {
+        // PROBLEM 64 — the NORMAL path on a non-admin machine, not an edge case.
+        log::warn!("startup: task create failed ({}) — using HKCU Run autostart instead",
+                   String::from_utf8_lossy(&o.stderr).trim());
+        set_run_key(run_at_startup);
+        return;
+    }
+    None => { log::warn!("startup: could not run schtasks — using HKCU Run autostart instead");
+              set_run_key(run_at_startup); return; }
+}
+```
+
+*After* (1.0.109): one pure function builds the registration script (so a
+unit test can read it), one helper runs PowerShell hidden, the settings ride
+in the same registration, and the delay is a named constant —
+
+```rust
+/// PROBLEM 266 — how long after logon the task starts the app.
+#[cfg(windows)]
+const TASK_DELAY: &str = "PT10S";
+
+/// PROBLEM 266 — the PowerShell that registers the logon task for THIS user
+/// through the Task Scheduler COM API (`Register-ScheduledTask`), which a
+/// non-elevated user IS allowed to do — unlike `schtasks.exe /Create`, whose
+/// `/SC ONLOGON` writes an "at log on of ANY user" trigger that only an
+/// administrator may create. … Pure so the tests can read it; the exe path is
+/// single-quoted for PowerShell, `'` doubled.
+#[cfg(windows)]
+fn register_task_script(exe: &str, delay: &str) -> String {
+    let exe_q = exe.replace('\'', "''");
+    format!(
+        "$ErrorActionPreference='Stop'; \
+         $a = New-ScheduledTaskAction -Execute '{exe_q}' -Argument '--autostart'; \
+         $t = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME; $t.Delay = '{delay}'; \
+         $p = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited; \
+         $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries \
+         -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable -MultipleInstances IgnoreNew; \
+         Register-ScheduledTask -TaskName '{TASK_NAME}' -Action $a -Trigger $t -Principal $p \
+         -Settings $s -Force | Out-Null"
+    )
+}
+
+/// Run a PowerShell script with a hidden window and return its output.
+#[cfg(windows)]
+fn run_powershell(script: &str) -> Option<std::process::Output> {
+    use std::os::windows::process::CommandExt;
+    std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()
+}
+```
+
+```rust
+// ensure_startup_task, the create step:
+match run_powershell(&register_task_script(&exe_str, TASK_DELAY)) {
+    Some(o) if o.status.success() => {
+        log::info!(
+            "startup: logon task registered for this user via the Task Scheduler API — \
+             '{TASK_NAME}' → {exe_str} (logon +{TASK_DELAY}, least-privilege, battery-safe)"
+        );
+        // The task is authoritative when it exists — drop any Run-key
+        // fallback so the app cannot be started twice at logon.
+        set_run_key(false);
+    }
+    Some(o) => {
+        // PROBLEM 64 — still possible (policy, a task of the same name
+        // owned by another user, a broken ScheduledTasks module). Not
+        // fatal: fall back to HKCU Run.
+        log::warn!("startup: task create failed ({}) — using HKCU Run autostart instead",
+                   String::from_utf8_lossy(&o.stderr).trim());
+        set_run_key(run_at_startup);
+        return;
+    }
+    None => {
+        log::warn!("startup: could not run powershell — using HKCU Run autostart instead");
+        set_run_key(run_at_startup);
+        return;
+    }
+}
+apply_task_enabled(run_at_startup);
+```
+
+`harden_task_settings()` is deleted — its four settings are the `-Settings $s`
+above, in the same registration, so there is no window in which the task
+exists with Task Scheduler's tray-hostile defaults (PROBLEM 59's "stops on
+battery, killed after three days"). `$ErrorActionPreference='Stop'` is what
+turns a cmdlet failure into a non-zero exit code; without it
+`Register-ScheduledTask` prints an error and PowerShell exits 0, and the app
+would log success over a task that does not exist.
+
+The `set_run_key(false)` on the success arm is unchanged from 1.0.3 and is the
+migration: an existing install whose Run value was written by every previous
+launch loses it on the first 1.0.109 launch (`startup: HKCU Run autostart
+removed`), so the machine cannot start the app twice at the next logon. The
+fallback arms are kept verbatim for the machines where even the per-user
+registration is refused (Group Policy, a `\Spaceadom` task owned by another
+account, a missing `ScheduledTasks` module on a stripped Windows).
+
+Tests added (`startup.rs::tests`), both pure:
+
+```rust
+#[test]
+fn register_task_script_is_per_user_least_privilege_and_autostart() {
+    let s = register_task_script(NSIS, "PT10S");
+    assert!(s.contains("New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME"));
+    assert!(s.contains("$t.Delay = 'PT10S'"));
+    assert!(s.contains("-RunLevel Limited"));
+    assert!(s.contains("-LogonType Interactive"));
+    assert!(s.contains("-Argument '--autostart'"));
+    assert!(s.contains(&format!("-Execute '{NSIS}'")));
+    assert!(s.contains("-AllowStartIfOnBatteries"));
+    assert!(s.contains("-ExecutionTimeLimit ([TimeSpan]::Zero)"));
+    assert!(s.contains(&format!("-TaskName '{TASK_NAME}'")));
+    assert!(!s.contains("schtasks"));
+}
+
+#[test]
+fn register_task_script_escapes_single_quotes_in_the_exe_path() {
+    let s = register_task_script(r"C:\Users\O'Brien\spaceadom.exe", TASK_DELAY);
+    assert!(s.contains(r"-Execute 'C:\Users\O''Brien\spaceadom.exe'"));
+}
+```
+
+**How it was verified.** Gates on the tree: `npx tsc --noEmit` 0; `cargo test
+--lib` **607 passed / 0 failed / 6 ignored** (605 + the two above); `cargo
+clippy --all-targets` 0. Then the 1.0.109 ship on this machine, every
+machine-facing read through an `explorer.exe`-launched `.cmd` (PROBLEM 143;
+the differential first: the same `%LOCALAPPDATA%\Spaceadom\spaceadom.exe`
+read **1.0.53 / 14,109,184 B** in the agent shell and **1.0.108 /
+21,930,496 B** via explorer; `config.json` 47,761 B vs 87,867 B). Probe
+scripts and raw output: `D:\Claude-Projects\_probe\p109\`.
+
+*Marker matrix* (marker = the leading `&'static str` of the new
+`log::info!`, `startup: logon task registered for this user via the Task
+Scheduler API`; 31 controls = the whole 1.0.108 list; negative control = a
+string never written into any build):
+
+| Exe | Controls | New marker | Negative |
+| --- | --- | --- | --- |
+| installed 1.0.108 (21,930,496 B) before | 31/31 True | **False** | False |
+| fresh 1.0.109 `target\release` (21,929,984 B) | 31/31 True | **True** | False |
+| installed 1.0.109 (21,929,984 B) after | 31/31 True | **True** | False; `install-proof.ps1` 32/32 Rust, 30/30 bundle |
+
+*Startup state BEFORE the install* (installed 1.0.108 running as PID 35456,
+the 11:21:43 autostart process): `schtasks /Query /TN Spaceadom /XML` →
+`ERROR: The system cannot find the file specified.` (exit 1); HKCU Run
+`Spaceadom` = `"C:\Users\beamu\AppData\Local\Spaceadom\spaceadom.exe"
+--autostart`.
+
+*The install* (`_probe\p109\install-109.cmd` → the repo's
+`scripts\install-real.cmd` → `install-proof.ps1` → 45 s → `postcheck.ps1`):
+FileVersion **1.0.109**, 21,929,984 B, banner names the same byte count; PID
+35456 → **36260** (started 11:43:55); startup **1,178 ms** logger →
+`dashboard_ready` on a manual launch (1.0.108's manual launch: 895 ms; not
+investigated — the picker scan came after `dashboard_ready`); `overlay
+usable for the Guide HUD 1026 ms after app start`; config SHA-256
+`0F3B0906…1D70`, 87,867 B, byte-identical before and after, semantic maps
+identical, 5 profiles both sides; **0** MsiInstaller/RestartManager events in
+the install window stamped 11:43:49 (control: 10 in the preceding 2 h — the
+1.0.108 and 1.0.109 `light.exe` validation pairs and a Microsoft GameInput
+1040/1042 transaction at 11:20); overlay `configured` ×1, `REBUILD FAILED` 0;
+hooks installed ×1; safe mode not entered, `alive 30s — boot counter reset to
+0`; rival scan one copy; updater kind Nsis, `1.0.109 is the newest release on
+the manifest`; 0 `[ERROR]`, 8 `[WARN]` (spacedesk/PowerToys conflict notices
+and `overlay-js: listeners registered OK`); 0 `KEYBOARD DEAF`, 0 `FORCED
+REPAIR` since the banner.
+
+*The PROBLEM 266 proof, 1.7 s after the banner:*
+
+```
+11:43:57.304  startup: logon task registered for this user via the Task Scheduler API — 'Spaceadom' → C:\Users\beamu\AppData\Local\Spaceadom\spaceadom.exe (logon +PT10S, least-privilege, battery-safe)
+11:43:57.305  startup: HKCU Run autostart removed
+11:43:57.413  startup: task 'Spaceadom' enabled
+```
+
+`schtasks /Query /TN Spaceadom /XML` now exits 0 with `<Command>C:\Users\
+beamu\AppData\Local\Spaceadom\spaceadom.exe</Command>`,
+`<Arguments>--autostart</Arguments>`, `<LogonTrigger><Delay>PT10S</Delay>
+<UserId>ARPONS\beamu</UserId></LogonTrigger>`,
+`<LogonType>InteractiveToken</LogonType>`,
+`<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>`,
+`<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>`,
+`<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>`,
+`<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>`,
+`<StartWhenAvailable>true</StartWhenAvailable>`; `/Query /FO LIST /V` reads
+`Status: Ready`, `Scheduled Task State: Enabled`, `Logon Mode: Interactive
+only`, `Run As User: beamu`. `Get-ScheduledTask` (COM): `State Ready`,
+`Principal.RunLevel Limited`, `Settings.Enabled True`, trigger
+`MSFT_TaskLogonTrigger UserId ARPONS\beamu Delay PT10S`. **The HKCU Run value
+`Spaceadom` is GONE** (read via explorer, 45 s and again 90 s after the boot;
+`install-proof.ps1`, which runs BEFORE the app is started, still saw it — the
+removal is the app's, 1.7 s into its first launch, not the installer's).
+`_proof-only.cmd` re-run after the boot: version 1.0.109, `Run key:` empty.
+
+*Measurement trap met on the way, recorded so nobody re-derives it:*
+`schtasks /Query /XML` **omits elements that hold their default value** —
+the XML it printed for this task has no `<RunLevel>` and no
+`<Settings><Enabled>` at all, so the probe's regexes for
+`<RunLevel>LeastPrivilege</RunLevel>` and `<Enabled>true</Enabled>` read
+**False** on a task that has both. `Export-ScheduledTask` (COM) prints every
+element, defaults included, and showed both. A False from a check that cannot
+see the default is not a finding; the follow-up `taskcheck.ps1` is the
+reading of record for those two fields.
+
+*What is NOT proven, in capitals:* **THE LOGON-TIME IMPROVEMENT ITSELF IS
+UNMEASURED.** The task has `Last Run Time: 11/30/1999` (never fired). It
+fires at the owner's next logon; that boot's `logger initialised` timestamp
+minus the Winlogon 7001 timestamp is the number this problem exists to change
+(1.0.107: 80 s; 1.0.108: 107 s; expected: ~12 s — 10 s trigger delay plus
+process start). Also **UNPROVEN this release for the usual reason: law 6**
+(0 `hold start … over own window` lines since the 1.0.109 banner — nobody has
+held Space over the dashboard) and **PROBLEM 263's middle-button ring on
+hardware** (0 `middle-button ring:` lines since the banner; 41 in the whole
+log, all on installed 1.0.108 between 11:13:26 and 11:30:06 — `middle-button
+hold #1 began … over brave.exe` — the first hardware evidence that feature
+has, and it belongs to PROBLEM 263's entry, not this one).
+
+**Generalise this.** *An access-denied from a CLI wrapper is not the API's
+verdict; try the API with the narrowest principal before concluding the OS
+forbids it.* `schtasks.exe` is one shape of request over a much wider API,
+and it happened to be a shape (any-user trigger) that needs a privilege the
+narrower shape (this-user trigger) does not. PROBLEM 64 tested the wrapper
+with a fresh name and `/RL LIMITED`, got the same denial twice, and wrote the
+OS off — the experiment varied the things the wrapper let it vary and never
+the thing that mattered. The second lesson is the one PROBLEM 265 also
+carries: **a fix behind a late start is a fix nobody sees** — the overlay's
+1.2 s was real and the owner still waited 107 s for it, because the
+measurement started at process start instead of at logon.

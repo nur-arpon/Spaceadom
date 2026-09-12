@@ -902,14 +902,21 @@ document.getElementById("settings-panel")!.innerHTML = `
       ${groupHeadingHtml("ring", "The Space ring")}
       <div class="set-rows">
         ${switchRow("hudpointer", "Point to launch", true, 0)}
+        <!-- PROBLEM 263 — mirrored from settings-panel.ts: the middle-button
+             row sits directly under "Point to launch" (the two mouse rows
+             read as a pair) and ON by default, because Rust ships the field
+             default_true. NOT in RING_AFFECTING below: the switch changes how
+             the ring is OPENED, not what it looks like, so the panel's own
+             handler deliberately fires no preview and neither does this. -->
+        ${switchRow("middlering", "Middle button opens the ring", true, 1)}
         <div class="set-item set-filterable">
           <div class="set-row set-row-stack">
             <button type="button" class="set-row-label">Ring layout</button>
             ${segRowHtml("hudring", RING_OPTS, previewRing, "background:var(--st-accent);", "Ring layout")}
           </div>
         </div>
-        ${switchRow("hudspecials", "Show special keys", true, 1)}
-        ${switchRow("flight", "Guide-to-toast motion", false, 2)}
+        ${switchRow("hudspecials", "Show special keys", true, 2)}
+        ${switchRow("flight", "Guide-to-toast motion", false, 3)}
         ${sliderRow("huddelay", "Guide HUD delay", 100, 1000, 300)}
       </div>
     </div>

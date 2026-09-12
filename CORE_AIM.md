@@ -53,6 +53,7 @@ The **undeniable, non-negotiable** goal is to provide a "layman-friendly" visual
 ### Visual HUDs
 - **Guide HUD**: Holding Space for >300ms must summon a native glassmorphism overlay showing the current profile's shortcuts. Releasing Space or triggering a combo must instantly hide it.
 - **Toast Notifications**: Every action (Bypass toggled, Boss Key engaged, App summoned) must have a clean UI notification overlay.
+- **Middle-button ring (added 2026-09-10, PROBLEM 263)**: Holding the MIDDLE MOUSE BUTTON must raise the same Guide HUD in the same centred place as Space, with aim-and-release, click-a-chip and tap-a-letter all launching exactly as under a Space hold; a quick middle click must still reach the app as a real middle click (one replayed `SendInput` batch, our `0x7A7A7A7A` cookie), and inside 3D/CAD/design programs (built-in list in `hook/orbit_apps.rs`, the middle button only, never Space) the button must be untouched. Never two rings for one gesture: the Space hold and the middle hold refuse each other in one arbitration block in `hook/mod.rs`. Settings row "Middle button opens the ring", ON by default. UNPROVEN ON HARDWARE as of 2026-09-12.
 
 ### The Bypass Toggle
 - Triggered via `Space + .`.

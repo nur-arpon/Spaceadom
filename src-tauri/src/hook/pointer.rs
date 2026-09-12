@@ -983,6 +983,29 @@ pub fn start_pointer_watcher() {
                         tracker.cancel_arm();
                     }
 
+                    // PROBLEM 263 — and the MIDDLE BUTTON's reaper, third in
+                    // the row, above the same `enabled` bail-out and for the
+                    // same reason: what it repairs is a ring stranded on
+                    // screen, which happens whether or not the user has pointer
+                    // activation switched on.
+                    //
+                    // A THIRD separate function, not a merge, because its
+                    // liveness signal is a third thing again: this one asks
+                    // whether the MOUSE callback is still being called at all,
+                    // because the WM_MBUTTONUP that ends the hold is delivered
+                    // by that hook and by nothing else. `reap_stale_hold` reads
+                    // keyboard auto-repeat; `reap_own_window_hold` reads the
+                    // foreground window. Merging any two of them means one
+                    // shape losing its evidence.
+                    //
+                    // It shares `probe_fg`'s throttle rather than adding a
+                    // fourth clock: both are 250 ms, both guard a handful of
+                    // Win32 calls that are free four times a second and are not
+                    // free at 62 Hz.
+                    if super::reap_middle_hold(probe_fg) {
+                        tracker.cancel_arm();
+                    }
+
                     if !enabled && tracker.armed.is_none() {
                         continue;
                     }
