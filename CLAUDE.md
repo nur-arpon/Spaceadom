@@ -618,7 +618,21 @@ point (the centre pill may be clipped by the screen edge — he likes it) and
 only the TILES must lie inside the cursor's monitor's work area; near an edge
 or a corner the rings become arcs (named `half-<dir>` / `quarter-<dir>` by
 the first partial arc; `circle-clamped` only when nothing fits at any tile
-size). **Clamp + warp is "All"'s path:** `clamp_ring_center` slides the
+size). **ROUND 6 (2026-09-17, shipped as local test builds 1.0.111/1.0.112) RESTORED
+THAT LAW after a rate-limited round-4 agent had silently replaced it with
+"snap the centre to the edge line" — the owner's "ring going out of the
+viewing screen". `choose_shape` is now ANCHOR (arcs around the press point,
+named by `shape_of_arcs`) → SHRINK (`tile_ladder`, the unit u scales radii
+and spacing with it, floor `TILE_MIN` = 27) → NUDGE (the shortest 8 px-grid
+vector that fits, `Nudged`) → CLAMP. `RING_CAPS` bind partial arcs too.
+Guides are SVG ARCS (`guide_arcs`) and the scrim is clipped to the room; the
+page rescales everything by `payload.scale / devicePixelRatio`
+(`rescaleForThisPage`) because WebView2's ratio lags a monitor change. Both
+fitters in `commands.rs` MOVE before they SIZE (mixed-DPI: a size set on the
+1.0 monitor is re-scaled 1.5× by WM_DPICHANGED on the way to the panel).
+Space + ; and the ring's "Voice Typing" special (U+E007) open Windows
+dictation. Full record: V14_FIXES_AND_CODE.md §PROBLEM 267 — ROUND 6.**
+**Clamp + warp is "All"'s path:** `clamp_ring_center` slides the
 centre inward by exactly the overhang against the CURSOR's monitor's work
 area (the actual outermost ring's extent) and `SetCursorPos` moves the OS
 cursor to that centre on the engine thread, followed by `pointer::note_cursor`.
@@ -768,6 +782,19 @@ the monitor at (mx,my) scale s` and `page centre (cx,cy) css`.
    hooks fired 0). The 60-second `N of them while the Spaceadom window itself
    had focus` line is a rate, not a proof; the per-hold line is the proof.
    `grep "KEYBOARD DEAF, PROVEN" debug.log` names the occurrences.
+
+   **PROBLEM 268 (2026-09-17, 1.0.112): the "KEYBOARD DEAF, PROVEN" verdict
+   reads a RAW-INPUT KEYBOARD CLOCK.** Proof B used to infer "keystroke" from
+   `GetLastInputInfo` minus the mouse callback, and on this laptop a touchpad
+   gesture (pointer input the LL mouse hook never sees) proved the keyboard
+   deaf 449 times in two days — each a destructive re-install. The hook thread
+   now owns a message-only sink window registered for keyboard raw input
+   (`register_raw_keyboard_sink`, `RIDEV_INPUTSINK`); `LAST_RAW_KB_EVENT` is
+   the clock, `raw_keyboard:N` is on every `hook liveness split` line, and a
+   verdict needs a raw keystroke the callback is older than by > 250 ms.
+   `grep "KEYBOARD DEAF, PROVEN" debug.log | grep WARN` should be near zero
+   per day now; if it is not, the line names the raw clock and the case is
+   real. Sentry SPACEADOM-2 stays open until a day of that is seen.
 
    **THERE IS NOW A FALLBACK, AND ITS PROOF LINE IS A DIFFERENT ONE
    (PROBLEM 259).** `src/own-window-keys.ts` runs the tap/hold/combo state
