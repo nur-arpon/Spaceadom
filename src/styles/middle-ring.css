@@ -1,0 +1,466 @@
+/* ===========================================================================
+   middle-ring.css — PROBLEM 267: the middle button's cursor-anchored ICON RING.
+
+   The overlay page's second HUD kind. The geometry is transcribed from the
+   design handoff (design/middle-mouse-ring/design_handoff_middle_ring/
+   README.md + the artboards in Spaceadom Middle Ring.dc.html) — tile 70×70
+   radius 13, badge 20 px circle at top-right, pill 130 px (growing to the
+   free inner circle for a long two-line name since round 3), scrim 600/640
+   px theme-bg → transparent at 68 %, guides 2r+14 px 1 px dashed. THE
+   MOTION IS RIPPLE ONLY since round 3 (owner decision 2026-09-13): the
+   Space ring's own language, transcribed from overlay-earthy.css, plus the
+   JS-driven fisheye wave. Bloom (the handoff's motion sheet) is gone.
+
+   RULES THIS FILE OBEYS (CLAUDE.md window rules):
+   · NO backdrop-filter (white boxes).
+   · NO filter: blur() — the scrim's softness is BAKED INTO GRADIENT STOPS,
+     the same way the toast glow does it (PROBLEM 37: a 560×320 blur made the
+     whole window compose zero pixels).
+   · Only transform and opacity animate (the skill's non-negotiable). The
+     hover "size" change is a transform scale, not a width change.
+   · The three palettes are keyed off the SAME `data-theme` attribute the
+     dashboard and toast.ts already set on <body> (PROBLEM 185).
+   =========================================================================== */
+
+/* ---- tokens: the README's three palettes, verbatim. `.mr-stage` is the
+        dev-only preview harness's host (preview.ts ?ring), carrying the same
+        `nocturne` class and `data-theme` the overlay body does. ------------ */
+body.st-overlay,
+.mr-stage {
+  --mr-bg: #f5ead8;
+  --mr-bg-rgb: 245, 234, 216;
+  --mr-surface: #faf1de;
+  --mr-text: #201e1d;
+  --mr-text-rgb: 32, 30, 29;
+  --mr-accent: #c67139;
+  --mr-accent-rgb: 198, 113, 57;
+  --mr-shadow-rgb: 90, 60, 30;            /* warm brown, never pure black on cream */
+  --mr-shadow-a: .22;                      /* tile shadow alpha */
+  --mr-shadow-b: .28;                      /* hovered tile / pill shadow alpha */
+  --mr-guide-a: .16;
+  --mr-flat-hover-bg: #f0e0c2;             /* artboard 7's hovered tile tint */
+  --mr-flat-border: rgba(32, 30, 29, .08);
+  --mr-badge-on-text: #faf1de;
+}
+body.st-overlay.nocturne[data-theme="starry"],
+.mr-stage.nocturne[data-theme="starry"] {
+  --mr-bg: #0d141f;
+  --mr-bg-rgb: 13, 20, 31;
+  --mr-surface: #131a29;
+  --mr-text: #e8e4dc;
+  --mr-text-rgb: 232, 228, 220;
+  --mr-accent: #6b8cd6;
+  --mr-accent-rgb: 107, 140, 214;
+  --mr-shadow-rgb: 0, 0, 0;
+  --mr-shadow-a: .45;
+  --mr-shadow-b: .5;
+  --mr-guide-a: .14;
+  --mr-flat-hover-bg: #1c2536;
+  --mr-flat-border: rgba(232, 228, 220, .08);
+  --mr-badge-on-text: #0d141f;
+}
+body.st-overlay.nocturne[data-theme="warcry"],
+.mr-stage.nocturne[data-theme="warcry"] {
+  --mr-bg: #140b09;
+  --mr-bg-rgb: 20, 11, 9;
+  --mr-surface: #1f100d;
+  --mr-text: #f0ded0;
+  --mr-text-rgb: 240, 222, 208;
+  --mr-accent: #b83024;
+  --mr-accent-rgb: 184, 48, 36;
+  --mr-shadow-rgb: 0, 0, 0;
+  --mr-shadow-a: .5;
+  --mr-shadow-b: .55;
+  --mr-guide-a: .14;
+  --mr-flat-hover-bg: #2b1712;
+  --mr-flat-border: rgba(240, 222, 208, .08);
+  --mr-badge-on-text: #f0ded0;
+}
+/* A dark theme with no recognised name: the starry numbers, so nothing on a
+   nocturne base is ever drawn in cream. */
+body.st-overlay.nocturne:not([data-theme="warcry"]):not([data-theme="starry"]),
+.mr-stage.nocturne:not([data-theme="warcry"]):not([data-theme="starry"]) {
+  --mr-bg: #0d141f;
+  --mr-bg-rgb: 13, 20, 31;
+  --mr-surface: #131a29;
+  --mr-text: #e8e4dc;
+  --mr-text-rgb: 232, 228, 220;
+  --mr-accent: #6b8cd6;
+  --mr-accent-rgb: 107, 140, 214;
+  --mr-shadow-rgb: 0, 0, 0;
+  --mr-shadow-a: .45;
+  --mr-shadow-b: .5;
+  --mr-guide-a: .14;
+  --mr-flat-hover-bg: #1c2536;
+  --mr-flat-border: rgba(232, 228, 220, .08);
+  --mr-badge-on-text: #0d141f;
+}
+
+/* ---- the ring: a 0×0 anchor at the cursor point ------------------------- */
+/* RIPPLE — the only motion since round 3. Every entrance, exit and hover rule
+   below is the SPACE RING's, transcribed from overlay-earthy.css: `#st-hud`'s
+   220 ms cubic-bezier(.2,.8,.2,1) shell from scale .93, `st-bloom-in`'s
+   620 ms cubic-bezier(.34,1.3,.4,1) radial spring per tile (staggered by
+   toast.ts's rule), `st-space-pop` on the centre pill, the 170 ms spring aim
+   push (`.st-chip`), the armed pulse (`st-chip-armed`), `#st-hud.hidden`'s
+   143 ms exit and `#st-hud.collapsing`'s 110 ms tile collapse — PLUS the
+   fisheye wave, which is JS-driven (`--ws` per tile, lerped between ≤ 60 Hz
+   bearing samples) and therefore has NO transition here: a CSS transition
+   retargeted every frame would restart its curve every frame.
+
+   The rules live on `.st-mring` itself, not on a `.ripple` class: styles.css
+   (which overlay.html also loads) owns `.ripple` — the dashboard's press
+   ripple, a 130 px accent circle with a 520 ms animation — and it matched
+   this element in the first cut.
+
+   WHY 1.0.110 SHOWED NO ENTRANCE AT ALL: the stylesheet was fine; the page
+   added `.in` inside a requestAnimationFrame, before the freshly inserted
+   element had a computed style, so there was no before-change style and no
+   transition was ever created (measured with getAnimations(): []). The fix
+   is in middle-ring.ts (a forced style read, then the class). */
+.st-mring {
+  position: fixed;
+  left: var(--mr-cx, 50%);
+  top: var(--mr-cy, 50%);
+  width: 0;
+  height: 0;
+  z-index: 40;
+  pointer-events: none;
+  font-family: 'Outfit', var(--st-font-body, system-ui), sans-serif;
+  color: var(--mr-text);
+  /* transform-origin is this element's own 0,0 = the cursor point. */
+  transform-origin: 0 0;
+  opacity: 0;
+  transform: scale(.93);
+  transition:
+    transform var(--mr-enter, 220ms) var(--mr-ease-out, cubic-bezier(.2, .8, .2, 1)),
+    opacity   var(--mr-enter, 220ms) var(--mr-ease-out, cubic-bezier(.2, .8, .2, 1));
+}
+.st-mring.in { opacity: 1; transform: scale(1); }
+.st-mring.out {
+  opacity: 0;
+  transform: scale(.93);
+  transition:
+    transform var(--mr-exit, 143ms) var(--mr-ease-in, cubic-bezier(.4, 0, 1, 1)),
+    opacity   var(--mr-exit, 143ms) var(--mr-ease-in, cubic-bezier(.4, 0, 1, 1));
+}
+
+/* Everything inside is centred on the anchor and offset by its own --dx/--dy. */
+.st-mring > * {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform: translate(calc(-50% + var(--dx, 0px)), calc(-50% + var(--dy, 0px)));
+}
+
+/* ---- scrim + guides ------------------------------------------------------ */
+.mr-scrim {
+  border-radius: 999px;
+  /* theme-bg at .8 → transparent by 68 % (the artboards: #f5ead8cc → #f5ead800). */
+  background: radial-gradient(circle,
+    rgba(var(--mr-bg-rgb), .8) 0%,
+    rgba(var(--mr-bg-rgb), .55) 34%,
+    rgba(var(--mr-bg-rgb), .2) 55%,
+    rgba(var(--mr-bg-rgb), 0) 68%);
+}
+.st-mring.all .mr-scrim {
+  background: radial-gradient(circle,
+    rgba(var(--mr-bg-rgb), .85) 0%,
+    rgba(var(--mr-bg-rgb), .6) 36%,
+    rgba(var(--mr-bg-rgb), .22) 58%,
+    rgba(var(--mr-bg-rgb), 0) 70%);
+}
+/* ROUND 6: a guide is an SVG arc (`guideElement`), dashed by stroke — a
+   bordered div could only draw a whole circle, and near the screen edge the
+   guide must stop where the tiles stop. */
+.mr-guide { overflow: visible; }
+.mr-guide path {
+  fill: none;
+  stroke: rgba(var(--mr-text-rgb), var(--mr-guide-a));
+  stroke-width: 1px;
+  stroke-dasharray: 3 3;
+  vector-effect: non-scaling-stroke;
+}
+.mr-guide[data-ring="1"] path { stroke: rgba(var(--mr-text-rgb), .10); }
+.st-mring.flat .mr-guide path { stroke-dasharray: none; stroke: rgba(var(--mr-text-rgb), .12); }
+
+/* ---- tiles: THREE LAYERS -------------------------------------------------
+   .mr-tile  the positioner: ring offset + the wave scale (`--ws`, JS-written
+             by the wave).
+   .mr-lift  the aim push: `--px/--py`, the Space ring's 170 ms spring.
+   .mr-face  the surface: colours, glow, badge, and every keyframed
+             entrance / exit / pop. A filled animation beats a plain transform
+             declaration (overlay-earthy.css says so three times), which is
+             exactly why the keyframes live on their own layer.
+   -------------------------------------------------------------------------- */
+.mr-tile {
+  width: var(--tile, 70px);
+  height: var(--tile, 70px);
+  transform:
+    translate(calc(-50% + var(--dx, 0px)), calc(-50% + var(--dy, 0px)))
+    scale(var(--ws, 1));
+}
+/* Deliberately NO transform transition on the positioner: `--ws` is lerped
+   by JS every frame (the wave). */
+.mr-tile.armed { z-index: 3; }
+.mr-tile.boost { z-index: 2; }
+
+.mr-lift {
+  width: 100%;
+  height: 100%;
+  transform: translate(var(--px, 0px), var(--py, 0px));
+}
+/* `.st-chip { transition: transform 170ms cubic-bezier(.34,1.3,.4,1) }` */
+.mr-lift { transition: transform 170ms cubic-bezier(.34, 1.3, .4, 1); }
+
+.mr-face {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 13px;
+  background: var(--mr-surface);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  border: 2px solid transparent;
+  box-shadow: 0 6px 16px rgba(var(--mr-shadow-rgb), var(--mr-shadow-a));
+  /* `.st-chip > i`'s colour transitions: 140 ms cubic-bezier(.2,.8,.2,1). */
+  transition:
+    background-color 140ms cubic-bezier(.2, .8, .2, 1),
+    border-color     140ms cubic-bezier(.2, .8, .2, 1),
+    box-shadow       140ms cubic-bezier(.2, .8, .2, 1),
+    opacity          140ms cubic-bezier(.2, .8, .2, 1);
+  /* The face's entrance = `st-bloom-in`, verbatim: from the centre (--fx/--fy
+     = the vector back to it), scale .2, overshoot to 1.06 at 62 %, settle.
+     620 ms cubic-bezier(.34,1.3,.4,1) both, delayed per tile by toast.ts's
+     stagger (`--mr-delay`). */
+  animation: mr-bloom-in var(--mr-tile-in, 620ms) cubic-bezier(.34, 1.3, .4, 1) both;
+  animation-delay: var(--mr-delay, 120ms);
+}
+.mr-tile.outer .mr-face {
+  border-radius: 11px;
+  opacity: .85;
+  box-shadow: 0 4px 10px rgba(var(--mr-shadow-rgb), calc(var(--mr-shadow-a) * .82));
+}
+/* The real icon: ≥ 24 px on the smallest tile, ~34 px on the 70 px tile. */
+.mr-icon {
+  width: calc(var(--tile, 70px) * .49);
+  height: calc(var(--tile, 70px) * .49);
+  min-width: 24px;
+  min-height: 24px;
+  object-fit: contain;
+  image-rendering: auto;
+  pointer-events: none;
+}
+/* The letter disc (no icon yet — a link whose favicon has not been fetched,
+   or a special). */
+.mr-disc {
+  width: calc(var(--tile, 70px) * .49);
+  height: calc(var(--tile, 70px) * .49);
+  min-width: 24px;
+  min-height: 24px;
+  border-radius: 999px;
+  background: rgba(var(--mr-text-rgb), .08);
+  color: var(--mr-text);
+  font-size: calc(var(--tile, 70px) * .2);
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  letter-spacing: .01em;
+}
+.mr-disc[data-kind="special"] { font-size: calc(var(--tile, 70px) * .17); border-radius: 8px; }
+/* The letter badge: 20 px circle, top-right, bg-coloured with a surface ring. */
+.mr-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--mr-bg);
+  color: var(--mr-text);
+  font-size: 10px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid var(--mr-surface);
+  box-sizing: border-box;
+  transition: background var(--mr-hover, 120ms), color var(--mr-hover, 120ms);
+}
+/* Inner tiles under "All of them" wear the accent badge (artboard 4). */
+.st-mring.all .mr-tile:not(.outer) .mr-badge {
+  width: 18px; height: 18px; font-size: 9px; font-weight: 700;
+  background: var(--mr-accent); color: var(--mr-badge-on-text); border: none;
+}
+.mr-tile.outer .mr-badge { width: 16px; height: 16px; font-size: 8.5px; top: -5px; right: -5px; }
+
+/* HOVER (armed) = `.st-chip.armed > i`: the base shadow, then two hard-edged
+   accent rings (spread only — a flat fill, not a soft glow), plus
+   `.st-chip.armed::after`'s outward pulse — 1100 ms cubic-bezier(.22,1,.36,1)
+   × 3, an arrival beat, then the static ring remains: the highlight must
+   never depend on motion to be visible. The swell itself (1.35×) is the
+   wave's, on the positioner. The badge turns accent. */
+.mr-tile.armed .mr-face {
+  border-color: var(--mr-accent);
+  opacity: 1;
+  box-shadow:
+    0 8px 20px rgba(var(--mr-shadow-rgb), var(--mr-shadow-b)),
+    0 0 0 3px rgba(var(--mr-accent-rgb), .38),
+    0 0 0 7px rgba(var(--mr-accent-rgb), .16);
+}
+.mr-tile.armed .mr-badge {
+  background: var(--mr-accent);
+  color: var(--mr-badge-on-text);
+  font-weight: 700;
+}
+.mr-tile.armed .mr-face::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  transform: translate(-50%, -50%);
+  border-radius: inherit;
+  border: 2px solid rgba(var(--mr-accent-rgb), .85);
+  pointer-events: none;
+  animation: mr-armed-pulse 1100ms cubic-bezier(.22, 1, .36, 1) 3;
+}
+@keyframes mr-armed-pulse {
+  0%   { transform: translate(-50%, -50%) scale(1);    opacity: .9; }
+  70%  { transform: translate(-50%, -50%) scale(1.42); opacity: 0; }
+  100% { transform: translate(-50%, -50%) scale(1.42); opacity: 0; }
+}
+
+/* ---- ENTRANCE keyframes: `st-bloom-in` (on the face, see .mr-face) and
+        `st-space-pop` for the centre pill: 560 ms from scale .55, overshoot
+        1.05 at 62 %. ---------------------------------------------------- */
+@keyframes mr-bloom-in {
+  0%   { opacity: 0; transform: translate(var(--fx, 0px), var(--fy, 0px)) scale(.2); }
+  62%  { opacity: 1; transform: translate(calc(var(--fx, 0px) * -.06), calc(var(--fy, 0px) * -.06)) scale(1.06); }
+  100% { opacity: 1; transform: translate(0, 0) scale(1); }
+}
+@keyframes mr-space-pop {
+  0%   { transform: translate(-50%, -50%) scale(.55); opacity: 0; }
+  62%  { transform: translate(-50%, -50%) scale(1.05); opacity: 1; }
+  100% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+}
+/* EXIT = `#st-hud.collapsing .st-chip`: 110 ms ease-in to scale .72 + fade,
+   under the shell's 143 ms. The launched tile (`.launched .armed`) holds,
+   so the thing you fired is the last thing to go.
+
+   ON THE LIFT LAYER, NOT THE FACE — measured 2026-09-13 in the preview: the
+   face's entrance keyframe fills forwards, and Chromium starts NO transition
+   from a value an animation owned when that animation is removed in the
+   same style change (`animation: none` + new values = a snap to .72/0,
+   `getAnimations()` = []). `.mr-lift` is transition-only, so it collapses. */
+.st-mring.out .mr-lift {
+  opacity: 0;
+  transform: translate(var(--px, 0px), var(--py, 0px)) scale(.72);
+  transition:
+    opacity   var(--mr-tile-out, 110ms) cubic-bezier(.4, 0, 1, 1),
+    transform var(--mr-tile-out, 110ms) cubic-bezier(.4, 0, 1, 1);
+}
+.st-mring.out.launched .mr-tile.armed .mr-lift {
+  opacity: 1;
+  transform: translate(var(--px, 0px), var(--py, 0px)) scale(1);
+}
+
+/* ---- centre pill: TWO LINES, readable (round 3) ---------------------------
+   `--mr-pill` is written by middle-ring.ts's fitPill: 130 px at rest, up to
+   the payload's pill_max (the free circle inside the innermost tiles, 170 px
+   for normal tiles at r = 125). Line 1 `.mr-app` 19 px / 700, line 2
+   `.mr-acct` 13 px / 500; both shrink together to the floors (15 / 12) and
+   then ellipsize. The pill may be clipped by the SCREEN edge — the owner
+   likes that — never by a window edge (the window is the canvas). --------- */
+.mr-pill {
+  width: var(--mr-pill, 130px);
+  height: var(--mr-pill, 130px);
+  border-radius: 999px;
+  background: var(--mr-surface);
+  border: 1.5px solid rgba(var(--mr-accent-rgb), .3);
+  box-sizing: border-box;
+  box-shadow: 0 10px 28px rgba(var(--mr-shadow-rgb), var(--mr-shadow-b));
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  padding: 0 12px;
+  animation: mr-space-pop var(--mr-pill-in, 560ms) cubic-bezier(.34, 1.3, .4, 1) both;
+}
+/* Two name layers stacked in the one grid cell; the live one is opaque. */
+.mr-name {
+  grid-area: 1 / 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  max-width: 100%;
+  text-align: center;
+  color: var(--mr-text);
+  opacity: 0;
+  transition: opacity var(--mr-hover, 120ms) cubic-bezier(.22, 1, .36, 1);
+}
+.mr-name.is-on { opacity: 1; }
+.mr-app, .mr-acct {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.15;
+}
+.mr-app { font-size: 19px; font-weight: 700; letter-spacing: .005em; }
+.mr-acct { font-size: 13px; font-weight: 500; opacity: .78; }
+.mr-name.one-line .mr-acct { display: none; }
+
+/* ---- FUN MODE OFF = flat (artboard 7): no scrim (not rendered), no glow,
+        no swell, no push (middle-ring.ts never writes --ws/--px for a flat
+        ring); hover is a tint + 1.5 px accent border; plain-border pill. The
+        ring-level entrance and exit still play — they are the ring arriving
+        and leaving, not a flourish. --------------------------------------- */
+.st-mring.flat .mr-face {
+  box-shadow: none;
+  border: 1px solid var(--mr-flat-border);
+  transition: background var(--mr-hover, 120ms), border-color var(--mr-hover, 120ms);
+}
+.st-mring.flat .mr-tile.armed .mr-face {
+  background: var(--mr-flat-hover-bg);
+  border: 1.5px solid var(--mr-accent);
+  box-shadow: none;
+}
+.st-mring.flat .mr-tile.armed { --ws: 1; }
+.st-mring.flat .mr-tile.armed .mr-badge { border-color: var(--mr-flat-hover-bg); }
+.st-mring.flat .mr-tile.armed .mr-face::after { content: none; }
+.st-mring.flat .mr-pill {
+  border: 1px solid rgba(var(--mr-text-rgb), .12);
+  box-shadow: none;
+}
+
+/* ---- REDUCED MOTION = final states only (the handoff's "Reduced motion"
+        row). Driven by the app's OWN "Visual effects: reduced" setting — the
+        payload's `reduced` flag, and the `.reduced-motion` class overlay.ts
+        puts on <html> from the same setting — and deliberately NOT by the
+        `prefers-reduced-motion` media query: the owner's standing rule
+        (2026-08-12, overlay.ts) is that the OS signal alone never strips the
+        app's motion; only an explicit in-app choice does. Same rule as the
+        Space ring, so the two rings cannot disagree about it. ------------ */
+.st-mring.reduced,
+:root.reduced-motion .st-mring {
+  transition: none !important;
+  opacity: 1;
+  transform: none;
+}
+.st-mring.reduced.out,
+:root.reduced-motion .st-mring.out { opacity: 0; transform: none; }
+.st-mring.reduced *,
+:root.reduced-motion .st-mring * { transition: none !important; animation: none !important; }
+.st-mring.reduced .mr-tile,
+:root.reduced-motion .st-mring .mr-tile { --ws: 1 !important; }
+.st-mring.reduced .mr-lift,
+:root.reduced-motion .st-mring .mr-lift { transform: none !important; }
+.st-mring.reduced .mr-tile.armed .mr-face::after,
+:root.reduced-motion .st-mring .mr-tile.armed .mr-face::after { content: none; }

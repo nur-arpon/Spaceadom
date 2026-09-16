@@ -44,7 +44,37 @@ export interface KeyBinding {
    * re-picking the profile is one press and rewrites it.
    */
   browser_profile_name?: string | null;
+  /**
+   * PROBLEM 267 — a LINK's favicon as a complete `data:` URL, fetched ONCE
+   * at bind time (`fetch_site_icon`, from the key editor's URL commit) and
+   * stored here so the middle-button icon ring never fetches anything at ring
+   * time. null/absent = no icon (the ring draws a letter disc) — and the next
+   * edit of the key tries once more.
+   */
+  site_icon?: string | null;
 }
+
+/** PROBLEM 267 — one App-exceptions row's scope. Mirrors `ExceptionScope`. */
+export type ExceptionScope = "off_entirely" | "space_only" | "middle_only";
+
+/**
+ * PROBLEM 267 — one App-exceptions row: the exe STEM and what stands down
+ * inside it. Rust's `AppException`. A config written before 1.0.110 stores
+ * plain strings; Rust reads those as `off_entirely` and REWRITES them as
+ * objects on the next save, so this type is what `get_config` returns — but
+ * `excludedList()` in settings-panel.ts still tolerates a bare string.
+ */
+export interface AppException {
+  exe: string;
+  scope: ExceptionScope;
+}
+
+/** PROBLEM 267 — what the middle button raises. Mirrors `MiddleRingStyle`. */
+export type MiddleRingStyle = "icon_ring" | "guide_hud";
+/** PROBLEM 267 — how much the icon ring shows. Mirrors `MiddleRingScope`. */
+export type MiddleRingScope = "my_eight" | "all";
+/** 2026-09-15 — how the "All" scope is laid out. Mirrors `AllRingLayout`. */
+export type AllRingLayout = "rings" | "spiral";
 
 export interface Profile {
   /** Unique profile name (1–24 chars, any printable text — PROBLEM 197). */
@@ -93,7 +123,7 @@ export interface AppConfig {
   /** Apps Spaceadom stands down inside — the "App exceptions" list.
    *  LOWERCASE EXE STEMS ("photoshop"), matching hook/exclusions.rs.
    *  Optional: every config written before 1.0.79 lacks it. */
-  excluded_apps?: string[];
+  excluded_apps?: Array<AppException | string>;
   /** All user-defined shortcut profiles. */
   profiles: Profile[];
   /** Nocturne (dark) mode. ONE setting drives dashboard AND overlay. */
@@ -172,6 +202,34 @@ export interface AppConfig {
    * SolidWorks are untouched by it.
    */
   middle_button_ring?: boolean;
+  /**
+   * PROBLEM 267 — WHAT the middle button raises: `"icon_ring"` (default;
+   * the cursor-anchored ring of real icons) or `"guide_hud"` (phase 1: the
+   * same centred Guide HUD as Space, exactly as 1.0.109). Absent = icon ring.
+   * Only meaningful while `middle_button_ring` is on.
+   */
+  middle_ring_style?: MiddleRingStyle;
+  /**
+   * PROBLEM 267 — how much the icon ring shows: `"my_eight"` (default) or
+   * `"all"` (the favourites, then every other bound letter and the
+   * specials, on as many rings as needed). Absent = favourites (the wire
+   * name `my_eight` is kept for compatibility; the UI says "Favourites").
+   */
+  middle_ring_scope?: MiddleRingScope;
+  /**
+   * 2026-09-15 — HOW the `"all"` scope is arranged: `"rings"` (default,
+   * the concentric Fibonacci rings) or `"spiral"` (one phyllotaxis spiral,
+   * the packing a sunflower's seed head uses). Absent = rings, which is
+   * what every existing install already draws. Ignored for Favourites.
+   */
+  all_ring_layout?: AllRingLayout;
+  /**
+   * PROBLEM 267 — the user's chosen favourites, as bound letters in ring
+   * order (at most fifteen since round 3). EMPTY = not chosen: Rust uses the
+   * first six bound letters of the active profile at ring time and writes
+   * nothing back.
+   */
+  middle_ring_favourites?: string[];
   /**
    * PROBLEM 209 — show the SPECIAL keys on the Space HUD's inner ring?
    * ON by default.

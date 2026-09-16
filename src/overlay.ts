@@ -11,7 +11,13 @@ import {
   applyFlight,
   markOverlayWindow,
   reapplyResolvedTheme,
+  beginExternalHud,
+  endExternalHud,
 } from "./components/toast";
+// PROBLEM 267 — the middle button's cursor-anchored icon ring: its own DOM,
+// its own stylesheet, its own listeners; shares only the window (through the
+// two toast.ts functions above) and the event plumbing.
+import { initMiddleRing } from "./components/middle-ring";
 import { onSystemThemeChange } from "./theme-resolve";
 // REVIEW FIXES 2026-09-05 (H4) — the shared OS light/dark value, seeded from
 // Rust and kept current by the `os-theme-changed` event. The dashboard takes
@@ -96,6 +102,13 @@ window.addEventListener("DOMContentLoaded", () => {
   // is exactly how the HUD shipped as an empty box (2026-08-10).
   initToastListener()
     .then(() => invoke("overlay_log", { msg: "listeners registered OK" }).catch(() => {}))
+    // PROBLEM 267 — the icon ring's listeners, AFTER the toast stack's so the
+    // shared `hud-pointer` event reaches both in a known order. Its own
+    // failure line: a deaf ring (window missing from capabilities/default.json
+    // would say so here, exactly as the HUD's own line does) must be
+    // distinguishable from a deaf HUD.
+    .then(() => initMiddleRing({ own: beginExternalHud, release: endExternalHud }))
+    .then(() => invoke("overlay_log", { msg: "middle-ring listeners registered OK (PROBLEM 267)" }).catch(() => {}))
     .catch((e) =>
       invoke("overlay_log", { msg: `listener init FAILED: ${e}` }).catch(() => {}),
     );

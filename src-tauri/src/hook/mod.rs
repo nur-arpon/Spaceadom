@@ -34,6 +34,7 @@ pub enum KeyCombo {
     UpArrow,          // Space + Up    → Scroll-Top (double-tap)
     DownArrow,        // Space + Down  → Scroll-Bottom (double-tap)
     Period,           // Space + .     → Bypass Toggle
+    Semicolon,        // Space + ;     → Voice typing (Windows dictation, Win+H)
     Backspace,        // Space + ⌫     → Force Close (Alt+F4)
     /// Space + Tab → FULLSCREEN-PRESERVING PiP (pip.rs §9, PROBLEM 219).
     ///
@@ -666,12 +667,24 @@ pub(crate) enum ProvenDeaf {
     /// `keyboard_deaf_with_space_down` for why law 3's lie makes this honest.
     SpaceHeld,
     /// The generalisation, and the one that would have caught the 2026-09-07
-    /// episode 105 seconds sooner. The OS input clock moved inside
-    /// `os_input_max_age_ms`, and OUR OWN MOUSE CALLBACK cannot account for
-    /// that input: the mouse hook's last callback is older than the input by
-    /// more than `mouse_attribution_margin_ms`. So something the OS accepted as
-    /// user input was not a mouse event this process saw — and the keyboard
-    /// callback has been silent past the threshold.
+    /// episode 105 seconds sooner. SINCE PROBLEM 268 (2026-09-17) it is a
+    /// MEASUREMENT, not an inference: the hook thread's raw-input sink saw a
+    /// KEYBOARD event (`WM_INPUT`, a clock that owes nothing to the hook
+    /// chain) inside `os_input_max_age_ms`, and our keyboard callback is
+    /// older than that event by more than the attribution margin — a
+    /// keystroke reached the OS and did not reach us.
+    ///
+    /// **WHAT IT WAS BEFORE, AND WHY IT HAD TO CHANGE.** From 1.0.105 to
+    /// 1.0.111 this read `GetLastInputInfo` (any input) against the MOUSE
+    /// callback's clock: "the OS saw input the mouse hook cannot account
+    /// for, so it must have been keyboard." On this owner's laptop it
+    /// produced 449 FORCED REPAIRS in the two days of 2026-09-16/17, 245 of
+    /// them after less than three seconds of keyboard silence — precision-
+    /// touchpad gestures arrive as pointer input the LL mouse hook never
+    /// sees, and a person scrolling with two fingers while not typing looks
+    /// exactly like a dead keyboard hook to that test. Each repair is a
+    /// destructive re-install that can drop a live Space-UP. The raw clock
+    /// cannot be fooled by the touchpad: it only ticks for keyboards.
     ///
     /// **THIS IS NOT PROBLEM 101'S DELETED `kb_dead` BRANCH.** That one read
     /// `kb_silence > 120_000 && ms_silence < 8_000` — "the mouse hook is
@@ -706,7 +719,7 @@ pub(crate) fn proven_keyboard_deaf(
     stand_down: bool,
     other_modifier: bool,
     kb_callback_silence_ms: Option<u64>,
-    ms_callback_silence_ms: Option<u64>,
+    raw_kb_age_ms: Option<u64>,
     os_input_age_ms: u64,
     since_install_ms: u64,
     threshold_ms: u64,
@@ -759,26 +772,29 @@ pub(crate) fn proven_keyboard_deaf(
     ) {
         return Some(ProvenDeaf::SpaceHeld);
     }
-    // 5. PROOF B: the OS saw input our mouse hook cannot account for.
+    // 5. PROOF B (PROBLEM 268): the OS DELIVERED A KEYSTROKE our callback did
+    //    not see. `raw_kb_age_ms` is the raw-input sink's clock — keyboard
+    //    devices only, chain-independent. `None` (no keystroke since launch,
+    //    or no sink) proves nothing.
     //
     //    The gates are deliberately NOT excluded here. `LAST_KB_CALLBACK` is
     //    stamped in the first four lines of `kb_hook_proc`, ABOVE every gate, so
     //    a fullscreen/excluded/bypass window still stamps it on every keystroke.
     //    Silence past the threshold therefore means the callback was not entered
     //    at all, whatever the gates say.
-    if os_input_age_ms <= os_input_max_age_ms {
-        // "Can our mouse hook explain that input?" — it can only if it was
-        // called at about the time the OS recorded the input. The margin covers
-        // the gap between the OS stamping `GetLastInputInfo` and our callback
-        // reaching its `tick_count()`; it is small on purpose, because widening
-        // it is how this test would decay back into PROBLEM 101's.
-        let mouse_accounts_for_it = matches!(
-            ms_callback_silence_ms,
-            Some(ms) if ms <= os_input_age_ms.saturating_add(mouse_attribution_margin_ms)
-        );
-        if !mouse_accounts_for_it {
-            return Some(ProvenDeaf::InputUnaccountedFor);
-        }
+    //
+    //    The margin covers the gap between the LL callback (synchronous, in
+    //    the input path) and the WM_INPUT for the same key reaching this
+    //    thread's queue: the raw stamp is the LATER of the two, so for a key
+    //    we did see, kb_silence <= raw_age + pump latency. It is small on
+    //    purpose. `os_input_age_ms` stays as a belt to that brace: a raw
+    //    event the OS input clock does not also know about is not one.
+    let raw_age = raw_kb_age_ms?;
+    if raw_age <= os_input_max_age_ms
+        && os_input_age_ms <= os_input_max_age_ms
+        && kb_silence > raw_age.saturating_add(mouse_attribution_margin_ms)
+    {
+        return Some(ProvenDeaf::InputUnaccountedFor);
     }
     None
 }
@@ -970,9 +986,14 @@ pub fn drain_hook_diagnostics() {
             let ms_now = MS_EVENTS.load(Ordering::Relaxed);
             let ms_events = ms_now.wrapping_sub(LAST_MS_COUNT.swap(ms_now, Ordering::Relaxed));
             let real = seen.saturating_sub(injected);
-            if seen > 0 || ref_events > 0 || ms_events > 0 {
+            // PROBLEM 268 — the raw-input keyboard clock beside the four hook
+            // counters: raw keystrokes above 0 with primary_real 0 is the
+            // deaf signature, measured rather than inferred.
+            let raw_now = RAW_KB_EVENTS.load(Ordering::Relaxed);
+            let raw_events = raw_now.wrapping_sub(LAST_RAW_COUNT.swap(raw_now, Ordering::Relaxed));
+            if seen > 0 || ref_events > 0 || ms_events > 0 || raw_events > 0 {
                 log::info!(
-                    "hook liveness split — {} in the last {elapsed_s}s. All four are \
+                    "hook liveness split — {} raw_keyboard:{raw_events} in the last {elapsed_s}s. All four are \
                      callback-only counters (PROBLEM 236): nothing but a hook proc can move \
                      them, so this line is the whole instrument panel for one window. \
                      primary_real 0 with primary_injected above it means the keyboard is dead \
@@ -1483,7 +1504,6 @@ fn deaf_evidence_for_reap() -> (bool, Option<u64>) {
     let since_install = t.saturating_sub(installed_at);
     let scoped = |cb: u64| (cb != 0 && cb >= installed_at).then(|| t.saturating_sub(cb));
     let kb_cb_silence = scoped(LAST_KB_CALLBACK.load(Ordering::Relaxed));
-    let ms_cb_silence = scoped(LAST_MS_CALLBACK.load(Ordering::Relaxed));
     // Legal on this thread and forbidden in the callback (keyboard law 3).
     let space_down = unsafe { (GetAsyncKeyState(VK_SPACE as i32) as u16 & 0x8000) != 0 };
     let stand_down = FULLSCREEN_ACTIVE.load(Ordering::Relaxed)
@@ -1495,7 +1515,7 @@ fn deaf_evidence_for_reap() -> (bool, Option<u64>) {
         stand_down,
         other_modifier_down(),
         kb_cb_silence,
-        ms_cb_silence,
+        raw_kb_age_ms(),
         millis_since_last_input(),
         since_install,
         HOLD_DEAF_SILENCE_MS,
@@ -1899,6 +1919,132 @@ static LAST_ESCALATION: AtomicU64 = AtomicU64::new(0);
 /// can only ever move the verdict towards NO alarm (see that function).
 static HOOKS_INSTALLED_AT: AtomicU64 = AtomicU64::new(0);
 
+/// THE RAW-INPUT KEYBOARD CLOCK (PROBLEM 268, 2026-09-17). `GetTickCount` at
+/// the last `WM_INPUT` the hook thread's sink window received for a KEYBOARD
+/// device (`RegisterRawInputDevices`, usage page 1 / usage 6,
+/// `RIDEV_INPUTSINK`). Raw input owes nothing to the hook chain: it is
+/// delivered by the input stack to every registered window whatever the
+/// low-level hooks did, so it is the one clock that can say "the OS delivered
+/// a KEYSTROKE" — where `GetLastInputInfo` can only say "the OS delivered
+/// something", and on a laptop that something is a touchpad gesture the
+/// mouse hook never sees (precision-touchpad panning arrives as pointer
+/// input). Stamped ONLY from `raw_sink_wndproc`, exactly like the two
+/// callback clocks; zero until the first keystroke after launch.
+static LAST_RAW_KB_EVENT: AtomicU64 = AtomicU64::new(0);
+/// How many keyboard `WM_INPUT`s the sink has received since launch — a
+/// counter for the same reason `REF_KB_EVENTS` is one.
+static RAW_KB_EVENTS: AtomicU64 = AtomicU64::new(0);
+/// `RAW_KB_EVENTS` as of the last 60-second liveness line (its window base).
+static LAST_RAW_COUNT: AtomicU64 = AtomicU64::new(0);
+/// The sink window exists and the registration succeeded. False means the
+/// proven-deaf verdict has only proof A (a physically held Space) to go on.
+static RAW_SINK_READY: AtomicBool = AtomicBool::new(false);
+
+/// Age of the last raw keyboard event, or `None` before the first one (and
+/// on a machine where the sink could not be registered).
+fn raw_kb_age_ms() -> Option<u64> {
+    let last = LAST_RAW_KB_EVENT.load(Ordering::Relaxed);
+    (last != 0).then(|| tick_count().saturating_sub(last))
+}
+
+/// PROBLEM 268 — the sink window on the hook thread. A message-only window
+/// (`HWND_MESSAGE`) whose only job is to receive `WM_INPUT` for keyboard
+/// devices and stamp `LAST_RAW_KB_EVENT`; the thread's `GetMessageW` loop
+/// already pumps it. `RIDEV_INPUTSINK` delivers even when this process is
+/// not in the foreground. Registration is per process, so a thread restart
+/// that creates a fresh sink simply re-points it; the old window dies with
+/// its thread.
+#[cfg(windows)]
+unsafe fn register_raw_keyboard_sink() {
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::UI::Input::{
+        RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_INPUTSINK,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, RegisterClassW, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
+        WNDCLASSW,
+    };
+    const CLASS: PCWSTR = w!("SpaceadomRawKbSink");
+    let wc = WNDCLASSW {
+        lpfnWndProc: Some(raw_sink_wndproc),
+        lpszClassName: CLASS,
+        ..Default::default()
+    };
+    // A second registration of the same class name fails harmlessly (thread
+    // restart); the class from the first one is still there.
+    let _ = RegisterClassW(&wc);
+    let hwnd = match CreateWindowExW(
+        WINDOW_EX_STYLE(0),
+        CLASS,
+        w!("spaceadom-raw-kb-sink"),
+        WINDOW_STYLE(0),
+        0,
+        0,
+        0,
+        0,
+        HWND_MESSAGE,
+        None,
+        None,
+        None,
+    ) {
+        Ok(h) if !h.is_invalid() => h,
+        other => {
+            RAW_SINK_READY.store(false, Ordering::Relaxed);
+            log::warn!(
+                "hook: raw-input keyboard sink window could not be created ({other:?}) — the \
+                 proven-deaf verdict has only a physically held Space to go on this session \
+                 (PROBLEM 268)"
+            );
+            return;
+        }
+    };
+    let rid = [RAWINPUTDEVICE {
+        usUsagePage: 0x01,
+        usUsage: 0x06,
+        dwFlags: RIDEV_INPUTSINK,
+        hwndTarget: hwnd,
+    }];
+    match RegisterRawInputDevices(&rid, std::mem::size_of::<RAWINPUTDEVICE>() as u32) {
+        Ok(()) => {
+            RAW_SINK_READY.store(true, Ordering::Relaxed);
+            log::info!(
+                "hook: raw-input keyboard sink registered on the hook thread (hwnd {:#x}) — \
+                 every keystroke the OS delivers now stamps a clock that owes nothing to the \
+                 hook chain, and the proven-deaf verdict reads THAT instead of guessing from \
+                 GetLastInputInfo (PROBLEM 268)",
+                hwnd.0 as usize
+            );
+        }
+        Err(e) => {
+            RAW_SINK_READY.store(false, Ordering::Relaxed);
+            log::warn!(
+                "hook: RegisterRawInputDevices(keyboard, INPUTSINK) failed ({e}) — the \
+                 proven-deaf verdict has only a physically held Space to go on this session \
+                 (PROBLEM 268)"
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn raw_sink_wndproc(
+    hwnd: windows::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::UI::WindowsAndMessaging::{DefWindowProcW, WM_INPUT};
+    if msg == WM_INPUT {
+        // Only keyboard devices are registered, so every WM_INPUT here IS a
+        // keystroke (down or up; injected ones included, exactly as the LL
+        // callback sees them). Nothing is parsed — the clock is the point.
+        LAST_RAW_KB_EVENT.store(tick_count(), Ordering::Relaxed);
+        RAW_KB_EVENTS.fetch_add(1, Ordering::Relaxed);
+    }
+    // WM_INPUT must reach DefWindowProc so the system can free the buffer.
+    DefWindowProcW(hwnd, msg, wparam, lparam)
+}
+
 /// PROBLEM 236 — tick at which the current alarm's repair was first deferred
 /// for a live Space hold, or 0 when nothing is being deferred.
 ///
@@ -2283,6 +2429,8 @@ const VK_ESCAPE: u16 = 0x1B;
 const VK_OEM_3: u16 = 0xC0;  // backtick / ~
 const VK_OEM_COMMA: u16 = 0xBC;
 const VK_OEM_PERIOD: u16 = 0xBE;
+/// `;` on a US layout (`VK_OEM_1`) — Space + ; is voice typing (2026-09-17).
+const VK_OEM_1: u16 = 0xBA;
 const VK_RMENU: u16 = 0xA5;  // Right Alt
 const VK_UP: u16 = 0x26;
 const VK_DOWN: u16 = 0x28;
@@ -2506,6 +2654,10 @@ fn hook_thread_main(tx: Sender<HookEvent>) {
         // NULL-hwnd SetTimer IGNORES the id you pass and returns a fresh
         // system id; WM_TIMER carries THAT id. Compare against the RETURN
         // VALUE or the watchdog silently never fires.
+        // PROBLEM 268 — the raw-input keyboard clock lives on this thread
+        // because this thread pumps messages for as long as the hooks live.
+        register_raw_keyboard_sink();
+
         let timer_id = SetTimer(None, 0, WATCHDOG_TICK_MS, None);
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -3116,13 +3268,14 @@ unsafe fn watchdog_check(
             |cb: u64| (cb != 0 && cb >= installed_at).then(|| t.saturating_sub(cb));
         let kb_cb_silence = scoped(kb_cb_raw);
         let ms_cb_silence = scoped(ms_cb_raw);
+        let raw_age = raw_kb_age_ms();
         let proven = proven_keyboard_deaf(
             space_down,
             MODIFIER_ACTIVE.load(Ordering::Relaxed),
             stand_down,
             other_modifier_down(),
             kb_cb_silence,
-            ms_cb_silence,
+            raw_age,
             user_input_ms,
             since_install,
             OWN_DEAF_SILENCE_MS,
@@ -3176,6 +3329,10 @@ unsafe fn watchdog_check(
                     Some(ms) => format!("{ms}ms ago"),
                     None => "NEVER since the last install".to_string(),
                 };
+                let raw_desc = match raw_age {
+                    Some(ms) => format!("{ms}ms ago ({} raw keystrokes since launch)", RAW_KB_EVENTS.load(Ordering::Relaxed)),
+                    None => "NEVER since launch".to_string(),
+                };
                 let fg = foreground_desc();
                 // Handles BEFORE the repair. `install_hooks()` replaces the
                 // reference hook too, from its own static, so all three are
@@ -3221,7 +3378,8 @@ unsafe fn watchdog_check(
                 log::warn!(
                     "hook: KEYBOARD DEAF, PROVEN (PROBLEM 260, was 257) — reason {reason:?}. \
                      Our keyboard callback has not fired for {}ms (threshold \
-                     {OWN_DEAF_SILENCE_MS}ms) while the mouse callback fired {ms_desc} and the \
+                     {OWN_DEAF_SILENCE_MS}ms) while the OS delivered a KEYSTROKE (raw input, \
+                     PROBLEM 268) {raw_desc}, the mouse callback fired {ms_desc} and the \
                      OS says the user was active {user_input_ms}ms ago; install {since_install}ms \
                      ago, no hold latched. Foreground: {fg}. FORCED REPAIR #{n} this session \
                      (this counter is never drained — the old line read a 60s counter and \
@@ -4394,6 +4552,7 @@ unsafe extern "system" fn kb_hook_proc(
             VK_OEM_3 => Some(KeyCombo::Backtick),
             VK_OEM_COMMA => Some(KeyCombo::Comma),
             VK_OEM_PERIOD => Some(KeyCombo::Period),
+            VK_OEM_1 => Some(KeyCombo::Semicolon),
 
             VK_RMENU => Some(KeyCombo::RightAlt),
             VK_UP    => Some(KeyCombo::UpArrow),
@@ -4540,7 +4699,20 @@ unsafe extern "system" fn ms_hook_proc(
     // MODIFIER_ACTIVE can still be TRUE from a Space held just before the
     // switch, and without this the wheel would stay swallowed for the first
     // scroll inside an excluded app.
-    if EXCLUDED_ACTIVE.load(Ordering::Relaxed) {
+    //
+    // PROBLEM 267 — the exception SCOPE splits this gate in two. `EXCLUDED_ACTIVE`
+    // is the SPACE verdict (off entirely, or middle-only); the middle button has
+    // its own verdict (`exclusions::MIDDLE_EXCLUDED_ACTIVE`, read inside the
+    // WM_MBUTTONDOWN branch below). So a `WM_MBUTTONDOWN` must reach its branch
+    // even where Space stands down, and a LIVE middle hold must keep its mouse
+    // moves, clicks and wheel — the ring inside a "Middle only" app is useless
+    // without them. Cost on the common path: nothing new — the two extra loads
+    // are only evaluated when `EXCLUDED_ACTIVE` is already true (PROBLEM 58's
+    // envelope; short-circuit `&&`).
+    if EXCLUDED_ACTIVE.load(Ordering::Relaxed)
+        && msg != WM_MBUTTONDOWN
+        && !MIDDLE_HOLD_ACTIVE.load(Ordering::Relaxed)
+    {
         return CallNextHookEx(None, n_code, w_param, l_param);
     }
 
@@ -4561,10 +4733,13 @@ unsafe extern "system" fn ms_hook_proc(
                 MIDDLE_BUTTON_RING.load(Ordering::Relaxed),
                 orbit_apps::WATCHER_ALIVE.load(Ordering::Relaxed),
                 orbit_apps::ORBIT_ACTIVE.load(Ordering::Relaxed),
-                // EXCLUDED_ACTIVE already returned above; passed as `false`
-                // rather than dropped so the pure gate lists every reason in
-                // one readable place and its test can walk all of them.
-                false,
+                // PROBLEM 267 — the user's OWN row for this app, with a scope
+                // that stands the middle button down (off entirely / Space
+                // only). Published by the exclusion watcher beside
+                // EXCLUDED_ACTIVE; one relaxed load, inside the branch. (Until
+                // 1.0.109 this was a literal `false`, because EXCLUDED_ACTIVE
+                // had already returned above for every excluded app.)
+                exclusions::MIDDLE_EXCLUDED_ACTIVE.load(Ordering::Relaxed),
                 BYPASS_MODE.load(Ordering::Relaxed),
                 FULLSCREEN_ACTIVE.load(Ordering::Relaxed),
                 // THE ARBITRATION, rule A.
@@ -5190,6 +5365,7 @@ pub(crate) fn own_window_combo_for_vk(vk: u16) -> Option<KeyCombo> {
         VK_OEM_3 => Some(KeyCombo::Backtick),
         VK_OEM_COMMA => Some(KeyCombo::Comma),
         VK_OEM_PERIOD => Some(KeyCombo::Period),
+        VK_OEM_1 => Some(KeyCombo::Semicolon),
         v if is_alpha_vk(v) => vk_to_char(v).map(KeyCombo::Alpha),
         _ => None,
     }
@@ -5320,6 +5496,20 @@ pub(crate) fn own_window_hold_count() -> u32 {
 // `hold_latched` is the one function that knows there are three of them, and
 // every consumer (the mouse gate, the pointer poller's `live` term, the hold
 // identity) goes through it.
+//
+// PROBLEM 267 — THE RING KIND CHANGES NONE OF THIS. `middle_ring_style`
+// decides, on the ENGINE thread, whether a `MiddleButtonDown` becomes the
+// centred Guide HUD (phase 1, `SpaceDown` normalisation untouched) or the
+// cursor-anchored icon ring (`guide_hud::show_middle_ring`). The witness is
+// the same `MIDDLE_HOLD_ACTIVE` either way, rules A/B/C read it unchanged,
+// and the release path is the same `on_middle_button_up` — a tile armed on
+// the icon ring comes back through the same `take_armed_key` as a chip armed
+// on the Space ring. Two things this feature DID add on the mouse path, both
+// atomics-only: the App-exceptions gate above the `WM_MBUTTONDOWN` branch now
+// lets that branch (and a live middle hold) through where only Space stands
+// down (`exclusions::MIDDLE_EXCLUDED_ACTIVE` is the middle button's own
+// verdict), and `pointer::RING_ACTIVE` tells the poller which hit test to
+// run. No new witness, no new latch.
 //
 // ───────────────────────────────────────────────────────────────────────────
 // TAP vs HOLD, AND WHY THE CLICK IS REPLAYED RATHER THAN PASSED
@@ -7023,13 +7213,14 @@ mod proven_deaf_tests {
     /// The production constants, so no test can pass against numbers the app
     /// does not actually use. Arguments in the order a reader of the log needs
     /// them: is Space down, is a hold latched, keyboard-callback silence,
-    /// mouse-callback silence, how old the OS input clock is, install age.
+    /// the RAW keyboard clock's age (PROBLEM 268 — was the mouse callback's
+    /// silence), how old the OS input clock is, install age.
     #[allow(clippy::too_many_arguments)]
     fn verdict(
         space_down: bool,
         modifier_active: bool,
         kb: Option<u64>,
-        ms: Option<u64>,
+        raw: Option<u64>,
         os_input_age: u64,
         since_install: u64,
     ) -> Option<ProvenDeaf> {
@@ -7039,7 +7230,7 @@ mod proven_deaf_tests {
             false,
             false,
             kb,
-            ms,
+            raw,
             os_input_age,
             since_install,
             OWN_DEAF_SILENCE_MS,
@@ -7058,11 +7249,11 @@ mod proven_deaf_tests {
     /// candidate, no alarm, no line. This verdict is the one that fires.
     #[test]
     fn a_live_mouse_hook_does_not_hide_a_dead_keyboard_hook() {
-        // Mouse callback 3200 ms old — older than the 391 ms OS input clock by
-        // far more than the attribution margin, so the mouse cannot be what the
-        // OS saw. Something else reached the OS and never reached us.
+        // The raw sink saw a keystroke 391 ms ago (the user typing into the
+        // terminal); our callback is 56 s silent. A keystroke reached the OS
+        // and never reached us — whatever the mouse hook is doing.
         assert_eq!(
-            verdict(false, false, Some(56_000), Some(3_200), 391, 135_000),
+            verdict(false, false, Some(56_000), Some(391), 391, 135_000),
             Some(ProvenDeaf::InputUnaccountedFor)
         );
     }
@@ -7074,7 +7265,7 @@ mod proven_deaf_tests {
     #[test]
     fn the_measured_alarm_is_proven_deaf_by_the_new_rule_too() {
         assert_eq!(
-            verdict(false, false, Some(129_672), Some(3_032), 391, 135_016),
+            verdict(false, false, Some(129_672), Some(391), 391, 135_016),
             Some(ProvenDeaf::InputUnaccountedFor)
         );
     }
@@ -7086,25 +7277,27 @@ mod proven_deaf_tests {
     /// branch cost 95 of 255 false alarms when it was decided the other way up.
     #[test]
     fn a_moving_mouse_accounts_for_the_input_and_is_never_deafness() {
-        // Mouse callback 60 ms old, OS input 60 ms old: the same event.
-        assert_eq!(verdict(false, false, Some(600_000), Some(60), 60, 900_000), None);
-        // And with the callback a little behind the OS stamp, inside the margin.
+        // PROBLEM 268 — THE TOUCHPAD. The OS input clock is fresh (a two-finger
+        // scroll), nobody has typed for ten minutes, and the raw keyboard sink
+        // has seen nothing in that time. No keystroke was lost, so nothing may
+        // be repaired — this exact shape produced 449 forced repairs in two
+        // days when the mouse callback's clock was the discriminator.
+        assert_eq!(verdict(false, false, Some(600_000), Some(600_000), 60, 900_000), None);
+        assert_eq!(verdict(false, false, Some(600_000), None, 0, 900_000), None);
+        // A keystroke the callback DID see: the raw stamp is the later of the
+        // two, so the callback's silence is at most the raw age plus the pump
+        // latency the margin allows. (Raw age 1600 so the callback's silence
+        // clears the 1500 ms threshold and the MARGIN is what decides.)
+        let raw = 1_600;
         assert_eq!(
-            verdict(false, false, Some(600_000), Some(FORCED_MOUSE_ATTRIBUTION_MS), 0, 900_000),
+            verdict(false, false, Some(raw + FORCED_MOUSE_ATTRIBUTION_MS), Some(raw), raw, 900_000),
             None
         );
         // One millisecond past the margin is the other verdict. This is the
         // whole width of the discriminator, asserted so a future widening of
         // the margin cannot happen silently.
         assert_eq!(
-            verdict(
-                false,
-                false,
-                Some(600_000),
-                Some(FORCED_MOUSE_ATTRIBUTION_MS + 1),
-                0,
-                900_000
-            ),
+            verdict(false, false, Some(raw + FORCED_MOUSE_ATTRIBUTION_MS + 1), Some(raw), raw, 900_000),
             Some(ProvenDeaf::InputUnaccountedFor)
         );
     }
@@ -7127,13 +7320,13 @@ mod proven_deaf_tests {
     #[test]
     fn the_install_grace_suppresses_even_a_proven_shape() {
         assert_eq!(
-            verdict(false, false, Some(56_000), Some(3_200), 391, INSTALL_GRACE_MS - 1),
+            verdict(false, false, Some(56_000), Some(391), 391, INSTALL_GRACE_MS - 1),
             None
         );
         assert_eq!(verdict(true, false, Some(56_000), None, 100, INSTALL_GRACE_MS - 1), None);
         // One millisecond past the grace, the same shape is a verdict.
         assert_eq!(
-            verdict(false, false, Some(56_000), Some(3_200), 391, INSTALL_GRACE_MS),
+            verdict(false, false, Some(56_000), Some(391), 391, INSTALL_GRACE_MS),
             Some(ProvenDeaf::InputUnaccountedFor)
         );
     }
@@ -7270,13 +7463,16 @@ mod proven_deaf_tests {
     /// 35 seconds later. This function is what knows that.
     #[test]
     fn no_proof_means_no_forced_repair_and_the_cooldown_keeps_its_job() {
-        // Nothing proven: keyboard silent, but the mouse accounts for the input
-        // and Space is up. The `both_dead`/`kb_only_dead` path and its 60 s
-        // cooldown handle this case exactly as before.
-        assert_eq!(verdict(false, false, Some(4_000), Some(100), 100, 900_000), None);
-        // Proven: the same keyboard silence, with input the mouse cannot own.
+        // Nothing proven (PROBLEM 268): keyboard callback silent 4 s, the OS
+        // input clock fresh (the touchpad), but the raw keyboard sink's last
+        // keystroke is as old as the callback's — no keystroke went missing.
+        // The `both_dead`/`kb_only_dead` path and its 60 s cooldown handle
+        // this case exactly as before.
+        assert_eq!(verdict(false, false, Some(4_000), Some(4_000), 100, 900_000), None);
+        // Proven: the same keyboard silence, with a keystroke the sink saw
+        // 100 ms ago that the callback never did.
         assert_eq!(
-            verdict(false, false, Some(4_000), Some(4_000), 100, 900_000),
+            verdict(false, false, Some(4_000), Some(100), 100, 900_000),
             Some(ProvenDeaf::InputUnaccountedFor)
         );
     }
@@ -7781,6 +7977,7 @@ mod own_window_fallback_tests {
         assert!(matches!(own_window_combo_for_vk(0xC0), Some(KeyCombo::Backtick)));
         assert!(matches!(own_window_combo_for_vk(0xBC), Some(KeyCombo::Comma)));
         assert!(matches!(own_window_combo_for_vk(0xBE), Some(KeyCombo::Period)));
+        assert!(matches!(own_window_combo_for_vk(0xBA), Some(KeyCombo::Semicolon)));
         // Escape, Enter, Tab, Backspace, arrows, Right Alt — the brief's
         // exclusion list. A page needs these to be a page.
         for vk in [0x1Bu16, 0x0D, 0x09, 0x08, 0x25, 0x26, 0x27, 0x28, 0xA5] {

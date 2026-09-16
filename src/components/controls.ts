@@ -187,6 +187,114 @@ export function ringConfigFor(
   return { magnetic: true, band: "auto" };
 }
 
+/* ===========================================================================
+   PROBLEM 267 — the middle-button ICON RING's three settings, as leaf data so
+   `preview.ts` renders the identical pills and tiles the panel does.
+   =========================================================================== */
+
+/** "Middle button shows" — WHAT the middle button raises (owner, 2026-09-13:
+ *  a choice, not a replacement). Mirrors Rust's `MiddleRingStyle`. */
+export const MIDDLE_STYLE_OPTS: ReadonlyArray<readonly [string, string]> = [
+  ["icon_ring", "Icon ring"],
+  ["guide_hud", "Space ring"],
+];
+export type MiddleStyle = "icon_ring" | "guide_hud";
+/** Config → pill. Absent = the icon ring (Rust's serde default). */
+export function middleStyleFor(raw: unknown): MiddleStyle {
+  return raw === "guide_hud" ? "guide_hud" : "icon_ring";
+}
+
+/** "Middle-button ring shows" — the favourites, or all (artboard 8; round 3
+ *  naming: "Favourites / All"; the wire value `my_eight` is unchanged). */
+export const MIDDLE_SCOPE_OPTS: ReadonlyArray<readonly [string, string]> = [
+  ["my_eight", "Favourites"],
+  ["all", "All"],
+];
+export type MiddleScope = "my_eight" | "all";
+export function middleScopeFor(raw: unknown): MiddleScope {
+  return raw === "all" ? "all" : "my_eight";
+}
+
+/** 2026-09-15 — how the "All" scope is arranged. "Spiral" is the owner's
+ *  confirmed name for the phyllotaxis layout; use it verbatim. */
+export const ALL_LAYOUT_OPTS: ReadonlyArray<readonly [string, string]> = [
+  ["rings", "Rings"],
+  ["spiral", "Spiral"],
+];
+export type AllLayout = "rings" | "spiral";
+/** Config → pill. Absent = rings, which is what every install already draws. */
+export function allLayoutFor(raw: unknown): AllLayout {
+  return raw === "spiral" ? "spiral" : "rings";
+}
+
+/** The three-state control on every App-exceptions tile (artboard 8). Order
+ *  and wording are the design's. Mirrors Rust's `ExceptionScope`. */
+export const EXC_SCOPE_OPTS: ReadonlyArray<readonly [string, string]> = [
+  ["off_entirely", "Off entirely"],
+  ["space_only", "Space only"],
+  ["middle_only", "Middle only"],
+];
+export type ExcScope = "off_entirely" | "space_only" | "middle_only";
+export function excScopeFor(raw: unknown): ExcScope {
+  return raw === "space_only" || raw === "middle_only" ? raw : "off_entirely";
+}
+
+/**
+ * One App-exceptions row as the panel holds it. `get_config` returns objects
+ * (Rust rewrites the pre-1.0.110 string form on its first save), but a
+ * config that has not been saved since the upgrade still arrives as strings
+ * — this is the ONE place the two shapes become one.
+ */
+export interface ExcRow { exe: string; scope: ExcScope }
+export function normaliseExceptions(raw: unknown): ExcRow[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ExcRow[] = [];
+  for (const r of raw) {
+    if (typeof r === "string") {
+      const exe = r.toLowerCase();
+      if (exe && !out.some((o) => o.exe === exe)) out.push({ exe, scope: "off_entirely" });
+    } else if (r && typeof r === "object" && typeof (r as { exe?: unknown }).exe === "string") {
+      const exe = (r as { exe: string }).exe.toLowerCase();
+      if (exe && !out.some((o) => o.exe === exe)) {
+        out.push({ exe, scope: excScopeFor((r as { scope?: unknown }).scope) });
+      }
+    }
+  }
+  return out;
+}
+
+/** The disclosure line under the "Choose your favourites" picker (artboard
+ *  9), verbatim. Here, beside the option tables, for the same reason
+ *  `SPECIALS_INERT_NOTE` is: the panel and the harness must print one string. */
+export const EIGHT_PICKER_NOTE = "Site icons are fetched once, when you bind the link.";
+/** The most favourites a user may tick — Rust's `FAVOURITES_MAX` (round 3). */
+export const FAVOURITES_MAX = 15;
+/** The favourites shown when none are chosen — Rust's `FAVOURITES_DEFAULT`:
+ *  the first six bound letters, one full inner ring. */
+export const FAVOURITES_DEFAULT = 6;
+
+/**
+ * The default favourites when none are chosen: the first six bound letters,
+ * sorted — Rust's `favourites_for` for an empty list, mirrored so the picker
+ * can show what the ring WILL do before anything is written. A stored list
+ * is filtered to letters that are still bound, in its own order, up to
+ * `FAVOURITES_MAX`.
+ */
+export function effectiveFavourites(
+  stored: readonly string[] | undefined,
+  boundLetters: readonly string[],
+): string[] {
+  const bound = boundLetters.map((c) => c.toLowerCase());
+  const chosen: string[] = [];
+  for (const raw of stored ?? []) {
+    const c = raw.toLowerCase();
+    if (bound.includes(c) && !chosen.includes(c)) chosen.push(c);
+    if (chosen.length >= FAVOURITES_MAX) break;
+  }
+  if (chosen.length) return chosen;
+  return [...bound].sort().slice(0, FAVOURITES_DEFAULT);
+}
+
 /**
  * THE INERT TREATMENT, shared by every settings row that another row can
  * switch off. One implementation, called from three places: the "Show special

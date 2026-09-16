@@ -80,7 +80,13 @@ import {
   startupRowIsInert, startupShownAsOn, startupOutcome, startupIsPortable,
   PORTABLE_STARTUP_STATE, type StartupOwnership,
   type AboutLinkKind, type ThirdPartyEntry,
+  // PROBLEM 267 — the icon ring's rows and the exception tiles, from the
+  // same leaf data the panel renders.
+  MIDDLE_STYLE_OPTS, MIDDLE_SCOPE_OPTS, ALL_LAYOUT_OPTS, EXC_SCOPE_OPTS, EIGHT_PICKER_NOTE,
 } from "./components/controls";
+// PROBLEM 267 — the ring itself, rendered by the SAME leaf renderer the
+// overlay uses, from a stub payload (?ring / ?ring=all). See the end of the file.
+import { renderMiddleRing, setRingArmed, fitPill, previewWave, previewAim, previewWaveStep, waveSnapshot, waveTargets, type MiddleRingPayload, type RingItem } from "./components/middle-ring";
 // ABOUT (feature 1) — the same data import settings-panel.ts uses, so the
 // harness's third-party count and grouped list are the real ones, not a
 // fabricated stand-in.
@@ -780,6 +786,58 @@ const previewStartup: StartupOwnership = q.has("portable")
   : null;
 document.body.dataset.fun = q.has("fun") ? "on" : "off";
 
+/**
+ * PROBLEM 267 — one App-exceptions tile (artboard 8), the SAME markup
+ * `renderAppExceptions` builds by DOM: icon disc, name, the Default tag on a
+ * built-in row, the three-state `.theme-seg`. Static here; the harness only
+ * has to LOOK right, and the measured indicator is positioned by the same
+ * `wireSegIndicators` pass the pills get.
+ */
+function excTileHtml(name: string, scope: string, builtin: boolean): string {
+  const idx = Math.max(0, EXC_SCOPE_OPTS.findIndex(([v]) => v === scope));
+  return `
+    <div class="exc-row" data-stem="${name.toLowerCase().replace(/\s+/g, "")}">
+      <div class="exc-row-head">
+        <span class="exc-tile-disc" style="background:#e7d8b8;"></span>
+        <span class="exc-row-name">${name}</span>
+        ${builtin ? `<span class="exc-default-tag">Default</span>` : `<button type="button" class="exc-tile-x exc-row-x" aria-label="Remove ${name} from exceptions">\u2715</button>`}
+      </div>
+      <div class="theme-seg exc-seg" role="radiogroup" aria-label="${name}: what stands down">
+        <span class="theme-seg-ind" data-seg="${scope}" style="background:var(--st-accent);"></span>
+        ${EXC_SCOPE_OPTS.map(([v, l], n) => `<button type="button" class="theme-seg-opt${n === idx ? " is-on" : ""}" data-exc-scope="${v}" role="radio" aria-checked="${n === idx}">${l}</button>`).join("")}
+      </div>
+    </div>`;
+}
+
+/**
+ * PROBLEM 267 — the "Choose your favourites" picker (artboard 9), from the DEMO
+ * bindings: six selected of eight, two link rows with the placeholder circle
+ * (`rd`, `gh`), and the disclosure line. The same class names
+ * `renderEightPicker` uses, so the stylesheet is exercised end to end.
+ */
+function eightPickerHtml(): string {
+  const rows: Array<[string, string, boolean, boolean]> = [
+    ["m", "Mail", true, false], ["b", "Browser", true, false], ["r", "reddit.com", false, true],
+    ["c", "Chat", true, false], ["g", "github.com", false, true], ["n", "Notes", true, false],
+    ["t", "Terminal", true, false], ["p", "Player", true, false], ["k", "Calendar", false, false],
+  ];
+  const n = rows.filter((r) => r[2]).length;
+  return `
+    <div class="eight-picker">
+      <div class="eight-head"><span class="eight-title">Choose your favourites</span><span class="eight-count">${n} of 15 selected</span><button type="button" class="btn btn-sm eight-done">Done</button></div>
+      <div class="eight-list">
+        ${rows.map(([k, name, on, link]) => `
+          <label class="eight-row${on ? " is-on" : ""}">
+            <span class="eight-chip">${k.toUpperCase()}</span>
+            <span class="eight-icon${link ? " is-link" : ""}">${link ? name.slice(0, 2) : ""}</span>
+            <span class="eight-name">${name}${link ? `<span class="eight-tag"> \u00b7 link</span>` : ""}</span>
+            <input type="checkbox" class="eight-check" ${on ? "checked" : ""} aria-label="${name} in the ring" />
+          </label>`).join("")}
+      </div>
+      <div class="eight-foot">${EIGHT_PICKER_NOTE}</div>
+    </div>`;
+}
+
 const switchRow = (id: string, label: string, on: boolean, i: number): string => {
   // REVIEW FIXES 2026-09-05 (H6) — the startup row's inert state comes from
   // the SAME `startupRowIsInert` the panel calls, fed the same tuple shape the
@@ -857,6 +915,9 @@ document.getElementById("settings-panel")!.innerHTML = `
   </div>
 
   <div class="set-scroll">
+  <!-- Mirrors settings-panel.ts: the multicol wrapper of the expanded
+       layout (display:contents in the popover). No backticks here. -->
+  <div class="set-cols">
 
   <input class="input set-search" id="set-search" type="text"
          placeholder="Search settings…" autocomplete="off" spellcheck="false"
@@ -909,14 +970,55 @@ document.getElementById("settings-panel")!.innerHTML = `
              the ring is OPENED, not what it looks like, so the panel's own
              handler deliberately fires no preview and neither does this. -->
         ${switchRow("middlering", "Middle button opens the ring", true, 1)}
+        <!-- PROBLEM 267 — mirrored from settings-panel.ts, directly under the
+             middle-button switch: "Middle button shows" (Icon ring / Space
+             ring, the owner's 2026-09-13 addition) and "Middle-button ring
+             shows" (Favourites / All + "Choose your favourites") with the
+             picker artboard under it when ?eight is set. ?middleoff paints
+             both inert with the same paintInert the panel uses. -->
+        <div class="set-item set-filterable">
+          <div class="set-row set-row-stack">
+            <button type="button" class="set-row-label">Middle button shows</button>
+            <span id="set-middlestyle-wrap">${segRowHtml("middlestyle", MIDDLE_STYLE_OPTS,
+              q.get("middlestyle") === "guide_hud" ? "guide_hud" : "icon_ring",
+              "background:var(--st-accent);", "Middle button shows")}</span>
+          </div>
+          <div class="set-sub">Sized by the golden ratio.</div>
+          <div class="set-note" id="set-middlestyle-note" style="margin-top:6px;display:none;">Turn on \u201cMiddle button opens the ring\u201d to use this.</div>
+        </div>
+        <div class="set-item set-filterable">
+          <div class="set-row set-row-stack">
+            <button type="button" class="set-row-label">Middle-button ring shows</button>
+            <span id="set-middlescope-wrap" class="mscope-line">${segRowHtml("middlescope", MIDDLE_SCOPE_OPTS,
+              q.get("ring") === "all" ? "all" : "my_eight",
+              "background:var(--st-accent);", "Middle-button ring shows")}<button type="button" class="mscope-choose" id="set-eight-open" aria-expanded="${q.has("eight")}">Choose your favourites \u2192</button></span>
+          </div>
+          <div class="set-sub">A Fibonacci cap, for density.</div>
+          <div class="set-note" id="set-middlescope-note" style="margin-top:6px;display:none;">Turn on \u201cMiddle button opens the ring\u201d to use this.</div>
+          <div id="set-eight-picker">${q.has("eight") ? eightPickerHtml() : ""}</div>
+        </div>
+        <!-- 2026-09-15 — mirrored from settings-panel.ts: "All layout"
+             (Rings / Spiral) sits directly under the scope pill and is inert
+             unless the scope is All, the same way "Choose your favourites"
+             only means something under Favourites. ?ring=all|spiral picks it. -->
+        <div class="set-item set-filterable">
+          <div class="set-row set-row-stack">
+            <button type="button" class="set-row-label">All layout</button>
+            <span id="set-alllayout-wrap">${segRowHtml("alllayout", ALL_LAYOUT_OPTS,
+              q.get("ring") === "spiral" ? "spiral" : "rings",
+              "background:var(--st-accent);", "All layout")}</span>
+          </div>
+          <div class="set-sub">Packed like a sunflower’s seeds.</div>
+          <div class="set-note" id="set-alllayout-note" style="margin-top:6px;display:none;">Only for “All” — Favourites arranges itself around the screen edge.</div>
+        </div>
         <div class="set-item set-filterable">
           <div class="set-row set-row-stack">
             <button type="button" class="set-row-label">Ring layout</button>
             ${segRowHtml("hudring", RING_OPTS, previewRing, "background:var(--st-accent);", "Ring layout")}
           </div>
         </div>
-        ${switchRow("hudspecials", "Show special keys", true, 2)}
-        ${switchRow("flight", "Guide-to-toast motion", false, 3)}
+        ${switchRow("hudspecials", "Show special keys", true, 4)}
+        ${switchRow("flight", "Guide-to-toast motion", false, 5)}
         ${sliderRow("huddelay", "Guide HUD delay", 100, 1000, 300)}
       </div>
     </div>
@@ -932,11 +1034,30 @@ document.getElementById("settings-panel")!.innerHTML = `
        NOTE: no backticks in these comments — this whole block is one JS
        template literal (see the assignment above), and a literal backtick
        here closes it early. -->
-  <div class="set-section set-filterable">
+  <div class="set-section set-filterable set-section-span">
     <div class="divider" style="margin:14px 0 10px;"></div>
     <div class="set-title" style="font-size:13px; margin-bottom:8px;">App exceptions</div>
-    <div class="set-note" style="margin-top:0;">No exceptions yet — Spaceadom works everywhere.</div>
+    <!-- Owner's 1.0.110 review — the popover's one-line summary + "Show";
+         the full section (.set-full) only shows expanded. Same markup shape
+         as settings-panel.ts's render(); the counts there are live. -->
+    <div class="set-summary" id="set-exc-summary">
+      <span class="set-summary-text" id="set-exc-summary-text">3 built-in${q.has("excuser") ? " · 1 yours" : ""} · 87 more</span>
+      <button type="button" class="btn btn-sm set-summary-show" data-show-section="set-app-exceptions">Show</button>
+    </div>
+    <div id="set-app-exceptions" class="set-full">
+    <!-- PROBLEM 267 — the three built-in tiles artboard 8 shows, pre-seeded
+         at "Space only" with the Default tag and the three-state control, in
+         the same .exc-row / .theme-seg markup renderAppExceptions() builds. -->
+    <div class="set-note" style="margin-top:0;">Built-in defaults for apps that use the middle button to orbit. Change anytime.</div>
+    <div class="exc-list">
+      ${excTileHtml("SolidWorks", "space_only", true)}
+      ${excTileHtml("Fusion 360", "space_only", true)}
+      ${excTileHtml("Blender", "space_only", true)}
+      ${q.has("excuser") ? excTileHtml("Photoshop", "off_entirely", false) : ""}
+    </div>
+    <div class="set-note">\u2026and 87 more 3D, CAD and design programs are built in at Space only. Add one below to change it.</div>
     <button type="button" class="btn exc-add-btn" id="exc-add-btn">Add an app</button>
+    </div><!-- /.set-full -->
   </div>
 
   <!-- Two stub conflicts (spacedesk, PowerToys) — the exact markup shape
@@ -946,9 +1067,14 @@ document.getElementById("settings-panel")!.innerHTML = `
        title attribute), the clamped description, and the "Close it" button,
        without a live conflict on the machine running the harness.
        NOTE: no backticks in these comments — see the note above this block. -->
-  <div class="set-section set-filterable">
+  <div class="set-section set-filterable set-section-span">
     <div class="divider" style="margin:14px 0 10px;"></div>
     <div class="set-title" style="font-size:13px; margin-bottom:8px;">Conflicts</div>
+    <div class="set-summary" id="set-conflicts-summary">
+      <span class="set-summary-text" id="set-conflicts-summary-text">2 found</span>
+      <button type="button" class="btn btn-sm set-summary-show" data-show-section="set-conflicts">Show</button>
+    </div>
+    <div id="set-conflicts" class="set-full">
     <div class="conflict-grid">
       <div class="conflict-row">
         <span class="conflict-row-disc" style="background:#c67139;">S</span>
@@ -972,6 +1098,7 @@ document.getElementById("settings-panel")!.innerHTML = `
         <button type="button" class="btn btn-sm">Check the ring</button>
       </div>
     </div>
+    </div><!-- /.set-full -->
   </div>
 
   <div class="set-section set-filterable">
@@ -1026,6 +1153,7 @@ document.getElementById("settings-panel")!.innerHTML = `
     </div>
   </div>
 
+  </div><!-- /.set-cols -->
   </div><!-- /.set-scroll -->`;
 
 // THE DEPENDENCY, LIVE IN THE HARNESS. Same call the panel makes once per
@@ -1040,6 +1168,19 @@ document.getElementById("settings-panel")!.innerHTML = `
 const specialsWrap = () => document.getElementById("set-hudspecials-wrap");
 const specialsNote = () => document.getElementById("set-hudspecials-note");
 paintInert(specialsWrap(), specialsNote(), previewInert);
+
+// PROBLEM 267 — ?middleoff: both middle-button rows dead, through the same
+// call. Without the flag this is the no-op that restores two live rows.
+paintInert(
+  document.getElementById("set-middlestyle-wrap"),
+  document.getElementById("set-middlestyle-note"),
+  q.has("middleoff"),
+);
+paintInert(
+  document.getElementById("set-middlescope-wrap"),
+  document.getElementById("set-middlescope-note"),
+  q.has("middleoff") || q.get("middlestyle") === "guide_hud",
+);
 
 // REVIEW FIXES 2026-09-05 (H6) — the SECOND row that can be dead, painted by
 // the same call. `?portable` greys "Run at startup" and shows the sentence
@@ -1217,6 +1358,17 @@ document.addEventListener("keydown", (e) => {
   previewExpanded = false;
   setPanelExpanded(previewPanel, false);
 }, true);
+// The summary rows' "Show" (owner's 1.0.110 review) — mirrors the panel's
+// own wiring: expand, then scroll the section into view a frame later.
+previewPanel.querySelectorAll<HTMLElement>(".set-summary-show").forEach((b) => {
+  b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const target = document.getElementById(b.dataset.showSection ?? "")?.closest<HTMLElement>(".set-section");
+    previewExpanded = true;
+    setPanelExpanded(previewPanel, true);
+    requestAnimationFrame(() => target?.scrollIntoView({ block: "start" }));
+  });
+});
 
 // ACCESSIBILITY PASS (feature 3) — the same arrow-key wiring the real panel
 // calls after every render(); here it only needs calling once, since this
@@ -1454,4 +1606,137 @@ if (q.has("ownwindow")) {
       `hold threshold ${config.guide_hud_delay_ms}ms). Calls are recorded in ` +
       `window.__ownWindowCalls.`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// PROBLEM 267 — ?ring / ?ring=all: the middle button's ICON RING, drawn by the
+// SAME `renderMiddleRing` the overlay page runs, from a stub payload.
+// ---------------------------------------------------------------------------
+//
+// The overlay cannot be validated in a browser harness (its failure mode is
+// the OS compositor — CLAUDE.md), so this is the ring's LOOK, not its window:
+// geometry, tokens for all three themes (?theme=starry / ?theme=warcry via
+// data-theme on the stage), the hovered tile (index 4 = the bottom spoke,
+// "Terminal", as artboards 1–3), fun off (?flat), reduced (?reduced).
+// Favourites and All both, per the owner's addition #2, so the dense layout
+// can be looked at before it ships.
+//
+// The layout below is a STUB MIRROR of `middle_ring::layout_ring_slots`
+// (round 3: 6 on the inner ring at r=125, 9 on the next at r=201, then as
+// many as fit at r=277, all 70 px) — Rust's is the real one and has the
+// tests. Icons are inline SVG data URLs standing in for real app icons, plus
+// one link with NO icon so the letter disc shows. `?name=App&acct=x` puts a
+// long two-line name on the hovered tile for the pill's auto-fit.
+if (q.has("ring")) {
+  // `?ring=spiral` — the 2026-09-15 phyllotaxis layout for the "All" scope,
+  // with the SAME constants Rust uses (`middle_ring::spiral_slots`): golden
+  // angle per tile, r_i = sqrt(RING_R1^2 + k^2 i), k = ARC_STEP*sqrt(sqrt(3)/2pi).
+  // It is the same item list "All" shows, so the two can be compared by
+  // flipping one query parameter.
+  const spiral = q.get("ring") === "spiral";
+  const all = q.get("ring") === "all" || spiral;
+  const stage = document.createElement("div");
+  stage.className = "mr-stage";
+  stage.style.cssText = "position:fixed;inset:0;z-index:200;background:var(--st-bg);";
+  const theme = q.get("theme") ?? (q.has("dark") ? "starry" : "earthy");
+  stage.dataset.theme = theme;
+  stage.classList.toggle("nocturne", theme !== "earthy");
+  document.body.appendChild(stage);
+
+  const glyph = (hue: number, letter: string): string => {
+    const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48' viewBox='0 0 48 48'>`
+      + `<rect x='4' y='4' width='40' height='40' rx='10' fill='hsl(${hue} 55% 55%)'/>`
+      + `<text x='24' y='31' font-family='Outfit,sans-serif' font-size='20' font-weight='700' fill='#fff' text-anchor='middle'>${letter}</text></svg>`;
+    return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+  };
+  const eight: Array<[string, string, string | null, RingItem["kind"]]> = [
+    ["M", "Mail", glyph(20, "M"), "app"], ["B", "Browser", glyph(210, "B"), "app"],
+    ["C", "Chat", glyph(150, "C"), "app"], ["N", "Notes", glyph(45, "N"), "app"],
+    ["T", "Terminal", glyph(0, ">"), "app"], ["P", "Player", glyph(280, "P"), "app"],
+    ["K", "Calendar", glyph(190, "K"), "app"], ["D", "Downloads", glyph(35, "D"), "folder"],
+  ];
+  const rest: Array<[string, string, string | null, RingItem["kind"]]> = [];
+  "EFGHIJLOQRSVWXYZ".split("").forEach((l, i) => {
+    // Two links without an icon yet: the letter disc, as the design's
+    // placeholder rule says.
+    const link = l === "R" || l === "G";
+    rest.push([l, link ? `${l.toLowerCase()}link.com` : `App ${l}`, link ? null : glyph((i * 47) % 360, l), link ? "link" : "app"]);
+  });
+  const specials: Array<[string, string, string | null, RingItem["kind"]]> = [
+    ["Esc", "Boss Key", null, "special"], ["`", "PiP", null, "special"], ["Tab", "Fullscreen PiP", null, "special"],
+    ["\u232B", "Force Close", null, "special"], ["RAlt", "Cycle Profiles", null, "special"],
+    [",", "Search / Input", null, "special"], [".", "Pause Spaceadom", null, "special"],
+    [";", "Voice Typing", null, "special"],
+  ];
+  const src = all ? [...eight, ...rest, ...specials] : eight;
+  const n = src.length;
+  const caps = [6, 9, 22];
+  const GOLDEN_ANGLE = 360 * (1 - 1 / 1.618);
+  const SPIRAL_K = 71 * Math.sqrt(Math.sqrt(3) / (2 * Math.PI));
+  const items: RingItem[] = src.map(([key, name, icon, kind], i) => {
+    if (spiral) {
+      const it: RingItem = {
+        key, code: key.toLowerCase(), name, icon, kind,
+        ring: 0,
+        angle_deg: ((GOLDEN_ANGLE * i) % 360 + 360) % 360,
+        radius: Math.sqrt(108 * 108 + SPIRAL_K * SPIRAL_K * i),
+        tile: 44,
+        pitch_deg: 360 / n,
+      };
+      if (i === 4 && q.has("name")) { it.name = q.get("name") ?? name; it.account = q.get("acct"); }
+      return it;
+    }
+    let ring = 0, start = 0;
+    while (i - start >= Math.min(caps[ring], n - start)) { start += Math.min(caps[ring], n - start); ring++; }
+    const count = Math.min(caps[ring], n - start);
+    const radius = 125 + ring * 76;
+    const angle = (i - start) * (360 / count);
+    const it: RingItem = { key, code: key.toLowerCase(), name, icon, kind, ring, angle_deg: angle, radius, tile: 70, pitch_deg: 360 / count };
+    if (i === 4 && q.has("name")) { it.name = q.get("name") ?? name; it.account = q.get("acct"); }
+    return it;
+  });
+  const rings = spiral ? 1 : new Set(items.map((it) => it.ring)).size;
+  // A spiral's extent is its outermost tile; it draws no guide circles (the
+  // same rule `middle_ring::guide_diameters` applies — no rings, no guides).
+  const spiralExtent = spiral
+    ? Math.max(...items.map((it) => it.radius)) + 22
+    : 0;
+  const payload: MiddleRingPayload = {
+    items,
+    scope: all ? "all" : "my_eight",
+    cx: window.innerWidth / 2,
+    cy: window.innerHeight / 2,
+    scrim: spiral
+      ? Math.max(640, 2 * spiralExtent + 80)
+      : rings > 1 ? Math.max(640, 2 * (125 + (rings - 1) * 76 + 35) + 80) : 600,
+    guides: spiral ? [] : Array.from({ length: rings }, (_, r) => 2 * (125 + r * 76) + 14),
+    fun: !q.has("flat"),
+    reduced: q.has("reduced"),
+    pill_max: 170,
+    shape: spiral ? "spiral" : undefined,
+  };
+  const armed = q.has("none") ? null : 4;
+  const el = renderMiddleRing(stage, payload, armed);
+  setRingArmed(el, armed, payload.items, payload.pill_max); // the live path's arming (push + pill name)
+  // The browser pane can load this page at 0×0 and size it afterwards, so
+  // the centre is re-read on resize; the overlay never needs this — Rust
+  // sizes its window before the payload is sent.
+  const recentre = () => {
+    el.style.setProperty("--mr-cx", `${window.innerWidth / 2}px`);
+    el.style.setProperty("--mr-cy", `${window.innerHeight / 2}px`);
+  };
+  recentre();
+  window.addEventListener("resize", recentre);
+  // The same forced style read the overlay uses (1.0.110 findings): a class
+  // added from a rAF before the first style recalc creates no transition.
+  void el.getBoundingClientRect();
+  el.classList.add("in");
+  if (payload.fun && !payload.reduced) previewWave(el, payload.items);
+  // `window.__ringAim(deg | null)` feeds the wave a bearing as Rust would;
+  // `window.__ringWave()` reads the per-tile scales back.
+  (window as unknown as { __ringAim: typeof previewAim }).__ringAim = previewAim;
+  (window as unknown as { __ringWave: typeof waveSnapshot }).__ringWave = waveSnapshot;
+  (window as unknown as { __ringWaveStep: typeof previewWaveStep }).__ringWaveStep = previewWaveStep;
+  (window as unknown as { __ringWaveTargets: typeof waveTargets }).__ringWaveTargets = waveTargets;
+  (window as unknown as { __fitPill: typeof fitPill }).__fitPill = fitPill;
 }

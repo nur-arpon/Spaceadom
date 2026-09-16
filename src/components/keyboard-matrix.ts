@@ -114,6 +114,7 @@ const SPECIAL_ON_KEY: Record<string, string> = {
   backspace: "Force Close",
   comma:     "Search",
   period:    "Pause",
+  semicolon: "Dictate",
   up:        "Scroll Top",
   down:      "Scroll Btm",
   ralt:      "Profile",
@@ -378,6 +379,14 @@ function applyKeyState(cell: HTMLDivElement, key: string): void {
     const img = document.createElement("img");
     img.src = `data:image/png;base64,${binding!.icon_override}`;
     img.alt = "";
+    sub.appendChild(img);
+  } else if (binding!.site_icon) {
+    // PROBLEM 267 — a link's favicon, fetched once when it was bound (a
+    // complete data: URL). The same key the icon ring shows, on the board.
+    const img = document.createElement("img");
+    img.src = binding!.site_icon;
+    img.alt = "";
+    img.onerror = () => img.remove();
     sub.appendChild(img);
   }
   const txt = document.createElement("span");

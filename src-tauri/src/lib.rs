@@ -38,6 +38,14 @@ mod guide_hud;
 mod hook;
 mod icon_extractor;
 mod logger;
+/// PROBLEM 267 — the middle button's cursor-anchored ICON RING: pure geometry
+/// (layout, edge clamp, band/sector hit test), the favourites rule and the
+/// payload builder. The impure halves live in `guide_hud::show_middle_ring`
+/// and `engine::dispatch`'s `MiddleButtonDown` arm.
+mod middle_ring;
+/// PROBLEM 267 — a link binding's favicon, fetched ONCE at bind time by the
+/// key editor and stored in the binding; never fetched at ring time.
+mod site_icon;
 /// PROBLEM 250 — "is this copy running from an MSIX package (the Microsoft
 /// Store build)?", and the four things that are silently wrong when it is:
 /// the in-app updater, autostart, the config's real location, and the
@@ -1322,6 +1330,12 @@ pub fn run() {
             // 1.0.96 — Settings previews the REAL ring in a layout the user has
             // not chosen yet. Writes nothing and cannot launch anything.
             commands::preview_hud_layout,
+            // PROBLEM 267 — the key editor fetches a link's favicon ONCE, at
+            // bind time, and stores it in the binding; the Settings panel
+            // reads the built-in 3D/CAD rows it shows pre-seeded at "Space
+            // only". Both are read-only for the config.
+            site_icon::fetch_site_icon,
+            commands::get_builtin_exceptions,
             commands::find_browser_cmd,
             commands::validate_browser,
             // TASK 3 — the OS default browser (path + name + icon) for the

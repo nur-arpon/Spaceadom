@@ -11,7 +11,7 @@ use crate::{
 };
 use crossbeam_channel::Receiver;
 use std::sync::{Arc, Mutex};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tokio::sync::watch;
 
 /// All mutable engine runtime state (shared between the actor and commands).
@@ -204,11 +204,30 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
     // path cannot drift into three behaviours. The only thing the trigger
     // changes is the sentence the arm logs — see there.
     let via_middle_button = matches!(event, HookEvent::MiddleButtonDown);
-    let event = if via_own_window_page || via_middle_button {
+    // PROBLEM 267 — WHICH ring the middle button raises is the owner's
+    // `middle_ring_style`. `GuideHud` keeps phase 1 byte-for-byte: the event
+    // is normalised to `SpaceDown` here exactly as 1.0.109 does it.
+    // `IconRing` (the default) leaves the event as `MiddleButtonDown`, which
+    // its own arm below turns into the cursor-anchored ring. One pure
+    // function decides (`routed_middle_event`), so a test can pin both.
+    let middle_style = if via_middle_button {
+        let s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
+        let cfg = s.config.read().unwrap_or_else(|p| p.into_inner());
+        cfg.middle_ring_style
+    } else {
+        crate::config::MiddleRingStyle::default()
+    };
+    let event = if via_own_window_page {
         HookEvent::SpaceDown
+    } else if via_middle_button {
+        routed_middle_event(middle_style)
     } else {
         event
     };
+    // Only the GuideHud leg is "via the middle button" from here on: the
+    // SpaceDown arm's per-hold line is phase 1's, and the icon-ring arm logs
+    // its own.
+    let via_middle_button = via_middle_button && matches!(event, HookEvent::SpaceDown);
 
     match event {
         // ---------------------------------------------------------------
@@ -322,10 +341,24 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
                     _ = tokio::time::sleep(tokio::time::Duration::from_millis(hud_delay_ms)) => {
                         // Show HUD if not cancelled
                         if !*cancel_rx.borrow() {
-                            let (profile_name, emoji, bindings, specials) = {
+                            let (profile_name, emoji, bindings, icons, specials) = {
                                 let s = state_clone.lock().unwrap_or_else(|p| p.into_inner());
                                 let cfg = s.config.read().unwrap_or_else(|p| p.into_inner());
                                 let name = cfg.active_profile.clone();
+                                // PROBLEM 267 round 3 — the pills' icons, from
+                                // the same cache the icon ring fills; CACHE
+                                // ONLY, so this path gains one HashMap lookup
+                                // per chip and no shell call.
+                                let icon_cache = s
+                                    .app_handle
+                                    .try_state::<crate::commands::IconCacheState>()
+                                    .map(|c| std::sync::Arc::clone(&c.0));
+                                let lookup = |target: &str| -> Option<String> {
+                                    icon_cache.as_ref().and_then(|c| {
+                                        c.lock().unwrap_or_else(|p| p.into_inner()).get(target).cloned()
+                                    })
+                                };
+                                let icons = hud_icons_for(&cfg, &name, &lookup);
 
                                 // CORE_AIM: the HUD must show the CURRENT
                                 // PROFILE's shortcuts — the user's actual app
@@ -393,10 +426,10 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
                                     &cfg.hud_band_count,
                                 );
 
-                                (name, emoji, binds, specials)
+                                (name, emoji, binds, icons, specials)
                             };
                             guide_hud::show_guide_hud(
-                                epoch, &profile_name, emoji, bindings, specials,
+                                epoch, &profile_name, emoji, bindings, icons, specials,
                             );
                         }
                     }
@@ -430,19 +463,7 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
                 s.cancel_hud(true);
             }
 
-            match combo {
-                KeyCombo::Alpha(ch)       => handle_alpha(ch, state_arc),
-                KeyCombo::Special(name)   => handle_special(name, state_arc),
-                KeyCombo::Escape          => handle_boss_key(state_arc),
-                KeyCombo::Backtick        => handle_pip(state_arc),
-                KeyCombo::Tab             => handle_fullscreen_pip(state_arc),
-                KeyCombo::Backspace       => handle_force_close(state_arc),
-                KeyCombo::Comma           => handle_focus(state_arc),
-                KeyCombo::RightAlt        => handle_profile_cycle(state_arc),
-                KeyCombo::UpArrow         => handle_double_tap_up(state_arc),
-                KeyCombo::DownArrow       => handle_double_tap_down(state_arc),
-                KeyCombo::Period          => handle_bypass_toggle(state_arc),
-            }
+            run_combo(combo, state_arc);
         }
 
         // ---------------------------------------------------------------
@@ -459,8 +480,30 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
                 let mut s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
                 s.cancel_hud(true);
             }
-            log::info!("engine: pointer activation → Space+{ch} (armed chip on the guide HUD)");
-            handle_alpha(ch, state_arc);
+            // PROBLEM 267 — the icon ring's SPECIAL tiles arrive here too, as
+            // a Private Use Area char, and fire the SAME `KeyCombo` the
+            // keyboard would (`middle_ring::special_combo_for`) through the
+            // SAME `run_combo`. The cascade is not forked: a letter is still
+            // `handle_alpha`, a special is still its handler.
+            if crate::middle_ring::is_special_code(ch) {
+                match crate::middle_ring::special_combo_for(ch) {
+                    Some(combo) => {
+                        log::info!(
+                            "engine: pointer activation → special {combo:?} (armed tile on the \
+                             icon ring, PROBLEM 267)"
+                        );
+                        run_combo(combo, state_arc);
+                    }
+                    None => log::warn!(
+                        "engine: pointer activation carried an unknown special code {:#x} — \
+                         nothing fired",
+                        ch as u32
+                    ),
+                }
+            } else {
+                log::info!("engine: pointer activation → Space+{ch} (armed chip on the guide HUD)");
+                handle_alpha(ch, state_arc);
+            }
         }
 
         // ---------------------------------------------------------------
@@ -498,14 +541,99 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
             );
         }
 
-        // PROBLEM 263 — unreachable for the same reason and written out for the
-        // same reason as the arm above it.
+        // PROBLEM 267 — THE ICON RING. Reachable ONLY when `middle_ring_style`
+        // is `IconRing` (the default): `routed_middle_event` at the top left
+        // the event as `MiddleButtonDown`. (Until 1.0.109 this arm was the
+        // "unreachable, normalisation broken" error; that leg now lives in
+        // `routed_middle_event`'s GuideHud branch, byte-for-byte.)
+        //
+        // What happens, in order, and why each piece is where it is:
+        //   1. The CURSOR is captured NOW — `GetCursorPos` on this thread,
+        //      never in the callback — because the ring is anchored where the
+        //      button went DOWN, and by the time it shows the hand may have
+        //      started moving toward where it expects a tile to be.
+        //   2. The ENTRIES (icons included) are built on a blocking thread
+        //      WHILE the tap window runs, so a warm icon cache costs the show
+        //      nothing and a cold one overlaps the 250 ms the hand is holding
+        //      anyway. `extract_icon` joins an STA per call (picker rules).
+        //   3. At `MIDDLE_TAP_MS` — the same threshold the release uses to
+        //      tell a click from a hold, so the two can never disagree about
+        //      whether a ring was owed — the ring shows, unless the release
+        //      (`MiddleButtonTap` → `cancel_hud`) has already cancelled it.
         HookEvent::MiddleButtonDown => {
-            log::error!(
-                "engine: MiddleButtonDown reached the match — the PROBLEM 263 \
-                 normalisation at the top of dispatch() has been broken; that hold \
-                 did nothing"
-            );
+            let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+            let (cfg_snapshot, app_handle) = {
+                let mut s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
+                s.hud_cancel_tx = Some(cancel_tx);
+                let cfg = s.config.read().unwrap_or_else(|p| p.into_inner()).clone();
+                (cfg, s.app_handle.clone())
+            };
+            let epoch = guide_hud::begin_hold();
+            let cursor = cursor_pos_phys();
+            #[cfg(windows)]
+            {
+                let own = crate::hook::exclusions::own_stem();
+                let fg = unsafe { crate::hook::exclusions::foreground_stem() };
+                let phrase = guide_hud::shown_over_phrase(&fg, &own);
+                // The per-hold line for THIS leg. No `hold start` in it, for
+                // PROBLEM 263's reason: the keyboard hook was never asked.
+                log::info!(
+                    "middle-button ring v2: middle-button hold #{} began at cursor ({},{}) \
+                     physical (hud hold #{epoch}) {phrase} — the cursor-anchored icon ring \
+                     will be raised in {} ms unless the button comes back up first, in which \
+                     case the click is replayed. THIS LINE IS NOT CLAUDE.md LAW 6's PROOF. \
+                     PROBLEM 267.",
+                    crate::hook::middle_hold_count(),
+                    cursor.0,
+                    cursor.1,
+                    crate::hook::MIDDLE_TAP_MS
+                );
+            }
+            let scope = cfg_snapshot.middle_ring_scope;
+            // 2026-09-15 — Rings or Spiral, for the "All" scope only. Read
+            // from the same snapshot as the scope so one hold can never mix
+            // a scope from one config with a layout from another.
+            let all_layout = cfg_snapshot.all_ring_layout;
+            let fun = cfg_snapshot.fun_mode;
+            let reduced = cfg_snapshot.motion == "reduced";
+            let build = tauri::async_runtime::spawn_blocking(move || {
+                let cache = app_handle
+                    .try_state::<crate::commands::IconCacheState>()
+                    .map(|c| std::sync::Arc::clone(&c.0));
+                let extract = |target: &str| -> Option<String> {
+                    ring_icon_for(target, cache.as_ref())
+                };
+                let profile = cfg_snapshot.active_profile.clone();
+                crate::middle_ring::build_entries(&cfg_snapshot, &profile, scope, &extract)
+            });
+            tauri::async_runtime::spawn(async move {
+                tokio::select! {
+                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(
+                        crate::hook::MIDDLE_TAP_MS,
+                    )) => {
+                        if *cancel_rx.borrow() { return; }
+                        let entries = match build.await {
+                            Ok(e) => e,
+                            Err(e) => {
+                                log::error!(
+                                    "engine: the icon-ring entry build PANICKED ({e}) — this \
+                                     hold shows no ring (PROBLEM 267)"
+                                );
+                                return;
+                            }
+                        };
+                        // Re-asked after the build: a cold icon cache can push
+                        // the build past the tap window, and a release that
+                        // landed meanwhile has already cancelled this hold.
+                        if *cancel_rx.borrow() { return; }
+                        guide_hud::show_middle_ring(epoch, entries, scope, all_layout, fun, reduced, cursor);
+                    }
+                    _ = cancel_rx.changed() => {
+                        // Released inside the tap window (the click is being
+                        // replayed) or superseded.
+                    }
+                }
+            });
         }
 
         // ---------------------------------------------------------------
@@ -563,6 +691,110 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
 // ---------------------------------------------------------------------------
 // Action handlers
 // ---------------------------------------------------------------------------
+
+/// ONE combo dispatcher for every witness: the keyboard's `KeyCombo` arm, and
+/// — since PROBLEM 267 — a special tile released on the icon ring. Lifted out
+/// of the `KeyCombo` arm verbatim so the ring cannot fork the cascade: there is
+/// exactly one place that says what Space+Esc does.
+fn run_combo(combo: KeyCombo, state_arc: &Arc<Mutex<EngineState>>) {
+    match combo {
+        KeyCombo::Alpha(ch)       => handle_alpha(ch, state_arc),
+        KeyCombo::Special(name)   => handle_special(name, state_arc),
+        KeyCombo::Escape          => handle_boss_key(state_arc),
+        KeyCombo::Backtick        => handle_pip(state_arc),
+        KeyCombo::Tab             => handle_fullscreen_pip(state_arc),
+        KeyCombo::Backspace       => handle_force_close(state_arc),
+        KeyCombo::Comma           => handle_focus(state_arc),
+        KeyCombo::RightAlt        => handle_profile_cycle(state_arc),
+        KeyCombo::UpArrow         => handle_double_tap_up(state_arc),
+        KeyCombo::DownArrow       => handle_double_tap_down(state_arc),
+        KeyCombo::Period          => handle_bypass_toggle(state_arc),
+        KeyCombo::Semicolon       => handle_voice_typing(state_arc),
+    }
+}
+
+/// Space + ; (and the ring's "Voice Typing" tile): Windows dictation.
+fn handle_voice_typing(state_arc: &Arc<Mutex<EngineState>>) {
+    let app_handle = {
+        let s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
+        s.app_handle.clone()
+    };
+    let msg = actions::voice_typing::start_voice_typing();
+    crate::show_toast(&app_handle, msg);
+}
+
+/// PROBLEM 267 — what a `MiddleButtonDown` becomes for the match in
+/// `dispatch`, by the owner's `middle_ring_style`:
+///
+/// * `GuideHud` → `SpaceDown`, the PROBLEM 263 normalisation, byte-for-byte:
+///   the centred Guide HUD, the same arm, the same log line.
+/// * `IconRing` → `MiddleButtonDown` stays itself and its own arm raises the
+///   cursor-anchored ring.
+///
+/// Pure, so `middle_route_tests` pins both values without a mouse.
+pub(crate) fn routed_middle_event(style: crate::config::MiddleRingStyle) -> HookEvent {
+    match crate::middle_ring::middle_down_route(style) {
+        crate::middle_ring::MiddleRoute::GuideHud => HookEvent::SpaceDown,
+        crate::middle_ring::MiddleRoute::IconRing => HookEvent::MiddleButtonDown,
+    }
+}
+
+/// PROBLEM 267 — the cursor in PHYSICAL screen px, read on the ENGINE thread
+/// (a win32k call; legal here, never in a hook callback — PROBLEM 58/134).
+/// `(0,0)` when it cannot be read: the clamp then lands the ring in the
+/// top-left corner of the primary work area and warps the cursor to it, which
+/// is visible and recoverable rather than a ring nowhere.
+fn cursor_pos_phys() -> (i32, i32) {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let mut pt = windows::Win32::Foundation::POINT::default();
+        if unsafe { GetCursorPos(&mut pt) }.is_ok() {
+            return (pt.x, pt.y);
+        }
+        log::warn!("engine: GetCursorPos failed — anchoring the icon ring at (0,0) (PROBLEM 267)");
+        (0, 0)
+    }
+    #[cfg(not(windows))]
+    {
+        (0, 0)
+    }
+}
+
+/// PROBLEM 267 — the icon ring's REAL-ICON resolver, cache first.
+///
+/// `target` is whatever the binding names: an absolute exe, a bare exe name
+/// (`brave.exe`), a `.lnk`, a `shell:AppsFolder\…` AUMID or a folder. The
+/// picker's `IconCache` is keyed by the target string exactly as
+/// `extract_icon_cmd` keys it, so a key the user bound through the picker is a
+/// warm hit; anything else is resolved the way `extract_icon_cmd` resolves it
+/// and extracted through the one shell extractor (`IShellItemImageFactory`,
+/// which handles folders and documents as well as exes), then cached for the
+/// next hold. Returns bare base64 PNG, as the extractor does; the payload
+/// builder wraps it as a data URL.
+fn ring_icon_for(
+    target: &str,
+    cache: Option<&std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>>,
+) -> Option<String> {
+    if let Some(c) = cache {
+        if let Some(hit) = c.lock().unwrap_or_else(|p| p.into_inner()).get(target) {
+            return Some(hit.clone());
+        }
+    }
+    let resolved = if std::path::Path::new(target).is_absolute() {
+        target.to_string()
+    } else {
+        actions::smart_cascade::resolve_path(target).unwrap_or_else(|| target.to_string())
+    };
+    let png = crate::icon_extractor::extract_icon(&resolved)?;
+    if let Some(c) = cache {
+        c.lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(target.to_string())
+            .or_insert_with(|| png.clone());
+    }
+    Some(png)
+}
 
 /// Handle Space + F1–F12 / Enter / Tab / Left / Right.
 /// Routes through AppConfig.special_keys if user has configured a binding.
@@ -1049,6 +1281,42 @@ pub(crate) fn hud_apps_for(
     binds
 }
 
+/// PROBLEM 267 round 3 — the Space ring's pill icons: one entry per
+/// `hud_apps_for` row, same order (both walk the mapped bindings sorted by
+/// key). The SAME sources the icon ring uses (`middle_ring::build_entries`),
+/// minus the shell call: a link → its `site_icon`; otherwise the picker's
+/// `icon_override`, else `lookup(target)` — the caller's CACHE-ONLY lookup,
+/// so nothing here fetches or extracts on the Space-hold path. `None` = the
+/// letter disc, exactly as before. Pure; `hud_icon_tests` pin the rules.
+pub(crate) fn hud_icons_for(
+    cfg: &crate::config::AppConfig,
+    profile_name: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Vec<Option<String>> {
+    let Some(profile) = cfg.profiles.iter().find(|p| p.name == profile_name) else {
+        return Vec::new();
+    };
+    let mut keys: Vec<_> = profile.bindings.iter().filter(|(_, b)| b.is_mapped()).collect();
+    keys.sort_by(|a, b| a.0.cmp(b.0));
+    keys.into_iter()
+        .map(|(_, bind)| {
+            if bind.web_url.is_some() {
+                return bind.site_icon.clone().filter(|s| !s.is_empty());
+            }
+            bind.icon_override
+                .clone()
+                .filter(|s| !s.is_empty())
+                .map(|b64| crate::middle_ring::as_png_data_url(&b64))
+                .or_else(|| {
+                    bind.app
+                        .as_deref()
+                        .and_then(lookup)
+                        .map(|b64| crate::middle_ring::as_png_data_url(&b64))
+                })
+        })
+        .collect()
+}
+
 /// The active profile's emoji, for the glyph beside the SPACE pill.
 ///
 /// `None` is the NORMAL state, not a degraded one: it is the correct answer for
@@ -1161,6 +1429,9 @@ pub(crate) fn preview_payload(
     crate::guide_hud::GuideHudPayload {
         profile_emoji: profile_emoji_for(cfg, &name),
         apps: hud_apps_for(cfg, &name),
+        // A preview carries no shell icons (no cache at hand); the stored
+        // site/override icons still show, as they would on a real hold.
+        app_icons: hud_icons_for(cfg, &name, &|_| None),
         specials: specials_for_hud(cfg.hud_show_specials, bands),
         profile: name,
         preview: Some(crate::guide_hud::HudPreview {
@@ -1453,5 +1724,61 @@ mod band_gate_tests {
                  widens the inner ring for every chip on it"
             );
         }
+    }
+}
+
+/// PROBLEM 267 — the owner's `middle_ring_style` switch, pinned at the one
+/// place `dispatch` consults it. `GuideHud` must reproduce phase 1 exactly,
+/// which means the SAME `SpaceDown` normalisation PROBLEM 263 shipped; the
+/// default must be the new ring.
+#[cfg(test)]
+mod middle_route_tests {
+    use super::*;
+    use crate::config::MiddleRingStyle;
+
+    #[test]
+    fn guide_hud_normalises_to_space_down_and_icon_ring_keeps_its_own_arm() {
+        assert!(matches!(routed_middle_event(MiddleRingStyle::GuideHud), HookEvent::SpaceDown));
+        assert!(matches!(routed_middle_event(MiddleRingStyle::IconRing), HookEvent::MiddleButtonDown));
+        assert!(
+            matches!(routed_middle_event(MiddleRingStyle::default()), HookEvent::MiddleButtonDown),
+            "the default is the icon ring (owner, 2026-09-13)"
+        );
+    }
+
+    /// `ring_icon_for` answers from the cache without touching the shell, and
+    /// a cache hit is returned byte-for-byte. (The extraction leg needs a
+    /// desktop; `picker_worker::tests::icons_extract_on_a_non_main_sta_thread`
+    /// already proves the extractor on a non-main thread.)
+    /// PROBLEM 267 round 3 — the HUD's pill icons follow the ring's rules,
+    /// one per `hud_apps_for` row in the same order, cache-only.
+    #[test]
+    fn hud_icons_follow_the_rings_sources_and_never_extract() {
+        use crate::config::{KeyBinding, Profile};
+        let mut cfg = crate::config::AppConfig::default();
+        let mut map = crate::config::BindingMap::new();
+        map.insert("b".into(), KeyBinding { label: Some("Brave".into()), app: Some("brave.exe".into()), ..Default::default() });
+        map.insert("g".into(), KeyBinding { label: Some("GitHub".into()), web_url: Some("https://github.com".into()), site_icon: Some("data:image/x-icon;base64,AAEC".into()), ..Default::default() });
+        map.insert("p".into(), KeyBinding { label: Some("Pinned".into()), app: Some("pinned.exe".into()), icon_override: Some("QUJD".into()), ..Default::default() });
+        map.insert("x".into(), KeyBinding { label: Some("Cold".into()), app: Some("cold.exe".into()), ..Default::default() });
+        cfg.profiles = vec![Profile { name: "P".into(), bindings: map, emoji: None }];
+        cfg.active_profile = "P".into();
+        let lookup = |t: &str| -> Option<String> { (t == "brave.exe").then(|| "iVBOR".to_string()) };
+        let apps = hud_apps_for(&cfg, "P");
+        let icons = hud_icons_for(&cfg, "P", &lookup);
+        assert_eq!(apps.len(), icons.len());
+        assert_eq!(apps.iter().map(|a| a.0.as_str()).collect::<Vec<_>>(), vec!["B", "G", "P", "X"]);
+        assert_eq!(icons[0].as_deref(), Some("data:image/png;base64,iVBOR"), "shell icon from the cache");
+        assert_eq!(icons[1].as_deref(), Some("data:image/x-icon;base64,AAEC"), "a link's site_icon");
+        assert_eq!(icons[2].as_deref(), Some("data:image/png;base64,QUJD"), "icon_override wins");
+        assert_eq!(icons[3], None, "not cached: the letter disc, no extraction");
+        assert!(hud_icons_for(&cfg, "Nope", &lookup).is_empty());
+    }
+
+    #[test]
+    fn ring_icon_for_answers_from_the_cache_first() {
+        let cache = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        cache.lock().unwrap().insert("brave.exe".to_string(), "QUJD".to_string());
+        assert_eq!(ring_icon_for("brave.exe", Some(&cache)).as_deref(), Some("QUJD"));
     }
 }

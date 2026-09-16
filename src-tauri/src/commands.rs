@@ -30,6 +30,188 @@ pub struct OverlayRect {
     pub y: f64,
     pub w: f64,
     pub h: f64,
+    /// PROBLEM 267 round 3 — for `overlay_fit_hud` only: the Space ring's
+    /// fixed-size STAGE inside the canvas window, in the page's CSS px. The
+    /// window is now the whole work area of the cursor's monitor; the ring
+    /// keeps its old box, centred on the monitor exactly where it always was,
+    /// and the page places `#st-hud` at this rectangle. `None` from the toast
+    /// and handover fits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<StageRect>,
+}
+
+/// The Space ring's stage box inside the canvas window, CSS px.
+#[derive(serde::Serialize, Clone, Copy, Debug, PartialEq)]
+pub struct StageRect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// PROBLEM 267 round 3 — where the Space ring's stage is centred, PHYSICAL
+/// px: the monitor's centre. `compositing_probes` samples around it instead
+/// of the window's centre, because the canvas window is the work area (its
+/// centre sits half a taskbar away from the SPACE pill) and the probes must
+/// land on the pill in both the pre-show baseline and the post-fit sample.
+static HUD_STAGE_CENTRE: std::sync::Mutex<Option<(i32, i32)>> = std::sync::Mutex::new(None);
+
+/// The canvas for the Space ring on `mon`, and the stage centre: the work
+/// area (inset if it equals the bounds), physical px, plus the monitor's
+/// centre in physical px. One function so `place_overlay_canvas` (show time)
+/// and `overlay_fit_hud` (the page's fit) compute the identical rectangle
+/// and the fit finds the window already there.
+pub(crate) fn hud_canvas_for(mon: &tauri::Monitor) -> (crate::middle_ring::WorkArea, f64, (i32, i32)) {
+    use crate::middle_ring::WorkArea;
+    let sf = mon.scale_factor();
+    let wa = mon.work_area();
+    let area = WorkArea {
+        x: wa.position.x as f64,
+        y: wa.position.y as f64,
+        w: wa.size.width as f64,
+        h: wa.size.height as f64,
+    };
+    let bounds = WorkArea {
+        x: mon.position().x as f64,
+        y: mon.position().y as f64,
+        w: mon.size().width as f64,
+        h: mon.size().height as f64,
+    };
+    let centre = (
+        (bounds.x + bounds.w / 2.0).round() as i32,
+        (bounds.y + bounds.h / 2.0).round() as i32,
+    );
+    (crate::middle_ring::canvas_rect(area, bounds), sf, centre)
+}
+
+/// PROBLEM 267 round 4 follow-up (2026-09-15) — how much of `monitor` an
+/// AUTO-HIDDEN appbar (in practice: an auto-hide taskbar) will take back
+/// when it slides out, as (left, top, right, bottom) in PHYSICAL px.
+///
+/// Windows does NOT subtract an auto-hidden appbar from `rcWork`, so the
+/// work area — and therefore the canvas — runs all the way to the screen
+/// edge the bar is docked against. The bar is TOPMOST and slides out over
+/// our topmost overlay the moment the cursor reaches that edge, which is
+/// precisely what the Favourites snap does when it pins the ring centre to
+/// the work-area edge and warps the cursor there. Measured on the owner's
+/// machine 2026-09-15: `rcWork` (0,48,2560,1600) — nothing reserved at the
+/// bottom — beside `Shell_TrayWnd` at (0,1598)-(2560,1670), auto-hide, 72 px
+/// tall. Everything the ring drew in that band was invisible.
+///
+/// `ABM_GETAUTOHIDEBAREX` is asked per edge for THIS monitor, so a
+/// multi-monitor setup answers per screen and a monitor with no bar gets
+/// zeroes. Failure of any kind reads as "no bar" — this may only ever take
+/// room away from the layout, never grant it.
+#[cfg(windows)]
+pub(crate) fn autohide_reserve_for(monitor: crate::middle_ring::WorkArea) -> (f64, f64, f64, f64) {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::Shell::{
+        SHAppBarMessage, ABE_BOTTOM, ABE_LEFT, ABE_RIGHT, ABE_TOP, ABM_GETAUTOHIDEBAREX,
+        APPBARDATA,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+    let mut out = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let mon_rect = RECT {
+        left: monitor.x.round() as i32,
+        top: monitor.y.round() as i32,
+        right: monitor.right().round() as i32,
+        bottom: monitor.bottom().round() as i32,
+    };
+    for edge in [ABE_LEFT, ABE_TOP, ABE_RIGHT, ABE_BOTTOM] {
+        let mut abd = APPBARDATA {
+            cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+            uEdge: edge,
+            rc: mon_rect,
+            ..Default::default()
+        };
+        let hwnd = unsafe { SHAppBarMessage(ABM_GETAUTOHIDEBAREX, &mut abd) };
+        if hwnd == 0 {
+            continue;
+        }
+        let mut r = RECT::default();
+        if unsafe { GetWindowRect(HWND(hwnd as *mut _), &mut r) }.is_err() {
+            continue;
+        }
+        let bar = crate::middle_ring::WorkArea {
+            x: r.left as f64,
+            y: r.top as f64,
+            w: (r.right - r.left) as f64,
+            h: (r.bottom - r.top) as f64,
+        };
+        let (l, t, rr, b) = crate::middle_ring::appbar_reserve(monitor, bar);
+        out = (out.0.max(l), out.1.max(t), out.2.max(rr), out.3.max(b));
+    }
+    out
+}
+
+#[cfg(not(windows))]
+pub(crate) fn autohide_reserve_for(_monitor: crate::middle_ring::WorkArea) -> (f64, f64, f64, f64) {
+    (0.0, 0.0, 0.0, 0.0)
+}
+
+/// PROBLEM 267 round 3 — size and place the overlay window as ONE BIG
+/// CANVAS: `canvas` is the work area of the target monitor in PHYSICAL px
+/// (`middle_ring::canvas_rect`, never the exact monitor bounds — a
+/// transparent window matching the monitor composes zero pixels here,
+/// PROBLEM 37 family). Shared by both rings. The window is compared with its
+/// CURRENT rectangle first and left alone when it already matches — a raise
+/// on the same monitor after a raise does no resize; a toast in between
+/// shrinks the window, and then it is moved back. Returns whether it moved.
+///
+/// INSTRUMENTATION, same discipline as `overlay_fit_hud`: the request, the
+/// scale, and what the window ACTUALLY became. Never remove it — a wrong
+/// size, a wrong position and a window that never moved are otherwise
+/// indistinguishable (2026-08-11).
+pub(crate) fn overlay_fit_canvas(
+    win: &tauri::WebviewWindow,
+    canvas: crate::middle_ring::WorkArea,
+    scale: f64,
+    what: &str,
+) -> bool {
+    crate::crash_context::note_overlay_op(format!(
+        "overlay_fit_canvas {:.0}x{:.0} @ ({:.0},{:.0}) physical ({what})",
+        canvas.w, canvas.h, canvas.x, canvas.y
+    ));
+    let pos = (canvas.x.round() as i32, canvas.y.round() as i32);
+    let size = (canvas.w.round().max(1.0) as u32, canvas.h.round().max(1.0) as u32);
+    let cur_pos = win.outer_position().ok().map(|p| (p.x, p.y));
+    let cur_size = win.outer_size().ok().map(|s| (s.width, s.height));
+    let unchanged = cur_pos == Some(pos) && cur_size == Some(size);
+    let mut resized_twice = false;
+    if !unchanged {
+        // POSITION FIRST, SIZE SECOND (round 6). A size set while the window
+        // still sits on another monitor is a LOGICAL size there; the move
+        // then crosses a DPI boundary and Windows' WM_DPICHANGED makes tao
+        // keep that logical size — measured on the owner's mixed setup
+        // (1920×1080 @ 1 beside 2560×1600 @ 1.5): asked 2560×1480, GOT
+        // 3840×2220, the canvas 1.5× too big. Moving first puts the window
+        // on the target monitor before the size is applied there; the
+        // readback below re-applies it once if a DPI change still bent it.
+        let _ = win.set_position(tauri::PhysicalPosition::new(pos.0, pos.1));
+        let _ = win.set_size(tauri::PhysicalSize::new(size.0, size.1));
+        let check = win.outer_size().ok().map(|s| (s.width, s.height));
+        if check != Some(size) {
+            resized_twice = true;
+            let _ = win.set_size(tauri::PhysicalSize::new(size.0, size.1));
+            let _ = win.set_position(tauri::PhysicalPosition::new(pos.0, pos.1));
+        }
+    }
+    let got_sz = win.outer_size().ok().map(|s| (s.width, s.height));
+    let got_ps = win.outer_position().ok().map(|p| (p.x, p.y));
+    if resized_twice {
+        log::warn!(
+            "overlay_fit_canvas ({what}): the first size was bent by a DPI change on the way to              ({},{}) — re-applied; GOT size {got_sz:?} (PROBLEM 267 round 6, mixed-DPI monitors)",
+            pos.0, pos.1
+        );
+    }
+    log::info!(
+        "overlay_fit_canvas ({what}): canvas {}x{} @ ({},{}) physical ({:.0}x{:.0} logical at          scale {scale}) — {}; GOT size {got_sz:?} pos {got_ps:?}; visible {:?} (PROBLEM 267)",
+        size.0, size.1, pos.0, pos.1,
+        canvas.w / scale, canvas.h / scale,
+        if unchanged { "already there, no resize" } else { "window moved/resized" },
+        win.is_visible(),
+    );
+    !unchanged
 }
 
 pub struct ConfigState(pub SharedConfig);
@@ -1455,8 +1637,14 @@ pub fn overlay_fit(app: tauri::AppHandle, width: f64, height: f64) -> Option<Ove
     let h = height.clamp(44.0, ms.height - 32.0);
     let x = mp.x + (ms.width - w) / 2.0;
     let y = mp.y + ms.height - h - 64.0;
-    let _ = win.set_size(tauri::LogicalSize::new(w, h));
-    let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+    // PHYSICAL, from the TARGET monitor's scale, position first (round 6):
+    // a `LogicalPosition` is converted with the window's CURRENT monitor's
+    // scale, so with the window still on a 1.0 monitor a toast meant for
+    // the 1.5 panel landed at two-thirds of its coordinates; and a size set
+    // before the move is re-scaled by WM_DPICHANGED on the way (see
+    // `overlay_fit_canvas`). One panel never showed either.
+    let _ = win.set_position(tauri::PhysicalPosition::new((x * sf).round() as i32, (y * sf).round() as i32));
+    let _ = win.set_size(tauri::PhysicalSize::new((w * sf).round() as u32, (h * sf).round() as u32));
     // INSTRUMENTATION — see overlay_fit_hud. Never remove.
     log::info!(
         "overlay_fit: asked {width:.0}x{height:.0} → {w:.0}x{h:.0} @ ({x:.0},{y:.0})          bottom-centre; monitor {:.0}x{:.0} at ({:.0},{:.0}) scale {sf}; GOT size {:?} pos {:?}",
@@ -1469,7 +1657,7 @@ pub fn overlay_fit(app: tauri::AppHandle, width: f64, height: f64) -> Option<Ove
     // (PROBLEM 168).
     raise_overlay_topmost(&win);
     let _ = win.show();
-    Some(OverlayRect { x, y, w, h })
+    Some(OverlayRect { x, y, w, h, stage: None })
 }
 
 /// Size + position the overlay window to fit the RENDERED Guide HUD, called
@@ -1506,7 +1694,7 @@ pub fn overlay_fit_handover(
     height: f64,
 ) -> Option<OverlayRect> {
     crate::crash_context::note_overlay_op(format!(
-        "overlay_fit_handover {width}x{height} (ring box, extended to the toast slot)"
+        "overlay_fit_handover stage {width}x{height} (canvas, bottom edge to the toast slot)"
     ));
     use std::sync::atomic::Ordering;
     use tauri::Manager;
@@ -1519,30 +1707,44 @@ pub fn overlay_fit_handover(
         return None;
     };
     let sf = mon.scale_factor();
-    let ms = mon.size().to_logical::<f64>(sf);
-    let mp = mon.position().to_logical::<f64>(sf);
-
-    let w = width.clamp(120.0, ms.width - 32.0);
-    let ring_h = height.clamp(44.0, ms.height - 32.0);
-    // Top edge: where the CENTRED ring box already is. Unchanged.
-    let y = mp.y + (ms.height - ring_h) / 2.0;
-    // Bottom edge: exactly overlay_fit's, so the toast slot lines up.
-    let bottom = mp.y + ms.height - 64.0;
-    let h = (bottom - y).clamp(ring_h, ms.height - 32.0);
-    let x = mp.x + (ms.width - w) / 2.0;
-
-    let _ = win.set_size(tauri::LogicalSize::new(w, h));
-    let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+    let (Ok(cur_pos), Ok(cur_size)) = (win.outer_position(), win.outer_size()) else {
+        log::warn!("overlay_fit_handover: the window's rectangle could not be read - not positioned");
+        return None;
+    };
+    let (_, _, centre) = hud_canvas_for(&mon);
+    // PROBLEM 267 round 3 — the window is the CANVAS (the work area); the
+    // ring sits on its fixed stage centred on the monitor. Keep the window's
+    // left, top and width exactly as they are (so the stage does not move a
+    // pixel) and set the BOTTOM edge to overlay_fit's own toast bottom
+    // (`monitor bottom − 64` logical), never above the stage's bottom, never
+    // the monitor's exact bottom.
+    let mon_bottom = mon.position().y as f64 + mon.size().height as f64;
+    let toast_bottom = mon_bottom - 64.0 * sf;
+    let stage_bottom = centre.1 as f64 + (height * sf) / 2.0;
+    let bottom = toast_bottom
+        .max(stage_bottom)
+        .min(mon_bottom - crate::middle_ring::CANVAS_INSET * sf);
+    let h = (bottom - cur_pos.y as f64).max(44.0 * sf).round() as u32;
+    if h != cur_size.height {
+        let _ = win.set_size(tauri::PhysicalSize::new(cur_size.width, h));
+    }
+    let got_sz = win.outer_size().ok().map(|s| (s.width, s.height));
+    let got_ps = win.outer_position().ok().map(|p| (p.x, p.y));
     log::info!(
-        "overlay_fit_handover: ring {ring_h:.0}px -> window {w:.0}x{h:.0} @ ({x:.0},{y:.0}); \
-         bottom {bottom:.0} matches overlay_fit; monitor {:.0}x{:.0} scale {sf}; GOT size {:?} pos {:?}",
-        ms.width, ms.height,
-        win.outer_size().map(|s| s.to_logical::<f64>(sf)).map(|s| (s.width.round(), s.height.round())),
-        win.outer_position().map(|p| p.to_logical::<f64>(sf)).map(|p| (p.x.round(), p.y.round())),
+        "overlay_fit_handover: stage {width:.0}x{height:.0} -> window {}x{h} @ ({},{}) physical; \
+         bottom {bottom:.0} (toast slot {toast_bottom:.0}, stage bottom {stage_bottom:.0}); \
+         monitor at ({},{}) scale {sf}; GOT size {got_sz:?} pos {got_ps:?}",
+        cur_size.width, cur_pos.x, cur_pos.y, mon.position().x, mon.position().y,
     );
     raise_overlay_topmost(&win);
     let _ = win.show();
-    Some(OverlayRect { x, y, w, h })
+    Some(OverlayRect {
+        x: cur_pos.x as f64 / sf,
+        y: cur_pos.y as f64 / sf,
+        w: cur_size.width as f64 / sf,
+        h: h as f64 / sf,
+        stage: None,
+    })
 }
 
 #[tauri::command]
@@ -1580,20 +1782,26 @@ pub fn overlay_fit_hud(app: tauri::AppHandle, width: f64, height: f64) -> Option
         return None;
     };
     if let Some(mon) = overlay_monitor(&win) {
-        let sf = mon.scale_factor();
+        let (canvas, sf, centre) = hud_canvas_for(&mon);
         let ms = mon.size().to_logical::<f64>(sf);
         let mp = mon.position().to_logical::<f64>(sf);
-        // The radial HUD is CENTRED on both axes (V13's panel was bottom-
-        // anchored). Clamped to 94% of the monitor and never to the full work
-        // area: a fullscreen transparent window composes zero pixels here.
+        // THE STAGE — the ring's own box, clamped to 94% of the monitor as it
+        // always was (the page laid the ring out against that budget) — is
+        // NOT the window any more. PROBLEM 267 round 3: the window is the
+        // whole work area of the cursor's monitor (`hud_canvas_for`), so a
+        // pill that blooms past the ring's box has canvas to grow into and
+        // no window edge can cut it. The stage is centred on the MONITOR,
+        // exactly where the old window was, so every pill lands where it
+        // did; only the window around it grew. The page places `#st-hud` at
+        // the returned stage rectangle.
         let w = width.clamp(320.0, ms.width * 0.94);
         let h = height.clamp(120.0, ms.height * 0.94);
-        // PROBLEM 112 — hoisted into locals so the rect can be returned. The
-        // maths is UNCHANGED; it was previously computed inline in the call.
-        let x = mp.x + (ms.width - w) / 2.0;
-        let y = mp.y + (ms.height - h) / 2.0;
-        let _ = win.set_size(tauri::LogicalSize::new(w, h));
-        let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+        let moved = overlay_fit_canvas(&win, canvas, sf, "space ring");
+        let (sx, sy) =
+            crate::middle_ring::stage_box(canvas, (centre.0 as f64, centre.1 as f64), sf, w, h);
+        *HUD_STAGE_CENTRE.lock().unwrap_or_else(|p| p.into_inner()) = Some(centre);
+        let x = canvas.x / sf;
+        let y = canvas.y / sf;
 
         // INSTRUMENTATION (2026-08-11). This function used to be completely
         // silent, and when the HUD stopped appearing there was no way to tell
@@ -1604,12 +1812,13 @@ pub fn overlay_fit_hud(app: tauri::AppHandle, width: f64, height: f64) -> Option
         let got_sz = win.outer_size().map(|s| s.to_logical::<f64>(sf));
         let got_ps = win.outer_position().map(|p| p.to_logical::<f64>(sf));
         log::info!(
-            "overlay_fit_hud: asked {width:.0}x{height:.0} → clamped {w:.0}x{h:.0} @ \
-             ({:.0},{:.0}); monitor {:.0}x{:.0} at ({:.0},{:.0}) scale {sf}; \
-             GOT size {:?} pos {:?}; visible {:?}",
-            mp.x + (ms.width - w) / 2.0,
-            mp.y + (ms.height - h) / 2.0,
-            ms.width, ms.height, mp.x, mp.y,
+            "overlay_fit_hud: asked {width:.0}x{height:.0} → stage {w:.0}x{h:.0} @ \
+             ({sx:.0},{sy:.0}) css inside the canvas {:.0}x{:.0} @ ({:.0},{:.0}) physical \
+             ({}); monitor {:.0}x{:.0} at ({:.0},{:.0}) scale {sf}, stage centre \
+             ({},{}) physical; GOT size {:?} pos {:?}; visible {:?}",
+            canvas.w, canvas.h, canvas.x, canvas.y,
+            if moved { "window moved/resized" } else { "window already there" },
+            ms.width, ms.height, mp.x, mp.y, centre.0, centre.1,
             got_sz.map(|s| (s.width.round(), s.height.round())),
             got_ps.map(|p| (p.x.round(), p.y.round())),
             win.is_visible(),
@@ -1622,7 +1831,13 @@ pub fn overlay_fit_hud(app: tauri::AppHandle, width: f64, height: f64) -> Option
 
         // PROBLEM 80 — the compositing self-test rides on every HUD show.
         compositing_selftest(app.clone());
-        return Some(OverlayRect { x, y, w, h });
+        return Some(OverlayRect {
+            x,
+            y,
+            w: canvas.w / sf,
+            h: canvas.h / sf,
+            stage: Some(StageRect { x: sx, y: sy, w, h }),
+        });
     }
     None
 }
@@ -1662,8 +1877,11 @@ fn compositing_probes(win: &tauri::WebviewWindow) -> Option<Vec<(i32, i32)>> {
     let (Ok(pos), Ok(size)) = (win.outer_position(), win.outer_size()) else {
         return None;
     };
-    let cx = pos.x + size.width as i32 / 2;
-    let cy = pos.y + size.height as i32 / 2;
+    // PROBLEM 267 round 3 — the window is the canvas (the work area), whose
+    // centre is half a taskbar away from the SPACE pill; the pill sits at
+    // the stage centre, so sample there when it is known.
+    let stage = *HUD_STAGE_CENTRE.lock().unwrap_or_else(|p| p.into_inner());
+    let (cx, cy) = stage.unwrap_or((pos.x + size.width as i32 / 2, pos.y + size.height as i32 / 2));
     Some(vec![(cx, cy), (cx - 120, cy), (cx + 120, cy), (cx, cy - 20), (cx, cy + 20)])
 }
 
@@ -2740,6 +2958,12 @@ pub fn publish_hud_chips(
     app: tauri::AppHandle,
     chips: Vec<crate::hook::pointer::ChipRectIn>,
     dpr: f64,
+    // `centre` is the ring's centre in the window's CSS px (`toast.ts`'s
+    // `stageCentre()`). Optional so an older page still publishes; absent,
+    // `publish_chips` falls back to the window's centre — which is what it
+    // always used, and what stopped being the ring's centre in PROBLEM 267
+    // round 3 when `#st-hud` moved onto a stage inside a work-area window.
+    centre: Option<crate::hook::pointer::ChipPointIn>,
 ) {
     use tauri::Manager;
     let Some(win) = app.get_webview_window("overlay") else {
@@ -2765,7 +2989,15 @@ pub fn publish_hud_chips(
         log::warn!("publish_hud_chips: overlay size unreadable — chip snapshot cleared");
         return;
     };
-    crate::hook::pointer::publish_chips(pos.x, pos.y, size.width, size.height, &chips, dpr);
+    crate::hook::pointer::publish_chips(
+        pos.x,
+        pos.y,
+        size.width,
+        size.height,
+        &chips,
+        dpr,
+        centre.map(|c| (c.x, c.y)),
+    );
 }
 
 /// Show the REAL Guide HUD, in a layout the user has not chosen yet, for about
@@ -4692,4 +4924,14 @@ mod frontend_bridge_tests {
         assert_eq!(level, log::Level::Error, "overlay_error must be ERROR: {msg}");
         assert!(msg.starts_with("overlay-js: "), "the log convention must not drift: {msg}");
     }
+}
+
+/// PROBLEM 267 — the built-in middle-button exception rows the Settings
+/// "App exceptions" section shows pre-seeded at "Space only" with a "Default"
+/// tag: `(stem, display name)` for the headline apps, plus how many more the
+/// full `orbit_apps::ORBIT_APPS` table holds. Read-only; the user's own
+/// changes go to `excluded_apps` through the ordinary `save_config`.
+#[tauri::command]
+pub fn get_builtin_exceptions() -> (Vec<(String, String)>, usize) {
+    crate::hook::orbit_apps::builtin_rows()
 }

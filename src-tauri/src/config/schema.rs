@@ -148,8 +148,14 @@ pub struct AppConfig {
     ///
     /// `#[serde(default)]` is load-bearing: every config written before
     /// 1.0.79 lacks the field, and without it they all fail to deserialise.
+    ///
+    /// PROBLEM 267 — entries carry a SCOPE now (`AppException`): off
+    /// entirely, Space only, or middle button only. A 1.0.79–1.0.109 file
+    /// stores plain strings; `AppException`'s own `Deserialize` reads them as
+    /// `OffEntirely`, which is the meaning they always had, so no migration
+    /// pass and no `Vec<String>` twin field are needed.
     #[serde(default)]
-    pub excluded_apps: Vec<String>,
+    pub excluded_apps: Vec<AppException>,
 
     /// All user-defined shortcut profiles.
     pub profiles: Vec<Profile>,
@@ -369,6 +375,46 @@ pub struct AppConfig {
     /// needs the owner. `first_install_tests` checks BOTH paths.
     #[serde(default = "default_true")]
     pub middle_button_ring: bool,
+
+    /// PROBLEM 267 — WHAT the middle button raises: the new cursor-anchored
+    /// icon ring (`IconRing`, default) or phase 1's centred Guide HUD
+    /// (`GuideHud`, byte-for-byte 1.0.109). The owner's decision, 2026-09-13:
+    /// a choice, not a replacement. See `MiddleRingStyle`. Only meaningful
+    /// while `middle_button_ring` is on; the Settings pill is inert otherwise.
+    ///
+    /// `#[serde(default)]` = `IconRing` (the enum's `Default`), which is the
+    /// upgrade path every existing config travels; `Default` below agrees and
+    /// `first_install_tests` holds both to it.
+    #[serde(default)]
+    pub middle_ring_style: MiddleRingStyle,
+
+    /// PROBLEM 267 — how much the icon ring shows: the eight favourites
+    /// (`MyEight`, default) or everything bound plus the specials on a second
+    /// ring (`All`). See `MiddleRingScope`. Both paths default to `MyEight`.
+    #[serde(default)]
+    pub middle_ring_scope: MiddleRingScope,
+
+    /// 2026-09-15 — HOW the `All` scope is arranged: the concentric
+    /// Fibonacci `Rings` (default, the behaviour every existing install
+    /// already has) or the phyllotaxis `Spiral`. Owner's addition, and a
+    /// TOGGLE rather than a replacement. Meaningless for `MyEight`, and the
+    /// Settings pill only appears under `All` for that reason.
+    ///
+    /// `#[serde(default)]` = `Rings`, so nothing changes for a config that
+    /// predates the field — which is every config on disk.
+    #[serde(default)]
+    pub all_ring_layout: AllRingLayout,
+
+    /// PROBLEM 267 — the user's chosen favourites for the icon ring, as bound
+    /// LETTERS (`"m"`, `"b"`, …), in ring order, at most
+    /// `middle_ring::FAVOURITES_MAX` (15 since round 3; older eight-long lists
+    /// carry over). EMPTY means "not chosen": `middle_ring::favourites_for`
+    /// then uses the first six bound letters of the active profile, computed at ring time
+    /// and never written back — so a user who never opens the picker is never
+    /// pinned to a snapshot of a profile they keep editing. Letters that are no
+    /// longer bound are skipped at ring time, not deleted here.
+    #[serde(default)]
+    pub middle_ring_favourites: Vec<String>,
 
     /// Show the SPECIAL keys on the Space HUD's inner ring? ON by default.
     ///
@@ -708,6 +754,15 @@ impl Default for AppConfig {
             // holds both to it. The 3D/CAD safety net is NOT this flag — it is
             // the built-in list in hook/orbit_apps.rs, which is not a setting.
             middle_button_ring: true,
+            // PROBLEM 267 — the NEW ring by default, the owner's decision on
+            // 2026-09-13; `GuideHud` is the way back to phase 1. Must agree
+            // with the `#[serde(default)]` (= the enum's `#[default]`) on the
+            // field; first_install_tests holds both to it. Scope: the eight.
+            // Favourites: empty = "the first eight bound letters, lazily".
+            middle_ring_style: MiddleRingStyle::IconRing,
+            middle_ring_scope: MiddleRingScope::MyEight,
+            all_ring_layout: AllRingLayout::Rings,
+            middle_ring_favourites: Vec::new(),
             // PROBLEM 209 — ON. The specials ring has always been drawn; this
             // setting only lets someone turn it off. An existing config must
             // keep what it had.
@@ -977,12 +1032,167 @@ pub struct KeyBinding {
     /// Explicit `#[serde(default)]` for the same reason as above.
     #[serde(default)]
     pub browser_profile_name: Option<String>,
+
+    /// PROBLEM 267 — a LINK's icon: the site's favicon as a complete `data:`
+    /// URL (`data:image/x-icon;base64,…` or `data:image/png;base64,…`),
+    /// **fetched ONCE, at bind time**, by the key editor through
+    /// `site_icon::fetch_site_icon` the moment a URL is bound. The
+    /// middle-button ring shows it as the tile; the "Choose your eight" picker
+    /// shows it beside the row; nothing ever fetches at ring time — a ring that
+    /// waited on the network would arrive after the hand had let go.
+    ///
+    /// `None` = the fetch failed or never ran (a config from before this
+    /// field): the ring draws a letter disc, and the NEXT edit of that key
+    /// tries once more (the editor re-fetches whenever it commits a URL whose
+    /// binding has no icon). Explicit `#[serde(default)]` for the reason
+    /// `browser_exe` spells out — a plain `Option` is REQUIRED to serde.
+    #[serde(default)]
+    pub site_icon: Option<String>,
 }
 
 impl KeyBinding {
     /// Returns true if this binding has any action defined.
     pub fn is_mapped(&self) -> bool {
         self.app.is_some() || self.web_url.is_some()
+    }
+}
+
+/// PROBLEM 267 — WHAT a middle-button hold raises. The owner's decision on
+/// 2026-09-13: the new cursor-anchored icon ring is a CHOICE, not a
+/// replacement, and phase 1 must survive byte-for-byte behind the other value.
+///
+/// `IconRing` (default) — phase 2: the ring of real icons blooming out of the
+/// cursor (`middle_ring.rs`, `guide_hud::show_middle_ring`).
+/// `GuideHud` — phase 1 exactly as 1.0.109 ships it: `MiddleButtonDown` is
+/// normalised to `SpaceDown` at the top of `engine::dispatch` and the centred
+/// Guide HUD comes up. That normalisation line is untouched by this feature.
+///
+/// Serde default = `IconRing`, so a config predating the field gets the new
+/// ring; `first_install_tests` holds BOTH paths to it. Stored as
+/// `"icon_ring"` / `"guide_hud"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MiddleRingStyle {
+    #[default]
+    IconRing,
+    GuideHud,
+}
+
+/// PROBLEM 267 — HOW MUCH the icon ring shows. `MyEight` (default) is the
+/// FAVOURITES scope since round 3: any number the user ticks, 1 to
+/// `middle_ring::FAVOURITES_MAX` (`middle_ring_favourites`, or the first
+/// six bound letters until they choose) — the variant keeps its name only
+/// so the serialised `"my_eight"` is unchanged; every user-facing string
+/// says "Favourites". `All`: the favourites first, then every other bound
+/// letter and the actionable specials, on as many rings as the layout law
+/// needs (`middle_ring::layout_arcs`). Stored as `"my_eight"` / `"all"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MiddleRingScope {
+    #[default]
+    MyEight,
+    All,
+}
+
+/// 2026-09-15 — HOW the `All` scope is laid out.
+///
+/// * `Rings` (default) — the concentric Fibonacci rings this app has always
+///   drawn: 5 / 8 / 13 / 21 tiles at 108 / 175 / 283 / 458, each ring
+///   staggered from the one inside it by the golden angle.
+/// * `Spiral` — one phyllotaxis spiral (`middle_ring::spiral_slots`): tile
+///   *i* at the golden angle × *i*, at the radius that keeps the area per
+///   tile constant. The same packing a sunflower's seed head uses, which is
+///   why it has no rings to align and no gaps to leave.
+///
+/// Both obey the same containment law (`All` clamps the centre on-screen and
+/// warps the cursor), and both are picked by the same nearest-tile test.
+/// Stored as `"rings"` / `"spiral"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AllRingLayout {
+    #[default]
+    Rings,
+    Spiral,
+}
+
+/// PROBLEM 267 round 3 — `middle_ring_motion` (`bloom` | `ripple`, 1.0.110's
+/// follow-up) is GONE: ripple is the only motion. The key is ignored on read
+/// (no `deny_unknown_fields`), so a config that still carries it loads
+/// unchanged; a save simply stops writing it.
+
+/// PROBLEM 267 — the per-app exception SCOPE. Until 1.0.109 an entry in
+/// `excluded_apps` meant one thing: Spaceadom off in that app. Three meanings
+/// now, and the old one is the first:
+///
+/// * `OffEntirely` — Space AND the middle button stand down (the 1.0.79
+///   behaviour; every plain-string entry migrates to this).
+/// * `SpaceOnly` — Space keeps working; the middle button is handed back to
+///   the app. This is what `hook/orbit_apps.rs`'s built-in 3D/CAD/design list
+///   means, so a built-in row shows at `SpaceOnly` by default.
+/// * `MiddleOnly` — the middle-button ring keeps working; Space passes
+///   through untouched (a game that uses Space, say, where the ring is still
+///   wanted).
+///
+/// Consumed in ONE place, `hook::exclusions::resolve_scope`, which turns the
+/// user's list plus the built-in list into the two atomics the mouse and
+/// keyboard callbacks read. Stored as `"off_entirely"` / `"space_only"` /
+/// `"middle_only"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExceptionScope {
+    #[default]
+    OffEntirely,
+    SpaceOnly,
+    MiddleOnly,
+}
+
+/// PROBLEM 267 — one row of `excluded_apps`: an exe STEM (lowercase, no
+/// `.exe`, the same normalisation `exclusions::normalize_stem` applies) and
+/// its scope.
+///
+/// **BACK-COMPAT IS IN `Deserialize`, NOT IN A MIGRATION PASS.** Every config
+/// written from 1.0.79 to 1.0.109 stores this field as a plain array of
+/// strings (`["photoshop", "figma"]`). `deserialize_app_exception` accepts
+/// EITHER a bare string (→ `OffEntirely`, the meaning it always had) OR the
+/// object form, so an old file parses without anyone having to run anything,
+/// and the first save writes the object form. Serialisation is always the
+/// object. `excluded_apps_migration_tests` holds both shapes to it.
+///
+/// A built-in row the user has NOT changed is never stored here — the UI
+/// derives it from `orbit_apps`; only a CHANGED built-in row (e.g. SolidWorks
+/// moved to `MiddleOnly`) lands in this list, and moving it back to
+/// `SpaceOnly` removes the entry again, so a built-in is never duplicated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AppException {
+    pub exe: String,
+    #[serde(default)]
+    pub scope: ExceptionScope,
+}
+
+impl AppException {
+    pub fn new(exe: impl Into<String>, scope: ExceptionScope) -> Self {
+        AppException { exe: exe.into(), scope }
+    }
+}
+
+impl<'de> Deserialize<'de> for AppException {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // Untagged: a JSON string is the 1.0.79–1.0.109 shape, an object is
+        // the 1.0.110+ shape. Anything else is an error, as it always was.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Legacy(String),
+            Full {
+                exe: String,
+                #[serde(default)]
+                scope: ExceptionScope,
+            },
+        }
+        Ok(match Raw::deserialize(d)? {
+            Raw::Legacy(exe) => AppException { exe, scope: ExceptionScope::OffEntirely },
+            Raw::Full { exe, scope } => AppException { exe, scope },
+        })
     }
 }
 
@@ -1152,6 +1362,7 @@ mod key_binding_upgrade_tests {
             browser_exe: Some(r"C:\Program Files\Google\Chrome\Application\chrome.exe".into()),
             browser_profile_dir: Some("Profile 1".into()),
             browser_profile_name: Some("Work".into()),
+            site_icon: None,
         };
         let json = serde_json::to_string(&b).expect("serialise");
         let back: KeyBinding = serde_json::from_str(&json).expect("deserialise");
@@ -1358,6 +1569,21 @@ mod first_install_tests {
             "holding the middle mouse button must raise the ring at first install \
              (owner's decision, 2026-09-08 — PROBLEM 263)"
         );
+        // PROBLEM 267 — and WHAT it raises is the new icon ring, by the
+        // owner's decision on 2026-09-13; phase 1 is the other value, not the
+        // default. The scope starts at the eight and the favourites start
+        // EMPTY (= "the first eight bound letters", decided at ring time).
+        assert_eq!(
+            d.middle_ring_style,
+            MiddleRingStyle::IconRing,
+            "a fresh install's middle button raises the cursor-anchored icon ring (PROBLEM 267)"
+        );
+        assert_eq!(d.middle_ring_scope, MiddleRingScope::MyEight, "the eight, not all of them");
+        // 2026-09-15 — Spiral is a CHOICE. A fresh install draws the rings
+        // it always has, so nothing an existing user sees can change until
+        // they flip the pill themselves.
+        assert_eq!(d.all_ring_layout, AllRingLayout::Rings, "Rings, never Spiral, by default");
+        assert!(d.middle_ring_favourites.is_empty(), "favourites are computed lazily until chosen");
         // PROBLEM 209 — the specials ring has been drawn since the HUD
         // existed; making it optional must not change what a first install
         // looks like.
@@ -1428,6 +1654,10 @@ mod first_install_tests {
         obj.remove("hud_toast_flight");
         obj.remove("pointer_hud_activation");
         obj.remove("middle_button_ring");
+        obj.remove("middle_ring_style");
+        obj.remove("middle_ring_scope");
+        obj.remove("all_ring_layout");
+        obj.remove("middle_ring_favourites");
         obj.remove("hud_show_specials");
         obj.remove("hud_band_count");
         obj.remove("hud_magnetic_layout");
@@ -1489,6 +1719,22 @@ mod first_install_tests {
             "a config predating middle_button_ring must read as ON — this is the path the \
              owner's 2026-09-08 decision actually travels (PROBLEM 263)"
         );
+        // PROBLEM 267 — every config on disk predates `middle_ring_style`, so
+        // this is the path the owner's 2026-09-13 default travels: an ABSENT
+        // field is the NEW ring. (A file that says "guide_hud" explicitly is a
+        // user's own choice and reads as such — see the migration tests.)
+        assert_eq!(
+            c.middle_ring_style,
+            MiddleRingStyle::IconRing,
+            "a config predating middle_ring_style must read as the icon ring (PROBLEM 267)"
+        );
+        assert_eq!(c.middle_ring_scope, MiddleRingScope::MyEight);
+        assert_eq!(
+            c.all_ring_layout,
+            AllRingLayout::Rings,
+            "a config predating all_ring_layout must read as the rings (2026-09-15)"
+        );
+        assert!(c.middle_ring_favourites.is_empty());
         // PROBLEM 209 — and the opposite direction of the same rule: the
         // specials ring has always been drawn, so a config that never heard
         // of the setting must keep drawing it.
@@ -1748,4 +1994,115 @@ mod first_install_tests {
         );
     }
 
+}
+
+/// PROBLEM 267 — the App-exceptions SCOPE migration and the two new enums'
+/// wire forms. The class of bug these guard is the one `key_binding_upgrade_tests`
+/// already records: a field whose shape changes must read every shape that is
+/// already on disk, or the user loses the whole config (PROBLEM 159).
+#[cfg(test)]
+mod excluded_apps_migration_tests {
+    use super::*;
+
+    /// A 1.0.79–1.0.109 file: `excluded_apps` is a plain array of strings.
+    /// Each must read as `OffEntirely` — the ONE meaning the field had.
+    #[test]
+    fn a_plain_string_list_reads_as_off_entirely() {
+        let mut v = serde_json::to_value(AppConfig::default()).expect("serialise");
+        v.as_object_mut()
+            .unwrap()
+            .insert("excluded_apps".into(), serde_json::json!(["photoshop", "Figma.exe"]));
+        let c: AppConfig = serde_json::from_value(v).expect("an old-shaped list must parse");
+        assert_eq!(
+            c.excluded_apps,
+            vec![
+                AppException::new("photoshop", ExceptionScope::OffEntirely),
+                // NOT normalised here — `publish_excluded_apps` normalises on
+                // the way to the hook, as it always has; the parse is faithful.
+                AppException::new("Figma.exe", ExceptionScope::OffEntirely),
+            ]
+        );
+    }
+
+    /// The new shape, including a row with the scope omitted (→ OffEntirely)
+    /// and the two mixed in one array — a hand-edited file may well do that.
+    #[test]
+    fn the_object_form_and_a_mixed_list_both_parse() {
+        let mut v = serde_json::to_value(AppConfig::default()).expect("serialise");
+        v.as_object_mut().unwrap().insert(
+            "excluded_apps".into(),
+            serde_json::json!([
+                { "exe": "sldworks", "scope": "middle_only" },
+                { "exe": "game" },
+                "blender",
+                { "exe": "kicad", "scope": "space_only" }
+            ]),
+        );
+        let c: AppConfig = serde_json::from_value(v).expect("mixed shapes must parse");
+        assert_eq!(c.excluded_apps[0], AppException::new("sldworks", ExceptionScope::MiddleOnly));
+        assert_eq!(c.excluded_apps[1].scope, ExceptionScope::OffEntirely, "a missing scope is OFF");
+        assert_eq!(c.excluded_apps[2], AppException::new("blender", ExceptionScope::OffEntirely));
+        assert_eq!(c.excluded_apps[3].scope, ExceptionScope::SpaceOnly);
+    }
+
+    /// What a save writes: always the object form, with the scope spelled
+    /// out — so the NEXT read never has to guess, and an old build reading a
+    /// new file fails loudly (an object where it wants a string) rather than
+    /// silently treating "space only" as "off entirely".
+    #[test]
+    fn a_save_writes_the_object_form_and_round_trips() {
+        let mut c = AppConfig::default();
+        c.excluded_apps = vec![
+            AppException::new("photoshop", ExceptionScope::OffEntirely),
+            AppException::new("sldworks", ExceptionScope::MiddleOnly),
+        ];
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains(r#"{"exe":"photoshop","scope":"off_entirely"}"#), "{json}");
+        assert!(json.contains(r#"{"exe":"sldworks","scope":"middle_only"}"#));
+        let back: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.excluded_apps, c.excluded_apps);
+    }
+
+    /// The two ring enums' wire forms, and that an EXPLICIT `guide_hud` is
+    /// honoured — the default only fills an absence, never overrides a choice.
+    #[test]
+    fn the_ring_enums_have_stable_wire_forms_and_honour_an_explicit_choice() {
+        let mut c = AppConfig::default();
+        c.middle_ring_style = MiddleRingStyle::GuideHud;
+        c.middle_ring_scope = MiddleRingScope::All;
+        c.all_ring_layout = AllRingLayout::Spiral;
+        c.middle_ring_favourites = vec!["m".into(), "b".into()];
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains(r#""middle_ring_style":"guide_hud""#), "{json}");
+        assert!(json.contains(r#""middle_ring_scope":"all""#));
+        let back: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.middle_ring_style, MiddleRingStyle::GuideHud, "an explicit choice survives");
+        assert_eq!(back.middle_ring_scope, MiddleRingScope::All);
+        // PROBLEM 267 round 3 — a 1.0.110/1.0.111 config still carrying
+        // `middle_ring_motion` loads, the key is ignored, and a save no
+        // longer writes it (ripple is the only motion).
+        let with_motion = json.replace(r#""middle_ring_scope":"all""#, r#""middle_ring_scope":"all","middle_ring_motion":"bloom""#);
+        let back_m: AppConfig = serde_json::from_str(&with_motion).expect("an old motion key is ignored");
+        assert_eq!(back_m.middle_ring_scope, MiddleRingScope::All);
+        assert!(!serde_json::to_string(&back_m).unwrap().contains("middle_ring_motion"));
+        assert_eq!(back.middle_ring_favourites, vec!["m".to_string(), "b".to_string()]);
+        // An unknown value is an ERROR, not a silent default: it can only
+        // come from a hand edit or a newer build, and either deserves a loud
+        // failure over a quietly different ring.
+        let bad = json.replace(r#""guide_hud""#, r#""triangle""#);
+        assert!(serde_json::from_str::<AppConfig>(&bad).is_err());
+    }
+
+    /// `site_icon` on a binding: absent parses as None (the pre-1.0.110
+    /// shape), present round-trips untouched.
+    #[test]
+    fn a_bindings_site_icon_is_optional_and_round_trips() {
+        let old = r#"{ "app": null, "web_url": "https://github.com", "label": "GitHub", "icon_override": null }"#;
+        let b: KeyBinding = serde_json::from_str(old).expect("a pre-site_icon binding parses");
+        assert!(b.site_icon.is_none());
+        let with = KeyBinding { site_icon: Some("data:image/png;base64,AAAA".into()), ..b };
+        let json = serde_json::to_string(&with).unwrap();
+        let back: KeyBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.site_icon.as_deref(), Some("data:image/png;base64,AAAA"));
+    }
 }

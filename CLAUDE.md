@@ -593,19 +593,92 @@ programs where the middle button is handed straight back to Windows — **that
 list gates the MIDDLE BUTTON ONLY and is not the user's App exceptions**;
 Space keeps working inside SolidWorks.
 
+**SINCE PROBLEM 267 (2026-09-13) THE MIDDLE BUTTON RAISES A SECOND RING KIND
+BY DEFAULT — the cursor-anchored ICON RING** (`middle_ring.rs` pure geometry,
+`guide_hud::show_middle_ring` the one impure caller, `src/components/middle-ring.ts`
++ `styles/middle-ring.css` the page's half): eight real app icons at 45° on a
+125 px radius blooming out of the cursor, a centre pill naming the hovered
+tile, release-to-launch through the SAME `take_armed_key` → `PointerActivate`
+path the Space ring uses (the poller runs `middle_ring::ring_pick` — band by
+distance, sector by angle — when `pointer::RING_ACTIVE` is set, `sector_pick`
+otherwise). **It is a CHOICE, not a replacement:** `middle_ring_style:
+icon_ring | guide_hud`, and `guide_hud` is phase 1 byte-for-byte — the
+`MiddleButtonDown → SpaceDown` normalisation still exists, one pure
+`engine::routed_middle_event` away; the witness, rules A/B/C and the release
+path are the same for both kinds. **ROUND 3 (owner
+decisions 2026-09-13, after the 1.0.110 build was tested):** the scope is
+**"Favourites"** (1..=15 ticked, `FAVOURITES_MAX`; `MyEight` stays the serde
+variant; empty = the first 6 bound letters) or **"All"**, and the LAYOUT LAW
+(`middle_ring::layout_arcs`) is: every ring EVENLY SPACED over the arc
+available to it (`feasible_arc`), the inner ring up to 6, the next up to 9,
+then as many as fit at `tile + 6` (`RING_CAPS`), rings filled inner-first,
+70 px tiles unless the room forces smaller, the smallest radii that satisfy
+spacing (125/201/277). For Favourites the centre NEVER moves from the press
+point (the centre pill may be clipped by the screen edge — he likes it) and
+only the TILES must lie inside the cursor's monitor's work area; near an edge
+or a corner the rings become arcs (named `half-<dir>` / `quarter-<dir>` by
+the first partial arc; `circle-clamped` only when nothing fits at any tile
+size). **Clamp + warp is "All"'s path:** `clamp_ring_center` slides the
+centre inward by exactly the overhang against the CURSOR's monitor's work
+area (the actual outermost ring's extent) and `SetCursorPos` moves the OS
+cursor to that centre on the engine thread, followed by `pointer::note_cursor`.
+**THE WINDOW IS ONE BIG CANVAS — the whole work area of the monitor the
+cursor is on** (`canvas_rect`; `MonitorFromPoint` of the press point; the
+Space ring's `overlay_fit_hud` does the same through `overlay_monitor`),
+never the exact monitor bounds (inset 2 px when the work area equals them);
+the page draws the ring at `page_point(centre, canvas, scale)` — PHYSICAL PX
+END TO END (1.0.110 handed a logical centre to a physical fitter and put the
+ring centre/3 away from the cursor). The marker line prints the canvas, the
+monitor and the page centre. **Motion is RIPPLE ONLY** (Bloom and
+`middle_ring_motion` are gone; the key is ignored on read): the Space ring's
+numbers plus the cursor-following fisheye wave fed by the poller's
+`middle-ring-aim` event at ≤ 60 Hz; the rules live on `.st-mring` itself,
+never on a bare `.ripple` — `styles.css`'s `.ripple` is loaded on the overlay
+page too and matched the ring once. **The centre pill has two lines:** the
+app's short name (vendor prefix stripped at display time: "Google Chrome" →
+"Chrome") over the profile/account (`split_display_name`); it grows to the
+free inner circle (170 px), then the text shrinks to 15/12 px floors, then
+ellipsizes. **The Space ring's pills carry the app icon** with a letter badge
+in place of the letter disc, from the picker's icon cache only
+(`engine::hud_icons_for`). **Favicons are fetched ONCE, at bind time,
+never at ring time:** the key editor's URL commit calls `site_icon::fetch_site_icon`
+in the background and stores the `data:` URL in `KeyBinding::site_icon`; a
+link with none draws a letter disc, and the next edit of that key is the one
+retry. **App exceptions carry a SCOPE** (`ExceptionScope`: off entirely /
+Space only / middle only; old plain-string rows read as off entirely through
+`AppException`'s own `Deserialize`), resolved in ONE place —
+`exclusions::resolve_scope` — into `EXCLUDED_ACTIVE` (Space's verdict,
+meaning unchanged) and `MIDDLE_EXCLUDED_ACTIVE` (the middle button's own);
+the built-in `orbit_apps` rows show in Settings pre-seeded at Space only, and
+a user's own row for one of them mutes the built-in verdict. On a plain
+release of the icon ring Rust does NOT hide the window — the page plays the
+exit (143 ms) and `overlay_toasts_done` is the terminal hide. The marker
+line, one per raise:
+`middle-button ring v2: cursor-anchored-ring-raised-at-cursor-spaceadom-267`
+— it carries `shape … (arc radii …, tiles …)`, `canvas WxH @ (x,y) physical on
+the monitor at (mx,my) scale s` and `page centre (cx,cy) css`.
+
 ### Window rules (hard-won; violating them re-opens fixed bugs)
 
 - Two windows: `settings` (dashboard, closes to tray) and `overlay`
   (transparent, on-demand, click-through, NoActivate, always-on-top).
-  The overlay is **centred** while the radial HUD owns it (`overlay_fit_hud`,
-  `place_overlay_centred`) and **bottom-centred** for toasts (`overlay_fit`).
+  While a ring owns it the overlay is **the canvas** — the whole work area
+  of the cursor's monitor (`overlay_fit_hud` / `overlay_fit_canvas`,
+  `place_overlay_canvas`; the Space ring's content sits on a fixed `stage`
+  centred on the monitor) — and **bottom-centred** for toasts (`overlay_fit`).
   Do not unify those two placements.
 - A window MUST be listed in `src-tauri/capabilities/default.json` or every
   `listen()` in it rejects silently — the window is deaf.
 - Transparency is CONDITIONAL, not banned: a **fullscreen** transparent
-  webview composes zero pixels on this machine, but the **small on-demand**
-  overlay is `transparent: true` and works (verified 2026-08-10). Keep it
-  small and on-demand. `backdrop-filter` is still banned (white boxes).
+  webview composes zero pixels on this machine, but the **on-demand**
+  overlay is `transparent: true` and works (verified 2026-08-10 at ring
+  size). **Since PROBLEM 267 round 3 (decided 2026-09-13) the ring window is
+  the WORK AREA of the cursor's monitor — 2560×1552 physical on this panel —
+  and NEVER the exact monitor rectangle: `canvas_rect` insets it 2 px per
+  side when the work area equals the bounds (auto-hide taskbar). That the
+  work-area-sized transparent window composes is UNPROVEN on hardware as of
+  this writing — it is the first thing to check on the round-3 build.**
+  `backdrop-filter` is still banned (white boxes).
 - **`filter: blur()` on the overlay has a size limit.** A 560x320 element at
   `blur(34px)` made the ENTIRE overlay window compose zero pixels — HUD and
   toasts both gone — while Rust reported it correctly sized, centred and
@@ -909,5 +982,7 @@ Space keeps working inside SolidWorks.
 - No CDN anything; the app must be fully offline.
 - The user's laptop panel is **2560×1600 at 150%** (1707×1067 logical), and he
   plugs a SECOND display in and out through the day — display changes are
-  routine here, not an edge case (PROBLEM 117/118). Guide HUD stays
-  primary-monitor-only by explicit user decision — don't "fix" without asking.
+  routine here, not an edge case (PROBLEM 117/118). Both rings appear on
+  the monitor the CURSOR is on (owner decision 2026-09-13, PROBLEM 267
+  round 3 — reversing the earlier primary-only rule for the icon ring, and
+  PROBLEM 169 for the Space ring); "primary" plays no role.

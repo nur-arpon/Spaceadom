@@ -43,6 +43,12 @@ import {
   startupRowIsInert, startupShownAsOn as ownershipShownAsOn, startupOutcome,
   startupIsPortable, type StartupOwnership,
   type RingLayout, type ThirdPartyEntry, type AboutLinkKind,
+  // PROBLEM 267 — the icon ring's three settings and the App-exceptions
+  // scope, as leaf data shared with preview.ts.
+  MIDDLE_STYLE_OPTS, MIDDLE_SCOPE_OPTS, ALL_LAYOUT_OPTS, EXC_SCOPE_OPTS,
+  middleStyleFor, middleScopeFor, allLayoutFor, normaliseExceptions, effectiveFavourites,
+  EIGHT_PICKER_NOTE, FAVOURITES_MAX,
+  type MiddleStyle, type MiddleScope, type AllLayout, type ExcScope, type ExcRow,
 } from "./controls";
 // ABOUT (feature 1) — a plain data import. resolveJsonModule (tsconfig.json)
 // makes this a typed array literal at compile time; Vite bundles it into
@@ -452,6 +458,22 @@ function render(): void {
   // user while the feature ran. The 3D/CAD safety net is NOT this flag — it is
   // the built-in list in `hook/orbit_apps.rs`, which is not a setting.
   const middleRing = appConfig.middle_button_ring !== false;
+  // PROBLEM 267 — WHAT the middle button raises and HOW MUCH the icon ring
+  // shows. Both absent-tolerant through the leaf helpers (absent = icon ring,
+  // absent = my eight — Rust's serde defaults). Both pills are inert while
+  // the middle-button switch is off: a control for a trigger that is switched
+  // off is a control that does nothing, and that is worse than a missing one
+  // (CLAUDE.md). The scope pill is additionally inert under "Space ring": the
+  // Space HUD has its own Compact/Wide/Double and this pill is not it.
+  const middleStyle = middleStyleFor(appConfig.middle_ring_style);
+  const middleScope = middleScopeFor(appConfig.middle_ring_scope);
+  // 2026-09-15 — how the "All" scope is arranged. The pill sits directly
+  // under the scope pill and is only relevant while "All" is chosen, the
+  // same way "Choose your favourites" only means something under
+  // Favourites; absent = rings, which is what every install already draws.
+  const allLayout = allLayoutFor(appConfig.all_ring_layout);
+  // PROBLEM 267 follow-up — how the icon ring moves. Inert with the other
+  // two rows, and additionally under "Space ring" (it has its own motion).
   // PROBLEM 209 — show the specials on the HUD's inner ring. `!== false`
   // again, but for the OTHER reason: this is existing behaviour becoming
   // optional, so an old config must keep the ring it has always had. Same
@@ -529,6 +551,15 @@ function render(): void {
          fix is to stop the top of the panel being part of the scroll at all.
          See #settings-panel.expanded in styles.css. -->
     <div class="set-scroll">
+    <!-- THE COLUMN FLOW (owner, 1.0.110 review: "design chaos" — a large
+         blank beside the tall Space-ring column while the left one ended
+         early). Same contract as .set-scroll above: display:contents in the
+         popover, so nothing there changes; in the expanded panel it is the
+         multicol container (columns: 2) that the section cards flow through,
+         and the App-exceptions / Conflicts sections span it (column-span:
+         all). See #settings-panel.expanded .set-cols in styles.css. NOTE:
+         no backticks in this comment — it sits inside a template literal. -->
+    <div class="set-cols">
 
     <input class="input set-search" id="set-search" type="text"
            placeholder="Search settings…" autocomplete="off" spellcheck="false"
@@ -573,34 +604,68 @@ function render(): void {
                and the specials switch (see the note directly below, which is
                a constraint, not a preference). -->
           ${toggleRow("middlering", "Middle button opens the ring", middleRing, 7)}
+          <!-- PROBLEM 267 — the two rows that only mean something while the
+               switch above is on, directly under it so the greyed reason is
+               visible FROM the control (the same adjacency rule the pill and
+               the specials switch obey below). "Middle button shows" is the
+               owner's choice between the new icon ring and phase 1's Space
+               ring; "Middle-button ring shows" is the icon ring's scope with
+               the "Choose your favourites" picker under it (artboards 8 and 9). -->
+          ${middleStyleRow(middleStyle, !middleRing, 8)}
+          ${middleScopeRow(middleScope, !middleRing || middleStyle === "guide_hud", 9)}
+          ${allLayoutRow(allLayout, !middleRing || middleStyle === "guide_hud" || middleScope !== "all", 9)}
           <!-- THE PILL AND THE SPECIALS SWITCH STAY ADJACENT. Double is the
                state in which the specials switch has nothing to do, and a
                reason a control is greyed out has to be visible FROM that
                control — put another row between these two and it stops
                being. (The old three-row chain this replaced needed the same
                rule for two dependencies; there is only one left.) -->
-          ${ringRow(ring, 8)}
-          ${specialsRow(hudSpecials, specialsInert, 9)}
-          ${toggleRow("flight", "Guide-to-toast motion", flight, 10)}
+          ${ringRow(ring, 10)}
+          ${specialsRow(hudSpecials, specialsInert, 11)}
+          ${toggleRow("flight", "Guide-to-toast motion", flight, 12)}
           ${sliderRow("huddelay", "Guide HUD delay", appConfig.guide_hud_delay_ms, 100, 1000, 50, "ms")}
         </div>
       </div>
     </div>
 
-    <div class="set-section set-filterable">
+    <!-- .set-section-span: in the expanded panel this section spans both
+         columns of .set-cols (its tiles are a wrapping grid of fixed-width
+         cards, which wants the whole row). -->
+    <div class="set-section set-filterable set-section-span">
       <div class="divider" style="margin:14px 0 10px;"></div>
       <button type="button" class="set-title set-row-label" data-desc="appexceptions"
               aria-expanded="false" style="font-size:13px; margin-bottom:8px;">App exceptions</button>
       ${descBox("appexceptions")}
-      <div id="set-app-exceptions"></div>
+      <!-- THE SUMMARY ROW (owner, 1.0.110 review): in the popover this
+           section is ONE line — the counts and a "Show" button that opens
+           the full-screen panel scrolled to the section — and nothing else
+           of it renders; the side scroll is about the app's own features.
+           Both rows are always in the markup; .set-summary / .set-full are
+           shown or hidden by the panel's .expanded class (styles.css), so
+           expanding never rebuilds the tiles or closes an open picker. The
+           text is written by renderAppExceptions(), which owns the counts.
+           NOTE: no backticks in this comment (template literal). -->
+      <div class="set-summary" id="set-exc-summary">
+        <span class="set-summary-text" id="set-exc-summary-text"></span>
+        <button type="button" class="btn btn-sm set-summary-show" data-show-section="set-app-exceptions">Show</button>
+      </div>
+      <div id="set-app-exceptions" class="set-full"></div>
     </div>
 
-    <div class="set-section set-filterable">
+    <div class="set-section set-filterable set-section-span">
       <div class="divider" style="margin:14px 0 10px;"></div>
       <button type="button" class="set-title set-row-label" data-desc="conflicts"
               aria-expanded="false" style="font-size:13px; margin-bottom:8px;">Conflicts</button>
       ${descBox("conflicts")}
-      <div id="set-conflicts"></div>
+      <!-- Same summary/full pair as App exceptions above; the count is
+           written by renderConflicts()'s draw(). The hook-health block and
+           the ring tool live inside .set-full, so in the popover they are
+           reached through "Show" like the rest of the section. -->
+      <div class="set-summary" id="set-conflicts-summary">
+        <span class="set-summary-text" id="set-conflicts-summary-text"></span>
+        <button type="button" class="btn btn-sm set-summary-show" data-show-section="set-conflicts">Show</button>
+      </div>
+      <div id="set-conflicts" class="set-full"></div>
     </div>
 
     <!-- THE ACTION BUTTONS, 1.0.97 (owner: "unnaturally long pills, stretched
@@ -660,7 +725,7 @@ function render(): void {
       <div class="divider" style="margin:14px 0 10px;"></div>
       ${groupHeadingHtml("privacy", "Privacy")}
       <div class="set-rows">
-        ${toggleRow("sendlogs", "Don't send logs", dontSendLogs, 11)}
+        ${toggleRow("sendlogs", "Don't send logs", dontSendLogs, 13)}
       </div>
     </div>
 
@@ -680,6 +745,7 @@ function render(): void {
       </div>
     </div>
 
+    </div><!-- /.set-cols -->
     </div><!-- /.set-scroll -->
   `;
 
@@ -687,6 +753,18 @@ function render(): void {
   // so a later render (a toast, a conflict re-check) cannot replay a character
   // the user pressed minutes ago.
   _flipped = null;
+
+  // PROBLEM 267 — the two middle-button rows' inert state, painted through
+  // the SAME `paintInert` the specials row uses (opacity, pointer-events,
+  // `disabled` on every control, the reason note shown). Done here, after the
+  // markup exists, so a first render and a later flip are one code path.
+  paintRow("set-middlestyle-wrap", "set-middlestyle-note", !middleRing);
+  paintRow("set-middlescope-wrap", "set-middlescope-note", !middleRing || middleStyle === "guide_hud");
+  paintRow(
+    "set-alllayout-wrap",
+    "set-alllayout-note",
+    !middleRing || middleStyle === "guide_hud" || middleScope !== "all",
+  );
 
   // THE SEARCH BOX, restored to whatever the user had typed before this
   // render. `render()` re-runs after every toggle, so without this a filtered
@@ -703,6 +781,25 @@ function render(): void {
   panelEl.querySelector("#set-expand")?.addEventListener("click", (e) => {
     e.stopPropagation();
     toggleExpanded(!_expanded);
+  });
+  // The summary rows' "Show" buttons (owner, 1.0.110 review): expand the
+  // panel AND land on the section. The scroll is deferred one frame so it
+  // runs against the expanded layout — `toggleExpanded` flips the class
+  // synchronously, but `.set-scroll` only becomes the scroller under it, and
+  // scrolling a box that is still `display: contents` scrolls nothing.
+  panelEl.querySelectorAll<HTMLElement>(".set-summary-show").forEach((b) => {
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      sfx.tick();
+      const target = panelEl?.querySelector<HTMLElement>(`#${b.dataset.showSection}`)?.closest<HTMLElement>(".set-section");
+      toggleExpanded(true);
+      requestAnimationFrame(() => {
+        target?.scrollIntoView({
+          block: "start",
+          behavior: document.documentElement.classList.contains("reduced-motion") ? "auto" : "smooth",
+        });
+      });
+    });
   });
 
   wireToggle("engine", async () => {
@@ -1092,6 +1189,77 @@ function render(): void {
     render();
   });
 
+  // PROBLEM 267 — "Middle button shows": Icon ring / Space ring. Same in-place
+  // pill update as the theme and ring pills above (PROBLEM 157 — a re-render
+  // would destroy the indicator mid-slide). Rust reads the field on the
+  // engine thread at the next middle press (`engine::routed_middle_event`),
+  // so persistConfig() is the whole wiring. No preview: this changes WHICH
+  // ring opens, not what one looks like.
+  panelEl?.querySelectorAll<HTMLElement>("[data-middlestyle-set]").forEach((b) => {
+    b.addEventListener("click", async () => {
+      if (!appConfig) return;
+      const next = middleStyleFor(b.dataset.middlestyleSet) as MiddleStyle;
+      if (next === middleStyleFor(appConfig.middle_ring_style)) return;
+      appConfig.middle_ring_style = next;
+      sfx.toggleOn("middlestyle");
+      moveSeg(b, "middlestyleSet", next);
+      // The scope pill only means something for the icon ring, and the
+      // All-layout pill under it only for the icon ring showing All.
+      paintRow("set-middlescope-wrap", "set-middlescope-note", next === "guide_hud");
+      paintRow(
+        "set-alllayout-wrap",
+        "set-alllayout-note",
+        next === "guide_hud" || middleScopeFor(appConfig.middle_ring_scope) !== "all",
+      );
+      await persistConfig();
+    });
+  });
+
+  // PROBLEM 267 — "Middle-button ring shows": Favourites / All. Read by
+  // Rust when it builds the ring's entries (`middle_ring::build_entries`);
+  // persistConfig() is the wiring, as above.
+  panelEl?.querySelectorAll<HTMLElement>("[data-middlescope-set]").forEach((b) => {
+    b.addEventListener("click", async () => {
+      if (!appConfig) return;
+      const next = middleScopeFor(b.dataset.middlescopeSet) as MiddleScope;
+      if (next === middleScopeFor(appConfig.middle_ring_scope)) return;
+      appConfig.middle_ring_scope = next;
+      sfx.toggleOn("middlescope");
+      moveSeg(b, "middlescopeSet", next);
+      // The All-layout pill only means something under "All" — greyed from
+      // the control that greys it, with no rebuild, exactly as above.
+      paintRow("set-alllayout-wrap", "set-alllayout-note", next !== "all");
+      await persistConfig();
+    });
+  });
+
+  // 2026-09-15 — "All layout": Rings / Spiral. Read by Rust when it lays the
+  // ring out (`middle_ring::spiral_slots` vs `layout_ring_slots`); the pill
+  // itself does nothing but persist the choice, like the two above it.
+  panelEl?.querySelectorAll<HTMLElement>("[data-alllayout-set]").forEach((b) => {
+    b.addEventListener("click", async () => {
+      if (!appConfig) return;
+      const next = allLayoutFor(b.dataset.alllayoutSet) as AllLayout;
+      if (next === allLayoutFor(appConfig.all_ring_layout)) return;
+      appConfig.all_ring_layout = next;
+      sfx.toggleOn("alllayout");
+      moveSeg(b, "alllayoutSet", next);
+      await persistConfig();
+    });
+  });
+
+  // PROBLEM 267 — "Choose your favourites →" opens the picker under its own row
+  // (artboard 9). Drawn into its own container so a pick never re-renders the
+  // panel and slams the list shut.
+  panelEl?.querySelector<HTMLElement>("#set-eight-open")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    sfx.tick();
+    if (_eightOpen) { closeEightPicker(); return; }
+    _eightOpen = true;
+    renderEightPicker();
+  });
+  renderEightPicker();
+
   // PROBLEM 263 — the middle-button ring trigger. Same shape as "hudpointer"
   // directly above, and for the same reason: the whole feature lives in Rust
   // (the WM_MBUTTONDOWN branch of the mouse callback, gated on an atomic
@@ -1361,16 +1529,81 @@ function wireExcPanelOutsideClick(): void {
   });
 }
 
-/** The stems currently excluded, always lowercase. */
-function excludedList(): string[] {
-  return (appConfig?.excluded_apps ?? []).map((s) => s.toLowerCase());
+/** The user's own rows, always lowercase stems, in ONE shape whatever the
+ *  config on disk still looks like (PROBLEM 267 — `normaliseExceptions`). */
+function excludedList(): ExcRow[] {
+  return normaliseExceptions(appConfig?.excluded_apps);
 }
 
-async function setExcluded(list: string[]): Promise<void> {
+async function setExcluded(list: ExcRow[]): Promise<void> {
   if (!appConfig) return;
-  appConfig.excluded_apps = Array.from(new Set(list.map((s) => s.toLowerCase())));
+  const seen = new Set<string>();
+  appConfig.excluded_apps = list
+    .map((r) => ({ exe: r.exe.toLowerCase(), scope: r.scope }))
+    .filter((r) => r.exe && !seen.has(r.exe) && seen.add(r.exe));
   await persistConfig();
   renderAppExceptions();
+}
+
+/**
+ * PROBLEM 267 — the BUILT-IN rows (SolidWorks, Fusion 360, Blender, …) that
+ * the section shows pre-seeded at "Space only" with a "Default" tag, and how
+ * many more the full table holds. Asked of Rust once per session; until the
+ * answer lands the section draws the user's own rows alone, and repaints.
+ */
+let _builtin: { rows: Array<[string, string]>; more: number } | null = null;
+let _builtinAsked = false;
+function ensureBuiltinRows(): void {
+  if (_builtinAsked) return;
+  _builtinAsked = true;
+  invoke<[Array<[string, string]>, number]>("get_builtin_exceptions")
+    .then(([rows, more]) => { _builtin = { rows, more }; renderAppExceptions(); })
+    .catch(() => { _builtin = { rows: [], more: 0 }; });
+}
+
+/** Change one app's scope. A built-in row moved BACK to "Space only" is
+ *  removed from the list rather than stored — a built-in is never
+ *  duplicated; a changed one is stored (PROBLEM 267). */
+async function setScope(stem: string, scope: ExcScope, builtin: boolean): Promise<void> {
+  const list = excludedList().filter((r) => r.exe !== stem);
+  if (builtin && scope === "space_only") {
+    await setExcluded(list);
+    return;
+  }
+  await setExcluded([...list, { exe: stem, scope }]);
+}
+
+/** The three-state control on one exception tile, built as DOM (user data
+ *  sits beside it) in the SAME `.theme-seg` shape the pills use, so it gets
+ *  the measured indicator, the keyboard rules and the theme colours for free. */
+function buildScopeSeg(scope: ExcScope, label: string, onPick: (s: ExcScope) => void): HTMLElement {
+  const seg = document.createElement("div");
+  seg.className = "theme-seg exc-seg";
+  seg.setAttribute("role", "radiogroup");
+  seg.setAttribute("aria-label", `${label}: what stands down`);
+  const ind = document.createElement("span");
+  ind.className = "theme-seg-ind";
+  ind.setAttribute("data-seg", scope);
+  ind.style.background = "var(--st-accent)";
+  seg.appendChild(ind);
+  EXC_SCOPE_OPTS.forEach(([v, l]) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "theme-seg-opt" + (v === scope ? " is-on" : "");
+    b.setAttribute("role", "radio");
+    b.setAttribute("aria-checked", String(v === scope));
+    b.dataset.excScope = v;
+    b.textContent = l;
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (v === scope) return;
+      sfx.toggleOn("excscope");
+      onPick(v as ExcScope);
+    });
+    seg.appendChild(b);
+  });
+  wireSegRowsKeyboard(seg);
+  return seg;
 }
 
 /**
@@ -1411,48 +1644,110 @@ function renderAppExceptions(): void {
       }
     });
 
-    if (list.length === 0) {
-      const none = document.createElement("div");
-      none.className = "set-note";
-      none.style.marginTop = "0";
-      none.textContent = "No exceptions yet — Spaceadom works everywhere.";
-      box.appendChild(none);
-    } else {
-      const grid = document.createElement("div");
-      grid.className = "exc-grid";
+    // PROBLEM 267 — every row is a TILE with a three-state control (artboard
+    // 8): the built-in 3D/CAD/design rows first, pre-seeded at "Space only"
+    // and tagged "Default" (a user's own row for the same stem overrides the
+    // seed and is what the control shows), then the user's own apps.
+    ensureBuiltinRows();
+    const userByStem = new Map(list.map((r) => [r.exe, r] as const));
+    const builtinRows = _builtin?.rows ?? [];
+    const builtinStems = new Set(builtinRows.map(([stem]) => stem));
+    const ownRows = list.filter((r) => !builtinStems.has(r.exe));
 
-      list.forEach((stem, i) => {
-        const hit = byStem.get(stem);
-        const label = hit?.name ?? stem;
+    // The popover's one-line summary ("8 built-in · 1 yours · 71 more"),
+    // written from the same three numbers the tiles below are built from so
+    // the two can never disagree. textContent — the counts are numbers, but
+    // the habit is the point.
+    const summary = panelEl?.querySelector<HTMLElement>("#set-exc-summary-text");
+    if (summary) {
+      const parts: string[] = [];
+      if (builtinRows.length) parts.push(`${builtinRows.length} built-in`);
+      if (ownRows.length) parts.push(`${ownRows.length} yours`);
+      if (_builtin && _builtin.more > 0) parts.push(`${_builtin.more} more`);
+      summary.textContent = parts.length ? parts.join(" · ") : "No exceptions yet";
+    }
 
-        const tile = document.createElement("div");
-        tile.className = "exc-tile";
-        tile.title = label;   // full name discoverable on hover for truncated ones
+    const intro = document.createElement("div");
+    intro.className = "set-note";
+    intro.style.marginTop = "0";
+    intro.textContent = "Built-in defaults for apps that use the middle button to orbit. Change anytime.";
+    box.appendChild(intro);
 
-        const disc = document.createElement("span");
-        disc.className = "exc-tile-disc";
-        paintAppDisc(disc, hit?.icon, label, i);
+    const tiles = document.createElement("div");
+    tiles.className = "exc-list";
 
-        const name = document.createElement("span");
-        name.className = "exc-tile-name";
-        name.textContent = label;   // textContent — user data
+    const makeTile = (
+      stem: string,
+      label: string,
+      scope: ExcScope,
+      builtin: boolean,
+      i: number,
+      removable: boolean,
+    ): HTMLElement => {
+      const hit = byStem.get(stem);
+      const tile = document.createElement("div");
+      tile.className = "exc-row";
+      tile.dataset.stem = stem;
+      tile.title = hit?.name ?? label;
 
+      const head = document.createElement("div");
+      head.className = "exc-row-head";
+      const disc = document.createElement("span");
+      disc.className = "exc-tile-disc";
+      paintAppDisc(disc, hit?.icon, hit?.name ?? label, i);
+      const name = document.createElement("span");
+      name.className = "exc-row-name";
+      name.textContent = hit?.name ?? label;   // textContent — user data
+      head.append(disc, name);
+      if (builtin) {
+        const tag = document.createElement("span");
+        tag.className = "exc-default-tag";
+        tag.textContent = "Default";
+        head.appendChild(tag);
+      }
+      if (removable) {
         const remove = document.createElement("button");
         remove.type = "button";
-        remove.className = "exc-tile-x";
+        remove.className = "exc-tile-x exc-row-x";
         remove.setAttribute("aria-label", `Remove ${label} from exceptions`);
-        remove.textContent = "✕";
+        remove.textContent = "\u2715";
         remove.addEventListener("click", async (e) => {
           e.stopPropagation();
           sfx.tick();
-          await setExcluded(excludedList().filter((s) => s !== stem));
+          await setExcluded(excludedList().filter((r) => r.exe !== stem));
         });
+        head.appendChild(remove);
+      }
+      tile.appendChild(head);
+      const seg = buildScopeSeg(scope, hit?.name ?? label, (next) => { void setScope(stem, next, builtin); });
+      tile.appendChild(seg);
+      return tile;
+    };
 
-        tile.append(disc, name, remove);
-        grid.appendChild(tile);
-      });
+    builtinRows.forEach(([stem, display], i) => {
+      const own = userByStem.get(stem);
+      tiles.appendChild(makeTile(stem, display, own?.scope ?? "space_only", true, i, false));
+    });
+    ownRows.forEach((r, i) => {
+      tiles.appendChild(makeTile(r.exe, r.exe, r.scope, false, builtinRows.length + i, true));
+    });
+    box.appendChild(tiles);
+    // The pills' indicators are MEASURED after insertion (PROBLEM 255
+    // follow-up); a tile built by hand needs the same pass.
+    tiles.querySelectorAll<HTMLElement>(".theme-seg").forEach(positionSegIndicator);
 
-      box.appendChild(grid);
+    if (_builtin && _builtin.more > 0) {
+      const more = document.createElement("div");
+      more.className = "set-note";
+      more.textContent = `\u2026and ${_builtin.more} more 3D, CAD and design programs are built in at Space only. Add one below to change it.`;
+      box.appendChild(more);
+    }
+    if (ownRows.length === 0 && builtinRows.length === 0) {
+      const none = document.createElement("div");
+      none.className = "set-note";
+      none.style.marginTop = "0";
+      none.textContent = "No exceptions yet \u2014 Spaceadom works everywhere.";
+      box.appendChild(none);
     }
 
     // PROBLEM 239 follow-up — this used to be `btn btn-sm` stretched with an
@@ -1507,7 +1802,7 @@ function renderAppExceptions(): void {
     box.appendChild(wrap);
 
     const paint = () => {
-      const current = new Set(excludedList());
+      const current = new Set(excludedList().map((r) => r.exe));
       drawAppGrid(
         grid,
         empty,
@@ -1556,12 +1851,14 @@ async function addException(path: string, label: string): Promise<void> {
     return;
   }
   const list = excludedList();
-  if (list.includes(stem)) {
+  if (list.some((r) => r.exe === stem)) {
     showToast(`${label} is already an exception`);
     return;
   }
   sfx.confirm();
-  await setExcluded([...list, stem]);
+  // PROBLEM 267 — a freshly added app starts at "Off entirely", the one
+  // meaning the list had before scopes existed; the tile's control changes it.
+  await setExcluded([...list, { exe: stem, scope: "off_entirely" }]);
   showToast(`Spaceadom will pause inside ${label}`);
 }
 
@@ -1571,6 +1868,13 @@ function renderConflicts(): void {
 
   const draw = () => {
     box.innerHTML = "";
+
+    // The popover's one-line summary: the count, or "none found".
+    const summary = panelEl?.querySelector<HTMLElement>("#set-conflicts-summary-text");
+    if (summary) {
+      const n = knownConflicts.length;
+      summary.textContent = n === 0 ? "none found" : `${n} found`;
+    }
 
     if (knownConflicts.length === 0) {
       const ok = document.createElement("div");
@@ -2076,7 +2380,17 @@ const DESC: Record<string, string> = {
   // this switch can be on by default, and a user who works in SolidWorks needs
   // to read it here rather than discover it.
   middlering:
-    "Hold the middle mouse button — the scroll wheel, pressed down — and the same ring opens in the same place as holding Space. Aim at an app and let go to open it. A normal quick middle click still works exactly as before: links still open in a new tab, tabs still close. 3D and CAD programs are left alone, because middle-drag already spins the model there — SolidWorks, Fusion 360, Blender, AutoCAD and the rest are on a built-in list, along with drawing apps like Photoshop and Figma where it pans the canvas. Your Space shortcuts keep working in all of them.",
+    "Hold the middle mouse button — the scroll wheel, pressed down — and a ring of your apps opens: the icon ring right at your cursor, or the same centred ring as holding Space (choose below). Aim at an app and let go to open it. A normal quick middle click still works exactly as before: links still open in a new tab, tabs still close. 3D and CAD programs are left alone, because middle-drag already spins the model there — SolidWorks, Fusion 360, Blender, AutoCAD and the rest are on a built-in list, along with drawing apps like Photoshop and Figma where it pans the canvas. Your Space shortcuts keep working in all of them; App exceptions below lets you change any of that per app.",
+  // PROBLEM 267 — the two rows under the middle-button switch. Same order of
+  // questions as `middlering`: what does it do, then what it does NOT change.
+  middlestyle:
+    "What the middle button opens. Icon ring is a small ring of your apps' real icons that blooms out of the cursor wherever it is — point at one and let go. Space ring opens the same big centred ring you get from holding Space, exactly as before. Your Space ring itself is never changed by this.",
+  // 2026-09-15 — the third middle-button row. Same order of questions as the
+  // two above: what each choice draws, then what it does NOT change.
+  alllayout:
+    "How the ring arranges itself when it is showing All of your apps. Rings keeps them on neat circles around your cursor, five on the first, eight on the next and thirteen on the one after — the counts that pack a circle evenly. Spiral puts every app on one winding line instead, turning the same fraction of a circle between each, which is how a sunflower packs its seeds: no rings to line up, no gaps to leave. Aiming works the same either way — whichever icon your cursor is nearest lights up. Favourites is unaffected; it arranges itself around the screen edge instead.",
+  middlescope:
+    "How many apps the icon ring shows. Favourites keeps it to the apps you tick below \u2014 up to fifteen, six on the inner ring and the rest on a second one \u2014 with the name in the middle. All adds every other key you have bound plus the special keys on further rings, so nothing is more than a flick away. Choose your favourites below.",
   // The ring pill and the specials switch are ONE system, so their two
   // descriptions have to tell the same story from both ends — each says the
   // inner ring is the shared resource, and each says what to change to get the
@@ -2110,7 +2424,7 @@ const DESC: Record<string, string> = {
   // conflict is a live fault on this machine, and the owner wants its
   // explanation there whenever it is (2026-08-20).
   appexceptions:
-    "Spaceadom pauses itself while any of these apps is in front. Space works exactly as it normally would there — Photoshop’s hold-Space panning, a game’s Space key, anything. Shortcuts come back the moment you switch away.",
+    "What Spaceadom does while each of these apps is in front. Off entirely pauses everything — Space works exactly as it normally would there, and the middle button too. Space only keeps your Space shortcuts and hands the middle button back to the app, which is what the built-in rows do for 3D, CAD and drawing programs, where middle-drag orbits or pans. Middle only is the other way round: the middle-button ring stays, Space is left alone. Shortcuts come back the moment you switch away.",
   conflicts:
     "Only one program can own the spacebar. Press one below to close it.",
   reset:
@@ -2465,6 +2779,310 @@ function engineRow(on: boolean): string {
  * the Conflicts-area tool on 2026-09-01. `TOGGLE_CHAR` in controls.ts is the
  * list that has to agree with this number.)
  */
+/**
+ * PROBLEM 267 — move a segmented pill's indicator IN PLACE (PROBLEM 157: a
+ * re-render destroys the indicator and builds a new one already at the
+ * destination, which has nothing to transition FROM). Shared by the two
+ * middle-button pills; the theme and ring pills predate it and keep their own
+ * inline copies of the same four lines.
+ */
+function moveSeg(b: HTMLElement, dataKey: string, next: string): void {
+  const seg = b.closest<HTMLElement>(".theme-seg");
+  if (!seg) return;
+  seg.querySelector<HTMLElement>(".theme-seg-ind")?.setAttribute("data-seg", next);
+  seg.querySelectorAll<HTMLElement>(".theme-seg-opt").forEach((o) => {
+    const on = o.dataset[dataKey] === next;
+    o.classList.toggle("is-on", on);
+    o.setAttribute("aria-checked", String(on));
+  });
+  positionSegIndicator(seg);
+}
+
+/* ---- THE MATH SUBTITLES (owner, 2026-09-15) -------------------------------
+   One short line under each of the three ring rows, in the same register as
+   the `set-note` copy above them: a plain statement of where the number came
+   from, for a user curious enough to notice. Deliberately NOT the `DESC`
+   text \u2014 these are always visible, so they have to earn their line in four or
+   five words. The wording is the owner's, verbatim. */
+const SUB_MIDDLESTYLE = "Sized by the golden ratio.";
+const SUB_MIDDLESCOPE = "A Fibonacci cap, for density.";
+const SUB_ALLLAYOUT = "Packed like a sunflower\u2019s seeds.";
+
+/** The always-visible subtitle under a row's label. */
+function subLine(text: string): string {
+  return `<div class="set-sub">${text}</div>`;
+}
+
+/** The reason line under a middle-button row while the switch above is off. */
+const MIDDLE_OFF_NOTE = "Turn on \u201cMiddle button opens the ring\u201d to use this.";
+/** \u2026and under the All-layout pill while the scope is Favourites. */
+const ALL_LAYOUT_NOTE = "Only for \u201cAll\u201d \u2014 Favourites arranges itself around the screen edge.";
+/** …and under the scope pill while the middle button opens the Space ring. */
+const MIDDLE_SCOPE_NOTE = "Only for the icon ring \u2014 the Space ring has its own layout above.";
+
+/**
+ * PROBLEM 267 — "Middle button shows": Icon ring / Space ring (the owner's
+ * addition of 2026-09-13). Same shape as `ringRow`; the wrap + note pair is
+ * what lets `paintRow` grey it without a rebuild, exactly as `specialsRow`.
+ */
+function middleStyleRow(style: MiddleStyle, inert: boolean, i: number): string {
+  return `
+    <div class="set-item set-filterable" style="animation-delay:${60 + i * 45}ms">
+      <div class="set-row set-row-stack" aria-disabled="${inert}">
+        <button type="button" class="set-row-label" data-desc="middlestyle"
+                aria-expanded="false" aria-controls="desc-middlestyle">Middle button shows</button>
+        <span id="set-middlestyle-wrap">${
+          segRowHtml("middlestyle", MIDDLE_STYLE_OPTS, style, "background:var(--st-accent);", "Middle button shows", descId("middlestyle"))
+        }</span>
+      </div>
+      ${subLine(SUB_MIDDLESTYLE)}
+      <div class="set-note" id="set-middlestyle-note" style="margin-top:6px;display:none;">${MIDDLE_OFF_NOTE}</div>
+      ${descBox("middlestyle")}
+    </div>`;
+}
+
+/**
+ * PROBLEM 267 — "Middle-button ring shows": the Favourites / All pill and
+ * the "Choose your favourites \u2192" link on one line (artboard 8), with the
+ * picker's container under it (artboard 9, drawn by `renderEightPicker`).
+ */
+function middleScopeRow(scope: MiddleScope, inert: boolean, i: number): string {
+  return `
+    <div class="set-item set-filterable" style="animation-delay:${60 + i * 45}ms">
+      <div class="set-row set-row-stack" aria-disabled="${inert}">
+        <button type="button" class="set-row-label" data-desc="middlescope"
+                aria-expanded="false" aria-controls="desc-middlescope">Middle-button ring shows</button>
+        <span id="set-middlescope-wrap" class="mscope-line">${
+          segRowHtml("middlescope", MIDDLE_SCOPE_OPTS, scope, "background:var(--st-accent);", "Middle-button ring shows", descId("middlescope"))
+        }<button type="button" class="mscope-choose" id="set-eight-open" aria-expanded="${_eightOpen}">Choose your favourites \u2192</button></span>
+      </div>
+      ${subLine(SUB_MIDDLESCOPE)}
+      <div class="set-note" id="set-middlescope-note" style="margin-top:6px;display:none;">${MIDDLE_OFF_NOTE} ${MIDDLE_SCOPE_NOTE}</div>
+      <div id="set-eight-picker"></div>
+      ${descBox("middlescope")}
+    </div>`;
+}
+
+/**
+ * 2026-09-15 — "All layout": Rings / Spiral, the owner's toggle for how the
+ * `All` scope arranges itself. It sits DIRECTLY under the scope pill and is
+ * inert unless "All" is chosen, mirroring the way "Choose your favourites"
+ * only means anything under Favourites — a row whose reason for being greyed
+ * has to be visible from the control that greys it (the same adjacency rule
+ * the ring pill and the specials switch obey).
+ */
+function allLayoutRow(layout: AllLayout, inert: boolean, i: number): string {
+  return `
+    <div class="set-item set-filterable" style="animation-delay:${60 + i * 45}ms">
+      <div class="set-row set-row-stack" aria-disabled="${inert}">
+        <button type="button" class="set-row-label" data-desc="alllayout"
+                aria-expanded="false" aria-controls="desc-alllayout">All layout</button>
+        <span id="set-alllayout-wrap">${
+          segRowHtml("alllayout", ALL_LAYOUT_OPTS, layout, "background:var(--st-accent);", "All layout", descId("alllayout"))
+        }</span>
+      </div>
+      ${subLine(SUB_ALLLAYOUT)}
+      <div class="set-note" id="set-alllayout-note" style="margin-top:6px;display:none;">${ALL_LAYOUT_NOTE}</div>
+      ${descBox("alllayout")}
+    </div>`;
+}
+
+/** The picker's open state survives a render, like the exceptions picker's. */
+let _eightOpen = false;
+/** The pending auto-close after the eighth tick (owner, 1.0.110 review):
+ *  ~400 ms so the user sees the eighth row tint before the card folds.
+ *  Cleared on every redraw and on "Done", so a close can never fire twice
+ *  or land on a picker the user has already reopened. */
+let _eightCloseTimer: number | undefined;
+const EIGHT_AUTO_CLOSE_MS = 400;
+
+/** The one place the picker closes — "Done", the auto-close, and the
+ *  "Choose your favourites" toggle all land here. */
+function closeEightPicker(): void {
+  window.clearTimeout(_eightCloseTimer);
+  _eightCloseTimer = undefined;
+  _eightOpen = false;
+  renderEightPicker();
+}
+
+/** The active profile's bound keys, sorted, with what the picker shows. */
+function boundKeysForPicker(): Array<{ key: string; name: string; icon: string | null; link: boolean }> {
+  const prof = appConfig?.profiles.find((p) => p.name === appConfig?.active_profile);
+  if (!prof) return [];
+  return Object.keys(prof.bindings)
+    .filter((k) => /^[a-z]$/i.test(k))
+    .map((k) => k.toLowerCase())
+    .sort()
+    .map((k) => {
+      const b = prof.bindings[k] ?? prof.bindings[k.toUpperCase()];
+      const link = !!b?.web_url && !b?.app;
+      let name = b?.label ?? b?.app ?? b?.web_url ?? k.toUpperCase();
+      if (link && b?.web_url) {
+        try { name = b.label ?? new URL(b.web_url).hostname.replace(/^www\./, ""); } catch (_) { /* keep */ }
+      }
+      // A link shows its favicon (a complete data: URL) or the placeholder
+      // circle; an app shows its picker PNG.
+      const icon = link ? (b?.site_icon ?? null) : (b?.icon_override ? `data:image/png;base64,${b.icon_override}` : null);
+      return { key: k, name, icon, link };
+    })
+    .filter((row) => {
+      const b = prof.bindings[row.key] ?? prof.bindings[row.key.toUpperCase()];
+      return !!(b && (b.app || b.web_url));
+    });
+}
+
+/**
+ * PROBLEM 267 — the "Choose your favourites" picker (artboard 9): every bound
+ * key of the active profile as letter chip + icon + name + checkbox, selected
+ * rows tinted, "N of 15 selected" at the top, the disclosure line at the foot.
+ * No new app search — it reuses what the user has already bound.
+ *
+ * Built with createElement: app names and hostnames are the user's data.
+ * Draws into its OWN container so a pick never re-renders the panel. Writes
+ * `middle_ring_favourites` in the order picked; an EMPTY list is never
+ * written by a pick — clearing the last one writes the empty list, which
+ * Rust reads as "the first six bound letters" (the same default the picker
+ * showed before anyone touched it).
+ */
+function renderEightPicker(): void {
+  const box = panelEl?.querySelector<HTMLElement>("#set-eight-picker");
+  if (!box) return;
+  box.innerHTML = "";
+  // A redraw supersedes any pending auto-close: the tick that armed it is
+  // re-evaluated below against the list as it now stands.
+  window.clearTimeout(_eightCloseTimer);
+  _eightCloseTimer = undefined;
+  const open = panelEl?.querySelector<HTMLElement>("#set-eight-open");
+  open?.setAttribute("aria-expanded", String(_eightOpen));
+  if (!_eightOpen || !appConfig) return;
+
+  const rows = boundKeysForPicker();
+  const bound = rows.map((r) => r.key);
+  // What the ring WILL show: the stored list, or the same first-six default
+  // Rust computes for an empty one — so the first pick keeps the five
+  // defaults beside it rather than leaving a ring of one.
+  const chosen = effectiveFavourites(appConfig.middle_ring_favourites, bound);
+
+  const wrap = document.createElement("div");
+  wrap.className = "eight-picker";
+
+  const head = document.createElement("div");
+  head.className = "eight-head";
+  const title = document.createElement("span");
+  title.className = "eight-title";
+  title.textContent = "Choose your favourites";
+  const count = document.createElement("span");
+  count.className = "eight-count";
+  count.textContent = `${chosen.length} of ${FAVOURITES_MAX} selected`;
+  // "Done" (owner, 1.0.110 review) — right of the count. The same close the
+  // "Choose your favourites →" toggle performs; a picker with no visible way out
+  // read as a list that was stuck open.
+  const done = document.createElement("button");
+  done.type = "button";
+  done.className = "btn btn-sm eight-done";
+  done.textContent = "Done";
+  done.addEventListener("click", (e) => {
+    e.stopPropagation();
+    sfx.tick();
+    closeEightPicker();
+  });
+  head.append(title, count, done);
+  wrap.appendChild(head);
+
+  if (rows.length === 0) {
+    const none = document.createElement("div");
+    none.className = "set-note";
+    none.style.margin = "6px 14px 10px";
+    none.textContent = "Bind a few keys first \u2014 the ring is made of them.";
+    wrap.appendChild(none);
+  }
+
+  const list = document.createElement("div");
+  list.className = "eight-list";
+  rows.forEach((r) => {
+    const on = chosen.includes(r.key);
+    const row = document.createElement("label");
+    row.className = "eight-row" + (on ? " is-on" : "");
+
+    const chip = document.createElement("span");
+    chip.className = "eight-chip";
+    chip.textContent = r.key.toUpperCase();
+
+    const disc = document.createElement("span");
+    disc.className = "eight-icon" + (r.link ? " is-link" : "");
+    if (r.icon) {
+      const img = document.createElement("img");
+      img.alt = "";
+      img.src = r.icon;
+      img.onerror = () => { disc.innerHTML = ""; disc.textContent = placeholderPair(r.name); disc.classList.add("is-link"); };
+      disc.appendChild(img);
+    } else {
+      // The placeholder circle: two letters of the host/name (artboard 9's
+      // "rd" for reddit.com, "gh" for github.com).
+      disc.textContent = placeholderPair(r.name);
+    }
+
+    const name = document.createElement("span");
+    name.className = "eight-name";
+    name.textContent = r.name;
+    if (r.link) {
+      const tag = document.createElement("span");
+      tag.className = "eight-tag";
+      tag.textContent = " \u00b7 link";
+      name.appendChild(tag);
+    }
+
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.className = "eight-check";
+    cb.checked = on;
+    cb.disabled = !on && chosen.length >= FAVOURITES_MAX;
+    cb.setAttribute("aria-label", `${r.name} in the ring`);
+    cb.addEventListener("change", async () => {
+      if (!appConfig) return;
+      let next = [...chosen];
+      if (cb.checked) {
+        if (next.length >= FAVOURITES_MAX) { cb.checked = false; return; }
+        if (!next.includes(r.key)) next.push(r.key);
+      } else {
+        next = next.filter((k) => k !== r.key);
+      }
+      appConfig.middle_ring_favourites = next;
+      sfx.tick();
+      await persistConfig();
+      renderEightPicker();
+      // The fifteenth tick completes the ring, so the card folds itself
+      // ~400 ms later (owner, 1.0.110 review) — after the redraw above,
+      // which is what shows the last row tinted and every other box greyed
+      // first. Only a TICK arms it: un-ticking and re-ticking is a fresh
+      // fifteenth, and a pick that was refused (`cb.checked = false` above)
+      // never reaches this line.
+      if (cb.checked && next.length === FAVOURITES_MAX) {
+        _eightCloseTimer = window.setTimeout(() => {
+          _eightCloseTimer = undefined;
+          if (_eightOpen) closeEightPicker();
+        }, EIGHT_AUTO_CLOSE_MS);
+      }
+    });
+
+    row.append(chip, disc, name, cb);
+    list.appendChild(row);
+  });
+  wrap.appendChild(list);
+
+  const foot = document.createElement("div");
+  foot.className = "eight-foot";
+  foot.textContent = EIGHT_PICKER_NOTE;
+  wrap.appendChild(foot);
+  box.appendChild(wrap);
+}
+
+/** Two lowercase letters standing in for a favicon that has not arrived. */
+function placeholderPair(name: string): string {
+  const letters = name.replace(/[^a-z0-9]/gi, "");
+  return (letters.slice(0, 2) || name.slice(0, 2)).toLowerCase();
+}
+
 function specialsRow(on: boolean, inert: boolean, i: number): string {
   const sw = toggleSwitchHtml(
     "hudspecials", on,

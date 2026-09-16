@@ -427,6 +427,13 @@ function renderPanel(key: string): void {
     img.src = `data:image/png;base64,${binding.icon_override}`;
     img.alt = "";
     cap.appendChild(img);
+  } else if (binding?.site_icon) {
+    // PROBLEM 267 — a link's favicon (fetched once at bind time).
+    const img = document.createElement("img");
+    img.src = binding.site_icon;
+    img.alt = "";
+    img.onerror = () => { img.remove(); cap.textContent = key.toUpperCase(); };
+    cap.appendChild(img);
   } else {
     cap.textContent = key.toUpperCase();
   }
@@ -1792,6 +1799,25 @@ function handleRemove(): void {
   });
 }
 
+/** The key's CURRENT binding in the live config, if any. */
+function currentBinding(key: string): KeyBinding | undefined {
+  const profile = _config?.profiles.find((p) => p.name === _config?.active_profile);
+  return profile?.bindings[key] ?? profile?.bindings[key.toLowerCase()];
+}
+
+/** PROBLEM 267 — see the call in `commit`. Fire-and-forget by design. */
+function fetchSiteIconOnce(key: string, url: string): void {
+  invoke<string | null>("fetch_site_icon", { url })
+    .then((icon) => {
+      if (!icon || !_onSave) return;
+      const current = currentBinding(key);
+      if (!current || current.web_url !== url || current.site_icon) return;
+      console.info(`key-editor: site icon fetched for ${key} (${icon.length} chars) — attaching`);
+      _onSave(key, { ...current, site_icon: icon });
+    })
+    .catch(() => { /* an absent icon is the whole failure mode */ });
+}
+
 interface CommitOptions {
   /** Skip the Space+<key> conflict prompt. Remove and the profile chip do. */
   skipConflict?: boolean;
@@ -1883,6 +1909,14 @@ async function commit(binding: KeyBinding, opts: CommitOptions = {}): Promise<vo
     browser_exe: binding.browser_exe ?? null,
     browser_profile_dir: binding.browser_profile_dir ?? null,
     browser_profile_name: binding.browser_profile_name ?? null,
+    // PROBLEM 267 — a link's favicon SURVIVES a re-commit of the same URL (a
+    // browser-profile pick re-commits the whole binding through this same
+    // function) and is DROPPED with the URL when the key is pointed elsewhere:
+    // the icon described the target being replaced.
+    site_icon: binding.site_icon
+      ?? (binding.web_url && currentBinding(key)?.web_url === binding.web_url
+        ? currentBinding(key)?.site_icon ?? null
+        : null),
   };
 
   console.info(
@@ -1890,6 +1924,18 @@ async function commit(binding: KeyBinding, opts: CommitOptions = {}): Promise<vo
     `browser_exe=${full.browser_exe ?? "null"} profile_dir=${full.browser_profile_dir ?? "null"}`,
   );
   _onSave(key, full);
+
+  // PROBLEM 267 — "Site icons are fetched once, when you bind the link."
+  // THIS is the once. A URL binding with no icon asks Rust for the site's
+  // favicon (`/favicon.ico`, then the page's <link rel=icon>, 3 s each) in
+  // the background — the save above has already happened and the editor is
+  // not kept waiting on the network — and, when it arrives, re-saves the
+  // binding with the icon attached, PROVIDED the key still points at that
+  // URL and still has no icon. A failure writes nothing; the next edit of
+  // the key lands here again, which is the one retry the design allows.
+  if (full.web_url && !full.site_icon) {
+    fetchSiteIconOnce(key, full.web_url);
+  }
 
   // PROBLEM 242 — the ONE place a save is reported to the first-run tour, and
   // it is deliberately here rather than at any of the seven call sites that

@@ -128,14 +128,23 @@ fn abort_if_stale(epoch: u64, win: Option<&tauri::WebviewWindow>, at: &str) -> b
 /// A HUD that eats mouse clicks is worse than no HUD, so we never show it.
 pub static OVERLAY_DISABLED: AtomicBool = AtomicBool::new(false);
 
-/// Logical size of the guide HUD panel (v11 was 340×195 for a 7-row list;
-/// ours shows the live profile's key grid plus system shortcuts, so it is
-/// substantially larger — 26 app keys + 7 system entries must fit unclipped).
-/// First-frame size only. The overlay page measures the rendered bloom and
-/// calls `overlay_fit_hud` with the real box a few ms later, so this just
-/// needs to be close enough that the resize is not a visible jump.
-const HUD_W: f64 = 680.0;
-const HUD_H: f64 = 600.0;
+/// PROBLEM 267 — WHICH kind of HUD the published `HUD_VISIBLE == true` is
+/// about: the Space ring (0) or the middle button's cursor-anchored icon ring
+/// (1). One `AtomicU8`, written by each show beside `VISIBLE_EPOCH` and read
+/// by `hide_guide_hud_pending`, whose only kind-specific act is WHICH event it
+/// emits (`guide-hud-hide` vs `middle-ring-hide`) — the epoch discipline, the
+/// `HUD_VISIBLE` swap, the chip teardown and the reconciliation path are all
+/// shared, so PROBLEM 177's race can never be fixed for one ring and not the
+/// other. The overlay page has one listener per event and each keeps its own
+/// DOM, so an event for the wrong kind is a no-op there, not a mis-hide.
+static HUD_KIND: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(HUD_KIND_SPACE);
+const HUD_KIND_SPACE: u8 = 0;
+const HUD_KIND_RING: u8 = 1;
+
+/// PROBLEM 267 — is the icon ring (not the Space ring) the HUD on screen?
+pub fn middle_ring_is_up() -> bool {
+    HUD_VISIBLE.load(Ordering::Relaxed) && HUD_KIND.load(Ordering::Relaxed) == HUD_KIND_RING
+}
 
 /// Called once during app setup to wire the Tauri handle.
 pub fn set_app_handle(handle: AppHandle) {
@@ -172,6 +181,13 @@ pub struct GuideHudPayload {
     /// hand-over point.
     pub profile_emoji: Option<String>,
     pub apps: Vec<(String, String)>,
+    /// PROBLEM 267 round 3 — one entry per `apps` row, in the same order: a
+    /// complete `data:` URL for the app's icon (the SAME sources the icon
+    /// ring uses — the binding's `site_icon` for a link, its `icon_override`,
+    /// or the shell icon already in the picker's cache), or `None` for the
+    /// letter disc. CACHE ONLY, never a fetch or a shell call at raise time:
+    /// this rides the Space-hold latency path. Built by `engine::hud_icons_for`.
+    pub app_icons: Vec<Option<String>>,
     pub specials: Vec<(String, String)>,
     /// `Some` ONLY for a Settings preview (`commands::preview_hud_layout`).
     ///
@@ -211,13 +227,11 @@ pub struct HudPreview {
 /// through the same epoch the rest of this file is built on.
 const PREVIEW_MS: u64 = 4000;
 
-/// Size and place the overlay window CENTRED on the monitor under the cursor.
-///
-/// V13 placed this bottom-centre because the HUD was a bottom-anchored
-/// rectangular panel. The V14 HUD is a radial bloom centred on screen, and
-/// the frontend re-sizes it via `overlay_fit_hud` milliseconds after show.
-/// Without centring HERE too, the window appears bottom-anchored for one
-/// frame and then visibly jumps to the middle.
+/// Size and place the overlay window as the CANVAS of the monitor under the
+/// cursor — PROBLEM 267 round 3: the whole work area (`commands::hud_canvas_for`),
+/// the same rectangle `overlay_fit_hud` computes milliseconds later, so the
+/// page's fit finds the window already there and the ring never jumps. The
+/// Space ring's fixed stage is centred on that monitor's centre by the page.
 ///
 /// PROBLEM 169 — this was primary-monitor-only, by the owner's explicit
 /// decision of 2026-08-10, and he reversed it on 2026-08-24 after reporting
@@ -227,20 +241,15 @@ const PREVIEW_MS: u64 = 4000;
 /// used to return having positioned nothing while the caller went on to
 /// `show()` anyway — so the ring painted into whatever box the last toast had
 /// left behind.
-fn place_overlay_centred(win: &tauri::WebviewWindow, w: f64, h: f64) {
+fn place_overlay_canvas(win: &tauri::WebviewWindow) {
     let Some(mon) = crate::commands::overlay_monitor(win) else {
         log::warn!(
             "guide_hud: no monitor resolved — showing the HUD at its previous size and              position rather than not at all. It may look clipped until the display settles."
         );
         return;
     };
-    let sf = mon.scale_factor();
-    let ms = mon.size().to_logical::<f64>(sf);
-    let mp = mon.position().to_logical::<f64>(sf);
-    let x = mp.x + (ms.width - w) / 2.0;
-    let y = mp.y + (ms.height - h) / 2.0;
-    let _ = win.set_size(tauri::LogicalSize::new(w, h));
-    let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+    let (canvas, sf, _) = crate::commands::hud_canvas_for(&mon);
+    crate::commands::overlay_fit_canvas(win, canvas, sf, "space ring, at show");
 }
 
 /// Show the Guide HUD for a real Space-hold — content via event, visibility
@@ -255,6 +264,7 @@ pub fn show_guide_hud(
     profile_name: &str,
     profile_emoji: Option<String>,
     apps: Vec<(String, String)>,
+    app_icons: Vec<Option<String>>,
     specials: Vec<(String, String)>,
 ) {
     show_hud_payload(
@@ -263,6 +273,7 @@ pub fn show_guide_hud(
             profile: profile_name.to_string(),
             profile_emoji,
             apps,
+            app_icons,
             specials,
             preview: None,
         },
@@ -386,6 +397,7 @@ fn show_hud_payload(epoch: u64, payload: GuideHudPayload) {
     // only its own. Stored first, and with SeqCst, so no reader can observe
     // `HUD_VISIBLE == true` paired with a stale epoch.
     VISIBLE_EPOCH.store(epoch, Ordering::SeqCst);
+    HUD_KIND.store(HUD_KIND_SPACE, Ordering::SeqCst);
     HUD_VISIBLE.store(true, Ordering::Relaxed);
 
     // Show the WINDOW first, then send the content. A hidden WebView2 window
@@ -393,7 +405,7 @@ fn show_hud_payload(epoch: u64, payload: GuideHudPayload) {
     // the panel came up as an empty dark box (2026-08-10).
     if !OVERLAY_DISABLED.load(Ordering::Relaxed) {
         if let Some(win) = handle.get_webview_window("overlay") {
-            place_overlay_centred(&win, HUD_W, HUD_H);
+            place_overlay_canvas(&win);
             // The toasts may have left a pill-shaped window region — the HUD
             // needs the full rectangle back.
             crate::commands::set_overlay_region(&win, &[], 1.0);
@@ -638,10 +650,31 @@ pub fn hide_guide_hud_pending(action_pending: bool) {
     // the `st-hud-pointer` poller also gates on `is_visible()`, so this is
     // the second lock on the same door.
     crate::hook::pointer::clear_chips();
+    // PROBLEM 267 — read the kind BEFORE the swap below, beside it: a show
+    // that lands between the two would rewrite the kind for ITS ring, and the
+    // hide event would then go to the wrong listener.
+    let ring = HUD_KIND.load(Ordering::SeqCst) == HUD_KIND_RING;
     if HUD_VISIBLE.swap(false, Ordering::Relaxed) {
         if let Some(handle) = APP_HANDLE.get() {
             if action_pending {
                 log::info!("guide_hud: hide with action pending - window stays up for the handover");
+            } else if ring {
+                // PROBLEM 267 — the icon ring's plain release does NOT hide
+                // the window here. The design's exit (scale 1→.85, fade, 117
+                // ms) is played by the page, and a window hidden on this line
+                // would play it into nothing — PROBLEM 135's class, chosen
+                // knowingly for the SPACE ring ("a plain release hides
+                // immediately, exactly as before") and declined for this one.
+                // The page calls `overlay_toasts_done` when its exit timer
+                // ends (a bounded setTimeout, never an animation event that
+                // can fail to fire), and THAT command is the single terminal
+                // hide, logged there. A new hold inside those ~120 ms simply
+                // re-shows; the late `overlay_toasts_done` is then refused by
+                // its own `is_visible()` gate.
+                log::info!(
+                    "guide_hud: icon-ring hide requested (no action pending) — the window stays \
+                     up for the page's exit; overlay_toasts_done is the terminal hide (PROBLEM 267)"
+                );
             } else if let Some(win) = handle.get_webview_window("overlay") {
                 // Say so. This hide was silent, and a silent window hide cost
                 // three diagnostic rounds (PROBLEM 135) - the same lesson the
@@ -649,7 +682,10 @@ pub fn hide_guide_hud_pending(action_pending: bool) {
                 log::info!("guide_hud: overlay window hidden (no action pending)");
                 let _ = win.hide();
             }
-            let _ = handle.emit("guide-hud-hide", action_pending);
+            let _ = handle.emit(
+                if ring { "middle-ring-hide" } else { "guide-hud-hide" },
+                action_pending,
+            );
         }
         // Consumed by the normal path — nothing left to reconcile.
         SHOW_OUTSTANDING.store(false, Ordering::SeqCst);
@@ -703,12 +739,367 @@ pub fn hide_guide_hud_pending(action_pending: bool) {
     // this event. Without it the page keeps refusing every window fit and
     // never calls `overlay_toasts_done`, which is what made the stall outlast
     // nine PiP actions and a launched app.
-    let _ = handle.emit("guide-hud-hide", action_pending);
+    let _ = handle.emit(
+        if ring { "middle-ring-hide" } else { "guide-hud-hide" },
+        action_pending,
+    );
 }
 
 /// Returns true if the HUD is currently displayed.
 pub fn is_visible() -> bool {
     HUD_VISIBLE.load(Ordering::Relaxed)
+}
+
+/* ===========================================================================
+   PROBLEM 267 — THE MIDDLE BUTTON'S CURSOR-ANCHORED ICON RING
+
+   A second HUD kind, shown through the same window, the same epoch, the same
+   `HUD_VISIBLE` and the same hide paths as the Space ring — only the
+   PLACEMENT and the PAYLOAD differ. Placement is the whole reason it cannot
+   share `show_hud_payload`: that function lets the page measure the Space
+   ring and fit the window afterwards; this one lays the ring out in Rust
+   (`middle_ring::choose_shape` / `layout_ring_slots`), makes the window ONE
+   BIG CANVAS — the work area of the monitor the CURSOR is on
+   (`middle_ring::canvas_rect`, round 3) — and, for "All", clamps the centre
+   on-screen and warps the OS cursor to it. None of that can happen after the
+   page has drawn (the page draws ONCE, from the payload, with no IPC while
+   the ring is up).
+   =========================================================================== */
+
+/// Where the ring landed, for the marker line and for the poller.
+struct RingPlacement {
+    /// Centre in PHYSICAL px (the poller's unit).
+    cx: i32,
+    cy: i32,
+    /// How far the clamp moved it from the cursor, physical px.
+    dx: i32,
+    dy: i32,
+    scale: f64,
+    /// The canvas the overlay window was fitted to, physical px.
+    canvas: crate::middle_ring::WorkArea,
+    /// The room the LAYOUT was measured against, physical px: the canvas,
+    /// less any auto-hidden appbar band (2026-09-15). It is the canvas
+    /// itself whenever no such bar is docked on this monitor — printing it
+    /// is how a clipped tile and a mis-measured room stay distinguishable.
+    room: crate::middle_ring::WorkArea,
+    /// The ring centre in the canvas page's CSS px.
+    page: (f64, f64),
+    /// Which shape was chosen at the press point (owner decision 2026-09-13).
+    shape: crate::middle_ring::RingShape,
+    /// The monitor's position, for the log.
+    monitor: (i32, i32),
+}
+
+/// Show the icon ring for hold `epoch`, anchored at `cursor_phys` (the cursor
+/// as it was at the press, in physical px — captured OFF the hook callback by
+/// `engine::dispatch` through `GetCursorPos`).
+///
+/// Order, and every line is where it is for a reason already paid for
+/// elsewhere in this file: stale-epoch check → mark visible (kind = ring) →
+/// canvas + region + topmost → stale check → show → warp the cursor ("All"
+/// only) → publish the hit table → stale check → emit. The warp comes AFTER
+/// `show()` so the user never sees the cursor jump to a place where nothing
+/// has appeared yet.
+pub fn show_middle_ring(
+    epoch: u64,
+    entries: Vec<crate::middle_ring::RingEntry>,
+    scope: crate::config::MiddleRingScope,
+    layout: crate::config::AllRingLayout,
+    fun: bool,
+    reduced: bool,
+    cursor_phys: (i32, i32),
+) {
+    use crate::middle_ring as mr;
+    // "All" only: the owner's Rings / Spiral pill. Favourites is always the
+    // edge-and-corner ring law — its whole point is the shape it takes at a
+    // screen edge, which a spiral has no answer for.
+    let spiral = scope == crate::config::MiddleRingScope::All
+        && layout == crate::config::AllRingLayout::Spiral;
+    let current = HOLD_EPOCH.load(Ordering::SeqCst);
+    if current != epoch {
+        log::info!(
+            "guide_hud: a deferred icon-ring show for hold #{epoch} arrived after that hold had \
+             ended (now #{current}) — NOT showing (PROBLEM 177, PROBLEM 267)."
+        );
+        return;
+    }
+    let Some(handle) = APP_HANDLE.get() else { return };
+    let n_items = entries.len();
+    if n_items == 0 {
+        log::info!(
+            "guide_hud: the icon ring has NOTHING to show — the active profile has no bound \
+             letters (PROBLEM 267). Standing down; the hold ends as a plain release."
+        );
+        return;
+    }
+
+    VISIBLE_EPOCH.store(epoch, Ordering::SeqCst);
+    HUD_KIND.store(HUD_KIND_RING, Ordering::SeqCst);
+    HUD_VISIBLE.store(true, Ordering::Relaxed);
+
+    let mut placement: Option<RingPlacement> = None;
+    // The payload and its slots are built once the monitor is known, because
+    // the SHAPE depends on the room around the press point (owner decision,
+    // 2026-09-13): Favourites changes shape at an edge or corner and never
+    // moves its centre; "All" keeps the full circles, clamped and warped.
+    let mut built: Option<(mr::MiddleRingPayload, Vec<mr::RingSlot>)> = None;
+    let mut entries = Some(entries);
+    if !OVERLAY_DISABLED.load(Ordering::Relaxed) {
+        if let Some(win) = handle.get_webview_window("overlay") {
+            // THE MONITOR THE CURSOR IS ON (owner decision 2026-09-13, round
+            // 3 — "primary" plays no role any more): `MonitorFromPoint` of
+            // the press point, falling back to `overlay_monitor`'s chain
+            // (the cursor now, then primary, then any) during a display
+            // change.
+            let mon = match win.monitor_from_point(cursor_phys.0 as f64, cursor_phys.1 as f64) {
+                Ok(Some(m)) => Some(m),
+                _ => {
+                    log::warn!(
+                        "guide_hud: no monitor under the press point ({},{}) — falling back to \
+                         overlay_monitor's chain for this one show (PROBLEM 267)",
+                        cursor_phys.0, cursor_phys.1
+                    );
+                    crate::commands::overlay_monitor(&win)
+                }
+            };
+            if let Some(mon) = mon {
+                let sf = mon.scale_factor();
+                let wa = mon.work_area();
+                let area = mr::WorkArea {
+                    x: wa.position.x as f64,
+                    y: wa.position.y as f64,
+                    w: wa.size.width as f64,
+                    h: wa.size.height as f64,
+                };
+                let bounds = mr::WorkArea {
+                    x: mon.position().x as f64,
+                    y: mon.position().y as f64,
+                    w: mon.size().width as f64,
+                    h: mon.size().height as f64,
+                };
+                let canvas = mr::canvas_rect(area, bounds);
+                // THE ROOM THE LAYOUT MAY USE — the CANVAS, not the work
+                // area, less any auto-hidden taskbar band (2026-09-15).
+                // Two right/bottom-only clips fixed at once; the full
+                // account is on `middle_ring::room_rect`. In one sentence:
+                // the window is the canvas, so anything measured against
+                // the work area is 2 px outside the window on the right and
+                // bottom whenever the 2-px inset applies, and an auto-hidden
+                // taskbar owns a band of the work area that Windows never
+                // subtracts.
+                let room_area = mr::room_rect(canvas, crate::commands::autohide_reserve_for(bounds));
+                // THE SHAPE, decided here and never again for this raise.
+                // Favourites (round 6 — the owner's round-3 law): the centre
+                // is the PRESS POINT. `choose_shape` lays arcs around it at
+                // full size, then SHRINKS the unit (tile, radii and spacing
+                // together) down to `TILE_MIN` before it will move the
+                // centre at all; only when even the floor cannot hold the
+                // count does it NUDGE by the smallest grid vector that fits
+                // (`Placement.offset`, logical, warped below like a clamp),
+                // and only when nothing fits anywhere does it fall back to
+                // the clamp + warp. "All": full circles, always, clamped and
+                // warped against THIS monitor's work area.
+                let cursor_f = (cursor_phys.0 as f64, cursor_phys.1 as f64);
+                let mr::Placement { shape, offset, slots, arcs } =
+                    if scope == crate::config::MiddleRingScope::MyEight {
+                        mr::choose_shape(n_items, mr::Room::at(cursor_f, room_area, sf))
+                    } else {
+                        // "All" — the Fibonacci rings, or (owner, 2026-09-15)
+                        // the phyllotaxis SPIRAL. Both take the SAME clamp +
+                        // warp path below: a spiral is a variant of "All",
+                        // not of Favourites, so its containment law is
+                        // unchanged.
+                        mr::Placement {
+                            shape: if spiral {
+                                mr::RingShape::Spiral
+                            } else {
+                                mr::RingShape::CircleClamped
+                            },
+                            offset: (0.0, 0.0),
+                            slots: if spiral {
+                                mr::spiral_slots(n_items, mr::TILE)
+                            } else {
+                                mr::layout_ring_slots(n_items, mr::TILE)
+                            },
+                            arcs: Vec::new(),
+                        }
+                    };
+                // Clamp on the TILES plus their hover halo, not on the scrim:
+                // the scrim fades to nothing and may be cut by the screen
+                // edge; a tile may not (artboard 5). `clamp_extent` is
+                // (ring_extent + CLAMP_MARGIN) × scale — physical, like the
+                // work area and the cursor, and it is the ACTUAL outermost
+                // ring's extent whatever the ring count. An ANCHORED shape
+                // skips it: its centre is the press point plus the snap
+                // (physical = logical × scale); a non-zero snap warps the
+                // cursor below exactly as a clamp does.
+                let (cx, cy) = if shape.anchored() {
+                    (cursor_f.0 + offset.0 * sf, cursor_f.1 + offset.1 * sf)
+                } else {
+                    mr::clamp_ring_center(cursor_f, room_area, mr::clamp_extent(&slots, sf))
+                };
+                let (cx, cy) = (cx.round() as i32, cy.round() as i32);
+                let page = mr::page_point((cx as f64, cy as f64), canvas, sf);
+                let Some(ent) = entries.take() else { return };
+                // The room in the page's own px: the scrim is clipped to it
+                // so the fade ends at the screen edge, never past it.
+                let room_css = mr::page_rect(room_area, canvas, sf);
+                let (payload, slots) = mr::build_payload_shaped(
+                    ent, scope, fun, reduced, shape, slots, &arcs, page, Some(room_css), sf,
+                );
+                built = Some((payload, slots));
+                // THE CANVAS. Physical in, physical out; the fitter compares
+                // the target with the window's current rectangle and moves
+                // nothing when they already agree (a raise on the same
+                // monitor after a raise is free).
+                crate::commands::overlay_fit_canvas(&win, canvas, sf, "icon ring");
+                crate::commands::set_overlay_region(&win, &[], 1.0);
+                crate::commands::raise_overlay_topmost(&win);
+                placement = Some(RingPlacement {
+                    cx,
+                    cy,
+                    dx: cx - cursor_phys.0,
+                    dy: cy - cursor_phys.1,
+                    scale: sf,
+                    canvas,
+                    room: room_area,
+                    page,
+                    shape,
+                    monitor: (mon.position().x, mon.position().y),
+                });
+            } else {
+                log::error!(
+                    "guide_hud: NO monitor could be resolved — the icon ring cannot be placed \
+                     and will not be shown this time (PROBLEM 267)"
+                );
+            }
+
+            if placement.is_none() || abort_if_stale(epoch, Some(&win), "before ring show") {
+                if placement.is_none() {
+                    HUD_VISIBLE.store(false, Ordering::Relaxed);
+                }
+                return;
+            }
+            let _ = win.show();
+            SHOW_OUTSTANDING.store(true, Ordering::SeqCst);
+            log::info!("guide_hud: overlay window shown for the icon ring (hold #{epoch})");
+            log_shown_over();
+        } else if !crate::windows_created() {
+            log::info!(
+                "guide_hud: still starting — the overlay webview is not built yet; the icon \
+                 ring for this hold is skipped and the overlay is asked for now (PROBLEM 215/265)"
+            );
+            crate::overlay_boot::request_now(handle);
+            HUD_VISIBLE.store(false, Ordering::Relaxed);
+            return;
+        } else {
+            log::error!(
+                "guide_hud: the overlay window does not exist — the icon ring cannot be shown. \
+                 Asking the display watcher to rebuild it (PROBLEM 214)."
+            );
+            crate::display_watch::heal_now();
+            HUD_VISIBLE.store(false, Ordering::Relaxed);
+            return;
+        }
+    } else {
+        log::error!(
+            target: crate::telemetry::DEGRADED_TARGET,
+            "guide_hud: OVERLAY_DISABLED is set, so the icon ring is suppressed; asking the \
+             display watcher to rebuild the overlay (PROBLEM 214/267)."
+        );
+        crate::display_watch::heal_now();
+        HUD_VISIBLE.store(false, Ordering::Relaxed);
+        return;
+    }
+
+    let Some(pl) = placement else { return };
+    let Some((payload, slots)) = built else { return };
+
+    // THE WARP ("All" only, or the clamped fallback). The OS cursor moves to
+    // the clamped centre, so what is drawn and what the hand feels agree
+    // (artboard 5: "cursor warped here"). A win32k call — legal here (engine
+    // thread), never in the callback. `SetCursorPos` generates one
+    // WM_MOUSEMOVE our LL hook sees as a plain move: it can start nothing (a
+    // move is not a press) and `note_cursor` then stores exactly this
+    // position, which is inside the dead zone. The explicit `note_cursor`
+    // below is the belt to that brace: the poller's cursor truth is right
+    // even if the injected move never reaches the hook (UIPI, or a hook
+    // evicted mid-hold).
+    if pl.dx != 0 || pl.dy != 0 {
+        #[cfg(windows)]
+        unsafe {
+            if let Err(e) = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(pl.cx, pl.cy) {
+                log::warn!(
+                    "guide_hud: SetCursorPos({},{}) failed ({e}) — the ring is drawn at the \
+                     clamped centre but the cursor stayed where it was; aiming still works, \
+                     from where the cursor is (PROBLEM 267)",
+                    pl.cx, pl.cy
+                );
+            }
+        }
+        crate::hook::pointer::note_cursor(pl.cx, pl.cy);
+    }
+
+    // THE HIT TABLE — codes first, geometry last (`RING_ACTIVE` goes up
+    // inside `publish_ring`, after the count).
+    let codes: Vec<char> = payload
+        .items
+        .iter()
+        .filter_map(|i| i.code.chars().next())
+        .collect();
+    crate::hook::pointer::publish_key_codes(&codes);
+    let hits = mr::hits_for(&slots, pl.scale);
+    let dead = mr::dead_zone_for(&slots) * pl.scale;
+    crate::hook::pointer::publish_ring(pl.cx, pl.cy, dead, &hits, spiral);
+
+    // THE MARKER LINE — one per raise, long and literal on purpose (CLAUDE.md:
+    // a long `log::` FORMAT STRING is the only exe marker that survives).
+    let radii: Vec<String> = {
+        let mut r: Vec<u32> = slots.iter().map(|s| s.radius.round() as u32).collect();
+        r.sort_unstable();
+        r.dedup();
+        r.iter().map(|v| v.to_string()).collect()
+    };
+    let tiles: Vec<String> = {
+        let mut t: Vec<u32> = slots.iter().map(|s| s.tile.round() as u32).collect();
+        t.sort_unstable();
+        t.dedup();
+        t.iter().map(|v| v.to_string()).collect()
+    };
+    let counts: Vec<String> = {
+        let mut rings: Vec<u8> = slots.iter().map(|s| s.ring).collect();
+        rings.sort_unstable();
+        rings.dedup();
+        rings
+            .iter()
+            .map(|r| slots.iter().filter(|s| s.ring == *r).count().to_string())
+            .collect()
+    };
+    log::info!(
+        "middle-button ring v2: cursor-anchored-ring-raised-at-cursor-spaceadom-267 — centre \
+         ({},{}) physical, clamp delta ({},{}), {} item(s), scope {}, shape {} (arc radii {} \
+         logical, ring counts {}, tiles {} px), canvas {:.0}x{:.0} @ ({:.0},{:.0}) physical on \
+         the monitor at ({},{}) scale {}, page centre ({:.1},{:.1}) css, room {:.0}x{:.0} @ \
+         ({:.0},{:.0}) physical — the canvas less any AUTO-HIDDEN appbar band (2026-09-15) \
+         (hud hold #{epoch}). A \
+         circle keeps the centre on the press point with delta (0,0); half-* / quarter-* are \
+         SNAPPED to the edge line / corner point and circle-clamped is pushed on-screen by \
+         clamp_ring_center — either way a non-zero delta means the cursor was warped to the new \
+         centre; the canvas is the work area of the cursor's monitor, never its exact bounds. \
+         PROBLEM 267.",
+        pl.cx, pl.cy, pl.dx, pl.dy, n_items, payload.scope, payload.shape,
+        radii.join("/"), counts.join("/"), tiles.join("/"),
+        pl.canvas.w, pl.canvas.h, pl.canvas.x, pl.canvas.y,
+        pl.monitor.0, pl.monitor.1, pl.scale, pl.page.0, pl.page.1,
+        pl.room.w, pl.room.h, pl.room.x, pl.room.y
+    );
+
+    if abort_if_stale(epoch, handle.get_webview_window("overlay").as_ref(), "before ring emit") {
+        return;
+    }
+    if let Err(e) = handle.emit("middle-ring-show", payload) {
+        log::warn!("guide_hud: middle-ring-show emit failed: {e}");
+    }
 }
 
 /// PROBLEM 243 — the Guide HUD must appear while Spaceadom's OWN dashboard is

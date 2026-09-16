@@ -19,6 +19,11 @@ fn binding(app: Option<&str>, web: Option<&str>, label: &str) -> KeyBinding {
         browser_exe: None,
         browser_profile_dir: None,
         browser_profile_name: None,
+        // PROBLEM 267 — a stock link binding ships WITHOUT a favicon: the
+        // icon is fetched on this machine, at bind time, by the key editor,
+        // and a seed cannot carry bytes for a site it has never reached. The
+        // ring draws a letter disc until the user first edits the key.
+        site_icon: None,
     }
 }
 

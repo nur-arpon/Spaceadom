@@ -34,14 +34,37 @@ is safe.
 
 **Missing: 1.0.28.** Deleted at your request on 2026-08-14 — it was the first
 attempt at the toast/HUD transition and it made the HUD feel delayed. Every
-other version is here, 1.0.0 through 1.0.109, including the few that were
+other version is here, 1.0.0 through 1.0.112, including the few that were
 superseded within minutes on 2026-08-20 (1.0.64, 1.0.66, 1.0.67, 1.0.68) —
 those are wrong turns, and they are kept so the record is honest rather than
 tidy. Their rows say what each one got wrong.
 
 ---
 
-## 2026-09-12 (latest) — 1.0.109
+## 2026-09-17 (latest) — 1.0.112 (and 1.0.111 the same night) — LOCAL TEST BUILDS, not published
+
+| Version | What changed |
+| --- | --- |
+| **1.0.112** | **The keyboard hook stops "repairing" itself for no reason.** Since 1.0.105 the app has watched for Windows silently disconnecting its keyboard hook and re-installed it when it proved the keyboard was deaf. The proof was wrong on a laptop: a two-finger scroll on the touchpad while you were not typing looked, to that test, exactly like a dead keyboard — 449 re-installs in two days on the owner's machine, each one able to drop a Space you were holding. The app now listens to the keyboard the way Windows itself does (raw input) and only calls the hook deaf when a real keystroke reached Windows and not the app. Real deafness is still caught, faster. |
+| | **The middle-button ring draws at the right size on a second monitor.** With an external monitor at a different scale, the ring could come out 12 % too large and reach past the screen edge; the page now measures the screen it is on and corrects itself. Also, the ring's window and the toasts no longer get re-scaled by Windows when they move between monitors of different scale. |
+| **1.0.111** | **The middle-button ring stays on the screen at edges and corners, centred on the cursor.** Since 1.0.110 a press near an edge moved the ring's centre onto the edge itself (up to 300 px from where you pressed), so half the ring — and three quarters of it in a corner — was drawn off-screen. Now the ring stays exactly where you pressed and becomes an arc: near an edge a half ring opening away from it, in a corner a quarter fan, the dashed guide lines ending where the tiles end, and the soft backdrop stopping at the screen edge. If there is genuinely not enough room, the tiles shrink first (down to the icon size) before the centre is allowed to move at all, and then only by the smallest nudge that fits. The centre disc may still touch the edge — by your choice. |
+| | **Space + ; — voice typing.** Hold Space and tap semicolon and Windows' own dictation opens, typing wherever your cursor is. The same "Voice Typing" tile is on the middle-button ring (under "All"). |
+| | **Nothing you have set up is touched.** Installs over 1.0.110 and keeps every profile, binding and setting. **UNPROVEN on hardware until the owner holds the button:** the ring at an edge and a corner, Space + ; with a text box focused, and the ring on the second monitor. |
+
+---
+
+## 2026-09-13 — 1.0.110 — LOCAL TEST BUILD, not published
+
+| Version | What changed |
+| --- | --- |
+| **1.0.110** | **The middle mouse button now raises a ring of your REAL app icons at the cursor.** Hold the wheel button and eight of your apps bloom out of the cursor as their own icons (the Start-menu icon for an app, the site's favicon for a link), each with a small letter badge; the pill in the middle names whichever one you are over; let go on it and it launches, focuses or minimises exactly as Space + that letter would; let go on nothing and it closes. A quick middle click still passes through, so browsers still open links in a new tab. Near an edge the ring slides fully on-screen and the cursor is moved to its new centre. Built and installed on this machine on 2026-09-13 as a local test build — **NOT released, NOT on the Store, nothing committed**. |
+| | **The choices.** Settings: **"My eight"** (pick which eight keys make the ring, under "Choose your eight") or **"All of them"** (every bound key plus the special shortcuts, packed into a second ring around the first). **"Icon ring"** or **"Space ring"** — the second one restores 1.0.109's behaviour exactly, the middle button raising the same centred guide ring as Space. **App exceptions have three states** — "Off entirely", "Space only", "Middle only" — and the built-in 3D/CAD list appears pre-set to "Space only" with a "Default" tag, so those programs keep their middle-button orbit and Space keeps working inside them; your own row for one of them overrides the default. Website icons are fetched once, when you bind the link in the key editor, never while the ring is open; a site with no icon gets a letter disc, and editing that key again is the one retry. |
+| | **WHAT WAS PROVEN ON THIS MACHINE, AND WHAT WAS NOT.** Proven: version stamp 1.0.110 on the installed program, the same 22,159,360 bytes as the fresh build; the new log marker present in the fresh and installed program and absent from 1.0.109 (with 32 older markers present in all three, so the check itself is working); a fresh process; your settings file byte-for-byte identical before and after the install (5 profiles both sides); zero Windows Installer activity during the install; keyboard hook and overlay both started clean, the overlay usable 659 ms after start; the overlay page reported "middle-ring listeners registered OK"; the 1.0.109 logon task survived the install and the old Run entry is still gone. **NOT proven: the ring itself.** Nobody has held the middle button on this build yet, so the icons, the centre pill, the edge clamp, release-to-launch, "All of them", the "Space ring" option and the three-state exceptions are all UNTESTED on real hardware — that is what this build is for. The Space-hold-over-the-dashboard check is UNPROVEN, as on every build until someone presses the key. **Measured this morning for 1.0.109:** its logon task fired for the first time — logon at 09:08:32, Spaceadom running at 09:08:43, twelve seconds, down from 107. |
+| | Nothing you have set up is touched. Installs over 1.0.109 and keeps every profile, binding and setting. |
+
+---
+
+## 2026-09-12 — 1.0.109
 
 | Version | What changed |
 | --- | --- |

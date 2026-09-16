@@ -348,6 +348,19 @@ body.nocturne[data-theme="warcry"] {
   font: 700 11px ui-monospace, Menlo, monospace; color: #fff; flex-shrink: 0; }
 .st-chip.sp kbd { background: var(--st-kbdA); }
 .st-chip.ap kbd { background: var(--st-kbdB); }
+/* PROBLEM 267 round 3 — the app's icon in the disc's place (same 20 px box,
+   so the chip measures as it did) with the letter badge at its top-right,
+   as a ring tile wears it (`.mr-badge`). No filter, no backdrop-filter. */
+.st-chip .st-ico { position: relative; display: inline-flex; align-items: center;
+  justify-content: center; width: 20px; height: 20px; flex-shrink: 0; }
+.st-chip .st-ico img { width: 20px; height: 20px; object-fit: contain; pointer-events: none;
+  border-radius: 5px; }
+.st-chip .st-ico-badge { position: absolute; top: -6px; right: -7px; min-width: 12px; height: 12px;
+  padding: 0 2px; border-radius: 999px; background: var(--st-kbdB); color: #fff;
+  font: 700 7.5px ui-monospace, Menlo, monospace; line-height: 12px; text-align: center;
+  box-sizing: border-box; border: 1px solid var(--st-chipB-bg); }
+#st-hud.dense-chips .st-chip .st-ico { width: 18px; height: 18px; }
+#st-hud.dense-chips .st-chip .st-ico img { width: 18px; height: 18px; }
 /* hard bound so arbitrary app names can never break the ring */
 .st-chip span { white-space: nowrap; max-width: 118px; overflow: hidden; text-overflow: ellipsis; }
 

@@ -915,6 +915,9 @@ fn parse_map_body(body: &str) -> schema::BindingMap {
                     browser_exe: None,
                     browser_profile_dir: None,
                     browser_profile_name: None,
+                    // PROBLEM 267 — no favicon on this route either; the
+                    // editor fetches one when the key is next edited.
+                    site_icon: None,
                 },
             );
             i += 6; // advance past this entry

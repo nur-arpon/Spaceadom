@@ -1609,6 +1609,8 @@ mod hard_requirement_tests {
             browser_exe: None,
             browser_profile_dir: None,
             browser_profile_name: None,
+            // PROBLEM 267 — a link icon is fetched by the editor, never seeded.
+            site_icon: None,
         }
     }
 
@@ -1893,6 +1895,7 @@ mod fallback_message_tests {
             browser_exe: None,
             browser_profile_dir: None,
             browser_profile_name: None,
+            site_icon: None,
         };
         assert_eq!(route_for(&b, &|_: &Path| false), BrowserRoute::Default);
     }

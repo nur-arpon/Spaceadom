@@ -32,6 +32,62 @@ use std::sync::Mutex;
 /// uncontended lock on a background thread costs nothing.
 static EXCLUDED_LIST: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// PROBLEM 267 — the SAME list with each entry's scope beside it. Two lists
+/// rather than one so every pre-267 reader of `EXCLUDED_LIST` (a plain stem
+/// list meaning "Space stands down here") keeps its exact semantics, and the
+/// scope is consulted only by `resolve_scope` on the poller.
+static SCOPED_LIST: Mutex<Vec<(String, crate::config::ExceptionScope)>> = Mutex::new(Vec::new());
+
+/// PROBLEM 267 — the middle-button verdict for the foreground app, the twin of
+/// `hook::EXCLUDED_ACTIVE` for the OTHER trigger. `true` = the user's own list
+/// (an `OffEntirely` or `SpaceOnly` row) stands the middle button down here.
+/// Written ONLY by the poller; read by `ms_hook_proc` as one relaxed load and
+/// passed to `middle_button_down_accepted` as `user_excluded`.
+///
+/// NOT the built-in 3D/CAD verdict — that stays `orbit_apps::ORBIT_ACTIVE`,
+/// a separate parameter of the same gate, so a log can still say WHICH list
+/// declined a press.
+pub static MIDDLE_EXCLUDED_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// PROBLEM 267 — what the two triggers do inside the foreground app, resolved
+/// from the user's scoped list and the built-in orbit list in ONE place.
+///
+/// Precedence, and each line is a decision:
+/// 1. The user's own row for this stem wins outright, whatever the built-in
+///    table says — a built-in row the user moved to `MiddleOnly` is stored in
+///    the user's list, so SolidWorks can have its ring back if he wants it.
+/// 2. Otherwise a built-in orbit app is `SpaceOnly`: Space works, the middle
+///    button orbits the model (PROBLEM 263's rule, unchanged).
+/// 3. Otherwise nothing stands down.
+///
+/// Returns `(space_off, middle_off, from_user_row)`. `from_user_row` is what
+/// `orbit_apps::publish` needs to know so `ORBIT_ACTIVE` is only ever set by
+/// the BUILT-IN table — the user's row publishes through
+/// `MIDDLE_EXCLUDED_ACTIVE` instead, and the two never both claim one app.
+pub fn resolve_scope(
+    foreground: &str,
+    scoped: &[(String, crate::config::ExceptionScope)],
+    is_builtin_orbit: bool,
+) -> (bool, bool, bool) {
+    use crate::config::ExceptionScope::*;
+    let fg = normalize_stem(foreground);
+    if fg.is_empty() {
+        return (false, false, false);
+    }
+    if let Some((_, scope)) = scoped.iter().find(|(stem, _)| *stem == fg) {
+        return match scope {
+            OffEntirely => (true, true, true),
+            SpaceOnly => (false, true, true),
+            MiddleOnly => (true, false, true),
+        };
+    }
+    if is_builtin_orbit {
+        return (false, true, false);
+    }
+    (false, false, false)
+}
+
 /// Normalise anything a user or Windows can hand us into a lowercase exe stem.
 ///
 /// Accepts a full path (`C:\Program Files\Adobe\Photoshop.exe`), a bare file
@@ -115,15 +171,41 @@ pub fn without_self(list: Vec<String>, own: &str) -> (Vec<String>, Vec<String>) 
 /// only fed on save means the feature is dead from launch until the user
 /// happens to save something.
 pub fn publish_excluded_apps(cfg: &crate::config::AppConfig) {
-    let list: Vec<String> = cfg
+    use crate::config::ExceptionScope;
+    // PROBLEM 267 — every row, normalised, with its scope. The plain stem
+    // list below (what every pre-267 consumer means by "excluded") is the
+    // rows whose scope stands SPACE down: off entirely, or middle-only.
+    let scoped: Vec<(String, ExceptionScope)> = cfg
         .excluded_apps
         .iter()
-        .map(|s| normalize_stem(s))
-        .filter(|s| !s.is_empty())
+        .map(|e| (normalize_stem(&e.exe), e.scope))
+        .filter(|(s, _)| !s.is_empty())
+        .collect();
+    let list: Vec<String> = scoped
+        .iter()
+        .filter(|(_, scope)| matches!(scope, ExceptionScope::OffEntirely | ExceptionScope::MiddleOnly))
+        .map(|(s, _)| s.clone())
         .collect();
     // PROBLEM 218 — see `without_self`. Loud, because the alternative is an
     // app that does nothing in its own window for a reason nobody can find.
     let (list, dropped) = without_self(list, &own_stem());
+    let own = normalize_stem(&own_stem());
+    let scoped: Vec<(String, ExceptionScope)> =
+        scoped.into_iter().filter(|(s, _)| own.is_empty() || *s != own).collect();
+    {
+        let mut guard = SCOPED_LIST.lock().unwrap_or_else(|p| p.into_inner());
+        if *guard != scoped {
+            log::info!(
+                "exclusions: {} scoped row(s) — {:?} (PROBLEM 267)",
+                scoped.len(),
+                scoped.iter().map(|(s, sc)| format!("{s}:{sc:?}")).collect::<Vec<_>>()
+            );
+            *guard = scoped;
+        }
+        if guard.is_empty() {
+            MIDDLE_EXCLUDED_ACTIVE.store(false, Ordering::Relaxed);
+        }
+    }
     if !dropped.is_empty() {
         log::error!(
             "exclusions: the app exception list named SPACEADOM ITSELF ({dropped:?}) — \
@@ -150,6 +232,14 @@ pub fn publish_excluded_apps(cfg: &crate::config::AppConfig) {
 #[cfg(windows)]
 fn snapshot() -> Vec<String> {
     EXCLUDED_LIST
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+}
+
+#[cfg(windows)]
+fn scoped_snapshot() -> Vec<(String, crate::config::ExceptionScope)> {
+    SCOPED_LIST
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .clone()
@@ -182,8 +272,23 @@ pub fn start_exclusion_watcher() {
                             );
                             String::new()
                         });
+                    // PROBLEM 267 — ONE resolver for both triggers. The
+                    // legacy `is_excluded` walk is kept as the Space verdict
+                    // (it is what `list` has always meant); `resolve_scope`
+                    // reads the SAME rows with their scopes for the middle
+                    // button, and tells `orbit_apps` whether the user has a
+                    // row of his own for this app.
                     let detected = !list.is_empty() && is_excluded(&name, &list);
                     crate::hook::EXCLUDED_ACTIVE.store(detected, Ordering::Relaxed);
+                    let scoped = scoped_snapshot();
+                    let builtin = crate::hook::orbit_apps::is_orbit_app(&name);
+                    let (_space_off, middle_off, from_user_row) =
+                        resolve_scope(&name, &scoped, builtin);
+                    // The USER's rows publish here; the built-in table
+                    // publishes through ORBIT_ACTIVE below. A user row for a
+                    // built-in app is the one case both could speak, and the
+                    // user's wins: `from_user_row` mutes the built-in verdict.
+                    MIDDLE_EXCLUDED_ACTIVE.store(middle_off && from_user_row, Ordering::Relaxed);
 
                     // PROBLEM 263 — the BUILT-IN middle-button exclusion list
                     // rides on this thread, and on this tick's `foreground_stem`
@@ -204,7 +309,11 @@ pub fn start_exclusion_watcher() {
                     // it is for (a watcher that is running and reading nothing
                     // is not the failure that gate exists for; a watcher that
                     // never spawned is).
-                    crate::hook::orbit_apps::publish(&name);
+                    //
+                    // PROBLEM 267 — `from_user_row` mutes the built-in verdict
+                    // for an app the user has his own row for (he may have
+                    // moved SolidWorks to "Middle only"; his row then owns it).
+                    crate::hook::orbit_apps::publish(&name, from_user_row);
 
                     // Logging here is legal and useful: this is the POLLER
                     // thread, not the hook callback. One line each way, on
@@ -397,5 +506,34 @@ mod tests {
         // every window it cannot query.
         assert!(!is_excluded("", &list));
         assert!(!is_excluded("photoshop", &[]));
+    }
+
+    /// PROBLEM 267 — the three scopes, the built-in fallback, and who wins.
+    /// Returns `(space_off, middle_off, from_user_row)`.
+    #[test]
+    fn scope_resolution_user_row_wins_then_builtin_then_nothing() {
+        use crate::config::ExceptionScope::*;
+        let rows = vec![
+            ("photoshop".to_string(), OffEntirely),
+            ("game".to_string(), MiddleOnly),
+            ("kicad".to_string(), SpaceOnly),
+            ("sldworks".to_string(), MiddleOnly), // a built-in the user changed
+        ];
+        // Off entirely: both triggers stand down.
+        assert_eq!(super::resolve_scope("Photoshop.exe", &rows, false), (true, true, true));
+        // Middle only: Space passes through, the ring stays.
+        assert_eq!(super::resolve_scope("game", &rows, false), (true, false, true));
+        // Space only: Space works, the middle button is the app's.
+        assert_eq!(super::resolve_scope("C:\\KiCad\\kicad.exe", &rows, true), (false, true, true));
+        // The user's row beats the built-in table: SolidWorks moved to
+        // Middle only gets its ring back and loses Space, as he asked.
+        assert_eq!(super::resolve_scope("sldworks", &rows, true), (true, false, true));
+        // A built-in with no user row: Space only, and NOT from a user row —
+        // that is what lets ORBIT_ACTIVE keep owning the verdict.
+        assert_eq!(super::resolve_scope("blender", &rows, true), (false, true, false));
+        // Nothing listed anywhere: nothing stands down.
+        assert_eq!(super::resolve_scope("explorer", &rows, false), (false, false, false));
+        // Unreadable foreground: never a stand-down, from either list.
+        assert_eq!(super::resolve_scope("", &rows, true), (false, false, false));
     }
 }

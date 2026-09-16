@@ -213,8 +213,15 @@ pub static WATCHER_ALIVE: AtomicBool = AtomicBool::new(false);
 /// Logging here is legal (poller thread, not the callback) and is ON CHANGE
 /// ONLY, exactly like `publish_excluded_apps`'s neighbour: an alt-tab must
 /// never spam the log.
-pub fn publish(foreground: &str) {
-    let hit = is_orbit_app(foreground);
+///
+/// PROBLEM 267 — `user_override` is true when the user's own App-exceptions
+/// list has a row for this app. His row owns the verdict then (he may have
+/// moved SolidWorks to "Middle only"), so the built-in table must stand
+/// aside: `ORBIT_ACTIVE` is only ever set for an app the user has NOT spoken
+/// about. The user's row publishes through
+/// `exclusions::MIDDLE_EXCLUDED_ACTIVE` instead.
+pub fn publish(foreground: &str, user_override: bool) {
+    let hit = is_orbit_app(foreground) && !user_override;
     WATCHER_ALIVE.store(true, Ordering::Relaxed);
     if ORBIT_ACTIVE.swap(hit, Ordering::Relaxed) != hit {
         if hit {
@@ -232,6 +239,35 @@ pub fn publish(foreground: &str) {
             );
         }
     }
+}
+
+/// PROBLEM 267 — the HEADLINE built-in rows the Settings "App exceptions"
+/// section shows pre-seeded at "Space only" with a "Default" tag (the design's
+/// artboard 8 shows SolidWorks, Fusion 360 and Blender). The full table above
+/// is ~90 stems and would drown the panel; these are the ones a user is most
+/// likely to recognise, and the panel says how many more the table holds.
+/// Every stem here MUST be in `ORBIT_APPS` — `headline_rows_are_in_the_table`
+/// pins that.
+pub const HEADLINE_APPS: &[(&str, &str)] = &[
+    ("sldworks", "SolidWorks"),
+    ("fusion360", "Fusion 360"),
+    ("blender", "Blender"),
+    ("inventor", "Inventor"),
+    ("acad", "AutoCAD"),
+    ("unity", "Unity"),
+    ("photoshop", "Photoshop"),
+    ("figma", "Figma"),
+];
+
+/// The built-in rows for the Settings panel: `(stem, display name)` for the
+/// headline apps, plus how many more the full table carries. A `#[tauri::command]`
+/// wrapper lives in `commands::get_builtin_exceptions`.
+pub fn builtin_rows() -> (Vec<(String, String)>, usize) {
+    let rows = HEADLINE_APPS
+        .iter()
+        .map(|(s, n)| ((*s).to_string(), (*n).to_string()))
+        .collect::<Vec<_>>();
+    (rows, ORBIT_APPS.len().saturating_sub(HEADLINE_APPS.len()))
 }
 
 #[cfg(test)]
@@ -329,11 +365,26 @@ mod tests {
     fn publishing_arms_the_watcher_gate_and_tracks_the_foreground() {
         WATCHER_ALIVE.store(false, Ordering::SeqCst);
         ORBIT_ACTIVE.store(false, Ordering::SeqCst);
-        publish("C:\\x\\SLDWORKS.exe");
+        publish("C:\\x\\SLDWORKS.exe", false);
         assert!(WATCHER_ALIVE.load(Ordering::SeqCst), "one probe arms the gate");
         assert!(ORBIT_ACTIVE.load(Ordering::SeqCst));
-        publish("chrome.exe");
+        publish("chrome.exe", false);
         assert!(!ORBIT_ACTIVE.load(Ordering::SeqCst));
         assert!(WATCHER_ALIVE.load(Ordering::SeqCst), "the gate stays armed");
+    }
+
+    /// PROBLEM 267 — the Settings headline rows must all be real table
+    /// entries, and the "and N more" count must add up. (The user-row-mutes-
+    /// the-built-in rule is pinned in `exclusions::tests::scope_resolution_*`,
+    /// on the pure resolver, rather than here on the shared atomics — two tests
+    /// racing on `ORBIT_ACTIVE` would flake.)
+    #[test]
+    fn headline_rows_are_in_the_table_and_the_count_adds_up() {
+        for (stem, _) in super::HEADLINE_APPS {
+            assert!(super::is_orbit_app(stem), "{stem} must be in ORBIT_APPS");
+        }
+        let (rows, more) = super::builtin_rows();
+        assert_eq!(rows.len(), super::HEADLINE_APPS.len());
+        assert_eq!(rows.len() + more, super::ORBIT_APPS.len());
     }
 }

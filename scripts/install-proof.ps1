@@ -422,7 +422,47 @@ $bytes = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($Exe))
 #         Before 1.0.109 every non-admin install fell to the Run key because
 #         `schtasks /Create /SC ONLOGON` writes an any-user trigger that only an
 #         administrator may create (PROBLEM 64's real cause).
-foreach ($m in 'rival install', 'start_menu_scan:', 'hud-band-count-changed', 'restored to TRUE FULLSCREEN', 'picker_worker: st-picker-scan started (os thread ', 'rival install: REFUSING the elevated removal for ', 'updater: install kind decided', 'installing SILENTLY now (setup.exe /S /UPDATE /R /ARGS', 'theme: watching the Windows app light/dark setting every ', 'rival install: this PACKAGED copy found an unpackaged per-user install beside it (PROBLEM 250 follow-up ', 'safe-mode: this process is the surviving single instance ', 'the one-time config snapshot would copy config.json and the backups into a subfolder', 'callback-only counters (PROBLEM 236): nothing but a hook proc can move them', 'the primary keyboard hook saw this Space-down and delivered it', 'own-window fallback: Space-down came from the dashboard page (PROBLEM 257 fallback), hook silent', 'The keyboard hook did NOT see this Space; the page did, and', "PROVEN' and 'own-window fallback:'.", 'MECHANISM (PROBLEM 260): when a WH_KEYBOARD_LL callback overruns LowLevelHooksTimeout', "the old line read a 60s counter and printed '#1' three times). Handles: keyboard ", ' consecutive forced repair(s) delivered no keyboard callback, so the backoff is engaged and the next repair waits ', 'own-window fallback: the re-hook tore down a live fallback hold (PROBLEM 261) ', 'own-window fallback: reaping a fallback Space-hold (', "Left standing this is a ring on screen with the pointer still arming chips behind it, which is PROBLEM 218's failure on the path PROBLEM 218's reaper cannot see", 'own-window-holds-reaped(page stopped talking mid-hold):', 'stale-hold-reaped-because-the-keyboard-is-proven-deaf-spaceadom', 'modifier-active-latched-past-the-bound-with-no-keyboard-callbacks-spaceadom', 'repair-tore-down-a-hold-that-predated-it-spaceadom', 'deferral-episode-bound-expired-proceeding-with-the-repair-spaceadom', 'middle-button ring: the-guide-hud-ring-was-raised-by-a-middle-mouse-button-hold-spaceadom', 'picker-serve-decision-path-and-list-age-marker-spaceadom-237:', 'overlay usable for the Guide HUD', 'startup: logon task registered for this user via the Task Scheduler API') {
+# 1.0.110's set (2026-09-13 - PROBLEM 267, the middle button's CURSOR-ANCHORED
+# ICON RING, phase 2 of PROBLEM 263). THIRTY-TWO CONTROLS: the whole 1.0.109
+# list, 1.0.109's own one promoted to a control because 1.0.109 is the
+# installed build this LOCAL TEST build is measured against. The last ONE is
+# NEW in 1.0.110 and must read False against the installed 1.0.109. It is the
+# LEADING piece of a `log::info!` format string in guide_hud/mod_impl.rs
+# `show_middle_ring` (the text before the em dash and the first `{}`), so
+# format_args! keeps it as one contiguous &'static str in .rodata:
+#   'middle-button ring v2: cursor-anchored-ring-raised-at-cursor-spaceadom-267'
+#       - printed ONCE PER RAISE of the icon ring, i.e. only after the owner
+#         has HELD THE MIDDLE BUTTON on this build. In the exe byte scan below
+#         it is an install-time fact (the string shipped); in debug.log it is
+#         an OWNER-TRIGGERED line, exactly like 1.0.108's
+#         'middle-button ring: the-guide-hud-ring-was-raised-...' - its absence
+#         from the log after an install is expected and is NOT a failure. It is
+#         never law 6's proof either (CLAUDE.md law 6: the keyboard hook was
+#         never asked anything by a mouse button).
+# 1.0.111's set (2026-09-17 - PROBLEM 267 ROUND 6: the icon ring anchored on
+# the press point, shrink-to-fit, guide ARCS, the scrim clipped to the room,
+# move-then-size across mixed-DPI monitors; and Space + ; / the "Voice
+# Typing" ring tile). THIRTY-THREE CONTROLS: the whole 1.0.110 list, 1.0.110's
+# own one promoted to a control because 1.0.110 is the installed build this
+# LOCAL TEST build is measured against. The last ONE is NEW in 1.0.111 and
+# must read False against the installed 1.0.110. It is a plain `log::info!`
+# literal (no format args) in engine/actions/voice_typing.rs:
+#   'voice_typing: sent Win+H (Windows dictation)'
+#       - printed once per Space + ; or per release on the ring's Voice
+#         Typing tile. OWNER-TRIGGERED in debug.log (absence after an install
+#         is expected); an install-time fact in the exe byte scan.
+# 1.0.112's set (2026-09-17 - PROBLEM 268: the proven-deaf verdict reads a
+# RAW-INPUT keyboard clock instead of inferring keystrokes from
+# GetLastInputInfo minus the mouse callback — 449 false forced repairs in two
+# days on this laptop's touchpad; and the icon-ring page rescales by the real
+# devicePixelRatio). THIRTY-FOUR CONTROLS: the whole 1.0.111 list, 1.0.111's
+# own one promoted to a control. The last ONE is NEW in 1.0.112 and must read
+# False against the installed 1.0.111 — the LEADING piece of the
+# `log::info!` in hook/mod.rs `register_raw_keyboard_sink`:
+#   'hook: raw-input keyboard sink registered on the hook thread (hwnd '
+#       - printed once per hook-thread start, i.e. at launch: an install-time
+#         fact in the exe scan AND expected in debug.log after the banner.
+foreach ($m in 'rival install', 'start_menu_scan:', 'hud-band-count-changed', 'restored to TRUE FULLSCREEN', 'picker_worker: st-picker-scan started (os thread ', 'rival install: REFUSING the elevated removal for ', 'updater: install kind decided', 'installing SILENTLY now (setup.exe /S /UPDATE /R /ARGS', 'theme: watching the Windows app light/dark setting every ', 'rival install: this PACKAGED copy found an unpackaged per-user install beside it (PROBLEM 250 follow-up ', 'safe-mode: this process is the surviving single instance ', 'the one-time config snapshot would copy config.json and the backups into a subfolder', 'callback-only counters (PROBLEM 236): nothing but a hook proc can move them', 'the primary keyboard hook saw this Space-down and delivered it', 'own-window fallback: Space-down came from the dashboard page (PROBLEM 257 fallback), hook silent', 'The keyboard hook did NOT see this Space; the page did, and', "PROVEN' and 'own-window fallback:'.", 'MECHANISM (PROBLEM 260): when a WH_KEYBOARD_LL callback overruns LowLevelHooksTimeout', "the old line read a 60s counter and printed '#1' three times). Handles: keyboard ", ' consecutive forced repair(s) delivered no keyboard callback, so the backoff is engaged and the next repair waits ', 'own-window fallback: the re-hook tore down a live fallback hold (PROBLEM 261) ', 'own-window fallback: reaping a fallback Space-hold (', "Left standing this is a ring on screen with the pointer still arming chips behind it, which is PROBLEM 218's failure on the path PROBLEM 218's reaper cannot see", 'own-window-holds-reaped(page stopped talking mid-hold):', 'stale-hold-reaped-because-the-keyboard-is-proven-deaf-spaceadom', 'modifier-active-latched-past-the-bound-with-no-keyboard-callbacks-spaceadom', 'repair-tore-down-a-hold-that-predated-it-spaceadom', 'deferral-episode-bound-expired-proceeding-with-the-repair-spaceadom', 'middle-button ring: the-guide-hud-ring-was-raised-by-a-middle-mouse-button-hold-spaceadom', 'picker-serve-decision-path-and-list-age-marker-spaceadom-237:', 'overlay usable for the Guide HUD', 'startup: logon task registered for this user via the Task Scheduler API', 'middle-button ring v2: cursor-anchored-ring-raised-at-cursor-spaceadom-267', 'voice_typing: sent Win+H (Windows dictation)', 'hook: raw-input keyboard sink registered on the hook thread (hwnd ') {
   Add-Content $Out ("rust marker '{0}': {1}" -f $m, ($bytes -match [regex]::Escape($m)))
 }
 
@@ -577,7 +617,7 @@ $bundle = (Get-ChildItem $assetDir -File | ForEach-Object { Get-Content $_.FullN
 # the four Rust markers above; what these two prove is that the strings are in
 # the bundle the version-stamped, exe-newer-than-dist2 installed binary
 # embedded.
-foreach ($m in 'st-beam', 'aiming', 'hudspecials', 'hud-layout-changed', 'reorder_profiles', 'preview_hud_layout', 'run_overlay_fix', 'duplicate_profile', 'magnetic', 'bandRx', 'ring EXHAUSTED at step', 'bp-tile-sub', 'st-bp-browsers-v2', 'account_label', 'tour_done', 'Show me the walkthrough', 'picker-data-updated', 'ed-replace-confirm', 'This only removes the leftover entry from Programs and Features', 'A Microsoft Store copy of Spaceadom is also installed', '--ind-x', '--ind-w', 'has more than one profile. Pick the one this key should open', 'profile-undo-btn', 'step2b', 'own_window_space_down', 'exc-add-btn', 'conflict-row-close', 'conflict-grid', 'conflict-row-why') {
+foreach ($m in 'st-beam', 'aiming', 'hudspecials', 'hud-layout-changed', 'reorder_profiles', 'preview_hud_layout', 'run_overlay_fix', 'duplicate_profile', 'magnetic', 'bandRx', 'ring EXHAUSTED at step', 'bp-tile-sub', 'st-bp-browsers-v2', 'account_label', 'tour_done', 'Show me the walkthrough', 'picker-data-updated', 'ed-replace-confirm', 'This only removes the leftover entry from Programs and Features', 'A Microsoft Store copy of Spaceadom is also installed', '--ind-x', '--ind-w', 'has more than one profile. Pick the one this key should open', 'profile-undo-btn', 'step2b', 'own_window_space_down', 'exc-add-btn', 'conflict-row-close', 'conflict-grid', 'conflict-row-why', 'guide_arcs', 'Voice Typing') {
   Add-Content $Out ("bundle has {0}: {1}" -f $m, ($bundle -match [regex]::Escape($m)))
 }
 

@@ -229,6 +229,44 @@ static HUD_CENTER_OK: AtomicBool = AtomicBool::new(false);
 /// Guard 4's dead-zone radius in physical px, derived from the snapshot.
 static DEAD_ZONE_PHYS: AtomicI32 = AtomicI32::new(0);
 
+// ---------------------------------------------------------------------------
+// PROBLEM 267 — the MIDDLE-BUTTON ICON RING's snapshot.
+//
+// The ring is not a set of page-measured rects: Rust lays it out
+// (`middle_ring::layout_ring_slots`) and knows every tile's band, bearing and
+// radius before the page has drawn a pixel. So the ring publishes POLAR
+// geometry — `(ring, angle in milli-degrees, radius in physical px)` per tile
+// — and the poller hit-tests it with `middle_ring::ring_pick` (band by
+// distance, sector by angle) instead of `sector_pick`. Same fixed-size atomic
+// tables, same "count last" publish discipline, same `clear_chips` teardown;
+// `RING_ACTIVE` is what tells one tick which of the two tests to run.
+//
+// The KEYS go through the existing `CHIP_KEYS` table (`publish_key_codes`),
+// so `take_armed_key` and the `ARMED_INDEX` protocol are shared byte-for-byte
+// with the Space ring: a release under the icon ring reaches the engine as
+// the same `PointerActivate(ch)` a release under the Space ring does.
+// ---------------------------------------------------------------------------
+
+/// Per tile: ring index, bearing in milli-degrees, radius in physical px.
+static RING_ITEMS: [AtomicI32; MAX_CHIPS * 3] = [const { AtomicI32::new(0) }; MAX_CHIPS * 3];
+/// Per tile: its edge in physical px. Its own table rather than a fourth
+/// `RING_ITEMS` column so the existing three-wide indexing arithmetic — and
+/// every comment that names it — stays exactly as it was. Read by the
+/// proximity override (2026-09-15), which has to know how big the thing
+/// under the cursor is; the angular test never did.
+static RING_TILES: [AtomicI32; MAX_CHIPS] = [const { AtomicI32::new(0) }; MAX_CHIPS];
+/// How many `RING_ITEMS` rows are valid. Zeroed while the table is rewritten.
+static RING_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// The live ring is a SPIRAL (2026-09-15): the poller runs `spiral_pick`
+/// (nearest tile by distance) instead of `ring_pick`. Written BEFORE
+/// `RING_ACTIVE` goes up and cleared with it, so a tick can never read a
+/// spiral's tiles through the rings' band-and-angle test.
+static RING_SPIRAL: AtomicBool = AtomicBool::new(false);
+/// The icon ring owns the snapshot right now (so the poller runs `ring_pick`,
+/// and pointer activation is live even with "Point to launch" switched off —
+/// the ring HAS no other way to be used).
+static RING_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 /// The armed chip (index into the apps ring), -1 = none. Written by the
 /// poller on change and consumed (reset to -1) by the hook on activation.
 pub(crate) static ARMED_INDEX: AtomicI32 = AtomicI32::new(-1);
@@ -284,7 +322,12 @@ pub(crate) fn block_for_hold() {
 /// hold, so a click-then-release cannot activate twice.
 #[inline(always)]
 pub(crate) fn take_armed_key() -> Option<char> {
-    if !super::POINTER_HUD_ACTIVATION.load(Ordering::Relaxed) {
+    // PROBLEM 267 — the icon ring is live whatever "Point to launch" says:
+    // pointing IS the ring's only interaction. One extra relaxed load, and
+    // only when the setting is off.
+    if !super::POINTER_HUD_ACTIVATION.load(Ordering::Relaxed)
+        && !RING_ACTIVE.load(Ordering::Relaxed)
+    {
         return None;
     }
     let i = ARMED_INDEX.load(Ordering::Relaxed);
@@ -297,7 +340,17 @@ pub(crate) fn take_armed_key() -> Option<char> {
     if i >= CHIP_KEY_COUNT.load(Ordering::Relaxed).min(MAX_CHIPS) {
         return None;
     }
-    char::from_u32(CHIP_KEYS[i].load(Ordering::Relaxed)).filter(|c| c.is_ascii_lowercase())
+    // A bound letter, or — PROBLEM 267 — one of the icon ring's special tiles
+    // (a Private Use Area char; `middle_ring::is_special_code`). Anything else
+    // is a corrupt table entry and arms nothing.
+    char::from_u32(CHIP_KEYS[i].load(Ordering::Relaxed))
+        .filter(|c| c.is_ascii_lowercase() || crate::middle_ring::is_special_code(*c))
+}
+
+/// PROBLEM 267 — is the icon ring's snapshot the live one? One relaxed load.
+#[inline(always)]
+pub(crate) fn ring_active() -> bool {
+    RING_ACTIVE.load(Ordering::Relaxed)
 }
 
 /// Gesture B ate a WM_LBUTTONDOWN — owe the matching up.
@@ -342,6 +395,14 @@ pub struct ChipRectIn {
     pub h: f64,
 }
 
+/// A point in the overlay window's CSS px, from the page — the ring's
+/// centre (`toast.ts`'s `stageCentre()`).
+#[derive(serde::Deserialize, Clone, Copy, Debug)]
+pub struct ChipPointIn {
+    pub x: f64,
+    pub y: f64,
+}
+
 /// Record which key each chip launches, in apps-ring order. Called by
 /// `show_guide_hud` with the SAME `apps` list the page builds its chips from,
 /// so index i here is chip i there by construction.
@@ -350,6 +411,20 @@ pub struct ChipRectIn {
 /// landing mid-publish must never pair new keys with old rects.
 pub fn publish_keys(apps: &[(String, String)]) {
     CHIP_GEOM_COUNT.store(0, Ordering::Relaxed);
+    // PROBLEM 267 / 2026-09-15 — AND the icon ring's snapshot with it, the
+    // exact mirror of `publish_key_codes` clearing `CHIP_GEOM_COUNT`. The
+    // two rings share one poller and one set of tables, and `RING_ACTIVE` is
+    // the single bit that decides whether a tick runs `ring_pick` or
+    // `sector_pick`. Every HIDE path clears it (`clear_chips`) — but "every
+    // hide path" is a claim about other code, and a Space ring that came up
+    // without one having run (a hide that raced a show; the middle-button
+    // reap that fires when a WM_MBUTTONUP never arrives, which this owner's
+    // log shows several times an hour) would have routed its ticks through
+    // the OTHER ring's polar table. One relaxed store on the show path buys
+    // the guarantee outright.
+    RING_ACTIVE.store(false, Ordering::Relaxed);
+    RING_COUNT.store(0, Ordering::Relaxed);
+    RING_SPIRAL.store(false, Ordering::Relaxed);
     let n = apps.len().min(MAX_CHIPS);
     for (i, (key, _)) in apps.iter().take(n).enumerate() {
         let ch = key
@@ -406,6 +481,7 @@ pub fn publish_chips(
     win_h: u32,
     chips: &[ChipRectIn],
     dpr: f64,
+    centre_css: Option<(f64, f64)>,
 ) {
     let dpr = if dpr.is_finite() && dpr > 0.0 { dpr } else { 1.0 };
     CHIP_GEOM_COUNT.store(0, Ordering::Relaxed);
@@ -420,8 +496,28 @@ pub fn publish_chips(
         CHIP_RECTS[i * 4 + 2].store(r.2, Ordering::Relaxed);
         CHIP_RECTS[i * 4 + 3].store(r.3, Ordering::Relaxed);
     }
-    let cx = win_x + (win_w / 2) as i32;
-    let cy = win_y + (win_h / 2) as i32;
+    // THE RING'S CENTRE. The page sends it (`stageCentre()`, window CSS px)
+    // and the window's own centre is only the FALLBACK now.
+    //
+    // WHY IT HAD TO STOP BEING THE WINDOW'S CENTRE (owner report
+    // 2026-09-15: "the cursor was near the top of the ring and the pill on
+    // the far RIGHT lit up"). This function's own comment used to reason
+    // that `#st-hud` is `position: fixed; inset: 0`, so the ring's centre IS
+    // the client-area centre. PROBLEM 267 round 3 ended that: the window
+    // became the whole work area of the monitor and `#st-hud` moved onto a
+    // STAGE inside it (`applyStage`, `overlay_fit_hud`'s `StageRect`),
+    // centred on the MONITOR, which is not the window's centre whenever an
+    // appbar shortens the work area. Measured from the owner's own log —
+    // canvas 2560x1552 @ (0,48), stage centre (1280,800) — the window's
+    // centre is (1280,824): every sector measured from 24 px below the ring
+    // it is describing. `sector_pick` never changed; its origin did.
+    let (cx, cy) = match centre_css {
+        Some((x, y)) => (
+            win_x + (x * dpr).round() as i32,
+            win_y + (y * dpr).round() as i32,
+        ),
+        None => (win_x + (win_w / 2) as i32, win_y + (win_h / 2) as i32),
+    };
     let dead = dead_zone_radius(cx, cy, &rects[..n]);
     HUD_CENTER_X.store(cx, Ordering::Relaxed);
     HUD_CENTER_Y.store(cy, Ordering::Relaxed);
@@ -456,6 +552,148 @@ pub fn clear_chips() {
     CHIP_GEOM_COUNT.store(0, Ordering::Relaxed);
     CHIP_KEY_COUNT.store(0, Ordering::Relaxed);
     HUD_CENTER_OK.store(false, Ordering::Relaxed);
+    // PROBLEM 267 — and the icon ring's snapshot with it: the same hide paths
+    // take both rings down, so one teardown covers both.
+    RING_ACTIVE.store(false, Ordering::Relaxed);
+    RING_COUNT.store(0, Ordering::Relaxed);
+    RING_SPIRAL.store(false, Ordering::Relaxed);
+}
+
+/// PROBLEM 267 — record which code each icon-ring tile fires, in tile order.
+/// The ring's twin of `publish_keys`: a letter's lowercase char, or a special's
+/// Private Use Area char (`middle_ring::RING_SPECIALS`). Geometry from the
+/// previous layout is invalidated FIRST, exactly as `publish_keys` does.
+pub fn publish_key_codes(codes: &[char]) {
+    CHIP_GEOM_COUNT.store(0, Ordering::Relaxed);
+    RING_COUNT.store(0, Ordering::Relaxed);
+    let n = codes.len().min(MAX_CHIPS);
+    for (i, c) in codes.iter().take(n).enumerate() {
+        let v = if c.is_ascii_lowercase() || crate::middle_ring::is_special_code(*c) {
+            *c as u32
+        } else {
+            0
+        };
+        CHIP_KEYS[i].store(v, Ordering::Relaxed);
+    }
+    CHIP_KEY_COUNT.store(n, Ordering::Relaxed);
+}
+
+/// PROBLEM 267 — publish the icon ring's polar geometry: its centre and dead
+/// zone in PHYSICAL px, and one `(ring, angle_deg, radius_phys)` per tile in
+/// the same order `publish_key_codes` received the codes. `RING_ACTIVE` goes
+/// up LAST, after the count, so a poller tick can never run `ring_pick`
+/// against a half-written table; `clear_chips` takes it all down.
+///
+/// While the ring is up the poller also emits `middle-ring-aim` (the
+/// cursor's bearing) at most once per tick (≤ 60 Hz) — the page's fisheye
+/// wave reads it (ripple is the only motion since round 3).
+pub fn publish_ring(
+    cx: i32,
+    cy: i32,
+    dead_phys: f64,
+    items: &[crate::middle_ring::RingHit],
+    spiral: bool,
+) {
+    RING_ACTIVE.store(false, Ordering::Relaxed);
+    RING_COUNT.store(0, Ordering::Relaxed);
+    RING_SPIRAL.store(spiral, Ordering::Relaxed);
+    HUD_CENTER_OK.store(false, Ordering::Relaxed);
+    let n = items.len().min(MAX_CHIPS);
+    for (i, it) in items.iter().take(n).enumerate() {
+        RING_ITEMS[i * 3].store(it.ring as i32, Ordering::Relaxed);
+        RING_ITEMS[i * 3 + 1].store((it.angle_deg * 1000.0).round() as i32, Ordering::Relaxed);
+        RING_ITEMS[i * 3 + 2].store(it.radius.round() as i32, Ordering::Relaxed);
+        RING_TILES[i].store(it.tile.round() as i32, Ordering::Relaxed);
+    }
+    HUD_CENTER_X.store(cx, Ordering::Relaxed);
+    HUD_CENTER_Y.store(cy, Ordering::Relaxed);
+    DEAD_ZONE_PHYS.store(dead_phys.round() as i32, Ordering::Relaxed);
+    HUD_CENTER_OK.store(true, Ordering::Relaxed);
+    RING_COUNT.store(n, Ordering::Relaxed);
+    RING_ACTIVE.store(true, Ordering::Relaxed);
+    let keys = CHIP_KEY_COUNT.load(Ordering::Relaxed);
+    log::info!(
+        "hud-pointer: icon ring published — {n} tile(s), {keys} code(s), centre ({cx},{cy}) \
+         physical, dead zone {dead_phys:.0}px, aim events on (PROBLEM 267)"
+    );
+}
+
+/// PROBLEM 267 follow-up — the cursor's compass bearing from the ring centre,
+/// degrees clockwise from north, or `None` inside the dead zone (no
+/// direction there). Same `atan2(dx, -dy)` as `middle_ring::ring_pick`, so
+/// the wave's peak and the armed tile can never disagree about "where the
+/// cursor points". Pure.
+pub fn ring_aim_bearing(centre: (i32, i32), cursor: (i32, i32), dead_r: f64) -> Option<f64> {
+    let dx = (cursor.0 - centre.0) as f64;
+    let dy = (cursor.1 - centre.1) as f64;
+    if (dx * dx + dy * dy).sqrt() < dead_r {
+        return None;
+    }
+    Some(dx.atan2(-dy).to_degrees().rem_euclid(360.0))
+}
+
+/// PROBLEM 267 follow-up — the throttle in front of `middle-ring-aim`.
+/// Emits at most once per `AIM_MIN_GAP_MS`, and only when the bearing has
+/// moved by `AIM_MIN_STEP_DEG` or crossed the dead zone: a still cursor
+/// costs no IPC at all, a moving one costs one event per poller tick. Pure;
+/// the poller feeds it `Instant`-derived milliseconds.
+pub struct AimThrottle {
+    last_emit_ms: Option<u64>,
+    last_sent: Option<Option<i32>>,
+}
+
+/// One event per poller tick at most (`TICK_HELD_MS` = 16 ms → ≤ 62 Hz on
+/// paper, ≤ 60 in practice once the tick's own work is added).
+pub const AIM_MIN_GAP_MS: u64 = 16;
+/// Below this the cursor has not turned; the page's lerp would not show it.
+pub const AIM_MIN_STEP_DEG: f64 = 0.25;
+
+impl AimThrottle {
+    pub const fn new() -> Self {
+        AimThrottle { last_emit_ms: None, last_sent: None }
+    }
+
+    /// `Some(bearing)` when an event should go out now, `None` to stay quiet.
+    /// The inner `Option` is the payload: `None` = "no direction" (dead zone
+    /// or no cursor yet), which the page turns into a uniform ring.
+    pub fn offer(&mut self, now_ms: u64, bearing: Option<f64>) -> Option<Option<f64>> {
+        // Quantised to hundredths so the "changed?" test is exact.
+        let key = bearing.map(|b| (b * 100.0).round() as i32);
+        if let Some(prev) = self.last_sent {
+            let moved = match (prev, key) {
+                (None, None) => false,
+                (Some(a), Some(b)) => {
+                    let d = ((a - b).rem_euclid(36000)) as f64 / 100.0;
+                    let d = if d > 180.0 { 360.0 - d } else { d };
+                    d >= AIM_MIN_STEP_DEG
+                }
+                _ => true,
+            };
+            if !moved {
+                return None;
+            }
+            if let Some(t) = self.last_emit_ms {
+                if now_ms.saturating_sub(t) < AIM_MIN_GAP_MS {
+                    return None;
+                }
+            }
+        }
+        self.last_emit_ms = Some(now_ms);
+        self.last_sent = Some(key);
+        Some(bearing)
+    }
+
+    /// A new hold: the first sample of it always goes out.
+    pub fn reset(&mut self) {
+        self.last_emit_ms = None;
+        self.last_sent = None;
+    }
+}
+
+impl Default for AimThrottle {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -483,6 +721,99 @@ pub(crate) fn chip_radius(cx: i32, cy: i32, r: (i32, i32, i32, i32)) -> f64 {
     let ccx = (r.0 as f64 + r.2 as f64) / 2.0;
     let ccy = (r.1 as f64 + r.3 as f64) / 2.0;
     ((ccx - cx as f64).powi(2) + (ccy - cy as f64).powi(2)).sqrt()
+}
+
+/// How far outside a chip's own box the cursor still counts as "on" it,
+/// PHYSICAL px. A pill is about 30 px tall here, so this is roughly a
+/// third of one — close enough to mean "the pointer is on that icon",
+/// tight enough that it cannot reach the next chip in the ring.
+pub(crate) const PROXIMITY_SLACK_PHYS_PX: f64 = 10.0;
+/// How much closer (in px, to the chip's CENTRE) the winner must be than
+/// the runner-up before proximity is allowed to overrule the aim. Below
+/// this the cursor is between two chips and the angle is the better judge.
+pub(crate) const PROXIMITY_DECISIVE_PHYS_PX: f64 = 8.0;
+/// An already-armed chip the cursor is still on keeps the pick while it is
+/// within this much of the winner — the proximity twin of
+/// `HYSTERESIS_RAD`, so a cursor resting between two chips cannot flicker.
+pub(crate) const PROXIMITY_HYSTERESIS_PHYS_PX: f64 = 14.0;
+
+/// Distance from a point to a rect, PHYSICAL px — zero when the point is
+/// inside it. The rects are `(x0, y0, x1, y1)`.
+fn rect_distance(r: (i32, i32, i32, i32), px: i32, py: i32) -> f64 {
+    let dx = (r.0 - px).max(px - r.2).max(0) as f64;
+    let dy = (r.1 - py).max(py - r.3).max(0) as f64;
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// Distance from a point to a rect's CENTRE, PHYSICAL px — the tiebreak
+/// when the cursor is inside more than one box (chips overlap when a long
+/// label blooms).
+fn rect_centre_distance(r: (i32, i32, i32, i32), px: i32, py: i32) -> f64 {
+    let cx = (r.0 as f64 + r.2 as f64) / 2.0;
+    let cy = (r.1 as f64 + r.3 as f64) / 2.0;
+    ((cx - px as f64).powi(2) + (cy - py as f64).powi(2)).sqrt()
+}
+
+/// The proximity override of `sector_pick`: `Some(i)` when the cursor is
+/// unambiguously ON one chip's drawn box, `None` when it is on none or
+/// cannot tell two apart.
+///
+/// The rects ARE the chips' on-screen boxes, so "is the cursor over it?" is
+/// a containment test and needs no polar arithmetic at all — which is the
+/// point: this is the answer that does not depend on the ring's centre, the
+/// only quantity in the angular path that can be wrong without anything
+/// noticing (it was, from PROBLEM 267 round 3 to 2026-09-15).
+pub(crate) fn proximity_pick(
+    rects: &[(i32, i32, i32, i32)],
+    px: i32,
+    py: i32,
+    armed: Option<usize>,
+) -> Option<usize> {
+    let mut best: Option<(usize, f64, f64)> = None; // (i, rect distance, centre distance)
+    let mut second_centre = f64::INFINITY;
+    for (i, &r) in rects.iter().enumerate() {
+        let d = rect_distance(r, px, py);
+        if d > PROXIMITY_SLACK_PHYS_PX {
+            continue;
+        }
+        let c = rect_centre_distance(r, px, py);
+        match best {
+            Some((_, bd, bc)) if (d, c) >= (bd, bc) => {
+                if c < second_centre {
+                    second_centre = c;
+                }
+            }
+            _ => {
+                if let Some((_, _, bc)) = best {
+                    second_centre = second_centre.min(bc);
+                }
+                best = Some((i, d, c));
+            }
+        }
+    }
+    let (winner, _, c_win) = best?;
+    let decisive = second_centre - c_win >= PROXIMITY_DECISIVE_PHYS_PX;
+    // An armed chip the cursor is STILL on holds the pick, decisive or not
+    // — the same rule the angular hysteresis applies, in the same spirit.
+    if let Some(a) = armed {
+        // Deliberately NOT gated on `a != winner`: when the armed chip IS
+        // the winner it must be returned even on a tie, or a cursor resting
+        // where two boxes overlap would disarm itself every tick.
+        if a < rects.len() {
+            let d_armed = rect_distance(rects[a], px, py);
+            let c_armed = rect_centre_distance(rects[a], px, py);
+            if d_armed <= PROXIMITY_SLACK_PHYS_PX
+                && c_armed - c_win < PROXIMITY_HYSTERESIS_PHYS_PX
+            {
+                return Some(a);
+            }
+        }
+    }
+    if decisive {
+        Some(winner)
+    } else {
+        None
+    }
 }
 
 /// The unsigned angular distance between two directions, in `[0, π]`. This
@@ -614,6 +945,14 @@ pub(crate) fn sector_pick(
     if dx * dx + dy * dy < dead_r * dead_r {
         return None;
     }
+    // THE PROXIMITY OVERRIDE (owner, 2026-09-15) — the cursor sitting on a
+    // chip's own box beats any argument about which direction it points.
+    // Runs FIRST and declines unless it is sure; the angular test below is
+    // untouched and still answers every other case, which is what lets a
+    // fast flick from across the screen work at all.
+    if let Some(i) = proximity_pick(rects, px, py, armed) {
+        return Some(i);
+    }
     let theta = dy.atan2(dx);
     // (index, score in px, angular distance). The angle is carried alongside
     // the score because the hysteresis below is angular and must compare the
@@ -682,6 +1021,14 @@ pub(crate) struct TickIn<'a> {
     pub dead_r: f64,
     /// How much wall time this tick represents (drives dwell).
     pub tick_ms: u64,
+    /// PROBLEM 267 — the icon ring's polar table when THAT ring owns the
+    /// snapshot; `None` for the Space ring (and in every pre-267 test). When
+    /// `Some`, `chips` is ignored and the hit test is `ring_pick`.
+    pub ring: Option<&'a [crate::middle_ring::RingHit]>,
+    /// 2026-09-15 — that ring is a SPIRAL, so the hit test is
+    /// `spiral_pick` (nearest tile) rather than `ring_pick` (band by
+    /// distance, sector by angle). Ignored when `ring` is `None`.
+    pub ring_spiral: bool,
 }
 
 /// What one tick decided. The impure side applies it to the shared atomics
@@ -786,9 +1133,28 @@ impl HoldTracker {
                         // Guard 4 — direction, not containment (PROBLEM 209).
                         // No centre means no directions: fail toward NOT
                         // arming, same as a failed GetCursorPos above.
-                        match i.centre {
-                            None => None,
-                            Some((cx, cy)) => sector_pick(
+                        match (i.centre, i.ring) {
+                            (None, _) => None,
+                            // PROBLEM 267 — the icon ring: band by distance,
+                            // sector by angle, same dead zone, same dwell and
+                            // hysteresis discipline downstream.
+                            (Some((cx, cy)), Some(ring)) => {
+                                // A spiral has no bands and no sectors to
+                                // own, so nearest-by-distance is not merely
+                                // the natural test there — it is the only
+                                // one that means anything.
+                                let (dx, dy) = ((cur.0 - cx) as f64, (cur.1 - cy) as f64);
+                                if i.ring_spiral {
+                                    crate::middle_ring::spiral_pick(
+                                        ring, i.dead_r, dx, dy, self.armed,
+                                    )
+                                } else {
+                                    crate::middle_ring::ring_pick(
+                                        ring, i.dead_r, dx, dy, self.armed,
+                                    )
+                                }
+                            }
+                            (Some((cx, cy)), None) => sector_pick(
                                 i.chips, cx, cy, i.dead_r, cur.0, cur.1, self.armed,
                             ),
                         }
@@ -915,13 +1281,29 @@ pub fn start_pointer_watcher() {
                 let mut seen_hold: u64 = u64::MAX;
                 let mut hold_start_cursor: Option<(i32, i32)> = None;
                 let mut chips = [(0i32, 0i32, 0i32, 0i32); MAX_CHIPS];
+                // PROBLEM 267 — the icon ring's polar table, copied out per
+                // tick the same way `chips` is.
+                let mut ring = [crate::middle_ring::RingHit { ring: 0, angle_deg: 0.0, radius: 0.0, tile: 0.0 };
+                    MAX_CHIPS];
                 // PROBLEM 261 — when the fallback reaper last probed the
                 // foreground. `0` is "never", and `tick_count()` never returns
                 // 0 in practice, so the first probe happens on the first tick
                 // of the first fallback hold.
                 let mut last_fg_probe: u64 = 0;
+                // PROBLEM 267 follow-up — the ripple wave's feed. `Instant`,
+                // not `tick_count()`: that one has a 15.6 ms grain, which is
+                // the whole budget.
+                let mut aim = AimThrottle::new();
+                let aim_t0 = std::time::Instant::now();
                 loop {
-                    let enabled = super::POINTER_HUD_ACTIVATION.load(Ordering::Relaxed);
+                    // PROBLEM 267 — the icon ring is live whatever "Point to
+                    // launch" says: pointing is its only interaction, so the
+                    // setting that makes the SPACE ring's chips inert cannot be
+                    // allowed to make the icon ring unusable. `ring_active()`
+                    // is false whenever the Space ring (or nothing) is up, so
+                    // the setting keeps its exact meaning there.
+                    let enabled = super::POINTER_HUD_ACTIVATION.load(Ordering::Relaxed)
+                        || ring_active();
                     // PROBLEM 261 — BOTH witnesses. A fallback hold ticks at
                     // the held cadence too: it has a ring on screen and a
                     // cursor to follow, so polling it at the idle 40 ms rate
@@ -1014,6 +1396,7 @@ pub fn start_pointer_watcher() {
                     let hold_ts = super::current_hold_ts();
                     if hold_ts != seen_hold {
                         seen_hold = hold_ts;
+                        aim.reset();
                         // Guard 2's reference point. A failing/panicking
                         // GetCursorPos fails toward NOT arming.
                         hold_start_cursor =
@@ -1063,6 +1446,32 @@ pub fn start_pointer_watcher() {
                     };
                     let dead_r = DEAD_ZONE_PHYS.load(Ordering::Relaxed) as f64;
 
+                    // PROBLEM 267 — the icon ring's table, read AFTER its
+                    // count for the same reason the chips are. `None` unless
+                    // that ring owns the snapshot, so every Space-ring tick is
+                    // byte-identical to 1.0.109's.
+                    // Bounded by the CODE count, not the rect count: the ring
+                    // publishes no rects (`CHIP_GEOM_COUNT` stays 0), so `n`
+                    // above is 0 for it and only `chips` is empty.
+                    let ring_n = if ring_active() {
+                        RING_COUNT
+                            .load(Ordering::Relaxed)
+                            .min(CHIP_KEY_COUNT.load(Ordering::Relaxed))
+                            .min(MAX_CHIPS)
+                    } else {
+                        0
+                    };
+                    for (i, slot) in ring.iter_mut().take(ring_n).enumerate() {
+                        *slot = crate::middle_ring::RingHit {
+                            ring: RING_ITEMS[i * 3].load(Ordering::Relaxed).clamp(0, 255) as u8,
+                            angle_deg: RING_ITEMS[i * 3 + 1].load(Ordering::Relaxed) as f64 / 1000.0,
+                            radius: RING_ITEMS[i * 3 + 2].load(Ordering::Relaxed) as f64,
+                            tile: RING_TILES[i].load(Ordering::Relaxed) as f64,
+                        };
+                    }
+                    let ring_table: Option<&[crate::middle_ring::RingHit]> =
+                        if ring_n > 0 { Some(&ring[..ring_n]) } else { None };
+
                     let input = TickIn {
                         enabled,
                         // PROBLEM 261 — `live` in `HoldTracker::tick` is
@@ -1091,8 +1500,25 @@ pub fn start_pointer_watcher() {
                         centre,
                         dead_r,
                         tick_ms,
+                        ring: ring_table,
+                        ring_spiral: RING_SPIRAL.load(Ordering::Relaxed),
                     };
                     let verdict = tracker.tick(&input);
+                    // PROBLEM 267 follow-up — the cursor's bearing for the
+                    // fisheye wave, ≤ one event per tick, only while the icon
+                    // ring is up and only when it has moved. Read from the same `cursor` /
+                    // `centre` / `dead_r` the hit test just used, so the wave's
+                    // peak is the armed tile's direction by construction.
+                    if ring_table.is_some() {
+                        let bearing = match (centre, cursor) {
+                            (Some(c), Some(cur)) => ring_aim_bearing(c, cur, dead_r),
+                            _ => None,
+                        };
+                        let now_ms = aim_t0.elapsed().as_millis() as u64;
+                        if let Some(payload) = aim.offer(now_ms, bearing) {
+                            emit_aim(payload);
+                        }
+                    }
                     let (emit, refused) =
                         apply_to(verdict, &super::SPACE_ABORTED, &ARMED_INDEX);
                     if refused {
@@ -1124,6 +1550,24 @@ pub fn start_pointer_watcher() {
                  pointer activation. Keyboard shortcuts are unaffected."
             );
         });
+}
+
+/// PROBLEM 267 follow-up — `middle-ring-aim`: the cursor's bearing (compass
+/// degrees, or null inside the dead zone) for the ripple wave. Global `emit`,
+/// one listener in `middle-ring.ts`. Failures are DEBUG, not WARN: this fires
+/// up to 60 times a second and a warning per miss would be a flood; the
+/// armed highlight (`hud-pointer`) is the one whose loss matters and it keeps
+/// its own warning.
+fn emit_aim(bearing: Option<f64>) {
+    #[derive(serde::Serialize, Clone)]
+    struct RingAim {
+        angle: Option<f64>,
+    }
+    let Some(handle) = crate::guide_hud::app_handle() else { return };
+    use tauri::Emitter;
+    if let Err(e) = handle.emit("middle-ring-aim", RingAim { angle: bearing }) {
+        log::debug!("hud-pointer: middle-ring-aim emit failed ({e})");
+    }
 }
 
 /// Emit the armed index to the overlay page's highlight (guard 5). Global
@@ -1760,6 +2204,8 @@ mod tests {
             centre: Some((0, 0)),
             dead_r: 140.0,
             tick_ms: TICK_HELD_MS,
+            ring: None,
+            ring_spiral: false,
         }
     }
 
@@ -1951,5 +2397,235 @@ mod tests {
         assert_eq!(CHIP_GEOM_COUNT.load(Ordering::Relaxed), 0);
         clear_chips();
         assert_eq!(CHIP_KEY_COUNT.load(Ordering::Relaxed), 0);
+    }
+
+    /// PROBLEM 267 — the icon ring rides the SAME tracker: with a ring table
+    /// in the tick, the hit test is `ring_pick` (band by distance, sector by
+    /// angle), and dwell, travel and the dead zone all still apply. The chips
+    /// slice is empty for the ring, as it is in production (no rects are ever
+    /// published for it), and that must not disable anything.
+    #[test]
+    fn the_icon_ring_arms_through_the_same_tracker_with_ring_pick() {
+        use crate::middle_ring::RingHit;
+        let table = [
+            RingHit { ring: 0, angle_deg: 0.0, radius: 187.0, tile: 66.0 },   // north, inner
+            RingHit { ring: 0, angle_deg: 90.0, radius: 187.0, tile: 66.0 },  // east, inner
+            RingHit { ring: 1, angle_deg: 90.0, radius: 315.0, tile: 66.0 },  // east, outer
+        ];
+        let no_chips: [(i32, i32, i32, i32); 0] = [];
+        let mut t = HoldTracker::new();
+        let mut i = base_in(&no_chips, 4000);
+        i.ring = Some(&table);
+        i.dead_r = 130.0;
+        i.tick_ms = 60; // one tick = the whole dwell
+        // East, at the inner radius: the inner east tile.
+        i.cursor = Some((187, 0));
+        assert_eq!(t.tick(&i), Verdict::Arm(1));
+        // Further east, at the outer radius: the band changes to the outer tile.
+        i.cursor = Some((330, 0));
+        assert_eq!(t.tick(&i), Verdict::Shift(2));
+        // Back into the dead zone: disarm and clear, exactly as the Space ring.
+        i.cursor = Some((20, 0));
+        assert_eq!(t.tick(&i), Verdict::DisarmClear);
+        // With NO ring table and no chips, nothing can arm (the pre-267 rule).
+        let mut t2 = HoldTracker::new();
+        let mut j = base_in(&no_chips, 5000);
+        j.cursor = Some((187, 0));
+        j.tick_ms = 60;
+        assert_eq!(t2.tick(&j), Verdict::NoChange);
+    }
+
+    /// PROBLEM 267 follow-up — the wave's bearing is the hit test's bearing:
+    /// compass degrees clockwise from north, `None` inside the dead zone.
+    #[test]
+    fn the_aim_bearing_is_compass_and_none_in_the_dead_zone() {
+        let c = (1000, 1000);
+        assert_eq!(ring_aim_bearing(c, (1000, 800), 130.0), Some(0.0));
+        assert_eq!(ring_aim_bearing(c, (1200, 1000), 130.0), Some(90.0));
+        assert_eq!(ring_aim_bearing(c, (1000, 1200), 130.0), Some(180.0));
+        assert_eq!(ring_aim_bearing(c, (800, 1000), 130.0), Some(270.0));
+        assert_eq!(ring_aim_bearing(c, (1050, 1050), 130.0), None, "inside the dead zone");
+        assert_eq!(ring_aim_bearing(c, (1000, 1000), 130.0), None, "at the centre");
+        // Agrees with ring_pick's bearing for an off-axis point.
+        let b = ring_aim_bearing(c, (1300, 700), 130.0).unwrap();
+        assert!((b - 45.0).abs() < 1e-9, "{b}");
+    }
+
+    /// PROBLEM 267 follow-up — the throttle: first sample always, a still
+    /// cursor never, a moving one at most once per gap, and the dead-zone
+    /// crossing is a change in its own right.
+    #[test]
+    fn the_aim_throttle_is_at_most_one_per_tick_and_only_on_change() {
+        let mut t = AimThrottle::new();
+        assert_eq!(t.offer(0, Some(10.0)), Some(Some(10.0)), "first sample goes out");
+        assert_eq!(t.offer(16, Some(10.1)), None, "moved under the step: quiet");
+        assert_eq!(t.offer(12, Some(12.0)), None, "moved, but inside the gap: quiet");
+        assert_eq!(t.offer(32, Some(12.0)), Some(Some(12.0)), "moved and past the gap");
+        assert_eq!(t.offer(48, Some(12.0)), None, "still: quiet however long it waits");
+        assert_eq!(t.offer(2000, Some(12.0)), None);
+        assert_eq!(t.offer(2016, None), Some(None), "into the dead zone is a change");
+        assert_eq!(t.offer(2032, None), None, "still in it: quiet");
+        assert_eq!(t.offer(2048, Some(359.9)), Some(Some(359.9)), "out again");
+        // Wrap-around: 359.9 → 0.1 is a 0.2° move, under the step.
+        assert_eq!(t.offer(2064, Some(0.1)), None);
+        assert_eq!(t.offer(2080, Some(0.4)), Some(Some(0.4)), "0.5° across the seam");
+        t.reset();
+        assert_eq!(t.offer(2081, Some(0.4)), Some(Some(0.4)), "a new hold always sends its first");
+    }
+    /* =====================================================================
+       THE PROXIMITY OVERRIDE, AND THE OWNER'S 2026-09-15 SCREENSHOT
+       ===================================================================== */
+
+    /// THE BUG, REPRODUCED FROM THE OWNER'S OWN NUMBERS, and it is not in
+    /// `sector_pick` at all — it is in what the page hands it.
+    ///
+    /// PROBLEM 267 round 3 made the overlay window the whole WORK AREA and
+    /// moved `#st-hud` onto a STAGE inside it (`applyStage`). The chips'
+    /// `offsetLeft`/`offsetTop` are measured from their offset parent, which
+    /// IS `#st-hud` — so from that day every rect `publishHudChips` sent was
+    /// short by the stage's origin, while the centre Rust derived was the
+    /// WINDOW's centre and had not moved with them.
+    ///
+    /// His panel: canvas 2560x1552 @ (0,48) physical, dpr 1.5, stage @
+    /// (255,138) css = (382,207) physical, stage centre (1280,800), window
+    /// centre (1280,824). A chip drawn 500 px RIGHT of the ring's centre was
+    /// published at (500-382, 0-231) from the hit-test centre — 27° off
+    /// north. A chip drawn 450 px ABOVE it was published at (-382, -681) —
+    /// 29° off north. So a cursor pointing due north armed the RIGHT-HAND
+    /// chip, by two degrees: "the cursor was near the top of the ring and
+    /// the pill on the far right lit up", exactly.
+    #[test]
+    fn the_stage_offset_is_what_made_a_north_cursor_arm_an_east_chip() {
+        // Physical px, the owner's geometry.
+        let (win_x, win_y) = (0i32, 48i32);
+        let centre = (1280i32, 800i32);          // the STAGE's centre — the ring's
+        let stage_org = (382i32, 207i32);        // (255,138) css at dpr 1.5
+        let north = (centre.0, centre.1 - 450);  // a chip 450px above the centre
+        let east = (centre.0 + 500, centre.1);   // a chip 500px to the right
+        let boxed = |c: (i32, i32)| (c.0 - 30, c.1 - 15, c.0 + 30, c.1 + 15);
+        // What the page USED to publish: window-relative rects short by the
+        // stage origin, hit-tested from the WINDOW's centre.
+        let shifted = |c: (i32, i32)| boxed((c.0 - stage_org.0, c.1 - stage_org.1));
+        let win_centre = (win_x + 2560 / 2, win_y + 1552 / 2); // (1280, 824)
+        let cursor = (centre.0, centre.1 - 300); // due north of the real ring
+        assert_eq!(
+            sector_pick(
+                &[shifted(north), shifted(east)],
+                win_centre.0, win_centre.1, 100.0, cursor.0, cursor.1, None,
+            ),
+            Some(1),
+            "THE BUG: a cursor pointing north arms the EAST chip"
+        );
+        // What it publishes now: true window-relative rects, hit-tested from
+        // the stage centre the page reports.
+        assert_eq!(
+            sector_pick(
+                &[boxed(north), boxed(east)],
+                centre.0, centre.1, 100.0, cursor.0, cursor.1, None,
+            ),
+            Some(0),
+            "fixed: north picks the north chip"
+        );
+    }
+
+    /// `publish_chips` uses the centre the page sent, and falls back to the
+    /// window's own centre only when it sends none. On the owner's canvas
+    /// the two differ by the 24 px that skewed every sector.
+    #[test]
+    fn the_published_centre_is_the_stage_centre_not_the_windows() {
+        let chip = ChipRectIn { x: 0.0, y: 0.0, w: 40.0, h: 20.0 };
+        // Window (0,48) 2560x1552 physical at dpr 1.5 → its own centre is
+        // (1280, 824); the stage centre the page reports is (1280, 800).
+        publish_chips(0, 48, 2560, 1552, &[chip], 1.5, Some((1280.0 / 1.5, (800.0 - 48.0) / 1.5)));
+        assert_eq!(HUD_CENTER_X.load(Ordering::Relaxed), 1280);
+        assert_eq!(HUD_CENTER_Y.load(Ordering::Relaxed), 800);
+        assert!(HUD_CENTER_OK.load(Ordering::Relaxed));
+        publish_chips(0, 48, 2560, 1552, &[chip], 1.5, None);
+        assert_eq!(HUD_CENTER_Y.load(Ordering::Relaxed), 824, "the old fallback");
+        clear_chips();
+    }
+
+    /// The cursor sitting ON a chip's box arms THAT chip, however far the
+    /// aim-line argument has drifted — including a miss as large as the
+    /// owner's. An addition, not a replacement: far from every chip it
+    /// declines and the sector answers exactly as it always did.
+    #[test]
+    fn a_cursor_on_a_chips_box_beats_the_aim() {
+        let (cx, cy) = (0, 0);
+        let chips = [
+            chip_at(cx, cy, 400.0, 0.0),    // east
+            chip_at(cx, cy, 400.0, 90.0),   // south
+            chip_at(cx, cy, 400.0, 180.0),  // west
+            chip_at(cx, cy, 400.0, 270.0),  // north
+        ];
+        // Dead on the NORTH chip, with the EAST chip armed: proximity wins.
+        let (px, py) = at(cx, cy, 400.0, 270.0);
+        assert_eq!(proximity_pick(&chips, px, py, None), Some(3));
+        assert_eq!(sector_pick(&chips, cx, cy, 100.0, px, py, Some(0)), Some(3));
+        // Just outside its box but within the slack — still that chip.
+        assert_eq!(proximity_pick(&chips, px + 34, py, None), Some(3));
+        // Far from every chip: no override, and the sector decides as it
+        // always did (this is the flick-from-a-distance path, untouched).
+        let (fx, fy) = at(cx, cy, 200.0, 20.0);
+        assert_eq!(proximity_pick(&chips, fx, fy, None), None);
+        assert_eq!(sector_pick(&chips, cx, cy, 100.0, fx, fy, None), Some(0));
+        // An armed chip the cursor is still on holds it (hysteresis, in the
+        // proximity domain) — no flicker between two overlapping boxes.
+        let pair = [(0, 0, 60, 30), (50, 0, 110, 30)];
+        assert_eq!(proximity_pick(&pair, 55, 15, Some(0)), Some(0), "armed holds");
+        assert_eq!(proximity_pick(&pair, 55, 15, None), None, "a tie is not an override");
+    }
+
+    /* =====================================================================
+       TASK 3 — the two rings share one poller; they may never share state
+       ===================================================================== */
+
+    /// A Space-ring show invalidates the ICON ring's snapshot, and an
+    /// icon-ring show invalidates the Space ring's — so no tick can ever
+    /// route through the other ring's hit test against the other ring's
+    /// table. `clear_chips` on every hide path is the first lock; this is
+    /// the second, and it is the one that does not depend on a claim about
+    /// somebody else's code path having run first.
+    #[test]
+    fn the_two_rings_cannot_contaminate_each_others_snapshot() {
+        use crate::middle_ring::RingHit;
+        // 1. An icon-ring session: polar table live, RING_ACTIVE set.
+        publish_key_codes(&['a', 'b']);
+        publish_ring(
+            100, 100, 80.0,
+            &[
+                RingHit { ring: 0, angle_deg: 0.0, radius: 162.0, tile: 66.0 },
+                RingHit { ring: 0, angle_deg: 180.0, radius: 162.0, tile: 66.0 },
+            ],
+            false,
+        );
+        assert!(ring_active());
+        assert_eq!(RING_COUNT.load(Ordering::Relaxed), 2);
+        assert_eq!(CHIP_GEOM_COUNT.load(Ordering::Relaxed), 0, "the ring publishes no rects");
+        // 2. It ends — and then a SPACE ring comes up WITHOUT the hide path
+        //    having run (a hide that raced a show; the middle-button reap
+        //    that fires when a WM_MBUTTONUP never arrives, which this
+        //    owner's log shows several times an hour).
+        publish_keys(&[("a".into(), "Chrome".into()), ("b".into(), "Code".into())]);
+        assert!(!ring_active(), "a Space-ring show must take the icon ring's snapshot down");
+        assert_eq!(RING_COUNT.load(Ordering::Relaxed), 0, "and its table with it");
+        // 3. The Space ring's own geometry arrives; the tick now routes
+        //    through sector_pick — the rects, not the polar table.
+        publish_chips(
+            0, 0, 800, 600,
+            &[ChipRectIn { x: 370.0, y: 190.0, w: 60.0, h: 30.0 }],
+            1.0,
+            Some((400.0, 300.0)),
+        );
+        assert!(!ring_active());
+        assert_eq!(CHIP_GEOM_COUNT.load(Ordering::Relaxed), 1);
+        // 4. And the reverse: an icon-ring show takes the Space ring's rects
+        //    down before its own table goes live (publish_key_codes).
+        publish_key_codes(&['a']);
+        assert_eq!(CHIP_GEOM_COUNT.load(Ordering::Relaxed), 0);
+        assert!(!ring_active(), "RING_ACTIVE only goes up once the table is written");
+        clear_chips();
+        assert!(!ring_active());
+        assert_eq!(CHIP_GEOM_COUNT.load(Ordering::Relaxed), 0);
     }
 }

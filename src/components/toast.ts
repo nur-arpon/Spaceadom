@@ -229,8 +229,104 @@ let _hudBusy = false;
 /** PROBLEM 175 — deadline timer that unsticks `_hudBusy` if nothing else does. */
 let _hudBusyGuard: number | undefined;
 
+/**
+ * PROBLEM 267 — ANOTHER component owns the overlay window right now: the
+ * middle button's cursor-anchored icon ring (`middle-ring.ts`). It is not the
+ * Space HUD, it has none of the HUD's DOM or choreography, and it must not
+ * touch `_hudActive` — but it shares this window, and everything in this
+ * file that resizes, hides or paints INTO that window has to know it is
+ * spoken for. So: while `_extHud` is true no fit runs (`fitToStack`,
+ * `requestFit`), no `overlay_toasts_done` is sent (`retire`), and the toast
+ * layer is parked hidden exactly as it is under the Space HUD, so a toast
+ * that arrives mid-ring does not paint into the ring's window. `endExternalHud`
+ * releases it and does the ONE fit or the ONE hide the stack then needs.
+ *
+ * Exported as a pair rather than as a setter so the release step cannot be
+ * forgotten: the ring's hide path calls `endExternalHud` from a bounded timer.
+ */
+let _extHud = false;
+export function beginExternalHud(): void {
+  _extHud = true;
+  setToastLayerHidden(true);
+  hideToastGlow();
+}
+export function endExternalHud(): void {
+  if (!_extHud) return;
+  _extHud = false;
+  setToastLayerHidden(false);
+  if (_toasts.length > 0) {
+    const glow = document.getElementById("st-toastglow");
+    if (glow) showToastGlow(glow);
+    anchorGlow("toast");
+    relayout();
+  } else if (_isOverlay && !_hudActive && !_hudBusy) {
+    invoke("overlay_toasts_done").catch(() => {});
+  }
+}
+
 /* ---- PROBLEM 112 state ---- */
-type Rect = { x: number; y: number; w: number; h: number };
+type Rect = { x: number; y: number; w: number; h: number; stage?: Rect | null };
+
+/* =======================================================================
+   THE STAGE — PROBLEM 267 round 3.
+
+   The overlay window is now ONE BIG CANVAS: Rust's `overlay_fit_hud` sizes
+   it to the whole work area of the cursor's monitor (never the exact monitor
+   bounds) and hands back `stage`, the ring's OLD box — the size this file
+   asked for, centred on the monitor exactly where the old window was. `#st-hud`
+   is placed at that box, so every chip, the SPACE pill, the pulse and the
+   beam (all `calc(50% + …)` inside it) land where they always did; only the
+   window around the stage grew. A bloomed pill that runs past the stage now
+   has canvas to grow into — the round-2 "cut at the window edge" — and the
+   crop guard in `paintBloom` measures the WINDOW around the stage centre,
+   not the stage. With no stage (an older Rust, or a refused fit) `#st-hud`
+   stays `inset: 0` and everything behaves as before.
+   ======================================================================= */
+let _stage: Rect | null = null;
+
+/** Put `#st-hud` on its stage, or back to `inset: 0` when there is none. */
+function applyStage(stage: Rect | null): void {
+  _stage = stage;
+  if (!_hudEl) return;
+  if (stage) {
+    _hudEl.style.left = `${stage.x}px`;
+    _hudEl.style.top = `${stage.y}px`;
+    _hudEl.style.width = `${stage.w}px`;
+    _hudEl.style.height = `${stage.h}px`;
+    _hudEl.style.right = "auto";
+    _hudEl.style.bottom = "auto";
+  } else {
+    for (const k of ["left", "top", "width", "height", "right", "bottom"] as const) {
+      _hudEl.style[k] = "";
+    }
+  }
+}
+
+/** The stage's TOP-LEFT in window CSS px — the origin `#st-hud`'s children
+ *  measure their `offsetLeft`/`offsetTop` from, since `applyStage` makes
+ *  `#st-hud` the offset parent at that point. `(0, 0)` with no stage, which
+ *  is the `inset: 0` case this file assumed everywhere before round 3. */
+function stageOrigin(): { x: number; y: number } {
+  return _stage ? { x: _stage.x, y: _stage.y } : { x: 0, y: 0 };
+}
+
+/** The stage's centre in window CSS px — the ring's centre. Falls back to
+ *  the window's centre when there is no stage. */
+function stageCentre(): { x: number; y: number } {
+  if (_stage) return { x: _stage.x + _stage.w / 2, y: _stage.y + _stage.h / 2 };
+  return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+}
+
+/** PROBLEM 137's handover pin: the ring must not move a pixel while the
+ *  window's bottom edge is moved. On a stage the box is already explicit
+ *  and the window's top edge is kept by Rust, so there is nothing to pin;
+ *  without one, pin `#st-hud` to the window box it had (today's rule). */
+function pinStage(ringH: number): void {
+  if (!_hudEl || _stage) return;
+  _hudEl.style.top = "0px";
+  _hudEl.style.bottom = "auto";
+  _hudEl.style.height = `${ringH}px`;
+}
 /** Last known logical screen rect of the overlay window. */
 let _rect: Rect | null = null;
 /** Pills currently wearing the SPACE identity. They do not age. */
@@ -276,9 +372,32 @@ export function markOverlayWindow(): void {
   _isOverlay = true;
 }
 
+const GLOW_ANIMATION = "st-toast-glow 4s ease-in-out infinite";
+
+/**
+ * `st-toast-glow`'s keyframes set `opacity` on every frame (.5↔.9, never 0)
+ * — a running CSS animation overrides an element's own inline `opacity` on
+ * the properties it animates, so setting `style.opacity = "0"` alone is
+ * cosmetically defeated for as long as the animation keeps running. The
+ * animation was started once at element creation and never stopped, so the
+ * glow has kept faintly pulsing at wherever it was last anchored (toast
+ * bottom-centre, or HUD centre) ever since the first toast of the session —
+ * including under the icon ring, which shares this one glow element but
+ * never asked for it. `hideToastGlow` must stop the animation, not just the
+ * opacity; the three call sites that relight the glow restore it.
+ */
 function hideToastGlow(): void {
   const g = document.getElementById("st-toastglow");
-  if (g) g.style.opacity = "0";
+  if (g) {
+    g.style.opacity = "0";
+    g.style.animation = "none";
+  }
+}
+
+function showToastGlow(g: HTMLElement | null): void {
+  if (!g) return;
+  g.style.opacity = "1";
+  g.style.animation = GLOW_ANIMATION;
 }
 
 /**
@@ -391,17 +510,23 @@ function setStageAnchor(on: boolean): void {
   const c = document.getElementById("toast-container");
   const g = document.getElementById("st-toastglow");
   // Clear the outer ring but stay inside the HUD window on short displays,
-  // where the ring clamp shrinks the window too.
-  const y = Math.min(250, Math.max(120, window.innerHeight / 2 - 44));
+  // where the ring clamp shrinks the window too. Measured from the STAGE
+  // (the ring's box), not the window: since round 3 the window is the whole
+  // work area and its centre is half a taskbar off the ring's.
+  const sc = stageCentre();
+  const half = _stage ? _stage.h / 2 : window.innerHeight / 2;
+  const y = Math.min(250, Math.max(120, half - 44));
   for (const el of [c, g]) {
     if (!(el instanceof HTMLElement)) continue;
     const isGlow = el.id === "st-toastglow";
     if (on) {
       el.style.bottom = "auto";
-      el.style.top = "50%";
+      el.style.top = `${sc.y}px`;
+      el.style.left = `${sc.x}px`;
       el.style.transform = `translate(-50%, ${isGlow ? y + 46 : y}px)`;
     } else {
       el.style.top = "";
+      el.style.left = "50%";
       el.style.bottom = isGlow ? "8px" : "74px";
       el.style.transform = "translateX(-50%)";
     }
@@ -446,8 +571,7 @@ function toastLayer(): HTMLDivElement | null {
       z-index: 29; filter: blur(22px);
       background: radial-gradient(ellipse, rgba(var(--st-glow-rgb),.30) 0%,
                   rgba(var(--st-glow-rgb),.12) 45%, transparent 70%);
-      animation: st-toast-glow 4s ease-in-out infinite;
-      opacity: 0; transition: opacity .3s;`;
+      animation: none; opacity: 0; transition: opacity .3s;`;
     document.body.appendChild(glow);
   }
   return c;
@@ -529,7 +653,8 @@ function retire(t: ToastEntry): void {
     hideToastGlow();
     if (_stageMode) { _stageMode = false; setStageAnchor(false); }
     _slingStaged = false;          // PROBLEM 136 - landing pad is gone
-    if (_isOverlay && !_hudActive) invoke("overlay_toasts_done").catch(() => {});
+    // PROBLEM 267 — and not while the icon ring owns the window either.
+    if (_isOverlay && !_hudActive && !_extHud) invoke("overlay_toasts_done").catch(() => {});
   }
 }
 
@@ -541,8 +666,9 @@ function fitToStack(): void {
   // Dashboard toasts must not touch the overlay window (see _isOverlay).
   if (!_isOverlay) return;
   // Never resize while the HUD is up OR still fading: a toast arriving then
-  // used to shrink the window mid-fade — a violent visual jump.
-  if (_hudActive || _hudBusy || _stageMode || _flying > 0) return;
+  // used to shrink the window mid-fade — a violent visual jump. PROBLEM 267 —
+  // nor while the icon ring owns the window.
+  if (_hudActive || _hudBusy || _stageMode || _flying > 0 || _extHud) return;
   const c = document.getElementById("toast-container");
   if (!c || _toasts.length === 0) return;
   // Room for the 340x150 blurred glow on every side, so it is never cut.
@@ -567,7 +693,7 @@ function fitToStack(): void {
  */
 const COALESCE_MS = 90;
 function requestFit(): void {
-  if (_hudActive || _hudBusy || _stageMode || _flying > 0) return;
+  if (_hudActive || _hudBusy || _stageMode || _flying > 0 || _extHud) return;
   const since = performance.now() - _lastFitAt;
   if (since >= COALESCE_MS) { fitToStack(); return; }
   window.clearTimeout(_fitTimer);
@@ -583,10 +709,12 @@ export function showToast(message: string, options: ToastOptions = {}): void {
   // would clear the "parked" visibility set at HUD-show time. Re-apply it
   // whenever the HUD is up — the first toast of a session is often fired by
   // the very shortcut the user pressed while holding Space.
-  if (_hudActive) setToastLayerHidden(true);
+  if (_hudActive || _extHud) setToastLayerHidden(true);
 
   const glow = document.getElementById("st-toastglow");
-  if (glow) glow.style.opacity = "1";
+  // PROBLEM 267 — the glow stays dark under the icon ring too; endExternalHud
+  // lights it when the stack gets the window back.
+  if (glow && !_extHud) showToastGlow(glow);
 
   // Leading glyph from the engine (⚡ ⚠️ ❌ ↩) becomes the icon disc letter.
   const first = Array.from(message)[0] ?? "•";
@@ -687,15 +815,11 @@ export function showToast(message: string, options: ToastOptions = {}): void {
          bottom:74px anchor - which is now the true final position. Everything
          is measured AFTER that, so the flight lands where the toast lives and
          nothing moves afterwards. */
-      const ringH = window.innerHeight;
+      const ringH = _stage ? _stage.h : window.innerHeight;
       invoke<Rect | null>("overlay_fit_handover", {
-        width: window.innerWidth, height: ringH,
+        width: _stage ? _stage.w : window.innerWidth, height: ringH,
       }).then(() => {
-        if (_hudEl) {                       // ring keeps its old box, so it stays put
-          _hudEl.style.top = "0px";
-          _hudEl.style.bottom = "auto";
-          _hudEl.style.height = `${ringH}px`;
-        }
+        pinStage(ringH);                    // ring keeps its old box, so it stays put
         _stageMode = false;                 // normal anchor = the real slot
         setStageAnchor(false);
         _stageMode = true;                  // but still no window fits during the flight
@@ -736,15 +860,11 @@ export function showToast(message: string, options: ToastOptions = {}): void {
       el.classList.add("open");
       relayout();
       _slingStaged = true;
-      const ringH2 = window.innerHeight;
+      const ringH2 = _stage ? _stage.h : window.innerHeight;
       invoke<Rect | null>("overlay_fit_handover", {
-        width: window.innerWidth, height: ringH2,
+        width: _stage ? _stage.w : window.innerWidth, height: ringH2,
       }).then(() => {
-        if (_hudEl) {
-          _hudEl.style.top = "0px";
-          _hudEl.style.bottom = "auto";
-          _hudEl.style.height = ringH2 + "px";
-        }
+        pinStage(ringH2);
         const from3 = spaceBox();        // ring pinned, so SPACE has not moved
         _stageMode = false;
         setStageAnchor(false);
@@ -824,6 +944,11 @@ export function showToast(message: string, options: ToastOptions = {}): void {
 interface GuideHudPayload {
   profile: string;
   apps: [string, string][];      // [key, label] — ONLY assigned letters
+  /** PROBLEM 267 round 3 — one per `apps` row, same order: the app's icon as
+   *  a `data:` URL (the icon ring's sources, from Rust's cache — never
+   *  fetched at raise time), or null for the letter disc. Absent on an
+   *  older payload → every chip keeps its disc. */
+  app_icons?: (string | null)[];
   specials: [string, string][];
   /** The active profile's emoji, for the glyph beside the SPACE pill.
    *  `null`/absent is the NORMAL state and must draw the pill exactly as every
@@ -2039,13 +2164,34 @@ function buildHud(payload: GuideHudPayload, entranceDelay = 0): Promise<Rect | n
   // PROBLEM 77 — build ALL chips first (unpositioned), measure their REAL
   // rendered widths, and only then compute the ring geometry and angles.
   // Estimates remain solely as a fallback for a zero measurement.
-  const make = (a: [string, string], special: boolean): HTMLDivElement => {
+  const make = (a: [string, string], special: boolean, icon: string | null = null): HTMLDivElement => {
     const c = document.createElement("div");
     c.className = "st-chip " + (special ? "sp" : "ap");
     const inner = document.createElement("i");
     const kbd = document.createElement("kbd");
     kbd.textContent = a[0];
-    inner.appendChild(kbd);
+    /* PROBLEM 267 round 3 — the app's real icon IN PLACE OF the letter disc,
+       with the letter as a small badge at the icon's top-right, exactly as
+       a ring tile wears it. Same 20 px box as the disc, so the chip's
+       measured width (below) and everything laid out from it are the same
+       as with a disc; the badge is absolute and adds no width. A broken
+       data URL falls back to the disc, never to a broken-image glyph. */
+    if (icon) {
+      const ico = document.createElement("span");
+      ico.className = "st-ico";
+      const img = document.createElement("img");
+      img.alt = "";
+      img.draggable = false;
+      img.src = icon;
+      img.addEventListener("error", () => { ico.replaceWith(kbd); });
+      const badge = document.createElement("b");
+      badge.className = "st-ico-badge";
+      badge.textContent = a[0];
+      ico.append(img, badge);
+      inner.appendChild(ico);
+    } else {
+      inner.appendChild(kbd);
+    }
 
     // A key pinned to a browser profile arrives as "Brave — STUDIES", built by
     // Rust's `browser_profiles::hud_label` from the binding's stored
@@ -2100,7 +2246,8 @@ function buildHud(payload: GuideHudPayload, entranceDelay = 0): Promise<Rect | n
   // send, once the measured labels prove the apps need a second band. See the
   // specials-drop block below `layout`.
   let spChips = specials.map((a) => make(a, true));
-  const apChips = apps.map((a) => make(a, false));
+  const icons = Array.isArray(payload.app_icons) ? payload.app_icons : [];
+  const apChips = apps.map((a, i) => make(a, false, icons[i] ?? null));
   /** True once this build dropped the specials itself. Read by `layout`. */
   let _spDropped = false;
 
@@ -3309,7 +3456,12 @@ function buildHud(payload: GuideHudPayload, entranceDelay = 0): Promise<Rect | n
       // preview geometry for the real ring (and consume `_chipsPubSeq`,
       // skipping the real publish outright).
       requestAnimationFrame(() => { if (seq === _hudShowSeq) publishHudChips(); });
-      if (r) { _rect = r; return r; }
+      if (r) {
+        _rect = r;
+        // Round 3: the window is the canvas; the ring lives on its stage.
+        if (seq === _hudShowSeq) applyStage(r.stage ?? null);
+        return r;
+      }
       // SHOULD-FIX 4 — the overlay_log call that used to live here is
       // DELETED, deliberately. `overlay_fit_hud`'s null return means Rust
       // already refused the fit and logged WHY, at INFO, with MORE detail
@@ -3459,8 +3611,21 @@ function paintBloom(): void {
          when the two disagree is how a "guarded" chip still gets cropped.
          With the window now sized for the bloomed ring this should never
          bite; it is the net under that, not the mechanism. */
-      const halfW = _hudEl.offsetWidth > 0 ? _hudEl.offsetWidth / 2 : _bloomHalf.w;
-      const halfH = _hudEl.offsetHeight > 0 ? _hudEl.offsetHeight / 2 : _bloomHalf.h;
+      /* ROUND 3: the window is the canvas and `#st-hud` is its stage, so
+         the room a chip has is the WINDOW's edge in the chip's own
+         direction, measured from the stage centre — asymmetric, because
+         the stage is centred on the monitor and the window is the work
+         area. Without a stage, `#st-hud` IS the window and the halves are
+         the old symmetric ones. */
+      let halfW: number, halfH: number;
+      if (_stage) {
+        const sc = stageCentre();
+        halfW = rest.x >= 0 ? window.innerWidth - sc.x : sc.x;
+        halfH = rest.y >= 0 ? window.innerHeight - sc.y : sc.y;
+      } else {
+        halfW = _hudEl.offsetWidth > 0 ? _hudEl.offsetWidth / 2 : _bloomHalf.w;
+        halfH = _hudEl.offsetHeight > 0 ? _hudEl.offsetHeight / 2 : _bloomHalf.h;
+      }
       if (halfW > 0) {
         const ux = Math.abs(rest.x) / rest.r, uy = Math.abs(rest.y) / rest.r;
         const roomX = (halfW - rest.full / 2 - Math.abs(rest.x)) / Math.max(0.02, ux);
@@ -3657,13 +3822,34 @@ export function publishHudChips(): void {
      arms a different chip, moves a different set — a feedback oscillation with
      the cursor perfectly still. `.st-chip.ap` only, as always: specials are
      never in this snapshot and `pointer.rs` derives its dead zone from that. */
+  /* THE STAGE ORIGIN, AND WHY IT IS ADDED HERE (2026-09-15).
+     `offsetLeft`/`offsetTop` are measured from the chip's OFFSET PARENT,
+     which is `#st-hud` (the nearest positioned ancestor). The block above
+     reasons that `#st-hud` is `position: fixed; inset: 0`, so its offset
+     origin IS the window client origin and these numbers are already
+     window-relative. THAT STOPPED BEING TRUE IN PROBLEM 267 ROUND 3:
+     `applyStage` now sets `#st-hud`'s left/top to the stage rectangle
+     `overlay_fit_hud` returns, so every rect published from here was short
+     by the stage origin — on the owner's panel (stage @ 255,138 css, dpr
+     1.5) the whole chip cloud was handed to Rust 382 px left and 207 px
+     above where it is drawn. Rust then measured each chip's BEARING from a
+     centre that had not moved with it, which is the owner's 2026-09-15
+     screenshot exactly: cursor near the top of the ring, the pill on the
+     far RIGHT armed. Arithmetic: the chip drawn 500 px to the right of the
+     centre was published at (500 − 382, 0 − 231) = 27° off north, while the
+     chip drawn 450 px ABOVE it was published at (−382, −681) = 29° off
+     north — so a cursor pointing due north picked the right-hand one, by
+     2°. `sector_pick` was never wrong; its inputs were.
+     The stage origin is added back here rather than subtracted in Rust
+     because this is the only place that knows the offset parent moved. */
+  const org = stageOrigin();
   const chips = Array.from(_hudEl.querySelectorAll<HTMLElement>(".st-chip.ap"))
     .map((c, i) => {
       const w = _apRest[i]?.w ?? c.offsetWidth;
       const h = _apRest[i]?.h ?? c.offsetHeight;
       return {
-        x: c.offsetLeft - w / 2,
-        y: c.offsetTop - h / 2,
+        x: org.x + c.offsetLeft - w / 2,
+        y: org.y + c.offsetTop - h / 2,
         w, h,
       };
     });
@@ -3695,7 +3881,15 @@ export function publishHudChips(): void {
     }).catch(() => {});
   }
   try {
-    invoke("publish_hud_chips", { chips, dpr: window.devicePixelRatio || 1 })
+    invoke("publish_hud_chips", {
+      chips,
+      dpr: window.devicePixelRatio || 1,
+      // THE RING'S CENTRE, from the page that placed it. Rust used to
+      // derive it from the overlay window's own centre; since round 3 the
+      // window is the whole work area and the ring sits on a stage inside
+      // it, so the two agree only when no appbar shortens the work area.
+      centre: stageCentre(),
+    })
       .catch(() => { /* Rust side not landed yet — see the block above */ });
   } catch { /* no IPC bridge at all (harness / dashboard) */ }
 }
@@ -4448,11 +4642,9 @@ function showGuideHud(payload: GuideHudPayload): void {
      make the HUD appear again is exactly the event that used to be blocked. */
   window.clearTimeout(_hudBusyGuard);
   _hudBusy = false;
-  if (_hudEl) {                 // PROBLEM 137 - undo the handover pin
-    _hudEl.style.top = "";
-    _hudEl.style.bottom = "";
-    _hudEl.style.height = "";
-  }   // SLINGSHOT - a fresh hold gets a fresh handover grace
+  applyStage(null);             // PROBLEM 137 - undo the handover pin / the
+                                // last stage; buildHud's fit sets the new one
+                                // SLINGSHOT - a fresh hold gets a fresh handover grace
   _lastPayload = payload;
   _hudActive = true;
   _hudShowSeq++;                // one chip-geometry publish per show
@@ -4477,7 +4669,7 @@ function showGuideHud(payload: GuideHudPayload): void {
   _hudEl.classList.remove("landed", "space-gone", "collapsing");
   anchorGlow("hud");
   const g = document.getElementById("st-toastglow");
-  if (g) g.style.opacity = "1";
+  showToastGlow(g);
 
   if (absorbIntoSpace(payload)) return;
 
@@ -4602,14 +4794,12 @@ function hideGuideHud(actionPending = false): void {
       park(t, true);                    // hidden until its copy lands on it
     });
 
-    const ringH = window.innerHeight;
+    const ringH = _stage ? _stage.h : window.innerHeight;
     invoke<Rect | null>("overlay_fit_handover", {
-      width: window.innerWidth, height: ringH,
+      width: _stage ? _stage.w : window.innerWidth, height: ringH,
     }).then(() => {
       if (!_hudEl) return;
-      _hudEl.style.top = "0px";         // pin: the ring must not move a pixel
-      _hudEl.style.bottom = "auto";
-      _hudEl.style.height = ringH + "px";
+      pinStage(ringH);                  // pin: the ring must not move a pixel
       const from = spaceBox();          // AFTER the grow (same viewport as the
                                         // slots), BEFORE .hidden scales to .93
       _hudEl.classList.remove("landed");

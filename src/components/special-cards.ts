@@ -79,6 +79,9 @@ export const SPECIALS: SpecialSpec[] = [
   { id: "period", combo: "␣ .", name: "Pause",
     desc: "Puts Spaceadom to sleep so Space acts normal for a while. The same keys wake it up.",
     how: "Hold Space, tap period" },
+  { id: "semicolon", combo: "␣ ;", name: "Voice Typing",
+    desc: "Opens Windows' own dictation: speak, and the words are typed wherever your cursor is. The same tile lives on the middle-button ring.",
+    how: "Hold Space, tap semicolon" },
   { id: "ralt", combo: "␣ RAlt", name: "Cycle Profile",
     desc: "Switches to your next profile — a different set of apps on the same keys.",
     how: "Hold Space, tap Right Alt" },
@@ -94,7 +97,7 @@ export const SPECIALS: SpecialSpec[] = [
  */
 const BOARD_TO_SPECIAL: Record<string, string> = {
   grave: "grave", backspace: "backspace", comma: "comma",
-  period: "period", up: "up", down: "down", ralt: "ralt",
+  period: "period", semicolon: "semicolon", up: "up", down: "down", ralt: "ralt",
 };
 
 let _card: HTMLElement | null = null;

@@ -2,20 +2,16 @@
 
 *Source-visible, proprietary — see [LICENSE](LICENSE).*
 
-**Hold Space, tap any app's initial letter — boom! it opens. Hold Space, tap
-the app's initial again — boom! it's gone.**
+**Hold Space, tap an app's initial — it opens. Tap it again — it's gone.
+Tap Space on its own and it types a space, always.**
 
-> **A hero screenshot and a short demo GIF belong here and aren't in yet.**
-> `docs/media/hud-starry.png` (the dashboard, Starry theme, ideally with the
-> radial "hold Space" HUD up) and `docs/media/demo.gif` (5–10 seconds of the
-> gesture above) are both owed by the owner. See
-> [`docs/media/CAPTURE-NOTES.md`](docs/media/CAPTURE-NOTES.md) for exactly
-> what was tried, why the HUD specifically can't be captured from a browser
-> preview, and the fastest path to finish both. Once `hud-starry.png` exists,
-> replace this note with
-> `![Spaceadom's Starry-night dashboard](docs/media/hud-starry.png)`.
+Spaceadom turns the spacebar into a modifier key for launching, focusing and
+minimising applications, without taking anything away from typing. It is a
+native Windows application: a Rust core with a system-wide keyboard hook, a
+Tauri v2 shell for the dashboard, and an on-demand transparent overlay for the
+radial guide and toasts.
 
-Windows only. Rust + Tauri v2. No account, no analytics, no ads.
+Windows 10/11, x64. No account, no analytics, no ads.
 
 ---
 
@@ -39,7 +35,8 @@ this warning, is in
 [`all-versions/WHAT-CHANGED.md`](all-versions/WHAT-CHANGED.md). Install one,
 never both.
 
-**Microsoft Store** listing is prepared but not yet submitted — see
+**Microsoft Store:** submitted (1.0.109, in certification as of 17 September
+2026). The MSIX package and the listing live in
 [`to-publish-in-microsoft-store/`](to-publish-in-microsoft-store/).
 
 That's it. Spaceadom starts with Windows and lives in your tray.
@@ -77,6 +74,11 @@ copy found" banner applies here exactly as it does to two installed copies.
   to the front if it's already open, or minimises if it's already in front.
 - **Hold Space for a moment** and a radial guide appears over the keyboard
   showing every shortcut you've set, so you never have to memorise them.
+- **Hold the middle mouse button** and a ring of your apps' own icons blooms
+  around the cursor — release on one to launch it. Near a screen edge or
+  corner the ring becomes an arc that stays on screen, centred on the cursor.
+  Choose which apps ("Favourites", up to 13) or show all of them, as rings
+  or as a golden-angle spiral.
 - **Tap Space on its own and it always types a space** — exactly as it always
   has. That rule is the whole design: a modifier you already have, that costs
   you nothing.
@@ -97,9 +99,12 @@ works too.
 | `Space` + `Right Alt` | Cycle profiles — Founders → Gamers → Professionals |
 | `Space` + `Esc` | Boss key: hide everything and mute the PC |
 | `Space` + `` ` `` | Picture-in-picture cycle |
+| `Space` + `Tab` | Picture-in-picture that preserves fullscreen apps |
 | `Space` + scroll | Fade the window under the cursor |
 | `Space` + `.` | Pause Spaceadom |
 | `Space` + `,` | Smart Search — put the cursor where you type on this app or page |
+| `Space` + `;` | Voice typing — Windows dictation, typed wherever the cursor is |
+| Middle mouse button, held | The icon ring at the cursor; release on an app to launch it |
 | `Space` + `⌫` | Force close the app in front, even when it is frozen |
 | `Space` + `↑↑` | Jump to the top of what you are reading |
 | `Space` + `↓↓` | Jump to the bottom |
@@ -130,9 +135,13 @@ keyboard.
 - **A visual guide, not a cheat sheet you have to remember** — hold Space and
   a glassmorphism HUD shows the current profile's bindings; every action also
   gets a toast confirming what just happened.
-- **Three themes** — Earthy daylight, Warcry, and a Starry night that is a
-  real animated night sky (moon phases, 20 constellations, a storm, a rigged
-  galleon) — or turn Fun mode off for something plain and quiet.
+- **Four themes** — Earthy daylight, Warcry, a Starry night that is a real
+  animated night sky (moon phases, 20 constellations, a storm, a rigged
+  galleon), and Auto, which follows Windows' own light/dark setting — or
+  turn Fun mode off for something plain and quiet.
+- **Self-diagnosing.** The keyboard hook is watched by a witness hook and a
+  raw-input clock; if Windows ever evicts it, the app notices and repairs it
+  within seconds, and the log says exactly why.
 - **Set up by clicking a keyboard**, not by editing a config file — the
   dashboard *is* the on-screen keyboard; click a key, pick an app or paste a
   URL, done.
@@ -249,9 +258,14 @@ interface.
   cause and the exact code that fixed it, including the diagnoses that turned
   out to be wrong
 
-That last file is unusual for a public repo and deliberate. Most of the hard
-problems here were things that **failed silently** — an overlay that reported
-itself visible while painting nothing, a list that stopped at 60 items, a
-confirmation dialog that never rendered, a watchdog that logged 260 errors
-without catching a single real fault. They're written up so the next person
-doesn't have to rediscover them.
+Those last two files are unusual for a public repository, and they are
+published on purpose and unedited. Most of the hard problems here were things
+that **failed silently** — an overlay that reported itself visible while
+painting nothing, a list that stopped at 60 items, a confirmation dialog that
+never rendered, a watchdog that logged 260 errors without catching a single
+real fault, a "proven deaf" detector that was measuring the touchpad. Each is
+written up with what was tried, what turned out to be wrong, and the exact
+code that fixed it, so the next person doesn't have to rediscover them. Read
+them as an engineering journal, not as documentation: the polished reference
+material is [`CORE_AIM.md`](CORE_AIM.md), [`DEVELOPER-GUIDE.md`](DEVELOPER-GUIDE.md)
+and [`NATIVE_SAFETY.md`](NATIVE_SAFETY.md).

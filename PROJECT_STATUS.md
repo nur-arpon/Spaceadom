@@ -42,6 +42,242 @@ can fail and the write still runs.
 ================================================================================
 -->
 
+## 2026-09-17 — Claude (Opus, main session, overnight run) — **1.0.112 LOCAL TEST BUILD: PROBLEM 268 — THE KEYBOARD-DEAF VERDICT WAS FIRING ON TOUCHPAD GESTURES (449 forced hook re-installs in two days, 245 of them after under 3 s of keyboard silence); it now reads a RAW-INPUT keyboard clock. Plus the icon-ring page rescaling by the real devicePixelRatio (measured 1.12x on the two-monitor moment). 1.0.111 was installed and proved first (see the entry below); this build supersedes it. Gates 692/0/6-ignored, clippy 0, tsc 0.**
+
+**PROBLEM 268, measured from the owner's own log.** `grep "KEYBOARD DEAF, PROVEN" debug.log | grep WARN`: 460 verdicts on 2026-09-16/17, every one `reason InputUnaccountedFor`, foreground mostly claude.exe / chrome.exe / explorer.exe. The numbers on the lines: keyboard callback silent < 3 s in 245 of them (the threshold is 1.5 s), 3–10 s in 155; the OS input clock 0 ms old in 191, the mouse callback 3 s+ old in 155. Read together: the person was NOT typing for a couple of seconds and WAS moving on the touchpad — precision-touchpad panning arrives as pointer input the LL mouse hook never sees, so "the OS saw input the mouse hook cannot account for" was TRUE and meant nothing about the keyboard. Every verdict is a destructive re-install (`install_hooks()`, which can drop a live Space-UP) — hook age at the next verdict was 5 s–2 min in 413 of 449, i.e. the storm re-armed itself within a minute or two of every repair. Sentry SPACEADOM-2 ("hook-deaf", 35 events, last 6 h ago) is this.
+
+**The fix (`hook/mod.rs`).** A message-only window on the hook thread (`register_raw_keyboard_sink`, `raw_sink_wndproc`) registers for raw input from KEYBOARD devices only (`RegisterRawInputDevices`, usage 1/6, `RIDEV_INPUTSINK`) and stamps `LAST_RAW_KB_EVENT` / counts `RAW_KB_EVENTS` on every `WM_INPUT` — a clock that owes nothing to the hook chain and ticks for nothing but keyboards. `proven_keyboard_deaf`'s proof B now reads it: a raw keystroke inside `FORCED_INPUT_MAX_AGE_MS` (2 s) that the callback is older than by more than the 250 ms margin = a keystroke reached the OS and not us = PROVEN. A touchpad gesture, a mouse move, a pen stroke: the raw clock does not move, no verdict. Proof A (Space physically down, PROBLEM 257) is untouched. The WARN line now prints the raw clock (`while the OS delivered a KEYSTROKE (raw input, PROBLEM 268) Nms ago (K raw keystrokes since launch)`), the 60-second `hook liveness split` line carries `raw_keyboard:N` beside the four hook counters (raw above 0 with primary_real 0 IS the deaf signature, measured), and if the sink cannot be created the log says so and only proof A remains. Tests: `proven_deaf_tests` rewritten around the raw clock — the touchpad shape (`Some(600_000)` silence, raw as old, OS input 60 ms) is asserted `None`, the typing-into-the-terminal shape of 2026-09-07 (raw 391 ms, callback 56 s) is asserted proven, and the margin's exact width is pinned at 1 ms.
+
+**The DPR rescale (`middle-ring.ts` `rescaleForThisPage`, payload `scale`).** In the 1.0.111 corner capture every radius measured ~1.12× what Rust laid out (ring 0 at ~122 px for 108, the disc 130 for 115): after the overlay window crossed the DPI boundary, WebView2's `devicePixelRatio` on the 1.0 monitor was not 1.0 while Rust had divided by the monitor's 1.0. The page now multiplies every length and position by `payload.scale / window.devicePixelRatio` before drawing (a new object, angles untouched; 1 on a single panel, always). The two tiles that touched the screen edge in the right-edge capture were this.
+
+**UNPROVEN on hardware until the owner tests:** everything in the 1.0.111 checklist below, plus (g) `grep raw_keyboard debug.log` after typing — the count must climb; (h) `grep "KEYBOARD DEAF, PROVEN" debug.log | grep WARN` over the next day: from ~225/day to near zero; if it still fires, the line names the raw clock and the case is real. Sentry SPACEADOM-2 stays OPEN until (h) is seen.
+
+
+## 2026-09-17 — Claude (Opus, main session, overnight run; the round-6 geometry was started by a Fable agent that a rate limit cut off mid-file and finished here) — **PROBLEM 267 ROUND 6: THE ICON RING IS ANCHORED ON THE PRESS POINT AGAIN — shrink before move, guides are ARCS, the scrim stops at the screen edge; plus a mixed-DPI canvas bug measured on the owner's own two-monitor moment, and Space + ; / the "Voice Typing" ring tile. Gates 692/0/6-ignored (was 686/0/7), clippy 0, tsc 0. 1.0.111 LOCAL TEST BUILD — see the entry above this one for whether it built and installed.**
+
+**What the owner asked for, in his words (04:30, going to sleep):** "the corner and edge snapping not being on screen thing — like, the ring going out of viewing screen." And to take screenshots to verify it myself.
+
+**What was actually happening, measured.** I drove a real middle-button hold from PowerShell (`mouse_event` MIDDLEDOWN at a chosen physical point, `CopyFromScreen`, release at the ring's centre so nothing launched) on the installed 1.0.110. At a press 206 px inside the right edge the log says `centre (2560,489), clamp delta (206,0), shape half-W`: the centre was moved ONTO the screen boundary and the cursor warped there (read back at 2559 during the hold). With the centre on the edge, half of every circle the page draws — the 115 px disc, the 600/640 px scrim, the dashed guide circles at 2r+14 — is off-screen BY CONSTRUCTION, and three quarters of it in a corner (`centre (2,2), clamp delta (-123,-278), quarter-SE` — a press 123/278 px from the corner jumped 300 px). That snap-to-the-edge-line was written by the round-4 agent that the rate limit cut off on 2026-09-15 before it recorded anything; it is not in any owner decision, and the round-3 law in CLAUDE.md says the opposite: "the centre NEVER moves from the press point … only the TILES must lie inside … near an edge or a corner the rings become arcs … 70 px [now 44] tiles unless the room forces smaller". The round-5 record even called the residual edge complaint "the Favourites snap working as specified … an owner decision" — it was not.
+
+**The law, restored (`middle_ring::choose_shape`, pure):** (1) ANCHOR — `layout_arcs` around the press point at `TILE`, full circles in open space, arcs against a wall, the shape NAMED from the arcs (`shape_of_arcs`: the first partial arc's middle bearing, cardinal = `half-<dir>`, diagonal = `quarter-<dir>`); offset `(0,0)`, always. (2) SHRINK — if that cannot hold the count, the tile walks `tile_ladder()` (×0.95 per rung, floor `TILE_MIN` = `ICON_PX` = 27 = u/φ) and the WHOLE number system scales with it: `ring_radius(ring, tile)` and `arc_step(tile)` are `RING_RADII[k]·tile/TILE` and `ARC_STEP·tile/TILE`, so a smaller tile brings its rings in with it (`the_tile_ladder_scales_the_whole_number_system`). The ignored round-4 test `tiles_shrink_only_when_the_room_forces_it` is un-ignored — its old numbers (a 150 px sliver) no longer force a shrink at u = 44, so it uses a room that does. (3) NUDGE — only if even the floor cannot, the centre moves by the SHORTEST vector on an 8 px grid that lets the floor-size arcs fit (`nudge`, `RingShape::Nudged(dir)`, warped like a clamp; `a_nudge_is_the_shortest_vector_that_fits`). (4) CLAMP — nothing fits anywhere: the old `circle-clamped`. "All" (clamp + warp) and the Spiral are untouched. **One more law gap the replay exposed:** `arc_capacity` applied the Fibonacci caps only to FULL rings, so a 314° arc at the right edge held NINE inner tiles where a full circle holds five, and a press ten px further in changed the ring's whole character — the cap now binds partial arcs too (the owner's half/quarter numbers 4/7/12/20 and 2/3/6/10 are all under it, unchanged).
+
+**The owner's eight logged edge presses, replayed in `round6_tests::the_owners_edge_presses_keep_the_centre_on_the_press_point`** (press = logged centre − clamp delta, the logged room): right edge (2354,489) → half-W, 44 px tiles, offset (0,0), rings 5/8; top-left (4,92) → quarter-SE 2/4/6/1; bottom-left (12,1599) → quarter-NE 1/3/5/4; left edge (0,1060) → half-E 4/7/2; (125,280) → half-E 7/6; top-right (2290,2) → half-S 4/6/3; top edge (1237,96) → half-S 6/7; top edge (1490,63) → half-S 5/8. Every tile inside its room, no centre moved, no shrink needed on a real monitor.
+
+**The page (`middle-ring.ts`, `middle-ring.css`).** Guides are ARCS: `guide_arcs` (Rust, one per ring, the ring's feasible arc plus ≤ 20 px of arc each end, never more than half a pitch) drawn as one SVG `<path>` per guide with a dashed stroke — a bordered div can only draw a whole circle. `round6_tests::guide_arcs_never_leave_the_room` samples every half-degree of every guide for the eight presses and a 160 px sweep of the panel. The scrim gets `clip-path: inset(...)` from the room in page px (`PageRect`, `scrimClip`), so its fade ends at the screen edge instead of being cut by the window's. The centre pill still may clip (owner: he likes it).
+
+**A SECOND bug, measured because the owner had a second monitor plugged in at 05:16 (1920×1080 @ 1.0 beside the 2560×1600 @ 1.5 panel):** `overlay_fit_canvas` logged `asked 2560x1480 … GOT size Some((3840, 2220))` — exactly 1.5×. It called `set_size` BEFORE `set_position`: a physical 2560 set while the window sits on the 1.0 monitor is a LOGICAL 2560 there, and the move across the DPI boundary makes tao keep that logical size (WM_DPICHANGED). Now: position first, size second, one re-apply if the readback disagrees (logged as a warn). `overlay_fit` (toasts) had the same order AND handed Tauri `LogicalPosition`s computed with the TARGET monitor's scale, which Tauri converts with the window's CURRENT monitor's scale — physical from the target monitor's scale now, position first. One panel never showed either. UNPROVEN on the two-monitor setup (I stopped injecting input once I saw the owner was active on it).
+
+**The column I photographed and then disproved.** My first 700 ms and 1200 ms holds at the right edge showed the 13 tiles as a straight vertical column hugging the edge. A 2000 ms hold showed proper arcs. The column was the ENTRANCE caught mid-flight (Fibonacci stagger up to 267 ms + 620 ms bloom, from the centre outward) — not a layout fault. Recorded so nobody chases it: hold ≥ 2 s before photographing.
+
+**Space + ; and the "Voice Typing" ring tile (owner decision 05:40, by ring tile rather than the left+right-click chord he first floated — the chord collides with drag-selects, context menus and CAD; discussion in the chat log).** `KeyCombo::Semicolon` (`VK_OEM_1`, both VK tables, own-window fallback too), `engine::handle_voice_typing` → `actions::voice_typing::start_voice_typing` sends Win+H in ONE `send_keys_checked` batch with the app's injected signature (PROBLEM 227: a partial insert can never latch Win). Ring special `(";", "Voice Typing", U+E007)`, the dashboard card ("Hold Space, tap semicolon"), the board label "Dictate" on `;`, the preview stub. The test reads the toast text only — `start_voice_typing` is never called from a test because it really opens dictation on whoever's desktop the test runs on.
+
+**Files.** `src-tauri/src/middle_ring.rs` (ladder, `ring_radius(ring, tile)`, `arc_step`, capped `arc_capacity`, `shape_of_arcs`, `nudge*`, `GuideArc`/`guide_arcs`, `PageRect`/`page_rect`, `tile_scale`, `Placement.arcs`, `Nudged`, `round6_tests`, two stale round-4 tests rewritten to assert the law), `guide_hud/mod_impl.rs` (call site, room rect), `commands.rs` (both fitters), `hook/mod.rs`, `engine/mod.rs`, `engine/actions/voice_typing.rs` (new), `src/components/middle-ring.ts`, `src/styles/middle-ring.css`, `special-cards.ts`, `keyboard-matrix.ts`, `preview.ts`, `scripts/install-proof.ps1` (1.0.111 markers: rust `'voice_typing: sent Win+H (Windows dictation)'`, frontend `'guide_arcs'`, `'Voice Typing'`), version 1.0.111.
+
+**UNPROVEN on hardware — the morning checklist for the owner:** (a) hold the middle button ~150 px from the right edge: the ring should stay centred on the cursor, arcs opening left, the dashed guides ending where the tiles end, nothing but the pill touching the edge; (b) the same in a corner; (c) the bottom edge with the taskbar visible; (d) Space + ; anywhere with a text box focused — Windows dictation should appear; (e) release on the ring's "Voice Typing" tile ("All" scope, or tick it if Favourites can show specials) — same; (f) if the external monitor is still plugged in: a middle hold on EACH monitor, and a toast on each. Full record: V14_FIXES_AND_CODE.md §PROBLEM 267 — ROUND 6.
+
+
+## 2026-09-15 — Claude (PROBLEM 267 round-5 agent, SECOND PASS) — **THE SPIRAL LAYOUT, φ MOTION AND THE MATHS SUBTITLES. Owner additions, kept out of the bug-fix diff on purpose; gates 686/0/7-ignored, clippy 0, tsc 0, vite clean. NOT BUILT, NOT INSTALLED, NOT HAND-TESTED, NO GIT.**
+
+**(5) "All layout: Rings / Spiral".** A real alternative arrangement for the `All` scope, opt-in and defaulting to `Rings`, so nothing an existing user sees changes until they flip the pill. Tile *i* at the golden angle × *i* and `r_i = sqrt(RING_R1² + k²·i)`, with `k = ARC_STEP · sqrt(√3 / 2π)` = 37.28 px — DERIVED, not tuned: a Vogel spiral's area per tile is `π k²` and a hexagonal packing at spacing `s` has `s²√3/2`, so equating them fixes `k` from the same `ARC_STEP` the rings already use. Containment is unchanged — a spiral is a variant of "All", so it takes "All"'s clamp + warp — and picking is `spiral_pick`, nearest tile by Euclidean distance, which is the only test that means anything on a layout with no bands and no sectors (it reuses the hysteresis slack the new proximity override introduced). `guide_diameters` draws no dashed circles for it, decided from the layout's own shape rather than a flag. The pill sits DIRECTLY under the Favourites/All pill and is inert unless "All" is chosen, mirroring "Choose your favourites →". `?ring=spiral` renders it in the preview harness with the same constants. Four property tests: no overlap and ARC_STEP-ish spacing for n = 1..=40, every tile inside the work area from all four corners after the clamp, every tile picked from its own centre (armed and unarmed), and no guides.
+
+**(6) Icon-ring motion, φ only.** The bloom-in stagger is now Fibonacci-indexed — `120 ms + stagger × fib(i)`, cycling through the first seven terms so it cannot run away and still lands inside the Space ring's own 340 ms budget — and the ring's shell easing is built from 1/φ³, 1/φ², 1/φ (`--mr-ease-out`/`--mr-ease-in` on `.st-mring`, with the old curves as the CSS fallback). **The Space ring's tuned timings and curves are untouched.** Read back out of the preview's DOM: delays 131/131/143/154/177/211/267 ms then a cycle, and the computed timing function is the φ curve.
+
+**(7) One line of maths under each ring row,** the owner's wording verbatim, in a new quiet `.set-sub` style: "Sized by the golden ratio." / "A Fibonacci cap, for density." / "Packed like a sunflower's seeds." Distributed at the point of use instead of one About-page credit, by his decision, and not gated on "Show me around" — four words each, under the three rows whose numbers look arbitrary without them. A full description entry for the new row was written in the same voice as the two above it. The interactive maths explainer he mentioned is explicitly NOT in this round.
+
+**UNPROVEN.** The spiral has never been drawn by the real overlay, only by the preview harness, which cannot validate the overlay's window; nobody has picked a tile on one with a real cursor. Full record: V14_FIXES_AND_CODE.md §PROBLEM 267 — ROUND 5, SECOND PASS.
+
+
+
+## 2026-09-15 — Claude (PROBLEM 267 round-5 investigation agent) — **THE SPACE RING'S PICKING WAS BROKEN BY THE ICON RING'S CANVAS, AND IT IS MEASURABLE FROM THE OWNER'S OWN LOG. Four fixes on the tree; gates 682/0/7-ignored (was 668), clippy 0, tsc 0, vite clean. NOT BUILT, NOT INSTALLED, NOT HAND-TESTED, NO GIT.**
+
+**(1) TASK 3 / the owner's screenshot — the real bug, and the cross-ring one he suspected.** He reported the SPACE ring's picking got worse when the icon ring arrived, and sent a screenshot: cursor near the TOP of the ring, the armed pill on the far RIGHT. `sector_pick` is untouched and its angle maths is correct (`chip_angle` and the cursor both use `atan2(dy, dx)` in the same screen frame — checked). **Its INPUTS were broken by PROBLEM 267 round 3.** Round 3 made the overlay window the whole work area and moved `#st-hud` onto a STAGE inside it (`applyStage`). `publishHudChips` reads each chip's `offsetLeft`/`offsetTop`, which are measured from the chip's OFFSET PARENT — and that parent IS `#st-hud`. The block's own comment ("`#st-hud` is `position: fixed; inset: 0`, so its offset origin IS the window client origin") stopped being true that day. So every rect published was short by the stage's origin, while the centre Rust derived was the WINDOW's centre and had not moved with them. The owner's numbers: canvas 2560×1552 @ (0,48), dpr 1.5, stage @ (255,138) css = (382,207) physical, stage centre (1280,800), window centre (1280,824). A chip drawn 500 px RIGHT of the ring's centre was published at (500−382, 0−231) = **27° off north**; a chip drawn 450 px ABOVE it at (−382,−681) = **29° off north**. A cursor pointing due north therefore armed the right-hand chip, by two degrees — his screenshot, exactly. Fixed on both sides: `publishHudChips` adds the stage origin back (`stageOrigin()`) and sends the ring's own centre (`stageCentre()`), and `publish_chips` uses that centre, falling back to the window's only when no page sends one. Separately, `publish_keys` now clears `RING_ACTIVE`/`RING_COUNT` — the exact mirror of `publish_key_codes` clearing `CHIP_GEOM_COUNT` — so a Space-ring show can never route its ticks through the icon ring's polar table even if a hide path did not run first (his log shows the middle-button reap firing several times an hour).
+
+**(2) TASK 1 / the ring clipped only at the right and bottom.** The lead's prime hypothesis — an under-sized window — is **FALSIFIED by measurement**: the logged canvas (2560×1552 @ (0,48)) is byte-identical to the real `rcWork` read from `GetMonitorInfo` (0,48,2560,1600), `outer_size`/`outer_position` read the same back, and every logged `page centre` checks out against `page_point`'s arithmetic to the decimal. Two genuine right/bottom-only errors were found and fixed instead. **(a)** The layout and the clamp were measured against the WORK AREA while the window is the CANVAS — and `canvas_rect` insets the canvas 2 px per side whenever the work area equals the monitor bounds, which is this owner's normal state (his log carries both `canvas 2560x1552 @ (0,48)` and `canvas 2556x1596 @ (2,2)`). Moving the origin +2 pushes content 2 px further INSIDE on the left and top and 2 px OUTSIDE the window on the right and bottom. `middle_ring::room_rect` is now the single room both `choose_shape` and `clamp_ring_center` are given. **(b)** An AUTO-HIDDEN taskbar is topmost, is not subtracted from the work area, and slides out the moment the cursor reaches its edge — which is precisely what the Favourites snap does when it pins the centre to the work-area edge and warps the cursor there (his log, hold #21: `centre (1482,1600) … clamp delta (0,193)`). Measured on his machine the same hour: `rcWork` reserves NOTHING at the bottom while `Shell_TrayWnd` sits at (0,1598)-(2560,1670), 72 px tall, auto-hide. `commands::autohide_reserve_for` (`ABM_GETAUTOHIDEBAREX`, per edge, per monitor) now takes that band out of the room, so no tile, no snapped centre and no cursor warp can land in it. The marker line prints the room beside the canvas. **What remains unexplained is the RIGHT edge specifically:** after these fixes the residual right/bottom-only error is 2 px of inset plus 1 px of exclusive-boundary, which is not "tiles genuinely invisible" — and the rest of what he describes at an edge (half the centre disc, half the scrim, off-screen) is the Favourites snap working as he specified it, since the snap puts the centre ON the boundary while "All" slides inward by exactly the overhang and so is never cut. That difference is an owner decision and was left alone.
+
+**(3) TASK 2 / proximity override, both rings.** A hybrid, not a replacement: `middle_ring::proximity_pick` and `pointer::proximity_pick` run first and pick the tile/chip the cursor is genuinely ON, declining whenever it is far from everything or between two of them, so the angle-and-band test still answers every flick from a distance exactly as before. Hysteresis is preserved in the proximity domain as well as the angular one. `RingHit` gained `tile` (physical, scaled by `hits_for`) and the poller a `RING_TILES` table, because "is the pointer on that icon?" needs to know how big the icon is.
+
+**(4) TASK 4 / the golden-angle stagger (owner decision).** The old rule `first_k = first_(k−1) + pitch_k / 2` was not merely suboptimal for the shipped caps — for "All" (5 + 8 + 13) it was **exactly** wrong: 360/lcm(8,13) = 3.4615° is the lattice the outer two rings share and half of ring 2's pitch is four lattice steps, so four of ring 2's thirteen tiles sat at EXACTLY a ring-1 tile's bearing. One app directly behind another, at zero degrees, which is what the owner reported seeing. `stagger` is now the golden angle 360°(1 − 1/φ) ≈ 137.5°, and a property test sweeps n = 1..=26 asserting the worst inner-vs-outer gap stays above 0.5° (the old rule's is 0.0, asserted too). Partial arcs (half rings, quarter fans) take a phase inside their own feasible arc, CHOSEN by `best_arc_phase` rather than fixed: a fixed golden fraction was tried first and the test caught it landing 0.36° from the inner arc on the owner's own right-edge press, because two arcs of different lengths at different radii have no fixed relationship. The shift is always inward from the arc's start and the run still ends on `hi`, so containment can only improve — re-asserted with `slots_fit` against the same room the layout used.
+
+**Files.** `src-tauri/src/middle_ring.rs` (golden angle, `best_arc_phase`, `room_rect`, `appbar_reserve`, `RingHit.tile`, `proximity_pick`, tests), `src-tauri/src/hook/pointer.rs` (`proximity_pick`, `RING_TILES`, `publish_chips` centre, `publish_keys` teardown, tests), `src-tauri/src/commands.rs` (`autohide_reserve_for`, `publish_hud_chips` centre), `src-tauri/src/guide_hud/mod_impl.rs` (room, marker line), `src/components/toast.ts` (`stageOrigin`, the published rects and centre).
+
+**UNPROVEN ON HARDWARE — everything visual, as always.** Nobody has held Space or the middle button on this code. The three things to look at first: the Space ring arming the pill the cursor is actually near (the screenshot case); a Favourites press at the bottom edge no longer reaching into the auto-hide taskbar's band; and whether the right-edge clipping he reported survives these fixes — if it does, it is not window geometry and the next measurement is a pixel sample of the screen with the ring up, because the arithmetic has now been checked end to end against his own log. Full record: V14_FIXES_AND_CODE.md §PROBLEM 267 — ROUND 5.
+
+
+
+## 2026-09-15 — Claude (Sonnet, main session) — **PROBLEM 267 ROUND 4 TESTS REPAIRED: 668/0/7-ignored, clippy 0, tsc 0.** The round-4 φ/Fibonacci agent (RING_CAPS=[5,8,13,21], RING_RADII=[108,175,283,458], FAVOURITES_MAX=13) got cut off mid-task by a rate limit with 21 stale-identifier compile errors left in `middle_ring.rs`'s test module. Fixed those, then found and fixed a REAL production bug it exposed: `choose_shape` classified Quarter-vs-Half by checking `sx != 0.0 && sy != 0.0`, but at the exact screen-corner pixel the snap amount is `-0.0` (IEEE-754: `-0.0 == 0.0`), so a genuinely-constrained corner silently read as an unconstrained Half — fixed by classifying from the already-correct `fits_x`/`fits_y` booleans instead (`Dir::of_binding` replaces `Dir::of_snap`). Also fixed a test-only bug: `assert_anchored` re-validated a snapped shape's slots against the un-shifted press-point room instead of `room.shifted(offset)`, the room `choose_shape` actually laid them out against — a false alarm on 7 tests. Left one KNOWN GAP marked `#[ignore]` rather than faked: tile-shrink-to-fit was never (re)implemented in round 4 (`choose_shape` falls back to `CircleClamped` instead of shrinking). NOT YET BUILT, INSTALLED, OR HAND-TESTED. Full record: V14_FIXES_AND_CODE.md §PROBLEM 267 — ROUND 4 test repair.**
+
+
+## 2026-09-13 — Claude (PROBLEM 267 round-3 agent) — **ROUND 3 ON THE TREE, gates green (670/0 tests, clippy 0, tsc 0, vite clean), NOT BUILT, NOT INSTALLED, NO GIT.** (1) ONE BIG CANVAS: both rings' overlay window is the whole work area of the monitor the CURSOR is on (`canvas_rect`, inset 2 px when it equals the monitor bounds, never the exact bounds; `overlay_fit_canvas` skips the resize when the window is already there); the Space ring keeps its old box as a `stage` centred on the monitor (`stage_box`, `applyStage`) so no pill moves; the boxy edge line and the cut pills were the scrim/pills reaching a ring-sized window's edge, and "All" was cut by the 960-px window hanging off the monitor (log holds #1099–#1139: 25 items, two rings, clamp deltas correct). (2) FAVOURITES (1..=15, `FAVOURITES_MAX`; empty = first 6) with the layout law: even spacing over each ring's available arc, 6 / 9 / spacing-limited rings at 125/201/277, 70 px tiles unless forced, centre never moves, pill may clip, tiles always inside; `feasible_arc` + `layout_arcs` replace the fixed fans (the owner's (2485,175) press: 4 + 4 at 125/201, 70 px, over ~105°); All = the same law + clamp/warp on the cursor's monitor. Settings: "Favourites / All", "Choose your favourites", "N of 15 selected". (3) Bloom deleted (`middle_ring_motion` ignored on read). (4) Centre pill: two lines (`split_display_name`: "Google Chrome — Arpon" → Chrome / Arpon), pill grows to 170 then fonts shrink to 15/12 floors, then ellipsis. (5) Space-ring pills carry the app icon (cache-only `hud_icons_for`) with a letter badge in place of the disc. **UNPROVEN: the big transparent canvas composing is the first thing to look at.** Full record: V14_FIXES_AND_CODE.md §PROBLEM 267 — ROUND 3.
+
+## 2026-09-13 — Claude (PROBLEM 267 follow-up agent) — **1.0.110 HARDWARE FINDINGS FIXED ON THE TREE: (A) the icon ring drew centre/3 away from the cursor and picked the wrong sector because `show_middle_ring` handed a LOGICAL centre (883/1.5 = 589) to `overlay_fit_ring`, which subtracts the PHYSICAL half-window — one `/ sf` at the call site; now physical end to end, pure `ring_window_origin` + 6 tests with the log's numbers (hold #1 (883,756) → window (433,306)), the marker line prints `placed @ (x,y) physical`. (B) NO motion because `.in` was added inside a rAF before the inserted element had a computed style (no before-change style → no transition; measured with `getAnimations()` = []); fixed with a forced style read, and two more traps found in the preview — `styles.css`'s `.ripple` (the press ripple, 520 ms) matched the ring's motion class (now `.motion-bloom`/`.motion-ripple`), and Chromium starts no transition from a filled animation's value when the animation is removed (the ripple collapse moved to the `.mr-lift` layer). Two motion styles behind `middle_ring_motion: bloom | ripple` (default ripple, missing = ripple): Bloom = the handoff's sheet; Ripple = the Space ring's own numbers (220 ms shell, `st-bloom-in` 620 ms per tile with toast.ts's stagger, `st-space-pop` pill, 40/24 px aim push on a 170 ms spring, `st-chip-armed` pulse, 143/110 ms exit) plus a continuous fisheye wave (1.35/1.15/1.0/.85 by angular distance, raised-cosine between, τ 120 ms lerp) fed by a new `middle-ring-aim` event from the pointer poller at ≤ 60 Hz, only while a ripple ring is up and only when the bearing moved. One Settings row, "Ring motion: Bloom / Ripple", under "Middle button shows". (C, owner decision mid-task) for scope "My eight" the ring centre now stays EXACTLY on the press point — no clamp, no `SetCursorPos` — and the SHAPE changes instead, chosen once at raise time by pure `choose_shape`: circle in open space, a half ring (8 tiles over ≤ 180° at a larger radius, ends tilting inward when the edge is closer than 51 px) near one edge, a quarter fan (two arcs of four, 20° pitch, 56 px tiles, r 178/240) in a corner, `circle-clamped` (1.0.110's clamp + warp) only when nothing fits; "All of them" keeps clamp + warp. `ring_pick` needed no change (band by radius, nearest by angle). Marker line carries `shape half-W (arc radii …)`. 12 shape tests with the 2560×1600 @1.5 numbers including a sweep of the whole work area. Gates: 670/0 tests (was 647), clippy 0, tsc 0, vite clean. Preview DOM reads confirm bloom/ripple entrance, exit, hover, push, collapse and the wave. NOT BUILT, NOT INSTALLED, NO GIT — the lead builds; everything is UNPROVEN on hardware, and Ripple shows no wave unless Fun mode is ON (the log does not record `fun_mode`). Full record: V14_FIXES_AND_CODE.md §PROBLEM 267 — FOLLOW-UP.**
+
+## 2026-09-13 — Claude (1.0.110 local-test agent) — **BUILT AND INSTALLED PROBLEM 267 (the middle button's cursor-anchored ICON RING) AS 1.0.110, A LOCAL TEST BUILD.** Signed NSIS + MSI built from PowerShell, NSIS installed on this machine through `explorer.exe` and proved PROBLEM 127-style. **NO git commit, tag or push; NO Store/MSIX build; NO release — the owner reviews first. The ring itself is UNPROVEN: nobody has held the middle button on this build yet. Law 6 UNPROVEN.**
+
+**Changed by this session.** The three version files (`package.json`,
+`src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`; `Cargo.lock` followed via
+the build), the `set SETUP=` line in `scripts/install-real.cmd`, the marker
+list in `scripts/install-proof.ps1` (1.0.109's one promoted to a control, one
+new appended with its comment block — the new one is an OWNER-TRIGGERED log
+line, so its absence from `debug.log` after an install is expected and is not
+a failure; only the exe byte scan reads it at install time), and the two
+owner-facing docs (`share-spaceadom/READ-ME-FIRST.txt`,
+`all-versions/WHAT-CHANGED.md`), each rewritten through a temp copy checked
+larger than the original. No code was touched. Gates were NOT re-run — the
+PROBLEM 267 build agent's entry directly below recorded 647/0 tests, clippy 0,
+tsc 0 on the same tree, and only the version strings changed since; `npm run
+build` (tsc + vite) ran clean as the build's first step. Probe scripts and
+every raw reading are in `D:\Claude-Projects\_probe\p110\` (outside the
+repo).
+
+**Artifacts**, all under `src-tauri\target\release\bundle\`, signed with
+the key path + password read into the two env vars from the PowerShell tool
+(never the Bash tool, never echoed):
+
+- `nsis\Spaceadom_1.0.110_x64-setup.exe` — **8,659,493 B**, 09:20:02 (+ `.sig` 424 B)
+- `msi\Spaceadom_1.0.110_x64_en-US.msi` — **13,873,152 B**, 09:20 (+ `.sig` 424 B)
+- `target\release\spaceadom.exe` — 1.0.110, **22,159,360 B**, 09:20:17
+
+Build: `cargo` 1m 35s, 130 s end to end, 0 Rust warnings (the only `Warn` is
+Tauri's standing `.app` identifier note). The repo's `posttauri` hook
+(`scripts/archive-build.mjs`) ran as on every build: it copied both installers
+into `all-versions/` (both `cmp`-identical to the bundle originals) and
+**removed the 1.0.109 setup.exe and .msi from `share-spaceadom/`** — a
+script-driven deletion, recorded because the agent rule forbids the agent doing
+it by hand. The two `.sig`s were then `cp -n`'d into `all-versions/` beside the
+installers.
+
+**THE CONTAINER DIFFERENTIAL, measured before anything was trusted (PROBLEM
+143).** Same path string, two readers: agent shell →
+`%LOCALAPPDATA%\Spaceadom\spaceadom.exe` = **1.0.53, 14,109,184 B, 2026-08-18**;
+`explorer.exe`-launched probe → **1.0.109, 21,929,984 B, 2026-09-12 11:38:52**.
+Config: 47,761 B SHA `7491…0EEE` in-sandbox vs 87,871 B SHA `7A18…7319`
+outside. Every machine-facing reading below came through the second reader.
+
+**THE MARKER DIFFERENTIAL, all three columns via `explorer.exe`.** Marker:
+`middle-button ring v2: cursor-anchored-ring-raised-at-cursor-spaceadom-267` —
+the leading `&'static str` of `show_middle_ring`'s `log::info!` in
+`guide_hud/mod_impl.rs`, stopping before the em dash. 32 controls = the whole
+1.0.109 list + 1.0.109's own; negative control = a string never written into
+any build.
+
+| Where | Reading |
+| --- | --- |
+| Installed **1.0.109** (21,929,984 B) before install | 32/32 controls **True**, new marker **False**, negative False |
+| Fresh **1.0.110** `target\release\spaceadom.exe` (22,159,360 B) before install | 32/32 **True**, new marker **True**, negative False |
+| Installed **1.0.110** (22,159,360 B) after install | 32/32 **True**, new marker **True**, negative False; `install-proof.ps1`: 33/33 Rust markers True, 30/30 bundle markers True, exe newer than newest `dist2` file (09:18:11) True |
+
+**THE INSTALL, via one `explorer.exe`-launched wrapper
+(`_probe\p110\install-110.cmd`)** that snapshotted config + PID, called the
+repo's `scripts\install-real.cmd`, waited 45 s, and ran `postcheck.ps1`.
+Installer exit code 0, which proves nothing; what follows does.
+
+- **FileVersion 1.0.110**, 22,159,360 B, at `%LOCALAPPDATA%\Spaceadom\spaceadom.exe` — the same byte count as the fresh build, and the log banner names it.
+- **New PID: 21616** (1.0.109, started 09:08:43 by the logon task) **→ 38312** (1.0.110, started 09:21:36).
+- **Startup 789 ms** (logger 09:21:36.223 → `dashboard_ready` 09:21:37.012), a manual launch by `install-real.cmd`. `overlay: configured … usable for the Guide HUD 659 ms after app start`.
+- **The first PROBLEM 267 line on hardware:** `overlay-js: middle-ring listeners registered OK (PROBLEM 267)` at 09:21:36.918 — the overlay page's half of the ring is loaded and listening. It is a WARN by the same convention as `overlay-js: listeners registered OK`.
+- **Config SHA-256 identical across the install:** `7A18DFE8836174074EA45B5C52D67147BB82F19DE5D5CB7358F0A6C30B887319`, 87,871 B, lastWrite 2026-09-13 01:05:21 before and after; semantic map compare 74,141 == 74,141 identical; 5 profiles both sides; `run_at_startup: true`, `middle_button_ring: true`, `middle_ring_style` absent (never saved yet — the code default `icon_ring` applies).
+- **0 MsiInstaller / RestartManager events inside the install window** (stamped 09:21:31), 0 of ids 1033/1040/1042. **Control:** 2 events in the preceding 2 h — the 11707+1033 pair from `light.exe` validating the 1.0.110 `.msi` at 09:20:17, no 1040/1042 bracket, exactly the build-time signature CLAUDE.md describes.
+- **PROBLEM 266 survived the install:** `schtasks /Query /TN Spaceadom /XML` exit 0, `<Command>` = the installed exe, `--autostart`, `<UserId>ARPONS\beamu</UserId>` in the logon trigger, `PT10S`, `InteractiveToken`, battery-safe, no time limit, `IgnoreNew`, `StartWhenAvailable`; `Status: Ready`, `Scheduled Task State: Enabled`, `Run As User: beamu`. HKCU Run `Spaceadom` **absent** before and after. First boot printed `startup: task 'Spaceadom' is healthy (this exe, --autostart)` then `task 'Spaceadom' enabled` — no re-registration, nothing to migrate. (The two XML `False`s, `RunLevel` and `Settings/Enabled`, are the default-omission trap the 1.0.109 entry documents; the `/FO LIST /V` readings above are the truth.)
+- **Overlay ALIVE:** 1 × `overlay: configured`, 0 `REBUILD FAILED`, 0 `OVERLAY_DISABLED`. **Hook:** 1 × `WH_KEYBOARD_LL + WH_MOUSE_LL installed`, 0 reference-install failures, 0 `KEYBOARD DEAF`, 0 `FORCED REPAIR` since the banner. Safe mode not entered; `safe-mode: alive 30s — boot counter reset to 0`. Rival scan: one Spaceadom. Updater kind **Nsis**; `updater: first launch of 1.0.110 after 1.0.109 (an update)`; `no update — 1.0.110 is the newest release on the manifest` (the manifest still names 1.0.109; nothing on GitHub changed). 0 `[ERROR]`/panics; 9 `[WARN]` (spacedesk + PowerToys conflict notices, the two `overlay-js: … registered OK` lines).
+
+**A BONUS MEASUREMENT THE 1.0.109 ENTRY WAS WAITING FOR.** The task's
+`Last Run Time` is no longer `11/30/1999`: it is **09:08:43 today**. Winlogon
+7001 (logon) at **09:08:32**; 1.0.109's `logger initialised` at
+**09:08:43.665** — **11.7 s from logon to process**, against 107 s (1.0.108
+via the Run key) and 80 s (1.0.107). PROBLEM 266's one open measurement is
+now taken, on the build that shipped it, before this install replaced it.
+
+**UNPROVEN, IN CAPITALS.** Counted in the real `debug.log` since the 1.0.110
+banner at line 4626 (65 lines at probe time):
+
+```text
+middle-button ring v2: cursor-anchored-ring-raised-…   0   (PROBLEM 267 — owner-triggered; nobody has held the button)
+site-icon:                                              0   (PROBLEM 267 — bind-time; no link has been re-bound)
+hold start (hold #<DIGIT>) … over own window            0   (law 6 half 1)
+guide_hud: shown over own window                        0   (law 6 half 2)
+own-window fallback:                                    0   (PROBLEM 259, informational)
+middle-button ring: the-guide-hud-ring-was-raised-…    0   (PROBLEM 263 phase 1 — not expected either: icon_ring is the default)
+```
+
+Whole-log controls for those 0s: `guide_hud: shown over own window` 18,
+`hold start (hold #N)` 1,382, `own-window fallback:` 1,394, `KEYBOARD DEAF`
+1,920, `middle-button ring:` 11 (all 1.0.108/1.0.109), `middle-button ring
+v2:` 0.
+
+- **THE ICON RING IS UNPROVEN ON HARDWARE.** Everything the PROBLEM 267 entry lists under "what the tests cannot say" is still unsaid: the ring at the cursor in each theme, the corner clamp + warp, release-to-launch and left-click, quick-click passthrough, a favicon on a freshly bound link, SolidWorks orbit untouched with Space still working, "Space ring" restoring 1.0.109. The owner holds the middle button; `grep "middle-button ring v2:" debug.log` is the first line to look for.
+- **LAW 6 IS UNPROVEN**, as on every build an agent installs: `install-proof.ps1` ran before the app started (its law-6 line reads "has not RUN yet"), and the postcheck's counts since the banner are 0/0. Owner holds Space with the dashboard focused.
+- **NOTHING WAS PUBLISHED.** No `git commit`, tag or push (the tree is exactly the PROBLEM 267 agent's uncommitted work plus this session's version/doc/script edits); no `npm run store`, no `npm run msix`, no GitHub release, no manifest written, the pen drive not touched, the owner's `config.json` never written.
+
+**FILES THIS SESSION CREATED** (all under `D:\Claude-Projects\_probe\p110\`):
+`markers.ps1`, `markers-controls.txt`, `markers-new.txt`,
+`precheck.ps1/.cmd/.txt`, `fresh.ps1/.cmd/.txt`, `postcheck.ps1/.txt`,
+`install-110.cmd`, `pre2.txt`, `config-pre.json`, `config-pre2.json`,
+`config-post.json`, `npm-build.log`, `tauri-build.log`,
+`READ-ME-FIRST.new.txt`, `WHAT-CHANGED.new.md`, `PROJECT_STATUS.new.md`, and
+the `_*-done.txt` / `_install-rc.txt` sentinels. In the repo: the 1.0.110
+installers + `.sig`s in `all-versions/`, the 1.0.110 installers in
+`share-spaceadom/` (put there by the build hook), `install-check.txt` and
+`_install-window-start.txt` (rewritten by `install-real.cmd` as on every
+install), and the build outputs.
+
+## 2026-09-13 — Claude (PROBLEM 267 build agent) — **BUILT the middle button's CURSOR-ANCHORED ICON RING (phase 2 of PROBLEM 263) on the tree; gates green (647/0 tests, clippy 0, tsc 0, vite clean). NOTHING HAS RUN ON HARDWARE — NO TAURI BUILD, NO INSTALL, NO GIT.**
+
+**What it is.** Holding the middle button now raises a ring of the user's
+REAL app icons at the cursor — the design handoff's eight at 45° on r=125,
+70 px tiles, 20 px letter badge, 130 px centre pill naming the hovered tile,
+600 px scrim, 264 px dashed guide, three themes, Fun-off = flat, reduced =
+final states, 180/117/120/150 ms motion — clamped fully on-screen near an
+edge with the OS cursor warped to the new centre. Release over a tile = the
+same cascade as Space+letter, through the SAME pointer-activation path
+(`take_armed_key` → `PointerActivate`); release over nothing = close; a quick
+click still passes through (phase 1's replay). "All of them" packs every
+bound letter plus the seven actionable specials into a second ring
+(`middle_ring::layout_ring`, pure, tested for every count 0–60: no overlap,
+inside 320 px). App exceptions carry a scope now — Off entirely / Space only /
+Middle only — with the built-in 3D/CAD rows pre-seeded at Space only and a
+"Default" tag. Owner addition #1 honoured: `middle_ring_style` (`icon_ring`
+default, `guide_hud` = 1.0.109 exactly, one pure route function).
+
+**Where the icons come from.** App/folder → the picker's `IconCache` then the
+shell extractor (`ring_icon_for`), built on a blocking thread DURING the
+250 ms tap window so a warm cache costs the show nothing. Link → the site's
+favicon, fetched ONCE when the key editor binds the URL (`site_icon.rs`:
+`/favicon.ico`, then `<link rel=icon>`, 3 s each, bytes sniffed) and stored in
+the binding as `site_icon`; NEVER fetched at ring time; the next edit of a key
+that still has none is the one retry. The disclosure line from the design is
+under the "Choose your eight" picker.
+
+**Files created:** `src-tauri/src/middle_ring.rs`, `src-tauri/src/site_icon.rs`,
+`src/components/middle-ring.ts`, `src/styles/middle-ring.css`. Everything
+else is edits — the full table is in `V14_FIXES_AND_CODE.md` §PROBLEM 267.
+
+**Decisions worth a line.** (1) Rust lays the ring out and sizes/places the
+window (`overlay_fit_ring`, physical coordinates, primary monitor's
+`work_area`); the page needs no IPC while the ring is up. (2) The ring shares
+`HUD_VISIBLE`, the PROBLEM 177 epoch and every hide path with the Space HUD;
+only the emitted event differs (`HUD_KIND`). (3) On a plain release Rust does
+NOT hide the window — the page plays the 117 ms exit and calls
+`overlay_toasts_done`, the existing terminal hide, from a bounded timer.
+(4) `prefers-reduced-motion` is deliberately NOT wired: the owner's standing
+rule (2026-08-12) is that only the in-app "Visual effects: reduced" strips
+motion; the ring follows the same rule as the Space ring. (5) The mouse
+callback gained two relaxed loads and nothing else; THE ARBITRATION block
+records that the ring kind adds no witness.
+
+**What the tests cannot say, and the owner must.** Ring at the cursor in each
+theme; the corner clamp with the warp; release-to-launch and left-click;
+quick-click passthrough; a favicon appearing on a freshly bound link;
+SolidWorks middle-orbit untouched with Space still working; "Space ring" in
+Settings restoring 1.0.109's behaviour. Markers:
+`cursor-anchored-ring-raised-at-cursor-spaceadom-267`, `site-icon:`.
+
+**Conditions this was built under.** Owner additions #1 and #2 and the
+clarification (dense layout is the icon ring's only; the Space ring's
+Compact/Wide/Double untouched) all arrived mid-task and are all in. No
+"compact" switch was added for the icon ring — the handoff's numbers fit
+(35 items on two rings at 40 px tiles, extent 230 < 320), so none was needed.
+
+
 ## 2026-09-12 — Claude (1.0.109 ship agent) — **SHIPPED PROBLEM 266 (the logon task is registered through the Task Scheduler COM API; the HKCU Run value is gone) AS 1.0.109.** Built signed (NSIS + MSI + both `.sig`), MSIX built unsigned and NOT installed, NSIS installed on this machine and proved. Gates: 607/0 tests, clippy 0, tsc 0. **The task is registered, enabled, per-user, +10 s, least-privilege, and the Run value is removed — all measured through `explorer.exe`. The thing it was built to change, the seconds between logon and process start, cannot be measured until the owner logs off and on again. Law 6 and the middle-button ring are UNPROVEN on this build.**
 
 **WHAT THIS ENTRY IS.** The build-and-install half of PROBLEM 266, whose code

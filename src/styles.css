@@ -1420,6 +1420,15 @@ body.nocturne .bp-host { max-width: 230px; }
      the expanded state changes it. Three places, one number each. */
   --set-pad-x: 16px;
   --set-pad-y: 16px;
+  /* THE CARD WIDTH the expanded grids reuse (owner's 1.0.110 review: an
+     App-exceptions tile or a Conflicts card in the full-screen panel must
+     be "the EXACT same width/height it has today in narrow mode"). In the
+     popover a card fills the content box: 280 − 2 × 16 padding − 2 × 1
+     border − 4 scrollbar = 242px (the panel always overflows, so the 4px
+     `::-webkit-scrollbar` is always taken). The value lives here, next to
+     the numbers it is derived from, and is read by
+     `#settings-panel.expanded .exc-list` / `.conflict-grid` below. */
+  --set-card-w: 242px;
   width: 280px;
   padding: var(--set-pad-y) var(--set-pad-x);
   max-height: calc(100vh - 110px);
@@ -1635,6 +1644,37 @@ body.nocturne .bp-host { max-width: 230px; }
    and every measurement in the compact state is unchanged. It only becomes a
    real box under .expanded, below. */
 .set-scroll { display: contents; }
+/* THE COLUMN FLOW WRAPPER (owner's 1.0.110 review) — same contract as
+   .set-scroll: not a box in the popover, the multicol container when
+   expanded (see "TWO-COLUMN MASONRY" below). It is a SEPARATE element from
+   .set-scroll for a reason that is easy to lose: a multicol container with a
+   definite height does not grow — it spills extra content into OVERFLOW
+   COLUMNS to the right. .set-scroll's height is pinned by the panel's flex
+   column, so `columns` on it would have produced a horizontal run of columns
+   with nothing to scroll. The wrapper's height is auto, so it balances
+   vertically and .set-scroll scrolls it. */
+.set-cols { display: contents; }
+
+/* THE SUMMARY ROWS (owner's 1.0.110 review). In the popover, App exceptions
+   and Conflicts are ONE line each — heading, counts, "Show" — and the full
+   section (.set-full) is not on screen at all: the side scroll is for the
+   app's own features. Expanded, the summary hides and the full section is
+   shown by default. Both are always in the DOM; the panel's .expanded class
+   is the only switch, so nothing is rebuilt on the way in or out. */
+.set-summary { display: flex; align-items: center; gap: 10px; }
+.set-summary-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--st-text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.set-summary-show { flex: none; }
+#settings-panel:not(.expanded) .set-full { display: none; }
+#settings-panel.expanded .set-summary { display: none; }
 
 #settings-panel.expanded {
   --set-pad-x: clamp(20px, 6vw, 90px);
@@ -1724,13 +1764,55 @@ body.nocturne .bp-host { max-width: 230px; }
 /* Roomier, which is the whole point of the state. The three top groups lay
    out side by side wherever the window can hold 280px columns; below that it
    is a single column again and the expand is simply a bigger panel. */
-#settings-panel.expanded #set-groups {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 20px 36px;
-  align-items: start;
+/* TWO-COLUMN MASONRY (owner's 1.0.110 review: "design chaos" — the three
+   top groups sat in a 3-column grid, so a large blank stood beside the tall
+   Space-ring column while Appearance and Behaviour ended a third of the way
+   down). The groups, the action section, Privacy and About now FLOW through
+   two balanced columns (CSS multicol, `column-fill: balance` is the
+   default), each card unbreakable, and the two sections whose contents are
+   grids of fixed-width cards — App exceptions, Conflicts — span both columns
+   (`.set-section-span`). Reading the result top to bottom: search across the
+   width; Appearance + Behaviour beside The Space ring; the exceptions grid;
+   the conflicts grid; then Maintenance/Danger beside Privacy + About. The
+   DOM order is untouched, so the popover is byte-identical, and Privacy is
+   still the last group of controls. Column width at the 1200 measure:
+   (1200 − 36) / 2 = 582px. */
+#settings-panel.expanded .set-cols {
+  display: block;
+  columns: 2;
+  column-gap: 36px;
+  max-width: var(--set-measure);
+  margin-inline: auto;
 }
-#settings-panel.expanded #set-groups > .set-group + .set-group { margin-top: 0; }
+/* Full-width bands inside the flow. `column-span: all` splits the multicol
+   into a balanced row of columns above the spanner and another below it —
+   which is exactly the layout described above. */
+#settings-panel.expanded .set-cols > .set-search,
+#settings-panel.expanded .set-cols > #set-search-empty,
+#settings-panel.expanded .set-cols > .set-section-span { column-span: all; }
+/* #set-groups stops being a box so its three groups flow as three cards, not
+   one tall unbreakable block. The sibling margin below still applies — the
+   `+` combinator is DOM-based — and a margin adjoining a column break is
+   truncated, so the top of column 2 sits flush. */
+#settings-panel.expanded #set-groups { display: contents; }
+#settings-panel.expanded .set-cols .set-group,
+#settings-panel.expanded .set-cols > .set-section { break-inside: avoid; }
+#settings-panel.expanded #set-groups > .set-group + .set-group { margin-top: 16px; }
+/* THE TOP EDGE OF A COLUMN. A margin adjoining a column break is truncated
+   (which is what keeps the top of column 2 flush with column 1 for the
+   groups above) — but the divider that opens the Maintenance section,
+   Privacy and About carries its 14px gap as an inline `margin-top`, so the
+   card that lands at the top of a column lost it while its neighbour in the
+   other column kept it: measured 14px of misalignment under the Conflicts
+   band. Padding is not truncated, so the gap moves onto the card itself
+   (same 14px) and the divider's own top margin is zeroed — `!important`
+   because the margin is an inline style in the markup. The spanning
+   sections are excluded: nothing beside them to align with, and their
+   divider margin is the gap under the row of columns above. */
+#settings-panel.expanded .set-cols > .set-section:not(.set-section-span),
+#settings-panel.expanded .set-cols > .set-group { padding-top: 14px; }
+#settings-panel.expanded .set-cols > .set-section:not(.set-section-span) > .divider:first-child,
+#settings-panel.expanded .set-cols > .set-group > .divider:first-child { margin-top: 0 !important; }
 
 /* CAPPED AND CENTRED (owner's decision, 2026-09-04, over a preview column).
    `margin-inline: auto` is the half that was missing before: the cap existed,
@@ -1834,6 +1916,20 @@ body.settings-expanded #gear-dock { opacity: 1; z-index: 60; }
 }
 .wpm-tick.is-active { color: var(--st-accent-deep); opacity: 1; }
 .set-note { margin-top: 10px; font-size: 11px; color: var(--st-text-dim); line-height: 1.45; }
+/* 2026-09-15 — the always-visible subtitle under a row's label (the three
+   ring rows' one-line note about where their numbers come from). Quieter and
+   tighter than `.set-note`, which is a REASON a control is unavailable and
+   has to read as an interruption; this is an aside and must not. Unlike the
+   teaching prose below it is NOT gated on "Show me around": it is four
+   words, and the rows it sits under are the ones whose numbers look
+   arbitrary without it. */
+.set-sub {
+  margin-top: 4px;
+  font-size: 10.5px;
+  color: var(--st-text-dim);
+  opacity: .8;
+  line-height: 1.4;
+}
 /* Teaching prose (the typing-speed hint, the conflicts explainer, the
    specials-tray note) exists only while "Show me around" is on — the owner's
    rule: the panel must not read as a manual once you know it. body.show-around
@@ -3104,3 +3200,213 @@ body.nocturne .tour-ring {
    outside `.set-row-label`'s usual context but share the class — already
    covered by the existing `.set-row-label:focus-visible` rule above, listed
    here only as the note that ties the two together for a future reader. */
+
+/* ===========================================================================
+   PROBLEM 267 — the middle-button icon ring's Settings pieces (artboards 8
+   and 9): the scope line with its "Choose your eight →" link, the picker
+   list, and the App-exceptions tiles with their three-state control. Same
+   tokens, same radii (13 keys/cards, 16 containers, 999 interactive) as the
+   rest of the panel; the pills are the existing `.theme-seg`.
+   =========================================================================== */
+.mscope-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.mscope-line .theme-seg { flex: 0 1 auto; }
+.mscope-choose {
+  border: 0;
+  background: none;
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--st-accent);
+  cursor: pointer;
+  padding: 6px 4px;
+  border-radius: var(--radius-full);
+  white-space: nowrap;
+}
+.mscope-choose:hover { text-decoration: underline; }
+.mscope-choose:focus-visible { outline: 2px solid var(--st-accent-brd); outline-offset: 2px; }
+
+/* The picker (artboard 9): a card of rows, selected ones tinted. */
+.eight-picker {
+  margin-top: 10px;
+  border-radius: 16px;
+  background: var(--st-card);
+  border: 1px solid var(--st-border);
+  overflow: hidden;
+}
+.eight-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 10px 8px 14px;
+  border-bottom: 1px solid var(--st-hairline, var(--st-border));
+}
+/* "Done" sits at the right end of the header (owner's 1.0.110 review), the
+   count directly to its left — `margin-left: auto` on the count is what
+   pushes both to the far edge now that the row has three children and
+   `space-between` would have centred the count. Sized like the other small
+   in-row buttons (the ring tool's "Check the ring"). */
+.eight-count { margin-left: auto; }
+.eight-done { flex: none; height: 26px; padding: 0 10px; font-size: 11px; }
+.eight-title { font-size: 14px; font-weight: 600; color: var(--st-text); }
+.eight-count { font-size: 12px; font-weight: 700; color: var(--st-accent); }
+.eight-list {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 6px 4px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+/* Expanded (owner's 1.0.110 review): the rows in TWO columns and no inner
+   scroll — the card has a 582px column to itself there and shows every
+   bound key at once. The popover keeps the single scrolling column above.
+   `minmax(0, 1fr)` so a long app name ellipsises inside its half instead of
+   widening the track. */
+#settings-panel.expanded .eight-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px 6px;
+  max-height: none;
+  overflow: visible;
+}
+.eight-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background-color 160ms var(--ease-out);
+}
+.eight-row.is-on { background: var(--st-accent-tint); }
+.eight-row:hover { background: var(--st-surface); }
+.eight-row.is-on:hover { background: var(--st-accent-tint); }
+.eight-chip {
+  width: 26px; height: 26px; flex: none;
+  border-radius: 8px;
+  background: var(--st-surface);
+  color: var(--st-text);
+  font-size: 11px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+.eight-row.is-on .eight-chip { background: var(--st-card); }
+.eight-icon {
+  width: 26px; height: 26px; flex: none;
+  border-radius: 7px;
+  background: var(--st-surface);
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+  color: var(--st-text-dim);
+  font-size: 10px; font-weight: 700;
+}
+.eight-icon img { width: 22px; height: 22px; object-fit: contain; }
+/* A link with no favicon yet: the placeholder circle ("rd", "gh"). */
+.eight-icon.is-link:not(:has(img)) { border-radius: 999px; }
+.eight-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--st-text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.eight-tag { color: var(--st-text-dim); font-weight: 400; }
+.eight-check {
+  width: 18px; height: 18px; flex: none;
+  accent-color: var(--st-accent);
+  cursor: pointer;
+}
+.eight-check:disabled { opacity: .35; cursor: default; }
+.eight-foot {
+  padding: 10px 14px 12px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--st-text-dim);
+  border-top: 1px solid var(--st-hairline, var(--st-border));
+}
+
+/* App exceptions as TILES (artboard 8): icon + name + Default tag on the
+   first line, the three-state control under it. Stacked, not side by side,
+   because the popover is 280px wide and three labels do not fit beside a
+   name; the expanded panel keeps the same shape so nothing reflows. */
+.exc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0 2px;
+}
+.exc-row {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 13px;
+  background: var(--st-card);
+  border: 1px solid var(--st-border);
+}
+.exc-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.exc-row-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--st-text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.exc-default-tag {
+  flex: none;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--st-accent-deep, var(--st-accent));
+  background: var(--st-surface);
+  border-radius: var(--radius-full);
+  padding: 2px 8px;
+}
+.exc-row-x { position: static; flex: none; opacity: .7; }
+.exc-row:hover .exc-row-x { opacity: 1; }
+/* Content-sized, like every other pill — never stretched (the owner's
+   standing complaint about "unnaturally long pills"). */
+.exc-seg { align-self: flex-start; flex: none; }
+.exc-seg .theme-seg-opt { font-size: 10.5px; padding: 5px 9px; flex: 0 0 auto; }
+/* THE EXPANDED GRID (owner's 1.0.110 review). This used to restyle the tile
+   into artboard 8's one-line row — name left, control right — stretched
+   across the whole panel width. The owner's decision reverses that: the
+   tile keeps EXACTLY its popover shape and size (`--set-card-w`, 242px,
+   stacked head + control, so the same height too) and the list becomes a
+   wrapping grid of them, as many per row as the 1200px measure holds
+   (`auto-fill` at 242px + 8px gap = four per row, 992px, left-aligned).
+   `align-items: start` so a card is never stretched to its row's height —
+   the height is the card's own, as it is in the popover. */
+#settings-panel.expanded .exc-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, var(--set-card-w));
+  gap: 8px;
+  align-items: start;
+}
+/* THE SAME HEIGHT, and it needs saying explicitly: in the popover the tile's
+   pill is painted by `#settings-panel:not(.expanded) .theme-seg-opt` (10.5px,
+   `6px 5px`), which outranks `.exc-seg .theme-seg-opt` (`5px 9px`) above by
+   specificity — so the popover tile is 94px, and without this line the
+   expanded one measured 92px. Same numbers as that popover rule, on
+   purpose; the tile is the one pill that must not change size with the
+   panel. */
+#settings-panel.expanded .exc-seg .theme-seg-opt { font-size: 10.5px; padding: 6px 5px; }
+/* Same treatment for the Conflicts cards: the popover's 242px card, as many
+   per row as fit, never stretched (`.conflict-grid` is `auto-fit, minmax(
+   240px, 1fr)` for the popover, where 1fr is what makes one card fill the
+   column; here the track is the fixed card width instead). */
+#settings-panel.expanded .conflict-grid {
+  grid-template-columns: repeat(auto-fill, var(--set-card-w));
+  align-items: start;
+}
