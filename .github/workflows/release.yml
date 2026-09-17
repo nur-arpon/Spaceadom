@@ -567,6 +567,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "${{ github.ref_name }}"
+          # RELEASE HOLD (2026-09-18, owner: "pause just before pressing
+          # publish"). A repository variable RELEASE_HOLD=true leaves the
+          # finished release as a DRAFT for the owner to inspect; he flips it
+          # himself with `gh release edit <tag> --draft=false`. Everything
+          # above still runs, so the draft is complete when he looks.
+          if ("${{ vars.RELEASE_HOLD }}" -eq "true") {
+            Write-Host "::notice::RELEASE_HOLD is true — $tag stays a DRAFT. Publish by hand: gh release edit $tag --draft=false"
+            exit 0
+          }
           gh release edit $tag --draft=false
           if ($LASTEXITCODE -ne 0) {
             Write-Host "::error::Could not publish release $tag. Everything was built and uploaded, but the release is still a DRAFT — nobody can download it and installed copies polling releases/latest will not see it. Flip it by hand: gh release edit $tag --draft=false"
