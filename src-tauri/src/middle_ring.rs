@@ -1556,6 +1556,7 @@ pub const RING_SPECIALS: &[(&str, &str, char)] = &[
     (",", "Search / Input", '\u{E005}'),
     (".", "Pause Spaceadom", '\u{E006}'),
     (";", "Voice Typing", '\u{E007}'),
+    ("/", "Screenshot", '\u{E008}'),
 ];
 
 /// Is this the code of a ring special (as opposed to a bound letter)?
@@ -1576,6 +1577,7 @@ pub fn special_combo_for(c: char) -> Option<crate::hook::KeyCombo> {
         '\u{E005}' => Some(KeyCombo::Comma),
         '\u{E006}' => Some(KeyCombo::Period),
         '\u{E007}' => Some(KeyCombo::Semicolon),
+        '\u{E008}' => Some(KeyCombo::Slash),
         _ => None,
     }
 }

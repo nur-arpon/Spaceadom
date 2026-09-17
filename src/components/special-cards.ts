@@ -82,6 +82,9 @@ export const SPECIALS: SpecialSpec[] = [
   { id: "semicolon", combo: "␣ ;", name: "Voice Typing",
     desc: "Opens Windows' own dictation: speak, and the words are typed wherever your cursor is. The same tile lives on the middle-button ring. If the panel listens but nothing appears, check Windows' default microphone — a virtual device (SteelSeries Sonar, for one) can feed it silence.",
     how: "Hold Space, tap semicolon" },
+  { id: "slash", combo: "␣ /", name: "Screenshot",
+    desc: "Opens Windows' own region snip: drag over what you want and it lands on the clipboard (and in your Screenshots folder, if Snipping Tool is set to save). The same tile lives on the middle-button ring.",
+    how: "Hold Space, tap /" },
   { id: "ralt", combo: "␣ RAlt", name: "Cycle Profile",
     desc: "Switches to your next profile — a different set of apps on the same keys.",
     how: "Hold Space, tap Right Alt" },
@@ -97,7 +100,7 @@ export const SPECIALS: SpecialSpec[] = [
  */
 const BOARD_TO_SPECIAL: Record<string, string> = {
   grave: "grave", backspace: "backspace", comma: "comma",
-  period: "period", semicolon: "semicolon", up: "up", down: "down", ralt: "ralt",
+  period: "period", semicolon: "semicolon", slash: "slash", up: "up", down: "down", ralt: "ralt",
 };
 
 let _card: HTMLElement | null = null;

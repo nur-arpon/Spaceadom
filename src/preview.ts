@@ -1666,7 +1666,7 @@ if (q.has("ring")) {
     ["Esc", "Boss Key", null, "special"], ["`", "PiP", null, "special"], ["Tab", "Fullscreen PiP", null, "special"],
     ["\u232B", "Force Close", null, "special"], ["RAlt", "Cycle Profiles", null, "special"],
     [",", "Search / Input", null, "special"], [".", "Pause Spaceadom", null, "special"],
-    [";", "Voice Typing", null, "special"],
+    [";", "Voice Typing", null, "special"], ["/", "Screenshot", null, "special"],
   ];
   const src = all ? [...eight, ...rest, ...specials] : eight;
   const n = src.length;
