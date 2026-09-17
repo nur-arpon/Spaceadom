@@ -353,6 +353,39 @@ jobs:
           releaseDraft: true
           prerelease: false
 
+      # ORDER MATTERS (2026-09-18, v1.0.114 run 35283479971): this step must
+      # run BEFORE the ARM64 build below. tauri-action's beforeBuildCommand
+      # re-runs `npm run build`, so after the ARM64 leg dist2 is newer than
+      # the x64 exe and build-portable.mjs's staleness guard (rightly)
+      # refuses to zip it. Same exe, same dist2 — just zip it first.
+      # PROBLEM 254 — the no-installer, self-contained zip. Packs the SAME
+      # release exe tauri-action already built above (`npm run portable`
+      # does not compile anything itself — see scripts/build-portable.mjs),
+      # then uploads it to the release page like the two installers. Unlike
+      # the .msix below, a portable copy is meant for anyone to download
+      # directly, so it belongs on the release, not in workflow artifacts.
+      #
+      # NEVER referenced by latest.json / latest-msi.json, and never will be:
+      # a portable copy's in-app updater is inert by design (updater.rs) —
+      # it has no installer of its own to silently re-run, so it must never
+      # be offered anything to "update" to.
+      - name: Build and publish the portable zip
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npm run portable
+          $tag = "${{ github.ref_name }}"
+          $ver = $tag -replace '^v',''
+          $zip = "src-tauri/target/release/bundle/portable/Spaceadom_${ver}_x64-portable.zip"
+          if (-not (Test-Path $zip)) {
+            Write-Host "::error::'npm run portable' did not produce $zip — no zip was uploaded."
+            exit 1
+          }
+          gh release upload $tag $zip --clobber
+          Write-Host "uploaded $zip to release $tag"
+
       # ARM64 (2026-09-17) — the second architecture onto the SAME draft
       # release. tauri-action finds the draft the step above created for this
       # tag and uploads the arm64 setup.exe, .msi and both .sig files beside
@@ -405,33 +438,6 @@ jobs:
           }
           Write-Host "release $tag carries all four installers (x64 + arm64) and both manifests."
 
-      # PROBLEM 254 — the no-installer, self-contained zip. Packs the SAME
-      # release exe tauri-action already built above (`npm run portable`
-      # does not compile anything itself — see scripts/build-portable.mjs),
-      # then uploads it to the release page like the two installers. Unlike
-      # the .msix below, a portable copy is meant for anyone to download
-      # directly, so it belongs on the release, not in workflow artifacts.
-      #
-      # NEVER referenced by latest.json / latest-msi.json, and never will be:
-      # a portable copy's in-app updater is inert by design (updater.rs) —
-      # it has no installer of its own to silently re-run, so it must never
-      # be offered anything to "update" to.
-      - name: Build and publish the portable zip
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          npm run portable
-          $tag = "${{ github.ref_name }}"
-          $ver = $tag -replace '^v',''
-          $zip = "src-tauri/target/release/bundle/portable/Spaceadom_${ver}_x64-portable.zip"
-          if (-not (Test-Path $zip)) {
-            Write-Host "::error::'npm run portable' did not produce $zip — no zip was uploaded."
-            exit 1
-          }
-          gh release upload $tag $zip --clobber
-          Write-Host "uploaded $zip to release $tag"
 
       # -----------------------------------------------------------------
       # PROBLEM 250 - THE MICROSOFT STORE PACKAGE (.msix).
