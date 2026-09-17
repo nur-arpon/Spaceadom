@@ -1,6 +1,6 @@
 [package]
 name = "spaceadom"
-version = "1.0.112"
+version = "1.0.113"
 description = "Spaceadom — hold Space + tap a key to launch, focus or minimise any app"
 authors = ["Spaceadom"]
 edition = "2021"
@@ -46,7 +46,12 @@ tauri-plugin-single-instance = "2"
 # (single-instance kills the newcomer). The relaunch is the NSIS
 # installer's own `/R`, which starts the app only after this process is
 # gone.
-tauri-plugin-updater = "=2.11.0"
+# TLS IS WINDOWS' OWN (Schannel via native-tls) SINCE 1.0.113 — for ARM64.
+# rustls pulls `ring` and `aws-lc-sys`, which compile C and assembly and on
+# aarch64-pc-windows-msvc need clang (ring) and trip a warning-as-error
+# (aws-lc-sys stdalign_check.c). Schannel is pure Rust over Win32 and builds
+# for every Windows target the same way. All three HTTPS users below agree.
+tauri-plugin-updater = { version = "=2.11.0", default-features = false, features = ["native-tls", "system-proxy", "zip"] }
 
 # Serialization
 serde      = { version = "1", features = ["derive"] }
@@ -85,7 +90,7 @@ log4rs         = { version = "1", default-features = false, features = ["file_ap
 #               the optional `curl` transport are both wrong here.
 # Deliberately OFF: panic (above), debug-images, logs, metrics, release-health,
 # native-tls, curl, tokio.
-sentry     = { version = "0.49", default-features = false, features = ["backtrace", "contexts", "reqwest", "rustls"] }
+sentry     = { version = "0.49", default-features = false, features = ["backtrace", "contexts", "reqwest", "native-tls"] }
 # The `log` → Sentry bridge. `SentryLogger::with_dest(...)` wraps log4rs's
 # logger rather than replacing it, so the local debug.log is untouched.
 sentry-log = "0.49"
@@ -107,7 +112,7 @@ sentry-log = "0.49"
 # `rustls` (not `rustls-tls` — the feature was renamed in 0.13) because nothing
 # on this build machine is installed system-wide; the whole toolchain is on D:,
 # which is the same reason sentry takes rustls rather than native-tls.
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls"] }
 
 # PROBLEM 253 — the "Report a problem" diagnostics bundle (src/diagnostics.rs).
 #

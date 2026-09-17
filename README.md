@@ -11,7 +11,7 @@ native Windows application: a Rust core with a system-wide keyboard hook, a
 Tauri v2 shell for the dashboard, and an on-demand transparent overlay for the
 radial guide and toasts.
 
-Windows 10/11, x64. No account, no analytics, no ads.
+Windows 10/11, x64 — and, since 1.0.113, Windows on ARM64 (`*_arm64-setup.exe`, built and signed but not yet run on ARM hardware). No account, no analytics, no ads.
 
 ---
 
@@ -213,7 +213,13 @@ npm install
 npm run build         # tsc + vite — must run before any cargo command
 npm run tauri dev      # run it
 npm run tauri build    # installers -> src-tauri/target/release/bundle/
+npm run arm64          # Windows on ARM64 -> src-tauri/target/aarch64-pc-windows-msvc/release/bundle/
 ```
+
+The ARM64 build needs `rustup target add aarch64-pc-windows-msvc` and the
+"MSVC v143 – VS 2022 C++ ARM64 build tools" component of Visual Studio Build
+Tools. TLS is Windows' own Schannel on every target, so no C crypto is
+compiled.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full environment, the checks a
 change needs to pass, and this project's documentation rules.

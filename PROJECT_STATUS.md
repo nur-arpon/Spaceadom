@@ -42,6 +42,19 @@ can fail and the write still runs.
 ================================================================================
 -->
 
+## 2026-09-17 — Claude (Opus, main session, owner awake) — **WINDOWS ON ARM64 BUILDS: the ARM64 MSVC component installed (owner-authorized, UAC approved by him), TLS moved from rustls to Windows' Schannel so nothing compiles C crypto, and `Spaceadom_1.0.112_arm64-setup.exe` + `.msi` came out signed; 1.0.113 rebuilds BOTH architectures on the new TLS stack. x64 gates 692/0/6, clippy 0. The ARM64 binary has NOT run on ARM hardware (this machine is x64).**
+
+**What blocked it (the 06:00 feasibility entry below):** `ring` and `aws-lc-sys`, both pulled by `rustls` through `reqwest` → sentry / tauri-plugin-updater / the app's own reqwest. With the VS component in place they still failed: `ring` wants clang for its ARMv8 assembly on MSVC, `aws-lc-sys` trips `C2220` (warning-as-error) in its `stdalign_check.c` feature probe. Rather than add clang and patch a crypto build, the whole app now uses `native-tls` — Windows' Schannel, pure Rust over Win32 — in all three places (`Cargo.toml`: `tauri-plugin-updater` `default-features = false, features = ["native-tls", "system-proxy", "zip"]`; `sentry` `"native-tls"` for `"rustls"`; `reqwest` `"native-tls"`). `cargo tree` confirms `rustls`, `ring`, `aws-lc-sys` are gone and `schannel 0.1.29` / `native-tls 0.2.18` are in. `telemetry.rs`'s header comment, which explained the rustls choice, now explains this one.
+
+**Built.** `cargo check --lib --target aarch64-pc-windows-msvc` clean (38 s); `npm run tauri build -- --target aarch64-pc-windows-msvc` (into `src-tauri/target-arm64/` for this first run) produced `Spaceadom_1.0.112_arm64-setup.exe` 7,171,293 bytes, `Spaceadom_1.0.112_arm64_en-US.msi` 11,313,152 bytes, both `.sig`s; `spaceadom.exe` PE machine type `0xAA64` (ARM64), 16,461,824 bytes. The x64 tree was untouched (`0x8664`, 22,253,568 bytes). `npm run arm64` is the one-command form from now on (`tauri build --target aarch64-pc-windows-msvc`; cargo separates per-target output under `src-tauri/target/aarch64-pc-windows-msvc/`).
+
+**So an ARM64 install can UPDATE:** `scripts/write-updater-manifests.ps1` takes an optional `-BundleDirArm64`; when given, `latest.json` / `latest-msi.json` carry `windows-aarch64` and `windows-aarch64-<kind>` beside the x64 keys (Tauri keys the platform `<os>-<std::env::consts::ARCH>`). Dry-run against both bundle dirs: four platform keys, cross-checks pass. Omit the parameter and the manifests are byte-for-byte what they were.
+
+**NOT done, on purpose (the owner decides):** `.github/workflows/release.yml` has no ARM64 leg yet — a broken workflow blocks every release, and it cannot be rehearsed locally; the shape is a second `tauri-action` step with `args: --target aarch64-pc-windows-msvc` on the same windows-latest runner (the ARM64 MSVC component is on the GitHub image) and the manifest script's `-BundleDirArm64`. The MSIX (`src-tauri/msix/AppxManifest.xml` `ProcessorArchitecture="x64"`, `scripts/build-msix.ps1`) is x64-only; a Store ARM64 package needs a second manifest/package. `scripts/archive-build.mjs` archives x64 names only (it warned, did not fail); the arm64 installers are copied into `all-versions/` by hand this once.
+
+**UNPROVEN:** the ARM64 exe on an ARM64 machine (nothing here can run it); Schannel at runtime — the proof is the updater's `no update — 1.0.113 is the newest release on the manifest` line after the 1.0.113 banner (the check now goes over Schannel), and the next real Sentry event.
+
+
 ## 2026-09-17 — Claude (ARM64 feasibility agent, Sonnet; recorded by the main session) — **WINDOWS ON ARM64: the code is portable, the toolchain is not yet — one Visual Studio component blocks everything. Nothing changed in the repo; the Rust target was added to D:\RUST-DOWNLOADED-HERE.**
 
 **Owner's ask (05:20, going to sleep):** "line task up to make this app ARM devices supported as well."

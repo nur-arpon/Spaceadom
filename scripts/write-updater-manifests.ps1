@@ -39,12 +39,21 @@ param(
   [Parameter(Mandatory = $true)][string]$Version,
   [Parameter(Mandatory = $true)][string]$OutDir,
   # Free text for the manifest's `notes` field.
-  [string]$Notes = ""
+  [string]$Notes = "",
+  # ARM64 (2026-09-17): the bundle dir of an `--target aarch64-pc-windows-msvc`
+  # build, e.g. src-tauri/target-arm64/aarch64-pc-windows-msvc/release/bundle.
+  # Optional: when given (and its installers exist), each manifest ALSO carries
+  # `windows-aarch64` / `windows-aarch64-<kind>` entries, so an ARM64 install
+  # updates itself from the same latest.json the x64 one reads. Omit it and
+  # the manifests are exactly what they were.
+  [string]$BundleDirArm64 = ""
 )
 $ErrorActionPreference = "Stop"
 
 $nsis = Join-Path $BundleDir "nsis\Spaceadom_${Version}_x64-setup.exe"
 $msi  = Join-Path $BundleDir "msi\Spaceadom_${Version}_x64_en-US.msi"
+$nsisArm = if ($BundleDirArm64) { Join-Path $BundleDirArm64 "nsis\Spaceadom_${Version}_arm64-setup.exe" } else { "" }
+$msiArm  = if ($BundleDirArm64) { Join-Path $BundleDirArm64 "msi\Spaceadom_${Version}_arm64_en-US.msi" } else { "" }
 
 function Read-Sig([string]$file) {
   if (-not (Test-Path $file)) { throw "installer missing: $file" }
@@ -57,19 +66,29 @@ function Read-Sig([string]$file) {
   return $text
 }
 
-function Write-Manifest([string]$outName, [string]$installer, [string]$bundleKey) {
+function Write-Manifest([string]$outName, [string]$installer, [string]$bundleKey, [string]$installerArm64 = "") {
   $sig  = Read-Sig $installer
   $name = Split-Path $installer -Leaf
   $url  = "$($BaseUrl.TrimEnd('/'))/$name"
   $entry = [ordered]@{ signature = $sig; url = $url }
+  $platforms = [ordered]@{
+    "windows-x86_64"            = $entry
+    "windows-x86_64-$bundleKey" = $entry
+  }
+  if ($installerArm64) {
+    $sigA  = Read-Sig $installerArm64
+    $nameA = Split-Path $installerArm64 -Leaf
+    $entryA = [ordered]@{ signature = $sigA; url = "$($BaseUrl.TrimEnd('/'))/$nameA" }
+    # Tauri's updater keys the platform as `<os>-<arch>` with arch from
+    # std::env::consts::ARCH: "aarch64" on Windows on ARM.
+    $platforms["windows-aarch64"]            = $entryA
+    $platforms["windows-aarch64-$bundleKey"] = $entryA
+  }
   $manifest = [ordered]@{
     version   = $Version
     notes     = $Notes
     pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-    platforms = [ordered]@{
-      "windows-x86_64"            = $entry
-      "windows-x86_64-$bundleKey" = $entry
-    }
+    platforms = $platforms
   }
   $path = Join-Path $OutDir $outName
   $json = $manifest | ConvertTo-Json -Depth 5
@@ -78,8 +97,8 @@ function Write-Manifest([string]$outName, [string]$installer, [string]$bundleKey
 }
 
 New-Item -ItemType Directory -Force $OutDir | Out-Null
-Write-Manifest "latest.json"     $nsis "nsis"
-Write-Manifest "latest-msi.json" $msi  "msi"
+Write-Manifest "latest.json"     $nsis "nsis" $nsisArm
+Write-Manifest "latest-msi.json" $msi  "msi"  $msiArm
 
 # Cross-check: the two manifests must never point at the same file, and each
 # must name the kind it claims. This is the whole point of the script.

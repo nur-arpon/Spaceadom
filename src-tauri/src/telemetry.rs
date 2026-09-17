@@ -30,10 +30,12 @@
 //! `capture_panic` below. **If you ever re-enable the `panic` feature, you have
 //! silently added a second panic hook.**
 //!
-//! TRANSPORT. `reqwest` + `rustls`, not the crate's default `native-tls` or the
-//! optional `curl`: nothing on the build machine is installed system-wide (the
-//! whole Rust toolchain lives on D:), and rustls needs no OpenSSL, no libcurl
-//! and no system certificate stack to link against.
+//! TRANSPORT. `reqwest` + `native-tls` = Windows' own Schannel (since 1.0.113,
+//! 2026-09-17), not rustls: rustls pulls `ring` and `aws-lc-sys`, which compile
+//! C and assembly and cannot build for aarch64-pc-windows-msvc without clang.
+//! Schannel is pure Rust over Win32 — no OpenSSL, no libcurl, nothing
+//! installed system-wide — and the same choice is made for the updater plugin
+//! and the app's own `reqwest` in Cargo.toml, so there is one TLS stack.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

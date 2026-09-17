@@ -1,7 +1,7 @@
 {
   "name": "spaceadom",
   "private": true,
-  "version": "1.0.112",
+  "version": "1.0.113",
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "scripts": {
@@ -11,6 +11,7 @@
     "tauri": "tauri",
     "posttauri": "node scripts/archive-build.mjs",
     "store": "tauri build --config src-tauri/tauri.store.conf.json",
+    "arm64": "tauri build --target aarch64-pc-windows-msvc",
     "poststore": "node scripts/label-store-build.mjs",
     "msix": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-msix.ps1",
     "portable": "node scripts/build-portable.mjs",

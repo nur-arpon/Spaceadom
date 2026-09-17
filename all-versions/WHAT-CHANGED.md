@@ -34,14 +34,22 @@ is safe.
 
 **Missing: 1.0.28.** Deleted at your request on 2026-08-14 — it was the first
 attempt at the toast/HUD transition and it made the HUD feel delayed. Every
-other version is here, 1.0.0 through 1.0.112, including the few that were
+other version is here, 1.0.0 through 1.0.113, including the few that were
 superseded within minutes on 2026-08-20 (1.0.64, 1.0.66, 1.0.67, 1.0.68) —
 those are wrong turns, and they are kept so the record is honest rather than
 tidy. Their rows say what each one got wrong.
 
 ---
 
-## 2026-09-17 (latest) — 1.0.112 (and 1.0.111 the same night) — LOCAL TEST BUILDS, not published
+## 2026-09-17 (latest) — 1.0.113 — LOCAL TEST BUILD, not published — the first ARM64 build
+
+| Version | What changed |
+| --- | --- |
+| **1.0.113** | **Spaceadom now builds for Windows on ARM64** (`Spaceadom_1.0.113_arm64-setup.exe` and the `.msi`, both signed, in this folder beside the x64 ones). To get there the app's secure connections — the daily update check and crash reports — moved from a bundled crypto library to Windows' own (Schannel), which needs nothing compiled for a new processor. Proven on this x64 machine: 1.0.113 installed, and its update check went through Windows' TLS and came back "no update". **Not proven:** the ARM64 installer has not been run on an ARM64 device — nothing here can run it. Installs over 1.0.112 and keeps every setting. |
+
+---
+
+## 2026-09-17 — 1.0.112 (and 1.0.111 the same night) — LOCAL TEST BUILDS, not published
 
 | Version | What changed |
 | --- | --- |
