@@ -711,7 +711,18 @@ fn run_combo(combo: KeyCombo, state_arc: &Arc<Mutex<EngineState>>) {
         KeyCombo::Period          => handle_bypass_toggle(state_arc),
         KeyCombo::Semicolon       => handle_voice_typing(state_arc),
         KeyCombo::Slash           => handle_screenshot(state_arc),
+        KeyCombo::Quote           => handle_osk(state_arc),
     }
+}
+
+/// Space + ' (and the ring's "Keyboard" tile): Windows' own on-screen keyboard.
+fn handle_osk(state_arc: &Arc<Mutex<EngineState>>) {
+    let app_handle = {
+        let s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
+        s.app_handle.clone()
+    };
+    let msg = actions::osk::toggle_osk();
+    crate::show_toast(&app_handle, msg);
 }
 
 /// Space + / (and the ring's "Screenshot" tile): Windows' own region snip.

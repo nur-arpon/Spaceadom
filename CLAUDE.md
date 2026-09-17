@@ -631,7 +631,9 @@ page rescales everything by `payload.scale / devicePixelRatio`
 fitters in `commands.rs` MOVE before they SIZE (mixed-DPI: a size set on the
 1.0 monitor is re-scaled 1.5× by WM_DPICHANGED on the way to the panel).
 Space + ; and the ring's "Voice Typing" special (U+E007) open Windows
-dictation. Full record: V14_FIXES_AND_CODE.md §PROBLEM 267 — ROUND 6.**
+dictation; Space + / (U+E008) is Windows' snip (Win+Shift+S); Space + '
+(U+E009, 1.0.114) toggles Windows' on-screen keyboard (Win+Ctrl+O — the
+touch keyboard's COM route is dead on Win11 26200, see actions/osk.rs). Full record: V14_FIXES_AND_CODE.md §PROBLEM 267 — ROUND 6.**
 **Clamp + warp is "All"'s path:** `clamp_ring_center` slides the
 centre inward by exactly the overhang against the CURSOR's monitor's work
 area (the actual outermost ring's extent) and `SetCursorPos` moves the OS

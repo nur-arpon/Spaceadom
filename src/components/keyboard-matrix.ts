@@ -116,6 +116,7 @@ const SPECIAL_ON_KEY: Record<string, string> = {
   period:    "Pause",
   semicolon: "Dictate",
   slash:     "Snip",
+  quote:     "Keys",
   up:        "Scroll Top",
   down:      "Scroll Btm",
   ralt:      "Profile",

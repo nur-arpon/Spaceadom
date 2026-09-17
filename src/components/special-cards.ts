@@ -85,6 +85,9 @@ export const SPECIALS: SpecialSpec[] = [
   { id: "slash", combo: "␣ /", name: "Screenshot",
     desc: "Opens Windows' own region snip: drag over what you want and it lands on the clipboard (and in your Screenshots folder, if Snipping Tool is set to save). The same tile lives on the middle-button ring.",
     how: "Hold Space, tap /" },
+  { id: "quote", combo: "␣ '", name: "On-screen Keyboard",
+    desc: "Shows Windows' own on-screen keyboard; press again to hide it. Handy with just a mouse in hand. The same tile lives on the middle-button ring.",
+    how: "Hold Space, tap '" },
   { id: "ralt", combo: "␣ RAlt", name: "Cycle Profile",
     desc: "Switches to your next profile — a different set of apps on the same keys.",
     how: "Hold Space, tap Right Alt" },
@@ -100,7 +103,7 @@ export const SPECIALS: SpecialSpec[] = [
  */
 const BOARD_TO_SPECIAL: Record<string, string> = {
   grave: "grave", backspace: "backspace", comma: "comma",
-  period: "period", semicolon: "semicolon", slash: "slash", up: "up", down: "down", ralt: "ralt",
+  period: "period", semicolon: "semicolon", slash: "slash", quote: "quote", up: "up", down: "down", ralt: "ralt",
 };
 
 let _card: HTMLElement | null = null;

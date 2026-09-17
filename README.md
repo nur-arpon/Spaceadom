@@ -104,6 +104,8 @@ works too.
 | `Space` + `.` | Pause Spaceadom |
 | `Space` + `,` | Smart Search — put the cursor where you type on this app or page |
 | `Space` + `;` | Voice typing — Windows dictation, typed wherever the cursor is |
+| `Space` + `/` | Screenshot — Windows' region snip (drag a rectangle, or pick window / full screen from its bar) |
+| `Space` + `'` | On-screen keyboard — Windows' own; press again to hide it |
 | Middle mouse button, held | The icon ring at the cursor; release on an app to launch it |
 | `Space` + `⌫` | Force close the app in front, even when it is frozen |
 | `Space` + `↑↑` | Jump to the top of what you are reading |

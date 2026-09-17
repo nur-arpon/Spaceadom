@@ -36,6 +36,7 @@ pub enum KeyCombo {
     Period,           // Space + .     → Bypass Toggle
     Semicolon,        // Space + ;     → Voice typing (Windows dictation, Win+H)
     Slash,            // Space + /     → Screenshot (Windows snip, Win+Shift+S)
+    Quote,            // Space + '     → On-screen keyboard (Windows OSK, Win+Ctrl+O)
     Backspace,        // Space + ⌫     → Force Close (Alt+F4)
     /// Space + Tab → FULLSCREEN-PRESERVING PiP (pip.rs §9, PROBLEM 219).
     ///
@@ -2434,6 +2435,8 @@ const VK_OEM_PERIOD: u16 = 0xBE;
 const VK_OEM_1: u16 = 0xBA;
 /// `/` on a US layout (`VK_OEM_2`) — Space + / is the screenshot (2026-09-17).
 const VK_OEM_2: u16 = 0xBF;
+/// `'` on a US layout (`VK_OEM_7`) — Space + ' is the on-screen keyboard (2026-09-18).
+const VK_OEM_7: u16 = 0xDE;
 const VK_RMENU: u16 = 0xA5;  // Right Alt
 const VK_UP: u16 = 0x26;
 const VK_DOWN: u16 = 0x28;
@@ -4557,6 +4560,7 @@ unsafe extern "system" fn kb_hook_proc(
             VK_OEM_PERIOD => Some(KeyCombo::Period),
             VK_OEM_1 => Some(KeyCombo::Semicolon),
             VK_OEM_2 => Some(KeyCombo::Slash),
+            VK_OEM_7 => Some(KeyCombo::Quote),
 
             VK_RMENU => Some(KeyCombo::RightAlt),
             VK_UP    => Some(KeyCombo::UpArrow),
@@ -5371,6 +5375,7 @@ pub(crate) fn own_window_combo_for_vk(vk: u16) -> Option<KeyCombo> {
         VK_OEM_PERIOD => Some(KeyCombo::Period),
         VK_OEM_1 => Some(KeyCombo::Semicolon),
         VK_OEM_2 => Some(KeyCombo::Slash),
+        VK_OEM_7 => Some(KeyCombo::Quote),
         v if is_alpha_vk(v) => vk_to_char(v).map(KeyCombo::Alpha),
         _ => None,
     }
@@ -7984,6 +7989,7 @@ mod own_window_fallback_tests {
         assert!(matches!(own_window_combo_for_vk(0xBE), Some(KeyCombo::Period)));
         assert!(matches!(own_window_combo_for_vk(0xBA), Some(KeyCombo::Semicolon)));
         assert!(matches!(own_window_combo_for_vk(0xBF), Some(KeyCombo::Slash)));
+        assert!(matches!(own_window_combo_for_vk(0xDE), Some(KeyCombo::Quote)));
         // Escape, Enter, Tab, Backspace, arrows, Right Alt — the brief's
         // exclusion list. A page needs these to be a page.
         for vk in [0x1Bu16, 0x0D, 0x09, 0x08, 0x25, 0x26, 0x27, 0x28, 0xA5] {

@@ -34,14 +34,22 @@ is safe.
 
 **Missing: 1.0.28.** Deleted at your request on 2026-08-14 — it was the first
 attempt at the toast/HUD transition and it made the HUD feel delayed. Every
-other version is here, 1.0.0 through 1.0.113, including the few that were
+other version is here, 1.0.0 through 1.0.114, including the few that were
 superseded within minutes on 2026-08-20 (1.0.64, 1.0.66, 1.0.67, 1.0.68) —
 those are wrong turns, and they are kept so the record is honest rather than
 tidy. Their rows say what each one got wrong.
 
 ---
 
-## 2026-09-17 (latest) — 1.0.113 — LOCAL TEST BUILD, not published — the first ARM64 build
+## 2026-09-18 (latest) — 1.0.114 — the Store update: the ring, Space + / and Space + ', and ARM64 as a beta
+
+| Version | What changed |
+| --- | --- |
+| **1.0.114** | The build that goes to the Microsoft Store and GitHub as the update over 1.0.109 — everything 1.0.110–1.0.113 did (the middle-button icon ring, round 6; the keyboard-deaf verdict on a raw-input clock; Space + ; voice typing; ARM64 builds) plus two more shortcuts to Windows' own tools: **Space + /** opens the region snip (Win+Shift+S — rectangle, window or full screen from its bar), **Space + '** toggles the on-screen keyboard (Win+Ctrl+O). Both are ring tiles too ("Screenshot", "Keyboard"). Proven on this machine through the real hook: Space + ' opened osk.exe and a second press closed it; Space + / started SnippingTool. The touch keyboard (the compact one) has no public way in on Windows 11 26200 — its COM class is unregistered and TabTip.exe wants elevation — so the accessibility keyboard it is. ARM64 installers and MSIX ship as a **beta**: they run on GitHub's ARM64 runner (`arm64-smoke.yml`) but nobody has held Space on a real ARM device. Installs over 1.0.113 and keeps every setting. |
+
+---
+
+## 2026-09-17 — 1.0.113 — LOCAL TEST BUILD, not published — the first ARM64 build
 
 | Version | What changed |
 | --- | --- |
