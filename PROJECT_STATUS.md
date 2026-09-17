@@ -58,6 +58,8 @@ can fail and the write still runs.
 - *Circular picture frame* — NOT BUILT; parked. What it is was not pinned down (a round always-on-top image? a webcam bubble?). Either is a new overlay window with a circular clip — medium, and it needs a decision first.
 - *Ring as a mouse-only command palette* — already parked in FUTURE_IDEAS §8; big.
 
+**Screenshots, owner-authorised (he left the machine for 20 minutes):** Win+D, then three captures of the primary 2560×1600 panel into `to-publish-in-microsoft-store/assets/screenshots/` — `1.0.114-icon-ring.png` (middle hold at the centre: two rings, 13 tiles, the moon wallpaper behind), `1.0.114-icon-ring-corner.png` (middle hold 120 px from the bottom-right corner: a QUARTER ARC with every tile on screen, the centre pill clipped by the edge exactly as the round-6 law says — this is the "ring going off screen" complaint, photographed fixed), `1.0.114-space-ring.png` (the Space ring, 26 pills + 8 specials). The Space one shows the Chrome profile name `arpo0001` and the taskbar's media thumbnail — crop or accept before uploading; the two ring shots are clean.
+
 **Version bump:** 1.0.114 in `package.json`, `tauri.conf.json`, `Cargo.toml`; `scripts/install-real.cmd` points at the 1.0.114 setup (it hardcodes the path — bump it every release).
 
 **Files:** `src-tauri/src/engine/actions/osk.rs` (new), `engine/actions/mod.rs`, `engine/mod.rs`, `hook/mod.rs`, `middle_ring.rs`, `src/components/special-cards.ts`, `keyboard-matrix.ts`, `src/preview.ts`, `README.md`, `CLAUDE.md`, `all-versions/WHAT-CHANGED.md`, `FUTURE_IDEAS.md`, `scripts/install-real.cmd`.

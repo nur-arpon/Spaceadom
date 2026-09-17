@@ -52,7 +52,8 @@ The whole point is that Space behaves differently in every application, so Space
 ## Product features (one per box, "Add more" for each)
 Hold Space + tap a key to launch, focus or minimise any app
 Space on its own always types a space
-A radial guide appears while you hold Space or the middle mouse button
+Hold the middle mouse button: an icon ring of your apps appears at the cursor — release on one to launch it
+Voice typing, screenshot and the on-screen keyboard from the ring or Space + ; / '
 Set up by clicking a picture of your own keyboard
 Three profiles, switchable with Space + Right Alt
 Boss key, picture-in-picture, force-quit, smart search, window fading
@@ -73,4 +74,6 @@ spacebar · app launcher · window switcher · hotkey · productivity · keyboar
 SpaceZ
 
 ## What's new in this version
-Leave blank (first submission).
+(1.0.114, the update over 1.0.109 — paste this)
+
+The icon ring: hold the middle mouse button and a ring of your apps opens at the cursor; release on one to launch it. It stays on screen at edges and corners and follows your monitor's scaling. New shortcuts to Windows' own tools: Space + ; for voice typing, Space + / for a screenshot (region, window or full screen), Space + ' for the on-screen keyboard — all also tiles on the ring. Fewer needless hook repairs on laptops with touchpads. Windows on ARM: a first ARM64 package, offered as a beta.
