@@ -210,6 +210,11 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          # ARM64 (2026-09-17): the second target. windows-latest ships the
+          # MSVC ARM64 build tools, and TLS is Schannel since 1.0.113, so
+          # nothing native is compiled for the extra target.
+          targets: aarch64-pc-windows-msvc
 
       # Rust builds are slow from cold. This caches the compiled dependencies
       # so later releases take a few minutes instead of fifteen.
@@ -259,6 +264,18 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
+      # ARM64 (2026-09-17) — the same rehearsal for the second architecture.
+      # Its bundles land under src-tauri/target/aarch64-pc-windows-msvc/, so
+      # the x64 step above and this one never overwrite each other.
+      - name: Build the ARM64 installers only (no release) — workflow_dispatch
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          args: --target aarch64-pc-windows-msvc
+
       - name: Build and publish (as a DRAFT — flipped public by the last step)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: tauri-apps/tauri-action@v0
@@ -292,6 +309,10 @@ jobs:
             **Most people: download `Spaceadom_*_x64-setup.exe`** and run it.
             It installs for your user account only and never asks for an
             administrator password, including for updates.
+
+            **Windows on ARM (Snapdragon laptops): `Spaceadom_*_arm64-setup.exe`.**
+            Same app, built natively for ARM64; it updates itself from the
+            same place.
 
             The `.msi` is the same app, for anyone who needs one (managed
             deployment). It installs for the whole PC and asks for admin once.
@@ -332,6 +353,25 @@ jobs:
           releaseDraft: true
           prerelease: false
 
+      # ARM64 (2026-09-17) — the second architecture onto the SAME draft
+      # release. tauri-action finds the draft the step above created for this
+      # tag and uploads the arm64 setup.exe, .msi and both .sig files beside
+      # the x64 ones. `uploadUpdaterJson: false` for the same PROBLEM 245
+      # reason: the manifest step below writes the per-arch keys itself.
+      - name: Build and publish the ARM64 installers onto the draft
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Spaceadom ${{ github.ref_name }}"
+          releaseDraft: true
+          uploadUpdaterJson: false
+          args: --target aarch64-pc-windows-msvc
+
       # PROBLEM 245 — the two updater manifests. See the header comment for
       # why there are two. `releases/latest/download/latest.json` is the URL
       # every installed copy polls (src-tauri/src/updater.rs::NSIS_MANIFEST),
@@ -354,16 +394,16 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $ver = $tag -replace '^v',''
           $base = "https://github.com/${{ github.repository }}/releases/download/$tag"
-          ./scripts/write-updater-manifests.ps1 -BundleDir src-tauri/target/release/bundle -BaseUrl $base -Version $ver -OutDir updater-manifests -Notes "Spaceadom $tag - see all-versions/WHAT-CHANGED.md"
+          ./scripts/write-updater-manifests.ps1 -BundleDir src-tauri/target/release/bundle -BundleDirArm64 src-tauri/target/aarch64-pc-windows-msvc/release/bundle -BaseUrl $base -Version $ver -OutDir updater-manifests -Notes "Spaceadom $tag - see all-versions/WHAT-CHANGED.md"
           gh release upload $tag updater-manifests/latest.json updater-manifests/latest-msi.json --clobber
           $assets = (gh release view $tag --json assets --jq '.assets[].name') -split "`n"
-          foreach ($need in @("Spaceadom_${ver}_x64-setup.exe", "Spaceadom_${ver}_x64_en-US.msi", "latest.json", "latest-msi.json")) {
+          foreach ($need in @("Spaceadom_${ver}_x64-setup.exe", "Spaceadom_${ver}_x64_en-US.msi", "Spaceadom_${ver}_arm64-setup.exe", "Spaceadom_${ver}_arm64_en-US.msi", "latest.json", "latest-msi.json")) {
             if ($assets -notcontains $need) {
               Write-Host "::error::Release $tag is missing asset $need — installed copies polling latest.json would find nothing. Assets present: $($assets -join ', ')"
               exit 1
             }
           }
-          Write-Host "release $tag carries both installers and both manifests."
+          Write-Host "release $tag carries all four installers (x64 + arm64) and both manifests."
 
       # PROBLEM 254 — the no-installer, self-contained zip. Packs the SAME
       # release exe tauri-action already built above (`npm run portable`

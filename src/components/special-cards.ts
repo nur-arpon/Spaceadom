@@ -80,7 +80,7 @@ export const SPECIALS: SpecialSpec[] = [
     desc: "Puts Spaceadom to sleep so Space acts normal for a while. The same keys wake it up.",
     how: "Hold Space, tap period" },
   { id: "semicolon", combo: "␣ ;", name: "Voice Typing",
-    desc: "Opens Windows' own dictation: speak, and the words are typed wherever your cursor is. The same tile lives on the middle-button ring.",
+    desc: "Opens Windows' own dictation: speak, and the words are typed wherever your cursor is. The same tile lives on the middle-button ring. If the panel listens but nothing appears, check Windows' default microphone — a virtual device (SteelSeries Sonar, for one) can feed it silence.",
     how: "Hold Space, tap semicolon" },
   { id: "ralt", combo: "␣ RAlt", name: "Cycle Profile",
     desc: "Switches to your next profile — a different set of apps on the same keys.",

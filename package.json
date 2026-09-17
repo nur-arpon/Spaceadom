@@ -14,6 +14,7 @@
     "arm64": "tauri build --target aarch64-pc-windows-msvc",
     "poststore": "node scripts/label-store-build.mjs",
     "msix": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-msix.ps1",
+    "msix:arm64": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-msix.ps1 -Arch arm64",
     "portable": "node scripts/build-portable.mjs",
     "test:own-window-keys": "node scripts/own-window-keys.test.ts"
   },

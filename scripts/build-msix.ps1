@@ -81,7 +81,14 @@ param(
 
   # Skip the makeappx unpack round-trip. CI passes this only if the validation
   # itself is what is being debugged; normally you want it.
-  [switch]$SkipValidate
+  [switch]$SkipValidate,
+
+  # ARM64 (2026-09-17): 'x64' (default) or 'arm64'. Picks the release binary
+  # from the matching cargo target dir, writes ProcessorArchitecture into
+  # the manifest, and names the package Spaceadom_<v>_<arch>.msix. The Store
+  # takes both packages under one submission; MakeAppx itself is always the
+  # host's x64 tool.
+  [ValidateSet('x64','arm64')][string]$Arch = 'x64'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -96,6 +103,11 @@ $MsixSrc  = Join-Path $Root 'src-tauri\msix'
 $Layout   = Join-Path $MsixSrc 'layout'
 $Assets   = Join-Path $Layout  'Assets'
 $OutDir   = Join-Path $Root 'src-tauri\target\release\bundle\msix'
+# The cargo output tree for the architecture: the host tree for x64, the
+# per-target tree for arm64 (`npm run arm64` = tauri build --target
+# aarch64-pc-windows-msvc).
+$RelDir   = if ($Arch -eq 'arm64') { Join-Path $Root 'src-tauri\target\aarch64-pc-windows-msvc\release' } else { Join-Path $Root 'src-tauri\target\release' }
+Say "architecture: $Arch (release tree $RelDir)"
 
 Say "repo root: $Root"
 
@@ -176,9 +188,19 @@ if ($isTestIdentity) {
 # ---------------------------------------------------------------------------
 # 3. The binary. Refuse loudly rather than packing a stale or wrong one.
 # ---------------------------------------------------------------------------
-$exe = Join-Path $Root 'src-tauri\target\release\spaceadom.exe'
+$exe = Join-Path $RelDir 'spaceadom.exe'
 if (-not (Test-Path $exe)) {
-  Die "no release binary at $exe. Run 'npm run build' then 'npm run tauri build' first."
+  Die "no release binary at $exe. Run 'npm run build' then 'npm run tauri build' (or 'npm run arm64') first."
+}
+# The binary must BE the architecture the manifest will claim: PE machine
+# type 0x8664 = x64, 0xAA64 = ARM64. A mismatch is unshippable and the Store
+# reports it only after a long upload.
+$peBytes = [IO.File]::ReadAllBytes($exe)
+$peOff   = [BitConverter]::ToInt32($peBytes, 0x3C)
+$machine = [BitConverter]::ToUInt16($peBytes, $peOff + 4)
+$want    = if ($Arch -eq 'arm64') { 0xAA64 } else { 0x8664 }
+if ($machine -ne $want) {
+  Die ("the binary's PE machine type is 0x{0:X4} but -Arch is {1} (wants 0x{2:X4})" -f $machine, $Arch, $want)
 }
 $exeItem = Get-Item $exe
 $exeVer  = $exeItem.VersionInfo.FileVersion
@@ -268,6 +290,7 @@ $manifest = $manifest.Replace('{{IDENTITY_NAME}}',         $identity.name)
 $manifest = $manifest.Replace('{{IDENTITY_PUBLISHER}}',    $identity.publisher)
 $manifest = $manifest.Replace('{{PUBLISHER_DISPLAY_NAME}}',$identity.publisherDisplayName)
 $manifest = $manifest.Replace('{{VERSION}}',               $version4)
+$manifest = $manifest.Replace('{{ARCH}}',                  $Arch)
 if ($manifest -match '\{\{[A-Z_]+\}\}') {
   Die "a placeholder survived substitution in AppxManifest.xml: $($Matches[0]). MakeAppx would pack it and the Store would reject the package."
 }
@@ -369,7 +392,7 @@ if (-not $makeappx) {
 Say "makeappx: $makeappx"
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-$msix = Join-Path $OutDir "Spaceadom_${version3}_x64.msix"
+$msix = Join-Path $OutDir "Spaceadom_${version3}_${Arch}.msix"
 if (Test-Path $msix) { Remove-Item $msix -Force }
 
 & $makeappx pack /d $Layout /p $msix /o

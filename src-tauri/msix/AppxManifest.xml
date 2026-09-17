@@ -94,7 +94,7 @@
     Name="{{IDENTITY_NAME}}"
     Publisher="{{IDENTITY_PUBLISHER}}"
     Version="{{VERSION}}"
-    ProcessorArchitecture="x64" />
+    ProcessorArchitecture="{{ARCH}}" />
 
   <Properties>
     <DisplayName>Spaceadom</DisplayName>
