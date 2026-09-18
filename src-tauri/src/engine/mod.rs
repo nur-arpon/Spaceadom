@@ -3,6 +3,10 @@
 /// and dispatches to specialized action handlers. Runs on a tokio task.
 
 pub mod actions;
+/// PHASE A — the chord recorder behind the key editor's "Press the keys…".
+pub mod chord_recorder;
+/// PHASE A — the specials' names and the two derived ring lists.
+pub mod specials;
 
 use crate::{
     config::SharedConfig,
@@ -19,9 +23,11 @@ pub struct EngineState {
     pub config: SharedConfig,
     pub boss_key: Arc<Mutex<actions::boss_key::BossKeyState>>,
     pub pip_cache: actions::pip::PipCache,
-    /// Double-tap timestamps for Space+Up and Space+Down
-    pub last_up_ts: u64,
-    pub last_down_ts: u64,
+    /// PHASE A — double-tap timestamps for the scroll specials, keyed by the
+    /// KEY ID they sit on (`up` / `down` by default), so the detection keeps
+    /// working when the user moves scroll_top to another key. Was a pair of
+    /// `last_up_ts` / `last_down_ts` fields fixed to the arrow keys.
+    pub double_tap_ts: std::collections::HashMap<String, u64>,
     /// Profile index for cycling (mirrors V11 ProfileIndex)
     pub profile_index: usize,
     /// Tauri app handle for emitting events to frontend
@@ -36,8 +42,7 @@ impl EngineState {
             config,
             boss_key: Arc::new(Mutex::new(actions::boss_key::BossKeyState::default())),
             pip_cache: actions::pip::new_cache(),
-            last_up_ts: 0,
-            last_down_ts: 0,
+            double_tap_ts: std::collections::HashMap::new(),
             profile_index: 0,
             app_handle,
             hud_cancel_tx: None,
@@ -103,10 +108,10 @@ impl EngineState {
     /// Global `emit`, never `emit_to` — that has never worked here.
     /// Fire-and-forget: a dashboard that is closed has no listener, and the
     /// engine must not care.
-    fn emit_launched(&self, key: char, label: &str) {
+    fn emit_launched(&self, key: &str, label: &str) {
         let _ = self.app_handle.emit(
             "st-launched",
-            serde_json::json!({ "key": key.to_string(), "label": label }),
+            serde_json::json!({ "key": key, "label": label }),
         );
     }
 
@@ -421,9 +426,14 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
                                 //
                                 // Free to read: `cfg` is already borrowed and
                                 // this is the Space-HOLD path, not the hook.
+                                // PHASE A — the rows are DERIVED from the
+                                // active profile's non-letter bindings
+                                // (`specials::hud_specials_for`), so a moved
+                                // or removed special shows as such.
                                 let specials = specials_for_hud(
                                     cfg.hud_show_specials,
                                     &cfg.hud_band_count,
+                                    specials::hud_specials_for(&cfg),
                                 );
 
                                 (name, emoji, binds, icons, specials)
@@ -502,7 +512,7 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
                 }
             } else {
                 log::info!("engine: pointer activation → Space+{ch} (armed chip on the guide HUD)");
-                handle_alpha(ch, state_arc);
+                run_binding(&ch.to_string(), state_arc);
             }
         }
 
@@ -655,6 +665,14 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
         // evicted (keyboard law 7b). Spending its budget to save a channel
         // hop would trade the feature against the app's own liveness.
         // ---------------------------------------------------------------
+        // ---------------------------------------------------------------
+        // PHASE A — a keystroke seen while the chord recorder is on. The
+        // hook already passed it through; this only records it.
+        // ---------------------------------------------------------------
+        HookEvent::RawKey(vk, down) => {
+            chord_recorder::note(vk, down);
+        }
+
         HookEvent::MiddleButtonTap => {
             let ok = crate::hook::replay_middle_click();
             {
@@ -696,22 +714,122 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
 /// — since PROBLEM 267 — a special tile released on the icon ring. Lifted out
 /// of the `KeyCombo` arm verbatim so the ring cannot fork the cascade: there is
 /// exactly one place that says what Space+Esc does.
+///
+/// PHASE A (2026-09-18): what Space+Esc does is no longer written here. A
+/// letter and a non-letter key both go to `run_binding` with their KEY ID
+/// (`a`, `esc`, `f1`, `7`…), and the active profile's binding for that id
+/// decides — a seeded `Special { id: "boss_key" }` on `esc` by default. The
+/// legacy `special_keys` map (`Special(name)`) is unchanged.
 fn run_combo(combo: KeyCombo, state_arc: &Arc<Mutex<EngineState>>) {
     match combo {
-        KeyCombo::Alpha(ch)       => handle_alpha(ch, state_arc),
-        KeyCombo::Special(name)   => handle_special(name, state_arc),
-        KeyCombo::Escape          => handle_boss_key(state_arc),
-        KeyCombo::Backtick        => handle_pip(state_arc),
-        KeyCombo::Tab             => handle_fullscreen_pip(state_arc),
-        KeyCombo::Backspace       => handle_force_close(state_arc),
-        KeyCombo::Comma           => handle_focus(state_arc),
-        KeyCombo::RightAlt        => handle_profile_cycle(state_arc),
-        KeyCombo::UpArrow         => handle_double_tap_up(state_arc),
-        KeyCombo::DownArrow       => handle_double_tap_down(state_arc),
-        KeyCombo::Period          => handle_bypass_toggle(state_arc),
-        KeyCombo::Semicolon       => handle_voice_typing(state_arc),
-        KeyCombo::Slash           => handle_screenshot(state_arc),
-        KeyCombo::Quote           => handle_osk(state_arc),
+        KeyCombo::Alpha(ch) => run_binding(&ch.to_string(), state_arc),
+        KeyCombo::Vk(vk) => match crate::hook::key_id_for_vk(vk) {
+            Some(id) => run_binding(id, state_arc),
+            None => log::warn!(
+                "engine: combo Space+VK {vk:#04X} received but the key table has no id for it — \
+                 nothing fired (the hook's bitmap and hook::keys::KEY_TABLE disagree)"
+            ),
+        },
+        KeyCombo::Special(name) => handle_special(name, state_arc),
+    }
+}
+
+/// PHASE A — Space + `key_id`: look the key up in the active profile and do
+/// what its binding says.
+///
+/// * `action: Some(_)` → `run_action` (a special's handler, a URI, a chord, a
+///   command, brightness).
+/// * `action: None` with a binding, or a LETTER with no binding → the
+///   cascade (`cascade_binding`: today's `handle_alpha` body, with the
+///   Founders fallback for an unassigned letter).
+/// * a NON-letter with no binding → the legacy `special_keys` map if it has
+///   the key, else nothing. (The hook only dispatches a non-letter key that
+///   is in its bitmap, so this is the "binding removed between the bitmap
+///   publish and this dispatch" race — harmless.)
+fn run_binding(key_id: &str, state_arc: &Arc<Mutex<EngineState>>) {
+    let (binding, in_special_keys) = {
+        let s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
+        let cfg = s.config.read().unwrap_or_else(|p| p.into_inner());
+        let b = cfg
+            .profiles
+            .iter()
+            .find(|p| p.name == cfg.active_profile)
+            .and_then(|p| p.bindings.get(key_id).cloned());
+        (b, cfg.special_keys.contains_key(key_id))
+    };
+    match binding.as_ref().and_then(|b| b.action.clone()) {
+        Some(action) => {
+            let label = binding.and_then(|b| b.label);
+            run_action(key_id, &action, label.as_deref(), state_arc);
+        }
+        None if binding.is_none() && !specials::is_letter_id(key_id) => {
+            if in_special_keys {
+                handle_special(key_id.to_string(), state_arc);
+            } else {
+                log::debug!("engine: Space+{key_id} has no binding in the active profile — nothing to do");
+            }
+        }
+        None => cascade_binding(key_id, state_arc),
+    }
+}
+
+/// PHASE A — run one `Action` for the key it sits on.
+fn run_action(
+    key_id: &str,
+    action: &crate::config::Action,
+    label: Option<&str>,
+    state_arc: &Arc<Mutex<EngineState>>,
+) {
+    use crate::config::Action;
+    log::info!(
+        "engine: combo Space+{} received → {} (Phase A action)",
+        specials::key_label(key_id),
+        specials::action_name(action)
+    );
+    crate::crash_context::note_action(format!("Space+{key_id}"));
+    let app_handle = {
+        let s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
+        s.app_handle.clone()
+    };
+    match action {
+        Action::Special { id } => run_special(id, key_id, state_arc),
+        Action::Uri { target } => {
+            let msg = actions::uri::open(target, label, Some(app_handle.clone()));
+            crate::show_toast(&app_handle, &msg);
+        }
+        Action::Chord { keys } => {
+            let msg = actions::chord::send(keys);
+            crate::show_toast(&app_handle, &msg);
+        }
+        Action::Command { line } => {
+            let msg = actions::command::run(line);
+            crate::show_toast(&app_handle, &msg);
+        }
+        Action::Brightness { delta } => actions::brightness::adjust(*delta, app_handle),
+    }
+}
+
+/// PHASE A — the twelve built-in specials, by id, to the handlers that have
+/// always run them. `key_id` is only for the scroll pair, whose double-tap
+/// state is keyed on the key they sit on.
+fn run_special(id: &str, key_id: &str, state_arc: &Arc<Mutex<EngineState>>) {
+    match id {
+        "boss_key" => handle_boss_key(state_arc),
+        "pip" => handle_pip(state_arc),
+        "pip_fullscreen" => handle_fullscreen_pip(state_arc),
+        "force_close" => handle_force_close(state_arc),
+        "cycle_profile" => handle_profile_cycle(state_arc),
+        "search" => handle_focus(state_arc),
+        "pause" => handle_bypass_toggle(state_arc),
+        "voice_typing" => handle_voice_typing(state_arc),
+        "screenshot" => handle_screenshot(state_arc),
+        "osk" => handle_osk(state_arc),
+        "scroll_top" => handle_scroll(key_id, true, state_arc),
+        "scroll_bottom" => handle_scroll(key_id, false, state_arc),
+        other => log::warn!(
+            "engine: Space+{key_id} is bound to an unknown special '{other}' — nothing fired \
+             (a config from a newer build?)"
+        ),
     }
 }
 
@@ -891,7 +1009,12 @@ fn cascade_toast(
     }
 }
 
-fn handle_alpha(ch: char, state_arc: &Arc<Mutex<EngineState>>) {
+/// The app / link cascade for `key_id` — `handle_alpha`'s body up to Phase
+/// A, generalised from a letter to a key id so a legacy app binding on a
+/// non-letter key (or one the user makes with "App or link" on `7`) takes
+/// the same path. Reached through `run_binding`.
+fn cascade_binding(key_id: &str, state_arc: &Arc<Mutex<EngineState>>) {
+    let ch = specials::key_label(key_id);
     // log::info, not println — stdout is invisible for a tray app.
     log::info!("engine: combo Space+{ch} received");
             crate::crash_context::note_action(format!("Space+{ch}"));
@@ -900,7 +1023,7 @@ fn handle_alpha(ch: char, state_arc: &Arc<Mutex<EngineState>>) {
         let s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
         let cfg = s.config.read().unwrap_or_else(|p| p.into_inner());
         let pname = cfg.active_profile.clone();
-        let key = ch.to_string();
+        let key = key_id.to_string();
 
         // Which browser profiles OTHER reachable bindings have pinned. Read
         // here, inside the read guard the binding lookup already holds open —
@@ -968,7 +1091,7 @@ fn handle_alpha(ch: char, state_arc: &Arc<Mutex<EngineState>>) {
         s.app_handle.clone()
     };
 
-    let label = bind.label.clone().unwrap_or_else(|| ch.to_string().to_uppercase());
+    let label = bind.label.clone().unwrap_or_else(|| ch.to_uppercase());
     // When we already substituted the Founders binding, don't pass it again
     // as the fallback — it IS the primary now.
     let outcome = actions::smart_cascade::smart_cascade(
@@ -996,7 +1119,7 @@ fn handle_alpha(ch: char, state_arc: &Arc<Mutex<EngineState>>) {
     // the other side. That gate is what makes the tour's "wrong key does
     // nothing, no error, it waits" behaviour fall out for free.
     if outcome != actions::smart_cascade::CascadeOutcome::Failed {
-        s.emit_launched(ch, &label);
+        s.emit_launched(key_id, &label);
     }
 }
 
@@ -1092,32 +1215,35 @@ fn handle_force_close(state_arc: &Arc<Mutex<EngineState>>) {
     s.emit_toast("⌧ Closed App");
 }
 
-fn handle_double_tap_up(state_arc: &Arc<Mutex<EngineState>>) {
+/// PHASE A — the scroll specials: a DOUBLE tap of the key they sit on within
+/// `DOUBLE_TAP_MS` sends Ctrl+Home (top) or Ctrl+End (bottom). The state is
+/// keyed on `key_id`, so moving scroll_top from ↑ to PgUp keeps working, and
+/// the two keys never share a timer.
+fn handle_scroll(key_id: &str, top: bool, state_arc: &Arc<Mutex<EngineState>>) {
     let now = tick_count();
     let mut s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
-    let last = s.last_up_ts;
-    s.last_up_ts = now;
-
-    if now - last < 400 {
-        s.last_up_ts = 0;
-        // Send Ctrl+Home (scroll to top)
-        send_ctrl_key(0x24); // VK_HOME
-        s.emit_toast("⤒ Scrolled to Top");
+    let last = s.double_tap_ts.get(key_id).copied().unwrap_or(0);
+    if double_tap_fires(last, now) {
+        s.double_tap_ts.remove(key_id);
+        if top {
+            send_ctrl_key(0x24); // VK_HOME
+            s.emit_toast("⤒ Scrolled to Top");
+        } else {
+            send_ctrl_key(0x23); // VK_END
+            s.emit_toast("⤓ Scrolled to Bottom");
+        }
+    } else {
+        s.double_tap_ts.insert(key_id.to_string(), now);
     }
 }
 
-fn handle_double_tap_down(state_arc: &Arc<Mutex<EngineState>>) {
-    let now = tick_count();
-    let mut s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
-    let last = s.last_down_ts;
-    s.last_down_ts = now;
+/// Two taps closer together than this are one double tap.
+pub(crate) const DOUBLE_TAP_MS: u64 = 400;
 
-    if now - last < 400 {
-        s.last_down_ts = 0;
-        // Send Ctrl+End (scroll to bottom)
-        send_ctrl_key(0x23); // VK_END
-        s.emit_toast("⤓ Scrolled to Bottom");
-    }
+/// Pure: does a tap at `now` complete a double tap begun at `last`?
+/// `last == 0` is "no first tap yet".
+pub(crate) fn double_tap_fires(last: u64, now: u64) -> bool {
+    last != 0 && now >= last && now - last < DOUBLE_TAP_MS
 }
 
 fn handle_bypass_toggle(state_arc: &Arc<Mutex<EngineState>>) {
@@ -1187,37 +1313,13 @@ fn tick_count() -> u64 {
     0
 }
 
-/// The system-wide shortcuts the HUD's INNER ring lists, in ring order.
-///
-/// A `const` and not a literal inside the builder so the truth table below can
-/// be tested against the real list rather than a copy of it.
-///
-/// NINE since 2026-08-29 (pip.rs §9, PROBLEM 219). The label is deliberately
-/// SHORT: specials render at their full label and a long one widens the inner
-/// ring for every chip on it, so "Fullscreen PiP" — shorter than the
-/// "Multi-Corner PiP Mode" already sitting next to it — cannot be the entry
-/// that decides the ring's size. `toast.ts` measures the labels it is given
-/// and has a documented ladder that passes at twelve specials, so the count
-/// itself is inside what the overlay was built for.
-/// Declared as a SLICE, not a fixed-size array, so the Tab row below can be
-/// commented in or out without also editing a length that would then be the
-/// one thing left to get wrong.
-const HUD_SPECIALS: &[(&str, &str)] = &[
-    ("Esc", "Boss Key (Hide All + Mute)"),
-    ("`", "Multi-Corner PiP Mode"),
-    // SPACE+TAB SPLIT — 1.0.91 ships this line COMMENTED OUT on purpose.
-    // The feature's code stays in the tree (pip.rs §9, PROBLEM 219); only its
-    // advertisement and its key registration (hook/mod.rs, `VK_TAB`) are
-    // disabled, pending the owner's verdict after testing. 1.0.92 = this exact
-    // tree with BOTH lines uncommented. Do not delete either one.
-    ("Tab", "Fullscreen PiP"), // ← 1.0.92 ON / 1.0.91 commented out
-    ("⌫", "Force Close App"),
-    ("RAlt", "Cycle OS Profiles"),
-    (",", "Contextual Search/Input"),
-    (".", "Pause Spaceadom"),
-    ("Scroll", "Layer Opacity"),
-    ("Up/Dn ×2", "Scroll Top/Bottom"),
-];
+// PHASE A (2026-09-18) — `HUD_SPECIALS`, the static nine-row list that
+// stood here, is gone: the rows come from `specials::hud_specials_for(cfg)`,
+// derived from the active profile's non-letter bindings, and read exactly as
+// the static list did for a seeded profile (Esc, `, Tab, ⌫, RAlt, `,`, `.`,
+// then `;`, `/`, `'`, then "Scroll" and "Up/Dn ×2"). The labels stay SHORT
+// for the reason the old list gave: specials render at their full label and a
+// long one widens the inner ring for every chip on it.
 
 /// Which specials go into the `GuideHudPayload` — the DETERMINISTIC half of
 /// the rows/specials system, and nothing else.
@@ -1243,14 +1345,15 @@ const HUD_SPECIALS: &[(&str, &str)] = &[
 /// that is not `"one"` or `"two"` is treated as `"auto"` — an old config that
 /// somehow carries `""` or a typo must behave like every previous build did,
 /// never like a layout the user did not choose.
-pub(crate) fn specials_for_hud(show_specials: bool, band_count: &str) -> Vec<(String, String)> {
+pub(crate) fn specials_for_hud(
+    show_specials: bool,
+    band_count: &str,
+    rows: Vec<(String, String)>,
+) -> Vec<(String, String)> {
     if !show_specials || band_count == "two" {
         return Vec::new();
     }
-    HUD_SPECIALS
-        .iter()
-        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-        .collect()
+    rows
 }
 
 /// The APP half of the `GuideHudPayload`: one `(KEY, label)` pair per MAPPED
@@ -1276,12 +1379,9 @@ pub(crate) fn hud_apps_for(
     let mut keys: Vec<_> = profile.bindings.iter().filter(|(_, b)| b.is_mapped()).collect();
     keys.sort_by(|a, b| a.0.cmp(b.0));
     for (key, bind) in keys {
-        let label = bind
-            .label
-            .clone()
-            .or_else(|| bind.app.clone())
-            .or_else(|| bind.web_url.clone())
-            .unwrap_or_default();
+        // PHASE A — one naming rule for every surface: the label, else the
+        // action's derived name, else the app / URL (`specials::binding_name`).
+        let label = specials::binding_name(bind);
         // 2026-08-26 — a key pinned to a browser profile reads "Brave —
         // Studies", not just "Brave", because "Brave" on three different keys
         // tells the user nothing.
@@ -1454,7 +1554,7 @@ pub(crate) fn preview_payload(
         // A preview carries no shell icons (no cache at hand); the stored
         // site/override icons still show, as they would on a real hold.
         app_icons: hud_icons_for(cfg, &name, &|_| None),
-        specials: specials_for_hud(cfg.hud_show_specials, bands),
+        specials: specials_for_hud(cfg.hud_show_specials, bands, specials::hud_specials_for(cfg)),
         profile: name,
         preview: Some(crate::guide_hud::HudPreview {
             layout: mode.to_string(),
@@ -1467,34 +1567,46 @@ pub(crate) fn preview_payload(
 mod band_gate_tests {
     use super::*;
 
+    /// PHASE A — the fixture every gate test reads: a freshly SEEDED profile,
+    /// whose derived rows are today's list. `n` is read from the fixture, not
+    /// written as a literal, for the same reason the old tests counted
+    /// `HUD_SPECIALS.len()`.
+    fn seeded() -> crate::config::AppConfig {
+        crate::engine::specials::seeded_cfg()
+    }
+    fn rows() -> Vec<(String, String)> {
+        specials::hud_specials_for(&seeded())
+    }
+
     /// All SIX rows of the rows x specials table, in one place, because the
     /// bug this guards against is silent: a HUD that renders two app bands AND
     /// an inner ring has no room for both and the page would simply overlap
     /// them. There is no error, no log line and nothing to see except a mess.
     #[test]
     fn the_six_rows_and_specials_combinations() {
-        let n = HUD_SPECIALS.len();
+        let n = rows().len();
+        assert!(n >= 9, "the seeded fixture must yield at least the nine classic rows");
 
         // rows = one — the only shape where Rust itself says "draw the ring".
         assert_eq!(
-            specials_for_hud(true, "one").len(),
+            specials_for_hud(true, "one", rows()).len(),
             n,
             "one row + specials ON must send the whole list"
         );
         assert!(
-            specials_for_hud(false, "one").is_empty(),
+            specials_for_hud(false, "one", rows()).is_empty(),
             "one row + specials OFF must send an empty list"
         );
 
         // rows = two — the new gate. The specials cannot coexist with two app
         // bands and Rust knows that WITHOUT measuring anything, so it decides.
         assert!(
-            specials_for_hud(true, "two").is_empty(),
+            specials_for_hud(true, "two", rows()).is_empty(),
             "two rows must drop the specials even with the setting ON — the \
              inner band is spoken for"
         );
         assert!(
-            specials_for_hud(false, "two").is_empty(),
+            specials_for_hud(false, "two", rows()).is_empty(),
             "two rows + specials OFF is empty for both reasons at once"
         );
 
@@ -1503,13 +1615,13 @@ mod band_gate_tests {
         // here would make "auto" mean "never show specials", which is not what
         // the owner asked for.
         assert_eq!(
-            specials_for_hud(true, "auto").len(),
+            specials_for_hud(true, "auto", rows()).len(),
             n,
             "auto + specials ON must still SEND them — only the page can know \
              whether one band fits"
         );
         assert!(
-            specials_for_hud(false, "auto").is_empty(),
+            specials_for_hud(false, "auto", rows()).is_empty(),
             "auto + specials OFF must send an empty list"
         );
     }
@@ -1522,8 +1634,8 @@ mod band_gate_tests {
     fn an_unknown_band_count_falls_back_to_auto_not_to_two() {
         for v in ["", "AUTO", "1", "one row", "three", "auto"] {
             assert_eq!(
-                specials_for_hud(true, v).len(),
-                HUD_SPECIALS.len(),
+                specials_for_hud(true, v, rows()).len(),
+                rows().len(),
                 "{v:?} must behave like auto — only the literal \"two\" hides the ring"
             );
         }
@@ -1570,19 +1682,19 @@ mod band_gate_tests {
     /// THE ROW THAT MATTERS: `double` must send NO specials, because the
     /// specials ARE the inner band and two app bands leave no room for it.
     /// Gated on the OVERRIDE, never on the saved `hud_band_count` — a preview
-    /// built from the saved value would send eight specials into a two-band
+    /// built from the saved value would send the specials into a two-band
     /// ring and the page would draw three rings over each other.
     #[test]
     fn the_preview_gates_specials_on_the_override_not_on_the_saved_setting() {
-        let n = HUD_SPECIALS.len();
+        let n = rows().len();
         for (name, layout) in [
             ("compact", PreviewLayout::Compact),
             ("wide", PreviewLayout::Wide),
             ("double", PreviewLayout::Double),
         ] {
             let (_, bands) = layout.overrides();
-            let with_setting_on = specials_for_hud(true, bands);
-            let with_setting_off = specials_for_hud(false, bands);
+            let with_setting_on = specials_for_hud(true, bands, rows());
+            let with_setting_off = specials_for_hud(false, bands, rows());
             if layout == PreviewLayout::Double {
                 assert!(
                     with_setting_on.is_empty(),
@@ -1623,7 +1735,14 @@ mod band_gate_tests {
         );
         // Present but UNMAPPED — the ring must not draw a chip for it.
         bindings.insert("z".to_string(), KeyBinding::default());
-        cfg.profiles = vec![Profile { name: "Preview Test".into(), bindings, emoji: None }];
+        // PHASE A — a LETTER whose binding is an ACTION with no label is still
+        // a chip, named after the action.
+        bindings.insert(
+            "d".to_string(),
+            KeyBinding { action: Some(crate::config::Action::Uri { target: "ms-settings:display".into() }),
+                         ..Default::default() },
+        );
+        cfg.profiles = vec![Profile { name: "Preview Test".into(), bindings, emoji: None, specials_seeded: true }];
         cfg.active_profile = "Preview Test".into();
 
         let apps = hud_apps_for(&cfg, "Preview Test");
@@ -1632,6 +1751,7 @@ mod band_gate_tests {
             vec![
                 ("A".to_string(), "Afterburner".to_string()),
                 ("C".to_string(), "Chrome".to_string()),
+                ("D".to_string(), "ms-settings:display".to_string()),
             ],
             "mapped keys only, sorted by key, badge upper-cased"
         );
@@ -1658,13 +1778,16 @@ mod band_gate_tests {
             name: "Live".into(),
             bindings,
             emoji: Some("🎯".into()),
+            specials_seeded: false,
         }];
         cfg.active_profile = "Live".into();
         cfg.hud_show_specials = true;
+        assert!(crate::config::seed_specials(&mut cfg));
 
         let p = preview_payload(&cfg, PreviewLayout::Compact);
         assert_eq!(p.profile, "Live");
         assert_eq!(p.apps, hud_apps_for(&cfg, "Live"), "the same chips, from the same builder");
+        assert_eq!(p.specials, specials::hud_specials_for(&cfg), "the same specials, from the same builder");
         assert_eq!(
             p.profile_emoji.as_deref(),
             Some("🎯"),
@@ -1695,6 +1818,7 @@ mod band_gate_tests {
                 name: "P".into(),
                 bindings: crate::config::BindingMap::new(),
                 emoji: emoji.map(str::to_string),
+                specials_seeded: false,
             }];
             cfg.active_profile = "P".into();
             cfg
@@ -1723,29 +1847,47 @@ mod band_gate_tests {
         );
     }
 
-    /// The gate must not quietly edit the list it is gating.
+    /// The gate must not quietly edit the list it is gating — and the list,
+    /// for a seeded profile, is the ring the owner has always seen.
     #[test]
     fn the_sent_list_is_the_real_one_in_ring_order() {
-        let sent = specials_for_hud(true, "one");
-        // Counted from the real list, NOT a literal, because Space+Tab is
-        // deliberately commented out of `HUD_SPECIALS` in 1.0.91 and back in
-        // for 1.0.92 — the same test has to pass for both builds.
-        assert_eq!(sent.len(), HUD_SPECIALS.len());
+        let sent = specials_for_hud(true, "one", rows());
+        assert_eq!(sent, rows());
         assert_eq!(sent[0].0, "Esc");
         assert_eq!(sent[0].1, "Boss Key (Hide All + Mute)");
         assert_eq!(sent[sent.len() - 1].0, "Up/Dn ×2");
         assert_eq!(sent[1].0, "`");
         // Tab sits next to the backtick, because the two PiPs are the pair a
         // user has to tell apart and the ring is the only place that says so.
-        // Asserted only WHEN PRESENT: absent is the legitimate 1.0.91 shape.
-        if let Some(i) = sent.iter().position(|(k, _)| k == "Tab") {
-            assert_eq!(i, 2, "Tab must sit immediately after the backtick");
-            assert_eq!(
-                sent[i].1, "Fullscreen PiP",
-                "the label must stay SHORT — specials render at their full label and a long one \
-                 widens the inner ring for every chip on it"
-            );
-        }
+        let i = sent.iter().position(|(k, _)| k == "Tab").expect("Tab is seeded");
+        assert_eq!(i, 2, "Tab must sit immediately after the backtick");
+        assert_eq!(
+            sent[i].1, "Fullscreen PiP",
+            "the label must stay SHORT — specials render at their full label and a long one \
+             widens the inner ring for every chip on it"
+        );
+    }
+
+    /// PHASE A — a special REMOVED from the profile is gone from the ring;
+    /// nothing else moves.
+    #[test]
+    fn a_removed_special_leaves_the_ring() {
+        let mut cfg = seeded();
+        cfg.profiles[0].bindings.remove("backtick");
+        let sent = specials_for_hud(true, "one", specials::hud_specials_for(&cfg));
+        assert_eq!(sent.len(), rows().len() - 1);
+        assert!(sent.iter().all(|(k, _)| k != "`"));
+        assert_eq!(sent[0].0, "Esc");
+        assert_eq!(sent[1].0, "Tab", "Tab moves up into the backtick's place");
+    }
+
+    /// PHASE A — the double-tap rule, pure.
+    #[test]
+    fn a_double_tap_is_two_taps_inside_the_window() {
+        assert!(!double_tap_fires(0, 1_000), "no first tap yet");
+        assert!(double_tap_fires(1_000, 1_399));
+        assert!(!double_tap_fires(1_000, 1_400));
+        assert!(!double_tap_fires(2_000, 1_000), "a clock that went backwards is not a double tap");
     }
 }
 
@@ -1783,7 +1925,7 @@ mod middle_route_tests {
         map.insert("g".into(), KeyBinding { label: Some("GitHub".into()), web_url: Some("https://github.com".into()), site_icon: Some("data:image/x-icon;base64,AAEC".into()), ..Default::default() });
         map.insert("p".into(), KeyBinding { label: Some("Pinned".into()), app: Some("pinned.exe".into()), icon_override: Some("QUJD".into()), ..Default::default() });
         map.insert("x".into(), KeyBinding { label: Some("Cold".into()), app: Some("cold.exe".into()), ..Default::default() });
-        cfg.profiles = vec![Profile { name: "P".into(), bindings: map, emoji: None }];
+        cfg.profiles = vec![Profile { name: "P".into(), bindings: map, emoji: None, specials_seeded: false }];
         cfg.active_profile = "P".into();
         let lookup = |t: &str| -> Option<String> { (t == "brave.exe").then(|| "iVBOR".to_string()) };
         let apps = hud_apps_for(&cfg, "P");

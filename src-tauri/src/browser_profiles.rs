@@ -1611,6 +1611,7 @@ mod hard_requirement_tests {
             browser_profile_name: None,
             // PROBLEM 267 — a link icon is fetched by the editor, never seeded.
             site_icon: None,
+            action: None,
         }
     }
 
@@ -1896,6 +1897,7 @@ mod fallback_message_tests {
             browser_profile_dir: None,
             browser_profile_name: None,
             site_icon: None,
+            action: None,
         };
         assert_eq!(route_for(&b, &|_: &Path| false), BrowserRoute::Default);
     }
@@ -2853,8 +2855,8 @@ mod window_profile_tests {
         let cfg = AppConfig {
             active_profile: "Work".to_string(),
             profiles: vec![
-                Profile { name: "Work".into(), bindings: active, emoji: None },
-                Profile { name: "Games".into(), bindings: idle, emoji: None },
+                Profile { name: "Work".into(), bindings: active, emoji: None, specials_seeded: false },
+                Profile { name: "Games".into(), bindings: idle, emoji: None, specials_seeded: false },
             ],
             special_keys: specials,
             ..Default::default()

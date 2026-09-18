@@ -24,6 +24,9 @@ fn binding(app: Option<&str>, web: Option<&str>, label: &str) -> KeyBinding {
         // and a seed cannot carry bytes for a site it has never reached. The
         // ring draws a letter disc until the user first edits the key.
         site_icon: None,
+        // PHASE A — a seed binding is an app or a link, never an action; the
+        // specials are seeded separately by `schema::seed_specials`.
+        action: None,
     }
 }
 
@@ -56,7 +59,7 @@ pub fn founders_profile() -> Profile {
     b.insert("x".into(), binding(None, Some("https://x.com"), "X"));
     b.insert("y".into(), binding(None, Some("https://youtube.com"), "YouTube"));
     b.insert("z".into(), binding(Some("Zoom.exe"), None, "Zoom"));
-    Profile { name: "Founders".into(), bindings: b, emoji: None }
+    Profile { name: "Founders".into(), bindings: b, emoji: None, specials_seeded: false }
 }
 
 /// Gamers profile — gaming launchers and services.
@@ -88,7 +91,7 @@ pub fn gamers_profile() -> Profile {
     b.insert("x".into(), binding(Some("Xbox.exe"), None, "Xbox"));
     b.insert("y".into(), binding(None, Some("https://gaming.youtube.com"), "YT Gaming"));
     b.insert("z".into(), KeyBinding::default());
-    Profile { name: "Gamers".into(), bindings: b, emoji: None }
+    Profile { name: "Gamers".into(), bindings: b, emoji: None, specials_seeded: false }
 }
 
 /// Professionals profile — creative and productivity tools.
@@ -120,7 +123,7 @@ pub fn professionals_profile() -> Profile {
     b.insert("x".into(), KeyBinding::default());
     b.insert("y".into(), KeyBinding::default());
     b.insert("z".into(), KeyBinding::default());
-    Profile { name: "Professionals".into(), bindings: b, emoji: None }
+    Profile { name: "Professionals".into(), bindings: b, emoji: None, specials_seeded: false }
 }
 
 /// Returns all three built-in seed profiles.

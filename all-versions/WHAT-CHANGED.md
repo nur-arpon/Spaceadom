@@ -41,7 +41,15 @@ tidy. Their rows say what each one got wrong.
 
 ---
 
-## 2026-09-18 (latest) — 1.0.115 — the Space ring's letters are back on icon pills
+## 2026-09-19 (latest) — 1.0.116 — every key is yours: actions, assignable specials
+
+| Version | What changed |
+| --- | --- |
+| **1.0.116** | Phase A, step 1. A key under Space can now do more than open an app: open a Windows settings page or any URI, send a key chord, run a command (Advanced mode only), nudge the built-in screen's brightness (Windows' own WMI, nothing third-party), or run one of the twelve specials (boss key, PiP, force close, cycle profile, search, pause, voice typing, screenshot, on-screen keyboard, scroll top/bottom). The specials are no longer welded to fixed keys — each profile seeds today's table once and you can move any of them. Every non-letter key with a virtual-key code is bindable. The Space ring's inner band shows the specials the active profile actually binds (12 by default, was 9). New: chord recorder in the key editor, "Advanced mode" switch in Settings, Windows catalogue (193 entries). Not yet: mouse buttons, touchpad edge bands, a changeable modifier. |
+
+---
+
+## 2026-09-18 — 1.0.115 — the Space ring's letters are back on icon pills
 
 | Version | What changed |
 | --- | --- |

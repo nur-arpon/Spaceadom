@@ -296,7 +296,7 @@ pub fn load_or_init() -> SharedConfig {
                     if let Err(e) = save_to_disk(&cfg, &path) {
                         log::error!("config: failed to write migrated config: {e}");
                     }
-                    return Arc::new(RwLock::new(cfg));
+                    return seeded(cfg, &path);
                 }
                 Err(e) => {
                     log::warn!("config: legacy V14 config found but unreadable ({e}) — seeding defaults");
@@ -325,7 +325,7 @@ pub fn load_or_init() -> SharedConfig {
                     if let Err(e) = save_to_disk(&cfg, &path) {
                         log::error!("config: failed to write the restored config: {e}");
                     }
-                    return Arc::new(RwLock::new(cfg));
+                    return seeded(cfg, &path);
                 }
                 Err(e) => log::warn!("config: backup at {} unreadable ({e})", backup.display()),
             }
@@ -356,7 +356,25 @@ pub fn load_or_init() -> SharedConfig {
         }
     }
 
-    Arc::new(RwLock::new(config))
+    seeded(config, &path)
+}
+
+/// PHASE A — the LAST step of every load path: seed the default specials into
+/// any profile that has never been seeded (`schema::seed_specials`), write the
+/// file back if that changed anything, and hand the config out. ONE function
+/// so the restored-backup exits and the normal exit cannot drift — a config
+/// that reached the engine unseeded would have no Boss Key, no PiP and no
+/// pause, with nothing in the log to say why.
+fn seeded(mut cfg: AppConfig, path: &PathBuf) -> SharedConfig {
+    if schema::seed_specials(&mut cfg) {
+        log::info!(
+            "config: seeded the default specials (Esc=boss key, `=PiP, Tab=fullscreen PiP,              Backspace=force close, RAlt=cycle profile, ,=search, .=pause, ;=voice typing,              /=screenshot, '=on-screen keyboard, Up/Down=scroll) into every profile that had              not been seeded yet (Phase A, 2026-09-18) — written back to config.json"
+        );
+        if let Err(e) = save_to_disk(&cfg, path) {
+            log::error!("config: failed to write the seeded config: {e}");
+        }
+    }
+    Arc::new(RwLock::new(cfg))
 }
 
 /// Persist the config to disk atomically (write-then-rename).
@@ -368,6 +386,11 @@ pub fn save(config: &AppConfig) -> Result<(), String> {
     // lib.rs's startup load: the atomic starts at 0, so without that one every
     // bit is clear from launch until the first save.
     crate::hook::publish_bound_specials(config);
+    // PHASE A — the "Space owns this non-letter key" bitmap and the pause
+    // key, from the ACTIVE profile's bindings. Same PROBLEM 180 rule: this
+    // funnel is also what `set_active_profile` goes through, so a profile
+    // switch republishes the table.
+    crate::hook::publish_bound_vks(config);
     // PROBLEM 180 again, for the App-exceptions list — published from BOTH
     // here and the startup load in lib.rs. Published from save alone, the
     // feature would be dead from launch until the user happened to save.
@@ -617,6 +640,7 @@ pub fn parse_profile_export(raw: &str) -> Result<Profile, String> {
         name: export.name.trim().to_string(),
         bindings: export.bindings,
         emoji,
+        specials_seeded: export.specials_seeded,
     })
 }
 
@@ -870,6 +894,8 @@ fn parse_ahk_profiles(src: &str) -> Vec<schema::Profile> {
                     // imported profile starts without one — which is exactly
                     // the state `Profile::emoji` documents as normal.
                     emoji: None,
+                    // Seeded by `seeded()` at the end of the load, like every profile.
+                    specials_seeded: false,
                 });
             }
         }
@@ -918,6 +944,7 @@ fn parse_map_body(body: &str) -> schema::BindingMap {
                     // PROBLEM 267 — no favicon on this route either; the
                     // editor fetches one when the key is next edited.
                     site_icon: None,
+                    action: None,
                 },
             );
             i += 6; // advance past this entry
@@ -1097,7 +1124,7 @@ mod profile_file_tests {
                 ..Default::default()
             },
         );
-        Profile { name: "Founders".into(), bindings: b, emoji: Some("👨‍👩‍👧".into()) }
+        Profile { name: "Founders".into(), bindings: b, emoji: Some("👨‍👩‍👧".into()), specials_seeded: false }
     }
 
     /// Export → Import must be lossless, INCLUDING the browser-profile pin

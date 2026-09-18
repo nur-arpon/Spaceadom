@@ -52,7 +52,7 @@ import { openWhatsNew } from "./components/whats-new-sheet";
 import { initTour, maybeStartTour } from "./components/tour";
 import { syncStarrySky } from "./components/starry-sky";
 import { sfx, bindSfxConfig, wireSfxUnlock } from "./sfx";
-import { SPECIALS, toggleSpecialCard } from "./components/special-cards";
+import { resolveSpecials, toggleSpecialCard } from "./components/special-cards";
 import { dismissAll } from "./dismissable";
 import { wireKeyWake, applyKeyWakeMotion } from "./key-wake";
 import { installJsErrorReporter } from "./js-error-reporter";
@@ -545,6 +545,9 @@ export async function persistConfig(): Promise<void> {
 function refreshBoard(): void {
   const el = document.getElementById("keyboard-matrix");
   if (el && appConfig) updateMatrix(el, appConfig);
+  // PHASE A — the tray's "␣ Esc" combos are derived from the active profile
+  // now, so a moved or removed special re-labels its chip with the board.
+  renderSpecials();
 }
 
 /** ONE setting drives the dashboard AND the overlay (Rust re-emits on save). */
@@ -1659,7 +1662,9 @@ function renderSpecials(): void {
   const tray = document.getElementById("specials-tray");
   if (!tray) return;
   tray.innerHTML = "";
-  SPECIALS.forEach((spec, i) => {
+  // PHASE A — combo/how come from the active profile (`resolveSpecials`):
+  // "␣ F1" for a Boss Key moved to F1, "␣ —" for one bound nowhere.
+  resolveSpecials(appConfig).forEach((spec, i) => {
     const item = document.createElement("button");
     item.type = "button";
     item.className = "special-item";

@@ -15,7 +15,15 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import { showToast } from "./toast";
-import { getKeyCell, animateKeyPop, cleanLabel } from "./keyboard-matrix";
+import { getKeyCell, animateKeyPop, cleanLabel, keyName, bindingLabel } from "./keyboard-matrix";
+// PHASE A (2026-09-18) — the action kinds beyond "app or link": the Windows
+// catalogue, the chord recorder, the (Advanced-only) command line and the
+// twelve Spaceadom specials. All leaf modules.
+import { SPECIALS, specialSpec, keyForSpecial, keyLabel } from "./special-cards";
+import { chordFromNames, chordLabel, vkLabel } from "./vk-names";
+import { segRowHtml, positionSegIndicator } from "./controls";
+import catalogueRaw from "../data/windows-catalogue.json";
+import { isMapped } from "../types.ts";
 // The app grid is SHARED with the App-exceptions setting (2026-08-25). Do not
 // re-inline it here: two copies drift and only one gets the next fix.
 import { loadApps, cachedApps, drawAppGrid, paintAppDisc, initPickerRefreshListener } from "./app-grid";
@@ -49,6 +57,7 @@ import {
   labelOf,
 } from "./browser-profile-picker";
 import type {
+  Action,
   AppConfig,
   KeyBinding,
   ConflictResult,
@@ -64,6 +73,93 @@ let _onSave: ((key: string, binding: KeyBinding) => void) | null = null;
 let _onClosed: (() => void) | null = null;
 
 let _query = "";
+
+// ---------------------------------------------------------------------------
+// PHASE A — the action-kind pages
+// ---------------------------------------------------------------------------
+
+/** The editor's pages. "app" is today's editor, unchanged. */
+type EditorKind = "app" | "setting" | "keys" | "command" | "special";
+
+/** The page the user PICKED with the segmented control this open, or null =
+ *  the page the binding's own kind selects (`kindForBinding`). Reset by
+ *  `openPanel`, so a fresh key always opens on its own page. */
+let _kindOverride: EditorKind | null = null;
+/** The chord being edited on the "Send keys" page, in press order. */
+let _chord: number[] = [];
+/** The recorder's poll timer while "Press the keys…" is live, else 0. */
+let _recordTimer = 0;
+/** How many 100 ms polls a recording may run: 15 s, matching Rust's own
+ *  deadline (`hook::keys::RECORD_MAX_MS`). */
+const RECORD_POLLS = 150;
+/** The catalogue search, kept across re-renders of the same key. */
+let _catQuery = "";
+
+interface CatalogueItem {
+  id: string;
+  group: string;
+  name: string;
+  path?: string;
+  kind: "uri" | "chord" | "brightness";
+  target: string | string[];
+  keywords?: string[];
+  unsure?: boolean;
+}
+const CATALOGUE: CatalogueItem[] = (catalogueRaw as { items: CatalogueItem[] }).items;
+/** The groups a NON-advanced editor shows. Advanced mode shows them all. */
+const BASIC_GROUPS = new Set(["settings", "shell", "media"]);
+/** At most this many catalogue rows at once — the list scrolls, but a search
+ *  that matches half the catalogue is not a search. */
+const CATALOGUE_CAP = 40;
+
+/** The page a binding belongs on. */
+function kindForBinding(b: KeyBinding | undefined): EditorKind {
+  switch (b?.action?.kind) {
+    case "uri": case "brightness": return "setting";
+    case "chord": return "keys";
+    case "command": return "command";
+    case "special": return "special";
+    default: return "app";
+  }
+}
+
+/** A catalogue item's `Action`, or null if its chord names a key this build
+ *  cannot map (the row is then not offered at all). */
+function actionFromItem(item: CatalogueItem): Action | null {
+  switch (item.kind) {
+    case "uri":
+      return typeof item.target === "string" ? { kind: "uri", target: item.target } : null;
+    case "brightness": {
+      const delta = Number(item.target);
+      return Number.isFinite(delta) ? { kind: "brightness", delta } : null;
+    }
+    case "chord": {
+      const names = Array.isArray(item.target) ? item.target : [item.target];
+      const keys = chordFromNames(names);
+      return keys && keys.length ? { kind: "chord", keys } : null;
+    }
+  }
+}
+
+/** The segmented control's options — "Run command" only in Advanced mode. */
+function kindOptions(): ReadonlyArray<readonly [EditorKind, string]> {
+  const opts: (readonly [EditorKind, string])[] = [
+    ["app", "App or link"],
+    ["setting", "Windows setting"],
+    ["keys", "Send keys"],
+  ];
+  if (_config?.advanced_mode) opts.push(["command", "Run command"]);
+  opts.push(["special", "Spaceadom special"]);
+  return opts;
+}
+
+/** Everything a cleared key is: what `commit` normalises a clear to, spelled
+ *  out so "Move" can write it to ANOTHER key through `_onSave` directly. */
+const EMPTY_BINDING: KeyBinding = {
+  app: null, web_url: null, label: null, icon_override: null,
+  browser_exe: null, browser_profile_dir: null, browser_profile_name: null,
+  site_icon: null, action: null,
+};
 
 /**
  * Page 2 — the browser-profile page — while it is up. It is a child of the
@@ -181,6 +277,11 @@ export function openPanel(key: string, config: AppConfig, origin?: HTMLElement):
   _config = config;
   _currentKey = key;
   _query = "";
+  // PHASE A — a fresh key opens on ITS page; a recording never outlives the
+  // key it was started for.
+  _kindOverride = null;
+  _catQuery = "";
+  stopRecording();
 
   if (!_panel) return;
 
@@ -218,6 +319,11 @@ export function openPanel(key: string, config: AppConfig, origin?: HTMLElement):
   document.getElementById("stage")?.classList.add("editing");
 
   _panel.querySelector<HTMLInputElement>("#ed-search")?.focus();
+  // PHASE A — the kind pill's indicator is MEASURED from the active button's
+  // box, which is 0 wide until the panel is unhidden — so it is placed here,
+  // after `hidden = false`, and again on every re-render (see renderPanel).
+  const seg = _panel.querySelector<HTMLElement>("#ed-kinds .theme-seg");
+  if (seg) positionSegIndicator(seg);
 
   // PROBLEM 242 — step 1 of the first-run tour is satisfied by the editor
   // opening for ANY letter, so the report goes out unconditionally and the
@@ -225,11 +331,13 @@ export function openPanel(key: string, config: AppConfig, origin?: HTMLElement):
   // SAME `getBinding` the panel itself paints from, so the tour's "this one's
   // already set" copy can never disagree with what the editor is showing.
   const had = getBinding(key);
-  tourEditorOpened(key, !!(had && (had.app || had.web_url)));
+  tourEditorOpened(key, isMapped(had));
 }
 
 export function closePanel(): void {
   if (!_panel || _panel.hidden) return;
+  // PHASE A — a recording ends with the editor, whatever page it was on.
+  stopRecording();
 
   // Page 2 goes with the panel, and INSTANTLY: the panel is already collapsing
   // back into the key, so sliding the page out on top of that would be two
@@ -284,6 +392,9 @@ export function updatePanelConfig(config: AppConfig): void {
 
 function renderPanel(key: string): void {
   if (!_panel || !_config) return;
+  // PHASE A — a re-render replaces the recorder's buttons; the recording
+  // must not outlive the controls that show it.
+  stopRecording();
 
   // `_panel.innerHTML = …` below would orphan page 2's node while leaving
   // `_page` pointing at it. Tear it down first, on the same path everything
@@ -295,23 +406,31 @@ function renderPanel(key: string): void {
   _pathSeed = null;
 
   const binding = getBinding(key);
-  const bound = !!(binding && (binding.app || binding.web_url));
-  const boundLabel = bound
-    ? binding!.label ||
-      (binding!.app
-        ? cleanLabel(binding!.app.split(/[\\/]/).pop() || "")
-        : cleanLabel(binding!.web_url || ""))
-    : "";
+  // PHASE A — "bound" includes an action (a special, a setting, a chord…),
+  // and the label follows the one naming rule the board uses.
+  const bound = isMapped(binding);
+  const boundLabel = bound ? bindingLabel(binding!) : "";
+  const kind: EditorKind = _kindOverride ?? kindForBinding(binding);
+  _chord = binding?.action?.kind === "chord" ? [...binding.action.keys] : [];
 
   _panel.innerHTML = `
     <div class="ed-head">
       <span class="ed-cap" id="ed-cap"></span>
       <span class="ed-title-wrap">
-        <span class="ed-title">Space + ${escapeHtml(key.toUpperCase())}</span>
+        <span class="ed-title">Space + ${escapeHtml(keyName(key))}</span>
         <span class="ed-sub" id="ed-sub"></span>
       </span>
       <button class="ed-close" id="ed-close" aria-label="Close">✕</button>
     </div>
+
+    <!-- PHASE A — WHAT KIND of thing this key does. The same segmented pill
+         as the Theme row in Settings (controls.ts segRowHtml), so the two
+         cannot drift. "Run command" appears only in Advanced mode. -->
+    <div class="ed-kinds" id="ed-kinds">
+      ${segRowHtml("edkind", kindOptions(), kind, "", "What this key does")}
+    </div>
+
+    <div id="ed-pane-app"${kind === "app" ? "" : " hidden"}>
 
     <!-- "Open this in a specific browser profile" (2026-08-26). Hidden unless
          this binding is a URL or a detected browser; see wireProfileChip.
@@ -343,8 +462,6 @@ function renderPanel(key: string): void {
          (No backticks anywhere in this block — it is inside a template
          literal, and one would terminate the string. See the NOTE below.) -->
     <div id="ed-replace-confirm" hidden></div>
-
-    <div id="ed-conflict" hidden></div>
 
     <!-- NOTE: this block is inside a template literal — no backticks in here,
          they terminate the string (TS1127 "Invalid character").
@@ -413,12 +530,35 @@ function renderPanel(key: string): void {
       </span>
       <button class="btn btn-primary" id="ed-assign" disabled>Assign</button>
     </div>
+    </div><!-- /ed-pane-app -->
+
+    <!-- PHASE A — the other four pages, one at a time. -->
+    <div id="ed-pane-other"${kind === "app" ? " hidden" : ""}>${otherPaneHtml(kind, binding)}</div>
+
+    <div id="ed-conflict" hidden></div>
 
     <div class="ed-foot">
       ${bound ? `<button class="btn btn-danger" id="ed-remove">Remove binding</button>` : ""}
       <button class="btn btn-primary" id="ed-done">Done</button>
     </div>
   `;
+
+  // PHASE A — the kind pill. A click re-renders on the chosen page; the
+  // indicator is measured after the DOM settles.
+  _panel.querySelectorAll<HTMLElement>("[data-edkind-set]").forEach((b) => {
+    b.addEventListener("click", () => {
+      const next = b.dataset.edkindSet as EditorKind;
+      if (next === kind) return;
+      stopRecording();
+      _kindOverride = next;
+      renderPanel(key);
+    });
+  });
+  requestAnimationFrame(() => {
+    const seg = _panel?.querySelector<HTMLElement>("#ed-kinds .theme-seg");
+    if (seg) positionSegIndicator(seg);
+  });
+  wireOtherPane(key, kind, binding);
 
   // --- header: real icon when we have one, otherwise the key letter ---
   const cap = _panel.querySelector<HTMLElement>("#ed-cap")!;
@@ -435,7 +575,7 @@ function renderPanel(key: string): void {
     img.onerror = () => { img.remove(); cap.textContent = key.toUpperCase(); };
     cap.appendChild(img);
   } else {
-    cap.textContent = key.toUpperCase();
+    cap.textContent = keyName(key);
   }
 
   const sub = _panel.querySelector<HTMLElement>("#ed-sub")!;
@@ -529,9 +669,9 @@ function renderPanel(key: string): void {
     }
     if (pending && key && _pathSeed === null) {
       const existing = getBinding(key);
-      if (existing && (existing.app || existing.web_url)) {
-        confirmReplace(key, existing, () =>
-          void assignFromPath(pending, { keepOpen: true, onSaved: () => finishReplace(key, existing) }),
+      if (isMapped(existing)) {
+        confirmReplace(key, existing!, () =>
+          void assignFromPath(pending, { keepOpen: true, onSaved: () => finishReplace(key, existing!) }),
         );
         return;   // wait for Replace/Keep — Done does not close out from under it
       }
@@ -546,6 +686,293 @@ function renderPanel(key: string): void {
   renderPathValue(key, binding);
 
   renderGrid();
+}
+
+// ---------------------------------------------------------------------------
+// PHASE A — the four non-app pages
+// ---------------------------------------------------------------------------
+
+/** The markup of the page for `kind` (empty for "app", which has its own). */
+function otherPaneHtml(kind: EditorKind, binding: KeyBinding | undefined): string {
+  switch (kind) {
+    case "app":
+      return "";
+    case "setting":
+      return `
+        <input class="input" id="ed-cat-search" placeholder="Search Windows settings…" autocomplete="off" spellcheck="false" />
+        <div class="ed-section">${_config?.advanced_mode ? "Windows settings, folders, Control Panel and shortcuts" : "Windows settings, folders and media"}</div>
+        <div id="ed-cat-scroll"><div id="ed-cat-list" class="ed-cat-list"></div>
+          <div class="ed-empty" id="ed-cat-empty" hidden>Nothing matches that.</div></div>`;
+    case "keys":
+      return `
+        <div class="ed-section">Send keys</div>
+        <div class="ed-chord" id="ed-chord">
+          <div class="ed-chord-caps" id="ed-chord-caps"></div>
+          <div class="ed-row">
+            <button class="btn ed-chord-rec" id="ed-chord-rec">Press the keys…</button>
+            <button class="btn btn-primary" id="ed-chord-done" disabled>Done</button>
+          </div>
+          <div class="ed-hint">Hold the whole combination at once — Win, Shift and S together — then let go. The keys still reach Windows while you record, so a screenshot chord takes a screenshot.</div>
+        </div>`;
+    case "command": {
+      const line = binding?.action?.kind === "command" ? binding.action.line : "";
+      return `
+        <div class="ed-section">Run command</div>
+        <input class="input" id="ed-cmd" placeholder="e.g. control.exe /name Microsoft.PowerOptions" autocomplete="off" spellcheck="false" value="${escapeHtml(line)}" />
+        <div class="ed-row">
+          <button class="btn" id="ed-cmd-try" ${line ? "" : "disabled"}>Try it</button>
+          <button class="btn btn-primary" id="ed-cmd-assign" ${line ? "" : "disabled"}>Assign</button>
+        </div>
+        <div class="ed-hint">Runs through cmd.exe with no window and never asks for administrator rights. Advanced mode only.</div>`;
+    }
+    case "special":
+      return `
+        <div class="ed-section">Spaceadom specials</div>
+        <div id="ed-spec-scroll"><div id="ed-spec-list" class="ed-spec-list"></div></div>
+        <div id="ed-spec-move" hidden></div>`;
+  }
+}
+
+/** Wire the page for `kind` after `renderPanel` has put it in the DOM. */
+function wireOtherPane(key: string, kind: EditorKind, binding: KeyBinding | undefined): void {
+  if (!_panel) return;
+  switch (kind) {
+    case "app":
+      return;
+    case "setting": {
+      const search = _panel.querySelector<HTMLInputElement>("#ed-cat-search")!;
+      search.value = _catQuery;
+      search.addEventListener("input", () => { _catQuery = search.value; renderCatalogue(key, binding); });
+      renderCatalogue(key, binding);
+      search.focus();
+      return;
+    }
+    case "keys": {
+      renderChordCaps();
+      _panel.querySelector("#ed-chord-rec")!.addEventListener("click", () => {
+        if (_recordTimer) stopRecording(); else startRecording();
+      });
+      _panel.querySelector("#ed-chord-done")!.addEventListener("click", () => {
+        stopRecording();
+        if (!_chord.length) return;
+        commitAction({ kind: "chord", keys: [..._chord] }, chordLabel(_chord));
+      });
+      return;
+    }
+    case "command": {
+      const input = _panel.querySelector<HTMLInputElement>("#ed-cmd")!;
+      const tryBtn = _panel.querySelector<HTMLButtonElement>("#ed-cmd-try")!;
+      const assign = _panel.querySelector<HTMLButtonElement>("#ed-cmd-assign")!;
+      const sync = () => { const has = !!input.value.trim(); tryBtn.disabled = !has; assign.disabled = !has; };
+      input.addEventListener("input", sync);
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter" && input.value.trim()) assign.click(); });
+      tryBtn.addEventListener("click", () => {
+        const line = input.value.trim();
+        if (!line) return;
+        invoke<string>("run_command_once", { line })
+          .then((toast) => showToast(toast))
+          .catch((e) => showToast(`⚠️ ${String(e)}`));
+      });
+      assign.addEventListener("click", () => {
+        const line = input.value.trim();
+        if (!line) return;
+        const first = (line.split(/\s+/)[0] ?? "Command").split(/[\\/]/).pop() || "Command";
+        commitAction({ kind: "command", line }, cleanLabel(first));
+      });
+      input.focus();
+      return;
+    }
+    case "special":
+      renderSpecialList(key, binding);
+      return;
+  }
+}
+
+/** Save an action binding through the one `commit` path (full replace; the
+ *  browser fields and the icon are normalised to null there). */
+function commitAction(action: Action, label: string): void {
+  void commit({ app: null, web_url: null, label, icon_override: null, action });
+}
+
+// --- Windows setting -------------------------------------------------------
+
+function renderCatalogue(key: string, binding: KeyBinding | undefined): void {
+  const list = _panel?.querySelector<HTMLElement>("#ed-cat-list");
+  const empty = _panel?.querySelector<HTMLElement>("#ed-cat-empty");
+  if (!list || !empty) return;
+  const q = _catQuery.trim().toLowerCase();
+  const advanced = !!_config?.advanced_mode;
+  const current = binding?.action;
+  const rows = CATALOGUE.filter((it) => {
+    if (it.unsure) return false;
+    if (!advanced && !BASIC_GROUPS.has(it.group)) return false;
+    if (!q) return true;
+    const hay = [it.name, it.path ?? "", ...(it.keywords ?? [])].join(" ").toLowerCase();
+    return hay.includes(q);
+  }).slice(0, CATALOGUE_CAP);
+
+  list.innerHTML = "";
+  empty.hidden = rows.length > 0;
+  for (const it of rows) {
+    const action = actionFromItem(it);
+    if (!action) continue;
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "ed-cat-row";
+    row.dataset.cat = it.id;
+    const isCurrent = !!current && JSON.stringify(current) === JSON.stringify(action);
+    if (isCurrent) row.classList.add("current");
+    const name = document.createElement("span");
+    name.className = "ed-cat-name";
+    name.textContent = it.name;
+    const path = document.createElement("span");
+    path.className = "ed-cat-path";
+    path.textContent = it.path
+      ?? (action.kind === "chord" ? chordLabel(action.keys) : action.kind === "brightness" ? "Built-in display" : String(it.target));
+    row.append(name, path);
+    row.addEventListener("click", () => {
+      const existing = getBinding(key);
+      if (isMapped(existing) && !isCurrent) {
+        confirmReplace(key, existing!, () => commitAction(action, it.name));
+        return;
+      }
+      commitAction(action, it.name);
+    });
+    list.appendChild(row);
+  }
+}
+
+// --- Send keys ---------------------------------------------------------------
+
+function renderChordCaps(): void {
+  const caps = _panel?.querySelector<HTMLElement>("#ed-chord-caps");
+  const done = _panel?.querySelector<HTMLButtonElement>("#ed-chord-done");
+  if (!caps) return;
+  caps.innerHTML = "";
+  if (!_chord.length) {
+    const none = document.createElement("span");
+    none.className = "ed-chord-none";
+    none.textContent = _recordTimer ? "Listening…" : "No keys yet";
+    caps.appendChild(none);
+  } else {
+    _chord.forEach((vk, i) => {
+      if (i) { const plus = document.createElement("span"); plus.className = "ed-chord-plus"; plus.textContent = "+"; caps.appendChild(plus); }
+      const k = document.createElement("kbd");
+      k.textContent = vkLabel(vk);
+      caps.appendChild(k);
+    });
+  }
+  if (done) done.disabled = !_chord.length;
+}
+
+function startRecording(): void {
+  const rec = _panel?.querySelector<HTMLButtonElement>("#ed-chord-rec");
+  void invoke("chord_record_start").catch(() => {});
+  let polls = 0;
+  _recordTimer = window.setInterval(() => {
+    polls += 1;
+    if (polls > RECORD_POLLS) { stopRecording(); return; }
+    invoke<number[]>("chord_record_poll")
+      .then((keys) => {
+        if (!_recordTimer) return;
+        if (keys.length) { _chord = keys; renderChordCaps(); }
+      })
+      .catch(() => {});
+  }, 100);
+  if (rec) { rec.textContent = "Recording… press now"; rec.classList.add("is-recording"); }
+  renderChordCaps();
+}
+
+function stopRecording(): void {
+  if (!_recordTimer) return;
+  window.clearInterval(_recordTimer);
+  _recordTimer = 0;
+  void invoke("chord_record_stop").catch(() => {});
+  const rec = _panel?.querySelector<HTMLButtonElement>("#ed-chord-rec");
+  if (rec) { rec.textContent = "Press the keys…"; rec.classList.remove("is-recording"); }
+  renderChordCaps();
+}
+
+// --- Spaceadom special -------------------------------------------------------
+
+function renderSpecialList(key: string, binding: KeyBinding | undefined): void {
+  const list = _panel?.querySelector<HTMLElement>("#ed-spec-list");
+  if (!list) return;
+  list.innerHTML = "";
+  const currentId = binding?.action?.kind === "special" ? binding.action.id : null;
+  for (const spec of SPECIALS) {
+    if (spec.id === "scroll") continue;           // a gesture, not a key
+    const where = keyForSpecial(_config, spec.id);
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "ed-spec-row";
+    row.dataset.spec = spec.id;
+    if (spec.id === currentId) row.classList.add("current");
+    const name = document.createElement("span");
+    name.className = "ed-spec-name";
+    name.textContent = spec.name;
+    if (where) {
+      const w = document.createElement("span");
+      w.className = "ed-spec-where";
+      w.textContent = where === key ? "· this key" : `· on ${keyLabel(where)}`;
+      name.appendChild(w);
+    }
+    const desc = document.createElement("span");
+    desc.className = "ed-spec-desc";
+    desc.textContent = spec.desc;
+    row.append(name, desc);
+    row.addEventListener("click", () => pickSpecial(key, spec.id));
+    list.appendChild(row);
+  }
+}
+
+/**
+ * ONE KEY, ONE ACTION, PER PROFILE — and one SPECIAL on one key: assigning
+ * a special that already sits elsewhere is refused with "Boss Key is on Esc
+ * — move it?", and Move clears the other key first (a full-replace save of
+ * an empty binding through the same `_onSave`), then binds this one.
+ */
+function pickSpecial(key: string, id: string): void {
+  const spec = specialSpec(id);
+  const label = spec?.name ?? id;
+  const other = keyForSpecial(_config, id);
+  const box = _panel?.querySelector<HTMLElement>("#ed-spec-move");
+  const bindHere = () => {
+    const existing = getBinding(key);
+    const same = existing?.action?.kind === "special" && existing.action.id === id;
+    if (same) { closePanel(); return; }
+    if (isMapped(existing)) {
+      confirmReplace(key, existing!, () => commitAction({ kind: "special", id }, label));
+      return;
+    }
+    commitAction({ kind: "special", id }, label);
+  };
+  if (!other || other === key || !box) { bindHere(); return; }
+
+  box.hidden = false;
+  box.innerHTML = "";
+  const text = document.createElement("span");
+  text.className = "ed-spec-move-text";
+  text.textContent = `${label} is on ${keyLabel(other)} — move it?`;
+  const move = document.createElement("button");
+  move.type = "button";
+  move.className = "btn btn-sm btn-primary";
+  move.textContent = "Move";
+  const keep = document.createElement("button");
+  keep.type = "button";
+  keep.className = "btn btn-sm";
+  keep.textContent = "Keep";
+  keep.addEventListener("click", () => { box.hidden = true; });
+  move.addEventListener("click", () => {
+    if (!_onSave) return;
+    console.info(`key-editor: moving special ${id} from ${other} to ${key}`);
+    _onSave(other, { ...EMPTY_BINDING });
+    box.hidden = true;
+    // The other key is clear in `_config` now (main.ts writes into the same
+    // object), so `keyForSpecial` will not find it again.
+    bindHere();
+  });
+  box.append(text, move, keep);
 }
 
 /**
@@ -834,9 +1261,9 @@ function hideReplaceConfirm(): void {
  *  when there is one, so "Replace 'Google Chrome — Arpon' with this?" names
  *  the SPECIFIC thing being lost, not just the app. */
 function replaceLabel(binding: KeyBinding): string {
-  const base = binding.label ||
-    (binding.app ? cleanLabel(binding.app.split(/[\\/]/).pop() || "")
-                 : cleanLabel(binding.web_url || ""));
+  // PHASE A — `bindingLabel` names an action binding too ("Boss Key",
+  // "Win+Shift+S"), through the same rule the board uses.
+  const base = bindingLabel(binding);
   return binding.browser_profile_name ? `${base} — ${binding.browser_profile_name}` : base;
 }
 
@@ -1263,9 +1690,9 @@ function submitPathField(value: string): void {
   const key = _currentKey;
   if (key && _pathSeed === null) {
     const existing = getBinding(key);
-    if (existing && (existing.app || existing.web_url)) {
-      confirmReplace(key, existing, () =>
-        void assignFromPath(value, { keepOpen: true, onSaved: () => finishReplace(key, existing) }),
+    if (isMapped(existing)) {
+      confirmReplace(key, existing!, () =>
+        void assignFromPath(value, { keepOpen: true, onSaved: () => finishReplace(key, existing!) }),
       );
       return;
     }
@@ -1598,8 +2025,8 @@ function wirePathDisc(key: string, path: HTMLInputElement, disc: HTMLButtonEleme
     // committing branch below unguarded — same reasoning as `submitPathField`.
     if (_pathSeed === null) {
       const existing = getBinding(key);
-      if (existing && (existing.app || existing.web_url)) {
-        confirmReplace(key, existing, () => {
+      if (isMapped(existing)) {
+        confirmReplace(key, existing!, () => {
           console.info(`bp: 4b disc pressed — committing ${value} then opening the page`);
           void assignFromPath(value, {
             keepOpen: true,
@@ -1607,7 +2034,7 @@ function wirePathDisc(key: string, path: HTMLInputElement, disc: HTMLButtonEleme
               if (_currentKey !== key) return;
               // Page 1 first, so the Undo row this offers is there waiting
               // when the user backs out of the profile page with ←.
-              finishReplace(key, existing);
+              finishReplace(key, existing!);
               openProfilePage(key, null);
             },
           });
@@ -1692,7 +2119,7 @@ function renderGrid(): void {
         // already `.current` is a no-op in effect and asking about it would be
         // noise, so that case still binds instantly like every empty key does.
         const existing = key ? getBinding(key) : undefined;
-        const alreadyBound = !!(existing && (existing.app || existing.web_url));
+        const alreadyBound = isMapped(existing);
         const sameTarget = existing?.app === app.path;
         if (alreadyBound && !sameTarget && key) {
           confirmReplace(key, existing!, () => void commit(binding, {
@@ -1886,7 +2313,7 @@ async function commit(binding: KeyBinding, opts: CommitOptions = {}): Promise<vo
   if (!opts.skipConflict) {
     try {
       const conflict = await invoke<ConflictResult>("show_conflict_check", {
-        keyCombo: `Space+${key.toUpperCase()}`,
+        keyCombo: `Space+${keyName(key)}`,
       });
       if (conflict.has_conflict) {
         showConflict(conflict, binding, opts);
@@ -1917,6 +2344,10 @@ async function commit(binding: KeyBinding, opts: CommitOptions = {}): Promise<vo
       ?? (binding.web_url && currentBinding(key)?.web_url === binding.web_url
         ? currentBinding(key)?.site_icon ?? null
         : null),
+    // PHASE A — the action, stated. An app/link commit passes none and
+    // therefore CLEARS whatever action was there: it described the target
+    // being replaced, exactly like the browser pin.
+    action: binding.action ?? null,
   };
 
   console.info(
@@ -1973,12 +2404,12 @@ async function commit(binding: KeyBinding, opts: CommitOptions = {}): Promise<vo
   // as PROBLEM 199.
   _pathSeed = null;
 
-  const label = full.label ?? key.toUpperCase();
+  const label = full.label ?? keyName(key);
   showToast(
     opts.toast ??
-      (full.app || full.web_url
-        ? `✅ Space+${key.toUpperCase()} → ${label}`
-        : `🗑️ Cleared: Space+${key.toUpperCase()}`),
+      (full.app || full.web_url || full.action
+        ? `✅ Space+${keyName(key)} → ${label}`
+        : `🗑️ Cleared: Space+${keyName(key)}`),
   );
 
   // Whatever the caller wanted to do with a save that actually happened. Runs

@@ -9,6 +9,36 @@
 // Core config types (mirrors AppConfig, Profile, KeyBinding in schema.rs)
 // ---------------------------------------------------------------------------
 
+/**
+ * PHASE A (2026-09-18) — what a key does when Space is held, beyond "open
+ * this app or link". Mirrors Rust's `Action` (schema.rs): `kind` is the
+ * serde tag, snake_case.
+ *
+ *   uri        ms-settings:… / shell:… / any URI Windows opens
+ *   chord      virtual-key codes in press order ([0x5B,0x10,0x53] = Win+Shift+S)
+ *   command    a command line via cmd.exe /C — Advanced mode only (UI rule)
+ *   brightness ±delta on the internal panel (WMI)
+ *   special    one of `SPECIAL_IDS` — the twelve built-in specials
+ */
+export type Action =
+  | { kind: "uri"; target: string }
+  | { kind: "chord"; keys: number[] }
+  | { kind: "command"; line: string }
+  | { kind: "brightness"; delta: number }
+  | { kind: "special"; id: string };
+
+/** The twelve built-in specials, in Rust's `SPECIAL_IDS` order. */
+export const SPECIAL_IDS = [
+  "boss_key", "pip", "pip_fullscreen", "force_close", "cycle_profile", "search",
+  "pause", "voice_typing", "screenshot", "osk", "scroll_top", "scroll_bottom",
+] as const;
+export type SpecialId = (typeof SPECIAL_IDS)[number];
+
+/** True when a binding points at anything at all — Rust's `is_mapped`. */
+export function isMapped(b: KeyBinding | undefined | null): boolean {
+  return !!(b && (b.action || b.app || b.web_url));
+}
+
 export interface KeyBinding {
   /** Executable file name or absolute path. null if not mapped to an app. */
   app: string | null;
@@ -52,6 +82,13 @@ export interface KeyBinding {
    * edit of the key tries once more.
    */
   site_icon?: string | null;
+  /**
+   * PHASE A — the key's action when it is not an app or a link. Absent/null
+   * on every binding written before 2026-09-18, and absent/null MEANS the
+   * legacy `app` / `web_url` fields are the action. When set, `app` and
+   * `web_url` are null (the editor writes one or the other, never both).
+   */
+  action?: Action | null;
 }
 
 /** PROBLEM 267 — one App-exceptions row's scope. Mirrors `ExceptionScope`. */
@@ -100,6 +137,12 @@ export interface Profile {
    * fail-fast before the round trip.
    */
   emoji?: string | null;
+  /**
+   * PHASE A — has Rust seeded the twelve default specials into `bindings`?
+   * Rust sets it on load; the UI never writes it. Absent = not yet (a config
+   * that has not been through a Phase A load).
+   */
+  specials_seeded?: boolean;
 }
 
 export interface AppConfig {
@@ -245,6 +288,11 @@ export interface AppConfig {
    * even though the two rows sit side by side in Settings.
    */
   hud_show_specials?: boolean;
+  /**
+   * PHASE A — Advanced mode: the key editor shows "Run command" and the full
+   * Windows catalogue. Absent = off. UI only; Rust ignores it.
+   */
+  advanced_mode?: boolean;
   /**
    * How many RINGS of app shortcuts the Space HUD lays out. Default "auto".
    *

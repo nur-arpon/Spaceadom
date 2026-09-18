@@ -12,9 +12,11 @@
  * the user saw in the previous attempt.
  */
 import { invoke } from "@tauri-apps/api/core";
-import { boardSpecial, boardCardIndex, toggleSpecialCard } from "./special-cards";
+import { SPECIAL_SHORT, keyLabel } from "./special-cards";
+import { chordLabel } from "./vk-names";
 import { showToast } from "./toast";
-import type { AppConfig, KeyBinding, Profile } from "../types.ts";
+import { isMapped } from "../types.ts";
+import type { Action, AppConfig, KeyBinding, Profile } from "../types.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -39,6 +41,10 @@ const BINDING_RESET = {
   browser_exe: null,
   browser_profile_dir: null,
   browser_profile_name: null,
+  // PHASE A — an app or link dropped on a key replaces whatever ACTION was
+  // there (a special, a setting, a chord) for the same reason the three
+  // fields above are reset: it described the target being replaced.
+  action: null,
 } as const;
 
 export function cleanLabel(raw: string): string {
@@ -70,7 +76,7 @@ export function cleanLabel(raw: string): string {
 
 const ROWS: [string, string, number][][] = [
   [
-    ["`", "grave", 1], ["1", "1", 1], ["2", "2", 1], ["3", "3", 1],
+    ["`", "backtick", 1], ["1", "1", 1], ["2", "2", 1], ["3", "3", 1],
     ["4", "4", 1], ["5", "5", 1], ["6", "6", 1], ["7", "7", 1],
     ["8", "8", 1], ["9", "9", 1], ["0", "0", 1], ["-", "minus", 1],
     ["=", "equal", 1], ["⌫", "backspace", 2], ["Del", "delete", 1],
@@ -100,27 +106,54 @@ const ROWS: [string, string, number][][] = [
   ],
 ];
 
-/** Keys that carry alpha bindings (a–z) — the only clickable ones. */
+/** Keys that carry alpha bindings (a–z). */
 const ALPHA_KEYS = new Set("abcdefghijklmnopqrstuvwxyz".split(""));
 
 /**
- * Preset special functions, labelled on the keys they actually live on.
- * The user asked for these to be discoverable on the board, not only in a
- * tray (V13_TO_V14_METHOD §3.5). Esc is not on this board, so it stays in
- * the bottom tray with the rest of the reference list.
+ * PHASE A (2026-09-18) — the keys that are NOT bindable: Space is the
+ * modifier, and the two Fn keys never reach Windows (no virtual key). Every
+ * other key on the board is `.bindable` exactly like a letter, and its
+ * sub-label is derived from its binding — the twelve specials Rust seeds
+ * (`schema::DEFAULT_SPECIALS`) show their short word ("PiP Cycle", "Snip",
+ * "Keys"…) on the keys they sit on, an empty key shows nothing. The static
+ * `SPECIAL_ON_KEY` table this replaces is gone: which key a special lives on
+ * is the profile's business now. Rust's `hook::keys` test reads this file's
+ * ROWS and checks every id outside this set has a VK row.
  */
-const SPECIAL_ON_KEY: Record<string, string> = {
-  grave:     "PiP Cycle",
-  backspace: "Force Close",
-  comma:     "Search",
-  period:    "Pause",
-  semicolon: "Dictate",
-  slash:     "Snip",
-  quote:     "Keys",
-  up:        "Scroll Top",
-  down:      "Scroll Btm",
-  ralt:      "Profile",
-};
+const NO_VK = new Set(["space", "lfn", "rfn"]);
+
+/** The display label of every key on the board, by id (from ROWS). */
+const KEY_DISPLAY: Record<string, string> = {};
+ROWS.forEach((row) => row.forEach(([label, key]) => { KEY_DISPLAY[key] = label; }));
+
+/** "Space + Q" / "Space + `" — the name a key goes by in titles and toasts. */
+export function keyName(key: string): string {
+  return ALPHA_KEYS.has(key) ? key.toUpperCase() : (KEY_DISPLAY[key] ?? keyLabel(key));
+}
+
+/** The short label under a key for an ACTION binding with no label. */
+export function actionShortLabel(action: Action): string {
+  switch (action.kind) {
+    case "special": return SPECIAL_SHORT[action.id] ?? action.id;
+    case "uri": return action.target.replace(/^ms-settings:/i, "").replace(/^shell:/i, "");
+    case "chord": return chordLabel(action.keys);
+    case "command": return (action.line.trim().split(/\s+/)[0] ?? "Command").split(/[\\/]/).pop() || "Command";
+    case "brightness": return action.delta >= 0 ? `Bright +${action.delta}` : `Bright −${-action.delta}`;
+  }
+}
+
+/**
+ * ONE naming rule for a binding on every page surface (mirrors Rust's
+ * `specials::binding_name`): the label, else the action's short name, else
+ * the app's or the URL's cleaned name.
+ */
+export function bindingLabel(binding: KeyBinding): string {
+  if (binding.label) return binding.label;
+  if (binding.action) return actionShortLabel(binding.action);
+  if (binding.app) return cleanLabel(binding.app.split(/[\\/]/).pop() || "");
+  if (binding.web_url) return cleanLabel(binding.web_url);
+  return "";
+}
 
 // Board geometry (mockup: U=56, G=10).
 // DESIGN_W is 1048, not the 1046 that 16 clean units would give: the
@@ -245,10 +278,8 @@ export function updateMatrix(container: HTMLElement, config: AppConfig): void {
   _config = config;
   // Re-skin the alpha cells in place — a full re-render would replay the
   // cascade and flash the whole board on every binding change.
-  container.querySelectorAll<HTMLDivElement>(".key[data-key]").forEach((cell) => {
-    const key = cell.dataset.key!;
-    if (!ALPHA_KEYS.has(key)) return;
-    applyKeyState(cell, key);
+  container.querySelectorAll<HTMLDivElement>(".key.bindable[data-key]").forEach((cell) => {
+    applyKeyState(cell, cell.dataset.key!);
   });
 }
 
@@ -316,35 +347,14 @@ function createKeyCell(
 
   if (key === "space") {
     cell.classList.add("space");
-  } else if (ALPHA_KEYS.has(key)) {
+  } else if (!NO_VK.has(key)) {
+    // PHASE A — every key with a virtual key is bindable, letter or not.
+    // Pressing a key that carries a special opens the editor on its
+    // "Spaceadom special" page, which shows the card's description there
+    // (PROBLEM 148's "pressing it explains it", one surface over).
     cell.classList.add("bindable");
     applyKeyState(cell, key);
     attachKeyListeners(cell, key);
-  } else if (SPECIAL_ON_KEY[key]) {
-    // Preset special function — labelled, but not user-rebindable yet
-    // (rebinding the presets is explicitly deferred work).
-    cell.classList.add("special");
-    const sub = document.createElement("span");
-    sub.className = "key-app";
-    const txt = document.createElement("span");
-    txt.textContent = SPECIAL_ON_KEY[key];
-    sub.appendChild(txt);
-    cell.appendChild(sub);
-    cell.title = `Space + ${label} — ${SPECIAL_ON_KEY[key]}`;
-
-    // PROBLEM 148 — pressing it explains it (spec §4). These keys are not
-    // bindable, so the press was doing nothing but a ripple; the card is the
-    // only thing on the board that ever tells you what a special DOES.
-    const spec = boardSpecial(key);
-    const idx = boardCardIndex(key);
-    if (spec && idx >= 0) {
-      cell.dataset.spec = spec.id;
-      cell.setAttribute("aria-expanded", "false");
-      cell.addEventListener("click", (e) => {
-        e.stopPropagation();
-        toggleSpecialCard(cell, spec, idx);
-      });
-    }
   }
 
   return cell;
@@ -352,25 +362,23 @@ function createKeyCell(
 
 function applyKeyState(cell: HTMLDivElement, key: string): void {
   const binding = getBinding(key);
-  const isMapped = !!(binding && (binding.app || binding.web_url));
+  const mapped = isMapped(binding);
+  const special = binding?.action?.kind === "special";
 
-  cell.classList.toggle("bound", isMapped);
+  // `.bound` = terracotta (an app, a link, a setting, a chord, a command);
+  // `.special` = sage, the look the preset specials have always had.
+  cell.classList.toggle("bound", mapped && !special);
+  cell.classList.toggle("special", special);
   cell.classList.remove("drop-target");
 
   // Drop any existing sub-label, then re-add it if the key is bound.
   cell.querySelector(".key-app")?.remove();
-  if (!isMapped) {
-    cell.title = `Space + ${key.toUpperCase()} — not bound`;
+  if (!mapped) {
+    cell.title = `Space + ${keyName(key)} — not bound`;
     return;
   }
 
-  const label =
-    binding!.label ||
-    (binding!.app
-      ? cleanLabel(binding!.app.split(/[\\/]/).pop() || "")
-      : binding!.web_url
-        ? cleanLabel(binding!.web_url)
-        : "URL");
+  const label = bindingLabel(binding!) || "URL";
 
   const sub = document.createElement("span");
   sub.className = "key-app";
@@ -396,7 +404,7 @@ function applyKeyState(cell: HTMLDivElement, key: string): void {
   sub.appendChild(txt);
   cell.appendChild(sub);
 
-  cell.title = `Space + ${key.toUpperCase()} — ${label}`;
+  cell.title = `Space + ${keyName(key)} — ${label}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -490,7 +498,7 @@ async function assignAppBinding(
 
   applyKeyState(cell, key);
   animateKeyPop(cell);
-  showToast(`⚡ Assigned: ${label} → Space+${key.toUpperCase()}`);
+  showToast(`⚡ Assigned: ${label} → Space+${keyName(key)}`);
   if (_onConfigChange) _onConfigChange();
 }
 
@@ -512,7 +520,7 @@ async function assignUrlBinding(
   });
   applyKeyState(cell, key);
   animateKeyPop(cell);
-  showToast(`🌐 URL mapped: ${label} → Space+${key.toUpperCase()}`);
+  showToast(`🌐 URL mapped: ${label} → Space+${keyName(key)}`);
   if (_onConfigChange) _onConfigChange();
 }
 
@@ -601,7 +609,7 @@ function clearBinding(key: string, cell: HTMLDivElement): void {
   });
   applyKeyState(cell, key);
   animateKeyPop(cell);
-  showToast(`🗑️ Cleared: Space+${key.toUpperCase()}`);
+  showToast(`🗑️ Cleared: Space+${keyName(key)}`);
   if (_onConfigChange) _onConfigChange();
 }
 

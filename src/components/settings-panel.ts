@@ -505,6 +505,8 @@ function render(): void {
   // they have it while reports keep going out. That is the one bug in this
   // panel nobody could see from the outside.
   const dontSendLogs = appConfig.send_logs === false;
+  // PHASE A — Advanced mode. Absent = off (schema.rs `advanced_mode`).
+  const advanced = appConfig.advanced_mode === true;
   document.body.classList.toggle("show-around", showAround);
 
   // THE 2026-09-01 REDESIGN, and the order is the owner's, not a convenience.
@@ -581,6 +583,7 @@ function render(): void {
           ${toggleRow("sound",     "Sound ticks",       sound,     2)}
           ${toggleRow("motion",    "Visual effects",    effects,   3)}
           ${toggleRow("hideboard", "Hide the keyboard", hideBoard, 4)}
+          ${toggleRow("advanced",  "Advanced mode",     advanced,  5)}
         </div>
       </div>
 
@@ -984,6 +987,17 @@ function render(): void {
     // personality layer is never the one switch you cannot hear.
     if (appConfig.fun_mode) sfx.toggleOn("fun"); else sfx.toggleOff("fun");
     applyLook();          // the living sky exists only while fun is on
+    await persistConfig();
+    render();
+  });
+
+  // PHASE A — Advanced mode: shows "Run command" and the full catalogue in
+  // the key editor. UI-only, so persistConfig() is the whole wiring; the key
+  // editor reads `advanced_mode` off the config it is handed on every open.
+  wireToggle("advanced", async () => {
+    if (!appConfig) return;
+    appConfig.advanced_mode = !(appConfig.advanced_mode === true);
+    if (appConfig.advanced_mode) sfx.toggleOn("advanced"); else sfx.toggleOff("advanced");
     await persistConfig();
     render();
   });
@@ -2412,6 +2426,8 @@ const DESC: Record<string, string> = {
     "Four looks for the whole app, pop-ups included: Auto follows Windows' own light/dark setting (Earthy in light mode, Starry night in dark), or pick a fixed look yourself — Earthy daylight, a Warcry of iron and war-banners, or a Starry night sky.",
   // Not in the spec — this setting is new, so the copy is written to match its
   // voice: what you get, and how to come back.
+  advanced:
+    "Shows Run command and the full catalogue in the key editor. Run command lets a key run any command line, with no window and never as administrator; the full catalogue adds Control Panel pages and system shortcuts to the Windows-setting search. Off keeps the editor to apps, links, everyday settings, key chords and Spaceadom's own specials.",
   hideboard:
     "Clears the whole dashboard away and leaves just the sky. Your shortcuts keep working exactly as they are — press Esc, the small arrow in the corner, or the settings gear, which stays on screen, to bring everything back.",
   wpm:

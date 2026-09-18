@@ -15,6 +15,10 @@ pub mod pointer;
 /// programs where middle-drag already orbits or pans). Separate from the
 /// user's App exceptions by design; see the module header.
 pub mod orbit_apps;
+/// PHASE A — the non-letter key table (`key_id_for_vk` / `vk_for_key_id`),
+/// the "Space owns this VK" bitmap and the chord recorder's switch.
+pub mod keys;
+pub use keys::{bound_vk, key_id_for_vk, publish_bound_vks, vk_for_key_id};
 
 use crossbeam_channel::Sender;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -25,33 +29,21 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[derive(Debug, Clone)]
 pub enum KeyCombo {
-    Alpha(char),      // Space + a–z
-    Special(String),  // Space + F1–F12, Enter, Tab, Left, Right (user-configurable)
-    Escape,           // Space + Esc   → Boss Key
-    Backtick,         // Space + `     → PiP
-    Comma,            // Space + ,     → Focus Engine
-    RightAlt,         // Space + RAlt  → Profile Cycle
-    UpArrow,          // Space + Up    → Scroll-Top (double-tap)
-    DownArrow,        // Space + Down  → Scroll-Bottom (double-tap)
-    Period,           // Space + .     → Bypass Toggle
-    Semicolon,        // Space + ;     → Voice typing (Windows dictation, Win+H)
-    Slash,            // Space + /     → Screenshot (Windows snip, Win+Shift+S)
-    Quote,            // Space + '     → On-screen keyboard (Windows OSK, Win+Ctrl+O)
-    Backspace,        // Space + ⌫     → Force Close (Alt+F4)
-    /// Space + Tab → FULLSCREEN-PRESERVING PiP (pip.rs §9, PROBLEM 219).
-    ///
-    /// A FIXED special, like Esc and the backtick — not one of the optional
-    /// user-bindable ones any more. Tab used to be bit 13 of
-    /// `BOUND_SPECIALS`, i.e. a key the user could point at an app through
-    /// `special_keys`, which nothing in the UI has ever been able to write
-    /// (see the `BOUND_SPECIALS` comment). The owner claimed it for this
-    /// feature on 2026-08-29 precisely because it was unbound in practice.
-    ///
-    /// `allow(dead_code)` because 1.0.91 comments out the only place this
-    /// variant is CONSTRUCTED (the `VK_TAB` arm of the combo match); the
-    /// engine still matches on it. 1.0.92 constructs it again.
-    #[allow(dead_code)]
-    Tab,
+    /// Space + a–z. The engine looks the letter up in the active profile.
+    Alpha(char),
+    /// Space + F1–F12, Enter, Left, Right through the LEGACY `special_keys`
+    /// map (`AppConfig.special_keys`), gated hook-side by `BOUND_SPECIALS`.
+    /// Left as it was; Phase A did not migrate it.
+    Special(String),
+    /// PHASE A (2026-09-18) — Space + ANY non-letter key Space owns
+    /// (`keys::BOUND_VKS`, published from the active profile's bindings).
+    /// Replaces the twelve fixed variants (`Escape`, `Backtick`, `Comma`,
+    /// `RightAlt`, `UpArrow`, `DownArrow`, `Period`, `Semicolon`, `Slash`,
+    /// `Quote`, `Backspace`, `Tab`) that each named ONE hard-coded special:
+    /// the engine now maps the VK to its key id (`keys::key_id_for_vk`) and
+    /// runs whatever the profile bound there — a seeded special by default,
+    /// exactly as before. `u16` is `Copy`: no heap in the callback.
+    Vk(u16),
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +100,12 @@ pub enum HookEvent {
     /// there and PROBLEM 58/134/184), so the batch is composed and sent on the
     /// ENGINE thread, where it is also legal to log about it.
     MiddleButtonTap,
+    /// PHASE A — a keystroke seen while `keys::RECORDING` is on: `(vk, is
+    /// down)`. The key was PASSED THROUGH untouched (Space included, no hold
+    /// started); the engine's `chord_recorder` keeps the held set so the key
+    /// editor's "Press the keys…" can read the chord back. Never sent
+    /// otherwise.
+    RawKey(u16, bool),
 }
 
 // ---------------------------------------------------------------------------
@@ -2427,27 +2425,14 @@ pub static HOOK_EVICTIONS_TOTAL: AtomicU32 = AtomicU32::new(0);
 // Win32 Virtual Key constants we care about
 // ---------------------------------------------------------------------------
 const VK_SPACE: u16 = 0x20;
-const VK_ESCAPE: u16 = 0x1B;
-const VK_OEM_3: u16 = 0xC0;  // backtick / ~
-const VK_OEM_COMMA: u16 = 0xBC;
-const VK_OEM_PERIOD: u16 = 0xBE;
-/// `;` on a US layout (`VK_OEM_1`) — Space + ; is voice typing (2026-09-17).
-const VK_OEM_1: u16 = 0xBA;
-/// `/` on a US layout (`VK_OEM_2`) — Space + / is the screenshot (2026-09-17).
-const VK_OEM_2: u16 = 0xBF;
-/// `'` on a US layout (`VK_OEM_7`) — Space + ' is the on-screen keyboard (2026-09-18).
-const VK_OEM_7: u16 = 0xDE;
-const VK_RMENU: u16 = 0xA5;  // Right Alt
-const VK_UP: u16 = 0x26;
-const VK_DOWN: u16 = 0x28;
-const VK_BACK: u16 = 0x08;   // Backspace → Force Close
+// PHASE A (2026-09-18) — the twelve per-special constants that used to sit
+// here (VK_ESCAPE, VK_OEM_3, VK_OEM_COMMA, VK_OEM_PERIOD, VK_OEM_1, VK_OEM_2,
+// VK_OEM_7, VK_UP, VK_DOWN, VK_BACK, VK_TAB) are rows of `keys::KEY_TABLE`
+// now; the callback consults the bitmap, not a constant per key.
+const VK_RMENU: u16 = 0xA5;  // Right Alt — the one modifier Space may combine with
 const VK_LEFT: u16 = 0x25;
 const VK_RIGHT: u16 = 0x27;
 const VK_RETURN: u16 = 0x0D;   // Enter
-// `allow` because 1.0.91 comments out the ONLY use of this constant (the
-// Space+Tab split — see the combo match). Unused in that build, used in 1.0.92.
-#[allow(dead_code)]
-const VK_TAB: u16 = 0x09;
 // F1–F12
 const VK_F1: u16 = 0x70;
 const VK_F12: u16 = 0x7B;
@@ -4197,6 +4182,20 @@ unsafe extern "system" fn kb_hook_proc(
         }
     }
 
+    // PHASE A — the chord recorder. While the key editor is recording, EVERY
+    // key is reported to the engine and passed through untouched: no hold,
+    // no suppression, Space included. Two relaxed loads on the way in (the
+    // flag, then the deadline only when the flag is set), and the flag
+    // clears itself once the deadline passes, so a page that never called
+    // stop cannot leave the hook in this state. Placed BELOW the cookie test
+    // and `track_modifier` (a modifier released during a recording must not
+    // stay latched) and ABOVE the Space-up block (a Space pressed while
+    // recording is just a key being recorded).
+    if keys::recording_at(now) {
+        send_event(HookEvent::RawKey(vk, is_down));
+        return CallNextHookEx(None, n_code, w_param, l_param);
+    }
+
     // ===================================================================
     // SPACE UP — PROBLEM 218: this block sits ABOVE the three stand-down
     // gates, and that position is load-bearing.
@@ -4298,9 +4297,17 @@ unsafe extern "system" fn kb_hook_proc(
         if is_down {
             SUPPRESS_BYPASS.fetch_add(1, Ordering::Relaxed);
         }
-        // Still allow Space + . to toggle bypass mode OFF!
-        if vk == VK_OEM_PERIOD && is_down && (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(VK_SPACE as i32) as u16 & 0x8000) != 0 {
-            send_event(HookEvent::KeyCombo(KeyCombo::Period));
+        // Still allow Space + <the pause key> to toggle bypass mode OFF!
+        // PHASE A — the pause special is remappable, so the key is
+        // `keys::PAUSE_VK` (published with the bitmap; `.` by default, 0 =
+        // no pause key anywhere), and it may be a letter.
+        let pause_vk = keys::PAUSE_VK.load(Ordering::Relaxed);
+        if pause_vk != 0 && vk == pause_vk && is_down && (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(VK_SPACE as i32) as u16 & 0x8000) != 0 {
+            let combo = match vk_to_char(vk) {
+                Some(ch) => KeyCombo::Alpha(ch),
+                None => KeyCombo::Vk(vk),
+            };
+            send_event(HookEvent::KeyCombo(combo));
             return LRESULT(1);
         }
         return CallNextHookEx(None, n_code, w_param, l_param);
@@ -4553,25 +4560,26 @@ unsafe extern "system" fn kb_hook_proc(
         }
 
         // --- Map VK to combo variant ---
+        //
+        // PHASE A (2026-09-18) — the twelve fixed arms (`VK_ESCAPE =>
+        // KeyCombo::Escape`, …, `VK_TAB => KeyCombo::Tab`) are ONE arm now:
+        // `v if bound_vk(v) => KeyCombo::Vk(v)`, over the bitmap the config
+        // publishes (`keys::BOUND_VKS`). Tab goes through the same table —
+        // it is seeded as the fullscreen-PiP key, so nothing changes for a
+        // user, and a user who REMOVES that binding gets a Tab that types a
+        // Tab again, which the 1.0.91/1.0.92 comment-in/comment-out dance
+        // used to need a build for. The legacy `special_keys` arms come
+        // FIRST so an Enter / F-key / arrow bound the old way keeps its old
+        // meaning; they are also in the bitmap, so the page's fallback sees
+        // them too. Letters are unchanged.
         let combo_opt: Option<KeyCombo> = match vk {
-            VK_ESCAPE => Some(KeyCombo::Escape),
-            VK_OEM_3 => Some(KeyCombo::Backtick),
-            VK_OEM_COMMA => Some(KeyCombo::Comma),
-            VK_OEM_PERIOD => Some(KeyCombo::Period),
-            VK_OEM_1 => Some(KeyCombo::Semicolon),
-            VK_OEM_2 => Some(KeyCombo::Slash),
-            VK_OEM_7 => Some(KeyCombo::Quote),
-
-            VK_RMENU => Some(KeyCombo::RightAlt),
-            VK_UP    => Some(KeyCombo::UpArrow),
-            VK_DOWN  => Some(KeyCombo::DownArrow),
-            VK_BACK  => Some(KeyCombo::Backspace),
             v if is_alpha_vk(v) => {
                 let ch = vk_to_char(v);
                 ch.map(KeyCombo::Alpha)
             }
-            // Special keys (F1–F12, Enter, Tab, Left, Right) — dispatched ONLY
-            // if the user has actually bound them.
+            // Special keys (F1–F12, Enter, Left, Right) through the LEGACY
+            // `special_keys` map — dispatched ONLY if the user has actually
+            // bound them there.
             //
             // PROBLEM 180: this comment has said "only dispatch if the user has
             // bound them" since 1.0.27 while the arms below dispatched
@@ -4580,28 +4588,14 @@ unsafe extern "system" fn kb_hook_proc(
             // — far too late to pass anything through. `BOUND_SPECIALS` moves
             // that decision to where it can still matter.
             VK_RETURN if special_bound(12) => Some(KeyCombo::Special("enter".into())),
-            // Tab is a FIXED special since 2026-08-29 (pip.rs §9, PROBLEM
-            // 210) — fullscreen-preserving PiP. It is no longer gated on
-            // `special_bound(13)` because it is no longer optional; it sits
-            // with Esc, `, ⌫ and the rest, all of which are dispatched
-            // unconditionally. `special_bit` no longer maps "tab", so bit 13
-            // can never be set and gating on it would make this key dead.
-            //
-            // SPACE+TAB SPLIT — 1.0.91 ships this line COMMENTED OUT on
-            // purpose. With no mapping here the hook never emits
-            // `KeyCombo::Tab`, so `handle_fullscreen_pip` is unreachable and
-            // Space+Tab types a normal Tab exactly as it did in 1.0.90. The
-            // feature's code stays in the tree; 1.0.92 = this exact tree with
-            // this line and the `("Tab", "Fullscreen PiP")` row in
-            // `engine::HUD_SPECIALS` uncommented. Pending the owner's verdict
-            // after testing 1.0.92 — do not delete either line.
-            VK_TAB    => Some(KeyCombo::Tab), // ← 1.0.92 ON / 1.0.91 commented out
             VK_LEFT   if special_bound(14) => Some(KeyCombo::Special("left".into())),
             VK_RIGHT  if special_bound(15) => Some(KeyCombo::Special("right".into())),
             v if (VK_F1..=VK_F12).contains(&v) && special_bound(v - VK_F1) => {
                 let n = v - VK_F1 + 1;
                 Some(KeyCombo::Special(format!("f{n}")))
             }
+            // PHASE A — every non-letter key Space owns in the active profile.
+            v if bound_vk(v) => Some(KeyCombo::Vk(v)),
             _ => None,
         };
 
@@ -5348,37 +5342,57 @@ pub(crate) fn drain_own_holds_reaped() -> u32 {
     OWN_HOLDS_REAPED.swap(0, Ordering::Relaxed)
 }
 
+/// The keys the own-window fallback NEVER takes from the dashboard page,
+/// bound or not: Escape, Enter, Tab, Backspace, the four arrows and Right
+/// Alt. They are how a user closes a popover, submits a name, moves between
+/// fields and edits text; a fallback that ate them would break the dashboard
+/// to add a shortcut. (Space+⌫ is Force Close and Space+↑/↓ scroll — none
+/// worth swallowing a caret key inside a text field for.) The two tests
+/// below read from THIS list.
+pub(crate) const OWN_WINDOW_NEVER_INJECTED: &[u16] =
+    &[0x1B, 0x0D, 0x09, 0x08, 0x25, 0x26, 0x27, 0x28, 0xA5];
+
 /// VK → combo, for the SUBSET of the hook's map that is safe to take away
 /// from a focused web page.
 ///
 /// Deliberately smaller than the callback's map, and every omission is a
 /// decision, not an oversight:
 ///
-/// * `Escape`, `Enter`, `Tab` — the brief's exclusion list. They are how a
-///   user closes a popover, submits a name and moves between fields; a
-///   fallback that ate them would break the dashboard to add a shortcut.
-/// * Arrows, `Backspace`, Right Alt — the same reasoning. Space+⌫ is
-///   Force Close (Alt+F4) and Space+↑/↓ scroll; none is worth swallowing a
-///   caret key inside a text field for.
-/// * F1–F12 specials — they are gated on `BOUND_SPECIALS`, which is hook-side
-///   state the page has no business re-deriving.
-/// * DIGITS — `vk_to_char` maps A–Z only, so the hook produces NO event for a
-///   digit either. Intercepting one would swallow a keystroke to do nothing.
+/// * `OWN_WINDOW_NEVER_INJECTED` — see there.
+/// * F1–F12 / Enter / arrows through the LEGACY `special_keys` map — gated on
+///   `BOUND_SPECIALS`, hook-side state the page has no business re-deriving
+///   (Enter and the arrows are excluded above anyway; an F-key the user
+///   bound in the active PROFILE is in the bitmap and does go through).
+/// * A DIGIT or punctuation key nobody bound — not in the bitmap, so the
+///   hook produces no event for it either. Intercepting one would swallow
+///   a keystroke to do nothing.
 ///
-/// What is left is what the ring actually shows: the letters, plus the three
-/// punctuation combos that have no meaning in a text field beyond the
-/// character they type (which the rollover window already protects).
+/// What is left is what the ring actually shows: the letters, plus every
+/// non-letter key the active profile binds (`keys::BOUND_VKS`) that is not
+/// on the exclusion list.
 pub(crate) fn own_window_combo_for_vk(vk: u16) -> Option<KeyCombo> {
-    match vk {
-        VK_OEM_3 => Some(KeyCombo::Backtick),
-        VK_OEM_COMMA => Some(KeyCombo::Comma),
-        VK_OEM_PERIOD => Some(KeyCombo::Period),
-        VK_OEM_1 => Some(KeyCombo::Semicolon),
-        VK_OEM_2 => Some(KeyCombo::Slash),
-        VK_OEM_7 => Some(KeyCombo::Quote),
-        v if is_alpha_vk(v) => vk_to_char(v).map(KeyCombo::Alpha),
-        _ => None,
+    let bits = [
+        keys::BOUND_VKS[0].load(Ordering::Relaxed),
+        keys::BOUND_VKS[1].load(Ordering::Relaxed),
+        keys::BOUND_VKS[2].load(Ordering::Relaxed),
+        keys::BOUND_VKS[3].load(Ordering::Relaxed),
+    ];
+    own_window_combo_for_vk_in(vk, &bits)
+}
+
+/// The pure half: the same decision over a bitmap VALUE, so the tests can
+/// hand it a fixture instead of racing the global.
+pub(crate) fn own_window_combo_for_vk_in(vk: u16, bound: &[u64; 4]) -> Option<KeyCombo> {
+    if OWN_WINDOW_NEVER_INJECTED.contains(&vk) {
+        return None;
     }
+    if is_alpha_vk(vk) {
+        return vk_to_char(vk).map(KeyCombo::Alpha);
+    }
+    if keys::bound_in(bound, vk) {
+        return Some(KeyCombo::Vk(vk));
+    }
+    None
 }
 
 /// The page saw Space go down. Returns `true` if the fallback took the hold.
@@ -7887,8 +7901,9 @@ mod repair_teardown_tests {
 #[cfg(test)]
 mod own_window_fallback_tests {
     use super::{
-        own_window_combo_for_vk, own_window_hold_is_ours, own_window_space_down_accepted,
-        KeyCombo, OWN_WINDOW_DEDUPE_MS, OWN_WINDOW_MAX_HOLD_MS,
+        keys, own_window_combo_for_vk_in, own_window_hold_is_ours,
+        own_window_space_down_accepted, KeyCombo, OWN_WINDOW_DEDUPE_MS, OWN_WINDOW_MAX_HOLD_MS,
+        OWN_WINDOW_NEVER_INJECTED,
     };
 
     /// The 2026-09-07 shape, and the only one that may be accepted: our window
@@ -7968,44 +7983,82 @@ mod own_window_fallback_tests {
         ));
     }
 
+    /// A fixture bitmap: a freshly seeded profile — the twelve default
+    /// specials' keys and nothing else — plus the digit 7 bound by hand.
+    fn seeded_bitmap() -> [u64; 4] {
+        use crate::config::{Action, AppConfig, BindingMap, KeyBinding, Profile};
+        let mut cfg = AppConfig::default();
+        cfg.profiles = vec![Profile {
+            name: "P".into(),
+            bindings: BindingMap::new(),
+            emoji: None,
+            specials_seeded: false,
+        }];
+        cfg.active_profile = "P".into();
+        assert!(crate::config::seed_specials(&mut cfg));
+        cfg.profiles[0].bindings.insert(
+            "7".into(),
+            KeyBinding { action: Some(Action::Uri { target: "ms-settings:display".into() }), ..Default::default() },
+        );
+        keys::bound_vks_for(&cfg).0
+    }
+
     /// The map is the hook's, narrowed. A–Z must survive it — that is the
     /// owner's requirement ("Space+letter must launch") in one assertion.
     #[test]
     fn every_letter_maps_to_the_same_alpha_the_hook_would_send() {
+        let bits = seeded_bitmap();
         for vk in 0x41u16..=0x5A {
             let ch = char::from_u32(vk as u32 + 32).unwrap();
             assert!(
-                matches!(own_window_combo_for_vk(vk), Some(KeyCombo::Alpha(c)) if c == ch),
+                matches!(own_window_combo_for_vk_in(vk, &bits), Some(KeyCombo::Alpha(c)) if c == ch),
                 "VK {vk:#04X} must map to Alpha('{ch}')"
             );
+            // And with NOTHING bound, letters still go through — they are
+            // never gated on the bitmap.
+            assert!(matches!(own_window_combo_for_vk_in(vk, &[0; 4]), Some(KeyCombo::Alpha(_))));
         }
     }
 
-    /// The three punctuation combos the ring offers, and nothing else.
+    /// The punctuation combos the ring offers survive; the excluded keys do
+    /// not, bound or not; an unbound key is left with the page.
     #[test]
-    fn the_three_punctuation_combos_survive_and_the_excluded_keys_do_not() {
-        assert!(matches!(own_window_combo_for_vk(0xC0), Some(KeyCombo::Backtick)));
-        assert!(matches!(own_window_combo_for_vk(0xBC), Some(KeyCombo::Comma)));
-        assert!(matches!(own_window_combo_for_vk(0xBE), Some(KeyCombo::Period)));
-        assert!(matches!(own_window_combo_for_vk(0xBA), Some(KeyCombo::Semicolon)));
-        assert!(matches!(own_window_combo_for_vk(0xBF), Some(KeyCombo::Slash)));
-        assert!(matches!(own_window_combo_for_vk(0xDE), Some(KeyCombo::Quote)));
-        // Escape, Enter, Tab, Backspace, arrows, Right Alt — the brief's
-        // exclusion list. A page needs these to be a page.
-        for vk in [0x1Bu16, 0x0D, 0x09, 0x08, 0x25, 0x26, 0x27, 0x28, 0xA5] {
+    fn bound_punctuation_survives_and_the_excluded_keys_do_not() {
+        let bits = seeded_bitmap();
+        // ` , . ; / ' — seeded specials, all bound, all taken.
+        for vk in [0xC0u16, 0xBC, 0xBE, 0xBA, 0xBF, 0xDE] {
             assert!(
-                own_window_combo_for_vk(vk).is_none(),
-                "VK {vk:#04X} must stay with the page"
+                matches!(own_window_combo_for_vk_in(vk, &bits), Some(KeyCombo::Vk(v)) if v == vk),
+                "VK {vk:#04X} must map to Vk({vk:#04X})"
             );
         }
-        // Digits: the hook maps none of them either (`vk_to_char` is A–Z), so
-        // suppressing one here would cost a keystroke and buy nothing.
-        for vk in 0x30u16..=0x39 {
-            assert!(own_window_combo_for_vk(vk).is_none());
+        // A digit the user bound goes through; the other digits do not.
+        assert!(matches!(own_window_combo_for_vk_in(0x37, &bits), Some(KeyCombo::Vk(0x37))));
+        for vk in (0x30u16..=0x39).filter(|v| *v != 0x37) {
+            assert!(own_window_combo_for_vk_in(vk, &bits).is_none(), "unbound digit {vk:#04X}");
         }
-        // F1–F12 are gated on hook-side `BOUND_SPECIALS` the page cannot read.
+        // Escape, Enter, Tab, Backspace, arrows, Right Alt — the exclusion
+        // list. A page needs these to be a page — EVEN THOUGH most of them
+        // are bound in the fixture (Esc = boss key, Tab = fullscreen PiP,
+        // ⌫ = force close, ↑/↓ = scroll, RAlt = cycle profile).
+        for vk in OWN_WINDOW_NEVER_INJECTED {
+            assert!(
+                own_window_combo_for_vk_in(*vk, &bits).is_none(),
+                "VK {vk:#04X} must stay with the page"
+            );
+            let bound = keys::bound_in(&bits, *vk);
+            let seeded = [0x1Bu16, 0x09, 0x08, 0x26, 0x28, 0xA5].contains(vk);
+            assert_eq!(bound, seeded, "fixture sanity for {vk:#04X}");
+        }
+        // F1–F12: not bound in the fixture, so nothing is taken. (An F-key
+        // the user binds in the profile WOULD go through — it is in the
+        // bitmap like any other non-letter key.)
         for vk in 0x70u16..=0x7B {
-            assert!(own_window_combo_for_vk(vk).is_none());
+            assert!(own_window_combo_for_vk_in(vk, &bits).is_none());
+        }
+        // The empty bitmap takes nothing but letters.
+        for vk in [0xC0u16, 0xBC, 0x37, 0x70] {
+            assert!(own_window_combo_for_vk_in(vk, &[0; 4]).is_none());
         }
     }
 }

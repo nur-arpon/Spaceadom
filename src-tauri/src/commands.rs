@@ -3441,7 +3441,7 @@ pub fn create_profile(
     // `emoji: None` — a brand-new profile has none until the user picks one,
     // and `Profile::emoji`'s contract is that None means "render the existing
     // look" everywhere. (Completed here when the field landed mid-flight.)
-    cfg.profiles.push(Profile { name, bindings, emoji: None });
+    cfg.profiles.push(Profile { name, bindings, emoji: None, specials_seeded: false });
     let snapshot = cfg.clone();
     drop(cfg);
     config::save(&snapshot)
@@ -4469,6 +4469,39 @@ pub fn own_window_space_up(had_combo: bool) -> bool {
     hook::own_window_space_up(had_combo)
 }
 
+// ---------------------------------------------------------------------------
+// PHASE A (2026-09-18) — the key editor's chord recorder and "Try it".
+// ---------------------------------------------------------------------------
+
+/// Start recording: the hook forwards every key to the engine and passes it
+/// through untouched for up to 15 s (`hook::keys::RECORD_MAX_MS`), or until
+/// `chord_record_stop`.
+#[tauri::command]
+pub fn chord_record_start() {
+    crate::engine::chord_recorder::start();
+}
+
+/// The keys that were held when the LAST key went down, in press order —
+/// the chord the editor shows and saves. Empty until something is pressed.
+#[tauri::command]
+pub fn chord_record_poll() -> Vec<u16> {
+    crate::engine::chord_recorder::snapshot()
+}
+
+/// Stop recording. The last chord stays readable.
+#[tauri::command]
+pub fn chord_record_stop() {
+    crate::engine::chord_recorder::stop();
+}
+
+/// "Try it" in the Run-command editor: run the line ONCE, exactly as the
+/// binding would (`cmd.exe /C`, no window, detached). Returns the toast
+/// text so the editor can show what the key will say.
+#[tauri::command]
+pub fn run_command_once(line: String) -> String {
+    crate::engine::actions::command::run(&line)
+}
+
 /// The 1.0.96 profile-editor commands: reorder validation and copy naming.
 ///
 /// Both are pure `AppConfig` / `&[String]` logic, split out of their commands
@@ -4491,7 +4524,7 @@ mod profile_editor_tests {
                     "a".to_string(),
                     KeyBinding { app: Some(format!("{n}.exe")), ..Default::default() },
                 );
-                Profile { name: (*n).to_string(), bindings, emoji: None }
+                Profile { name: (*n).to_string(), bindings, emoji: None, specials_seeded: false }
             })
             .collect();
         cfg.active_profile = names.first().unwrap_or(&"Founders").to_string();
@@ -4626,7 +4659,7 @@ mod profile_rename_tests {
                 ..Default::default()
             },
         );
-        Profile { name: name.to_string(), bindings, emoji: None }
+        Profile { name: name.to_string(), bindings, emoji: None, specials_seeded: false }
     }
 
     /// Two profiles, `active` marked as the one currently active — mirrors
@@ -4779,7 +4812,7 @@ mod delete_profile_tests {
                     "a".to_string(),
                     KeyBinding { app: Some(format!("{n}.exe")), ..Default::default() },
                 );
-                Profile { name: (*n).to_string(), bindings, emoji: None }
+                Profile { name: (*n).to_string(), bindings, emoji: None, specials_seeded: false }
             })
             .collect();
         cfg.active_profile = names.first().unwrap_or(&"Founders").to_string();

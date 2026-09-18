@@ -36091,3 +36091,78 @@ keyboard sink registered on the hook thread (hwnd 0xa0810)` at 05:47:35.
 The verdict rate over the next day: from ~225/day to near zero. If it still
 fires, the line names the raw clock and the case is real — escalate then.
 Sentry SPACEADOM-2 stays OPEN until that is seen.
+
+
+## PHASE A — ACTIONS AND ASSIGNABLE SPECIALS (2026-09-18, step 1 of Phase A; built against 1.0.115, shipped in the tree as 1.0.116 — gates green: 722 unit tests / 0 failed / 6 ignored, clippy 0, tsc 0, vite clean; **NOT BUILT AS AN INSTALLER, NOT INSTALLED, NOT RUN ON HARDWARE, NO GIT** — the lead does that)
+
+### Symptom / decision
+
+Every special was a fixed key. `Space+Esc` was the Boss Key because `hook/mod.rs` had a `VK_ESCAPE => KeyCombo::Escape` arm and `engine::run_combo` had `KeyCombo::Escape => handle_boss_key`; twelve of those pairs, one per special, and the Space ring's inner band and the icon ring's tiles were two more static lists naming the same twelve keys. A user could not move the Boss Key to F1, could not remove the pause special, and a key could open an app or a link and nothing else. `docs/PHASE-A-ACTIONS.md` records the owner's decision (2026-09-18): one action model — App | Uri | Chord | Command | Brightness | Special — on any key, the twelve specials seeded as ordinary bindings, and a hook that reads ONE published table instead of twelve constants.
+
+### Design
+
+* **Config** (`src-tauri/src/config/schema.rs`). `Action` is a serde-tagged enum (`{"kind":"uri","target":…}` / `chord` / `command` / `brightness` / `special`); `KeyBinding` gains `#[serde(default)] action: Option<Action>` — `None` means the legacy `app`/`web_url` fields ARE the action, so every config on disk reads unchanged (the `browser_exe` pattern, PROBLEM 159). `is_mapped()` is `action || app || web_url`. `Profile` gains `#[serde(default)] specials_seeded: bool`; `AppConfig` gains `#[serde(default)] advanced_mode: bool` (UI only). `DEFAULT_SPECIALS` is exactly the old fixed table (`esc→boss_key`, `backtick→pip`, `tab→pip_fullscreen`, `backspace→force_close`, `ralt→cycle_profile`, `comma→search`, `period→pause`, `semicolon→voice_typing`, `slash→screenshot`, `quote→osk`, `up→scroll_top`, `down→scroll_bottom`), and `seed_specials(&mut cfg)` inserts them into every profile with `specials_seeded == false` for keys not already present, then sets the flag — once, so a special the user deletes stays deleted. `config/mod.rs::seeded()` is the last step of all three load exits and writes the file back when the seed changed anything. `ProfileExport` carries the flag so an export made after a removal does not re-seed on import.
+* **Hook** (`src-tauri/src/hook/keys.rs`, new; `hook/mod.rs`). `KEY_TABLE` is the one `(key id, VK)` table for every non-letter key the dashboard draws (55 rows; append-only, because the icon ring's tile code is `'\u{E000}' + row index`). `KeyCombo` is now `Alpha(char) | Special(String) | Vk(u16)` — the twelve fixed variants are gone. `BOUND_VKS: [AtomicU64; 4]` is the 256-bit "Space owns this VK" bitmap, built by the PURE `bound_vks_for(cfg)` from (a) the active profile's mapped non-letter bindings and (b) `special_keys` minus `tab`, published by `publish_bound_vks` from `config::save` (which `set_active_profile` goes through), and seeded at boot in `lib.rs` next to `publish_bound_specials`. `PAUSE_VK` is published beside it: the bypass branch used to hard-code `VK_OEM_PERIOD`; the pause special is remappable now, letter or not. The callback's match is `Alpha` → the four legacy `special_keys` arms (unchanged, first) → `v if bound_vk(v) => Vk(v)`. **Tab goes through the same table** — the 1.0.91/1.0.92 comment-in/comment-out of `VK_TAB` is a binding now. `own_window_combo_for_vk` maps through the bitmap too, minus `OWN_WINDOW_NEVER_INJECTED` (Esc, Enter, Tab, ⌫, arrows, RAlt — the page keeps those); its pure twin `own_window_combo_for_vk_in(vk, &bits)` is what the tests drive. The chord recorder's hook side is `RECORDING` + `RECORD_DEADLINE` (15 s, self-clearing in the callback): while on, every key is forwarded as `HookEvent::RawKey(vk, down)` and passed through untouched.
+* **Engine** (`src-tauri/src/engine/mod.rs`, `engine/specials.rs` new, `engine/chord_recorder.rs` new, `engine/actions/{uri,chord,command,brightness}.rs` new). `run_combo`: `Alpha(c)` and `Vk(vk)` both go to `run_binding(key_id)` (`key_id_for_vk` for the VK); `Special(name)` is the legacy path, untouched. `run_binding`: the active profile's binding for the id → `action: Some` → `run_action`; `None` → `cascade_binding` (today's `handle_alpha` body, generalised to a key id, Founders fallback and all); a non-letter with no binding → `special_keys` if it has the key, else nothing. `run_special(id, key_id)` maps the twelve ids to the handlers that always ran them; the scroll pair's double-tap state is a `HashMap<key id, tick>` on `EngineState` (was two fields fixed to the arrows), with `double_tap_fires(last, now)` pure. `specials.rs` owns the specials' names (today's HUD strings byte for byte), `binding_name` (label → action name → app/url — ONE rule for the HUD, the ring, the toast and the board), `hud_specials_for(cfg)` and `ring_specials_for(cfg)` — both derived from the active profile's non-letter bindings in key-table order, plus the HUD's two gesture rows ("Scroll → Layer Opacity", and "Up/Dn ×2" only when both scroll specials are bound; one each otherwise). `specials_for_hud(show, bands, rows)` keeps its truth table over the derived rows. `middle_ring::ring_specials_for/is_special_code/special_combo_for` are thin wrappers; a tile fires the same `Vk` the keyboard would. Chords: downs in press order, ups in reverse, ONE `send_keys_checked` batch with the `0x7A7A7A7A` cookie (PROBLEM 227), extended-key flag on the nav cluster. Commands: `cmd.exe /C <line>` via `raw_arg`, `CREATE_NO_WINDOW`, detached, never elevated. Brightness: one hidden PowerShell on its own thread (`WmiMonitorBrightness` → clamp → `WmiSetBrightness`), toasting from that thread; exit 3 = no internal panel → "No built-in display to adjust". URI: `smart_cascade::open_target` (the cascade's own `ShellExecuteExW` path, exposed, not duplicated); an exe-with-arguments target is handed to `command::run`. Commands for the page: `chord_record_start/poll/stop`, `run_command_once`.
+* **Frontend** (vanilla TS). `types.ts`: `Action` union, `SPECIAL_IDS`, `isMapped()`, the three new fields. `keyboard-matrix.ts`: every key except Space/Fn is `.bindable` with the letters' listeners; the static `SPECIAL_ON_KEY` is gone — the sub-label is `bindingLabel(binding)` (label → `SPECIAL_SHORT` word / chord / target → app / url), `.special` (sage) for a special action, `.bound` (terracotta) for everything else; `BINDING_RESET` also nulls `action`; the board id `grave` became `backtick` to match the config key. `key-detail-panel.ts`: a segmented pill (the Theme row's `segRowHtml`) at the top — *App or link* (today's editor, unchanged) / *Windows setting* (search over `src/data/windows-catalogue.json`, `unsure` rows hidden, Control Panel + system groups only in Advanced mode) / *Send keys* ("Press the keys…" polls `chord_record_poll` every 100 ms, kbd caps, Done saves) / *Run command* (Advanced only; "Try it" → `run_command_once`) / *Spaceadom special* (the twelve with the cards' descriptions; a special already on another key gets "Boss Key is on Esc — move it?" with Move, which writes an empty binding to the other key through the same `_onSave` first). Every save goes through `commit()`, which now states `action` in the complete binding — an app/link commit therefore clears any action, as it clears the browser pin. `special-cards.ts`: ids are special ids; `resolveSpecials(config)` derives each card's combo/how from the active profile ("␣ —" / "Not on any key — assign it from any key's editor" when bound nowhere); a `pip_fullscreen` card was added so every special has one. `settings-panel.ts`: the "Advanced mode" switch. `own-window-keys.ts`: `;` `/` `'` join the page fallback's map (Rust answers false for an unbound key). `preview.ts`: the twelve seeded specials, `?advanced`, stubs for the four new commands. `vk-names.ts` (new leaf): `VK_*` names → codes for the catalogue's chords, and the caps' labels.
+
+### Exact files
+
+`src-tauri/src/config/{schema.rs,mod.rs,defaults.rs}`, `src-tauri/src/hook/{mod.rs,keys.rs}`, `src-tauri/src/engine/{mod.rs,specials.rs,chord_recorder.rs}`, `src-tauri/src/engine/actions/{mod.rs,uri.rs,chord.rs,command.rs,brightness.rs,smart_cascade.rs}`, `src-tauri/src/{middle_ring.rs,commands.rs,lib.rs,browser_profiles.rs}` (the last only for `KeyBinding` literals), `src/types.ts`, `src/components/{keyboard-matrix,key-detail-panel,special-cards,settings-panel,vk-names}.ts`, `src/{main,preview,own-window-keys}.ts`, `src/styles.css`, version files.
+
+### Key code
+
+The callback's arm (hook/mod.rs), the whole of what replaced twelve:
+
+```rust
+            // PHASE A — every non-letter key Space owns in the active profile.
+            v if bound_vk(v) => Some(KeyCombo::Vk(v)),
+```
+
+The dispatcher (engine/mod.rs):
+
+```rust
+fn run_combo(combo: KeyCombo, state_arc: &Arc<Mutex<EngineState>>) {
+    match combo {
+        KeyCombo::Alpha(ch) => run_binding(&ch.to_string(), state_arc),
+        KeyCombo::Vk(vk) => match crate::hook::key_id_for_vk(vk) {
+            Some(id) => run_binding(id, state_arc),
+            None => log::warn!(/* the bitmap and KEY_TABLE disagree */),
+        },
+        KeyCombo::Special(name) => handle_special(name, state_arc),
+    }
+}
+```
+
+The seed (schema.rs):
+
+```rust
+pub fn seed_specials(cfg: &mut AppConfig) -> bool {
+    let mut changed = false;
+    for p in cfg.profiles.iter_mut() {
+        if p.specials_seeded { continue; }
+        for (key, id) in DEFAULT_SPECIALS {
+            if p.bindings.contains_key(*key) { continue; }
+            p.bindings.insert((*key).to_string(), KeyBinding {
+                action: Some(Action::Special { id: (*id).to_string() }), ..Default::default() });
+        }
+        p.specials_seeded = true;
+        changed = true;
+    }
+    changed
+}
+```
+
+### How it was verified
+
+Unit tests only, all pure: `phase_a_action_tests` (every variant round-trips; the `is_mapped` truth table; an old config with no `action`/`specials_seeded` loads, seeds once, keeps a hand-bound `esc`, and a removed special stays removed; the export flag), `hook::keys::tests` (round trips, uniqueness, the first twelve rows are the seed keys in seed order, every board id from `keyboard-matrix.ts` — read with `include_str!` — has a row unless it is `space`/`lfn`/`rfn`, the bitmap and pause VK from a fixture, the recorder deadline), the two own-window tests rewritten against a seeded bitmap fixture with the exclusion list read from `OWN_WINDOW_NEVER_INJECTED`, `specials::tests` (names, `chord_name`, `binding_name`, a seeded profile yields today's HUD rows `Esc ` Tab ⌫ RAlt , . ; / ' Scroll Up/Dn ×2` and today's ten ring tiles with codes U+E000–E009; rows follow a removed/moved/labelled binding), `band_gate_tests` rewritten over the derived rows plus "a removed special leaves the ring" and the double-tap rule, the middle-ring tests over a seeded fixture (ten tiles, `special_combo_for('\u{E000}') == Vk(0x1B)`, All = 11 + 10), and the four action modules' toast/plan/script tests. 694 → 722 passing. **Nothing has run on hardware:** no chord has been sent, no brightness changed, no key pressed. The golden-bytes test also covers a seeded fresh config.
+
+Generalise: **a fixed table in a hook callback is a config that cannot be edited.** Publish it as an atomic from the config's own save funnel and the callback keeps its microseconds while the user gets the setting.
+
+### QUESTIONS left for the lead (also in the report)
+
+1. The Space ring's inner band now shows TWELVE rows by default (the old static list had nine — `;`, `/`, `'` were never added to `HUD_SPECIALS`). The brief says "the active profile's non-letter bindings", so they are in; the overlay's label ladder was written for twelve. Visible change; owner may prefer the old nine.
+2. `keyboard-matrix.ts`'s board id `grave` was renamed `backtick` to match the brief's config key; nothing else referenced it.
+3. Which keys are bindable: every key with a VK, including Caps, both Shifts, Ctrl, Alt, Win and the digits. Binding a modifier eats that modifier while Space is held; the board offers it because the brief said "where a VK exists".
+4. The page fallback (`own-window-keys.ts`) sends only letters and the nine seeded punctuation keys; a digit or bracket the user binds works through the real hook everywhere except inside the dashboard itself.
+5. Rust's `Special(String)` / `special_keys` path (Enter, F-keys, Left, Right through Settings) is untouched, as the brief asked; a profile binding on `enter` or `f1` loses to a `special_keys` entry for the same key.

@@ -167,6 +167,12 @@ pub struct AppConfig {
     #[serde(default)]
     pub special_keys: BindingMap,
 
+    /// PHASE A — Advanced mode: shows "Run command" and the full catalogue in
+    /// the key editor. UI only; the engine ignores it (a `Command` binding
+    /// that is already in the file runs whether or not this is on).
+    #[serde(default)]
+    pub advanced_mode: bool,
+
     /// Whether Nocturne (dark) mode is enabled. Drives body.nocturne on both
     /// the dashboard and overlay windows. Defaults to false (Earthy/light).
     #[serde(default)]
@@ -720,6 +726,7 @@ impl Default for AppConfig {
             excluded_apps: Vec::new(),
             profiles: Vec::new(),
             special_keys: BindingMap::new(),
+            advanced_mode: false,
             dark_mode: false,
             // FEATURE 2 (2026-09-05) — NEW installs default to "auto", not
             // "earthy". This is `AppConfig::default()`, used ONLY when there
@@ -824,6 +831,14 @@ pub struct Profile {
     /// not the same as one `char` and not the same as a byte budget.
     #[serde(default)]
     pub emoji: Option<String>,
+
+    /// PHASE A — has `seed_specials` run on this profile? `false` on every
+    /// config written before 2026-09-18 (serde default), so the seed runs
+    /// exactly once per profile on the next load and then never again — which
+    /// is what lets a user DELETE a special (remove its key) and have it stay
+    /// deleted.
+    #[serde(default)]
+    pub specials_seeded: bool,
 }
 
 /// The longest a valid single-cluster emoji may be, counted in `char`s.
@@ -943,6 +958,12 @@ pub struct ProfileExport {
     #[serde(default)]
     pub emoji: Option<String>,
     pub bindings: BindingMap,
+    /// PHASE A — carried so an export made after a special was deliberately
+    /// removed does not get it re-seeded on import. Absent in every export
+    /// written before 2026-09-18, which then seeds on import — correct, since
+    /// those exports predate the specials being keys at all.
+    #[serde(default)]
+    pub specials_seeded: bool,
 }
 
 impl ProfileExport {
@@ -956,8 +977,113 @@ impl ProfileExport {
             name: p.name.clone(),
             emoji: p.emoji.clone(),
             bindings: p.bindings.clone(),
+            specials_seeded: p.specials_seeded,
         }
     }
+}
+
+/// PHASE A (2026-09-18) — WHAT a key does when Space is held, beyond "open
+/// this app or link". Tagged `{"kind": "...", ...}` on disk.
+///
+/// `KeyBinding::action` is `None` for every binding written before this
+/// enum existed, and `None` means the legacy `app` / `web_url` fields ARE the
+/// action — nothing on disk changes shape, and `is_mapped` treats the two
+/// forms alike. The 12 built-in specials that used to be fixed `KeyCombo`
+/// variants in the hook are `Special { id }` bindings now, seeded once per
+/// profile by `seed_specials` (see `DEFAULT_SPECIALS`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Action {
+    /// `ms-settings:display`, `shell:Downloads`, `control.exe /name
+    /// Microsoft.PowerOptions`, or any URI Windows knows how to open.
+    Uri { target: String },
+    /// Virtual-key codes in PRESS order, e.g. `[0x5B, 0x10, 0x53]` =
+    /// Win+Shift+S. Sent as ONE `send_keys_checked` batch (PROBLEM 227).
+    Chord { keys: Vec<u16> },
+    /// A command line, run through `cmd.exe /C` with no window. Advanced
+    /// only — that is a UI concern; the engine just runs it.
+    Command { line: String },
+    /// +10 / -10 on the internal panel through WMI.
+    Brightness { delta: i32 },
+    /// One of `SPECIAL_IDS`.
+    Special { id: String },
+}
+
+/// The built-in specials, by id. The order is the order the HUD's inner
+/// ring and the icon ring list them when they are on their default keys.
+pub const SPECIAL_IDS: &[&str] = &[
+    "boss_key",
+    "pip",
+    "pip_fullscreen",
+    "force_close",
+    "cycle_profile",
+    "search",
+    "pause",
+    "voice_typing",
+    "screenshot",
+    "osk",
+    "scroll_top",
+    "scroll_bottom",
+];
+
+/// Is `id` one of the twelve? Pure; the UI and the seed both ask.
+pub fn is_special_id(id: &str) -> bool {
+    SPECIAL_IDS.contains(&id)
+}
+
+/// The default key for each special — EXACTLY the table the hook hard-coded
+/// before Phase A (Esc = Boss Key, ` = PiP, Tab = fullscreen PiP, ⌫ = force
+/// close, RAlt = cycle profile, `,` = search, `.` = pause, `;` = voice
+/// typing, `/` = screenshot, `'` = on-screen keyboard, ↑↑ / ↓↓ = scroll).
+/// Keys are the dashboard's key ids (`keyboard-matrix.ts`), the same ids
+/// `hook::vk_for_key_id` maps. Space + scroll (opacity) is a gesture, not a
+/// key, and is not here.
+pub const DEFAULT_SPECIALS: &[(&str, &str)] = &[
+    ("esc", "boss_key"),
+    ("backtick", "pip"),
+    ("tab", "pip_fullscreen"),
+    ("backspace", "force_close"),
+    ("ralt", "cycle_profile"),
+    ("comma", "search"),
+    ("period", "pause"),
+    ("semicolon", "voice_typing"),
+    ("slash", "screenshot"),
+    ("quote", "osk"),
+    ("up", "scroll_top"),
+    ("down", "scroll_bottom"),
+];
+
+/// Seed `DEFAULT_SPECIALS` into every profile that has not been seeded yet.
+/// Returns `true` when anything changed (the caller writes the file back).
+///
+/// IDEMPOTENT BY CONSTRUCTION: a profile is seeded ONCE, and the flag is what
+/// remembers it — a key the user later REMOVES is simply absent, and the seed
+/// never re-adds it because `specials_seeded` is already true. A key that is
+/// already present when the seed runs (an old config where the user had bound
+/// `esc` through a hand edit, or a Phase A config being re-read) keeps its own
+/// binding untouched.
+pub fn seed_specials(cfg: &mut AppConfig) -> bool {
+    let mut changed = false;
+    for p in cfg.profiles.iter_mut() {
+        if p.specials_seeded {
+            continue;
+        }
+        for (key, id) in DEFAULT_SPECIALS {
+            if p.bindings.contains_key(*key) {
+                continue;
+            }
+            p.bindings.insert(
+                (*key).to_string(),
+                KeyBinding {
+                    action: Some(Action::Special { id: (*id).to_string() }),
+                    ..Default::default()
+                },
+            );
+        }
+        p.specials_seeded = true;
+        changed = true;
+    }
+    changed
 }
 
 /// A single key's action binding.
@@ -1048,12 +1174,20 @@ pub struct KeyBinding {
     /// `browser_exe` spells out — a plain `Option` is REQUIRED to serde.
     #[serde(default)]
     pub site_icon: Option<String>,
+
+    /// PHASE A — the key's action when it is not an app or a link. `None` =
+    /// the legacy fields above ARE the action; every config written before
+    /// 2026-09-18 reads as `None`. Explicit `#[serde(default)]` for the reason
+    /// `browser_exe` spells out — a plain `Option` is REQUIRED to serde, and
+    /// PROBLEM 159 is what a required key costs.
+    #[serde(default)]
+    pub action: Option<Action>,
 }
 
 impl KeyBinding {
     /// Returns true if this binding has any action defined.
     pub fn is_mapped(&self) -> bool {
-        self.app.is_some() || self.web_url.is_some()
+        self.action.is_some() || self.app.is_some() || self.web_url.is_some()
     }
 }
 
@@ -1363,6 +1497,7 @@ mod key_binding_upgrade_tests {
             browser_profile_dir: Some("Profile 1".into()),
             browser_profile_name: Some("Work".into()),
             site_icon: None,
+            action: None,
         };
         let json = serde_json::to_string(&b).expect("serialise");
         let back: KeyBinding = serde_json::from_str(&json).expect("deserialise");
@@ -1389,7 +1524,7 @@ mod key_binding_upgrade_tests {
             "g".to_string(),
             KeyBinding { web_url: Some("https://github.com".into()), ..Default::default() },
         );
-        let profile = Profile { name: "Old Name".into(), bindings, emoji: None };
+        let profile = Profile { name: "Old Name".into(), bindings, emoji: None, specials_seeded: false };
 
         // Round-trip once, as an ordinary save/load would.
         let json = serde_json::to_string(&profile).expect("serialise");
@@ -1473,6 +1608,7 @@ mod profile_emoji_tests {
             name: "Founders".into(),
             bindings: BindingMap::new(),
             emoji: Some("👨‍👩‍👧".into()),
+            specials_seeded: false,
         };
         let json = serde_json::to_string(&p).expect("serialise");
         let back: Profile = serde_json::from_str(&json).expect("deserialise");
@@ -1911,13 +2047,28 @@ mod first_install_tests {
                     KeyBinding { label: Some(k.to_uppercase()), ..Default::default() },
                 );
             }
-            Profile { name: "Founders".into(), bindings: m, emoji: None }
+            Profile { name: "Founders".into(), bindings: m, emoji: None, specials_seeded: false }
         };
         assert_eq!(
             serde_json::to_string(&mk(false)).expect("serialise"),
             serde_json::to_string(&mk(true)).expect("serialise"),
             "insertion order must not reach the file — this is the 2026-09-05 defect"
         );
+
+        // PHASE A — and a SEEDED fresh install is just as stable: two
+        // independently built default configs, seeded separately, are the
+        // same bytes, and the seeded bytes carry every special exactly as
+        // `DEFAULT_SPECIALS` lists it.
+        let seeded = || {
+            let mut c = AppConfig::default();
+            c.profiles = crate::config::defaults::generate();
+            assert!(seed_specials(&mut c));
+            serde_json::to_string_pretty(&c).expect("serialise")
+        };
+        let (x, y) = (seeded(), seeded());
+        assert_eq!(x, y, "a seeded fresh config must serialise byte-identically");
+        assert!(x.contains(r#""kind": "special""#), "the seed is on disk as tagged actions");
+        assert!(x.contains(r#""specials_seeded": true"#));
     }
 
     /// The round trip a running app performs on every save: load what is on
@@ -2104,5 +2255,159 @@ mod excluded_apps_migration_tests {
         let json = serde_json::to_string(&with).unwrap();
         let back: KeyBinding = serde_json::from_str(&json).unwrap();
         assert_eq!(back.site_icon.as_deref(), Some("data:image/png;base64,AAAA"));
+    }
+}
+
+/// PHASE A (2026-09-18) — the `Action` enum's wire form, the seed, and the
+/// `is_mapped` truth table. The class of bug guarded is PROBLEM 159's: a
+/// config written before a field existed must read unchanged, and a
+/// migration must run once and only once.
+#[cfg(test)]
+mod phase_a_action_tests {
+    use super::*;
+
+    /// Every variant survives a JSON round trip, and the tag is the
+    /// snake_case `kind` the TypeScript union (`src/types.ts`) matches on.
+    #[test]
+    fn every_action_variant_round_trips_through_serde() {
+        let all = [
+            Action::Uri { target: "ms-settings:display".into() },
+            Action::Chord { keys: vec![0x5B, 0x10, 0x53] },
+            Action::Command { line: "control.exe /name Microsoft.PowerOptions".into() },
+            Action::Brightness { delta: -10 },
+            Action::Special { id: "boss_key".into() },
+        ];
+        for a in all {
+            let json = serde_json::to_string(&a).expect("serialise");
+            let back: Action = serde_json::from_str(&json).expect("deserialise");
+            assert_eq!(back, a, "{json}");
+        }
+        assert_eq!(
+            serde_json::to_string(&Action::Special { id: "pip".into() }).unwrap(),
+            r#"{"kind":"special","id":"pip"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Action::Brightness { delta: 10 }).unwrap(),
+            r#"{"kind":"brightness","delta":10}"#
+        );
+    }
+
+    /// `is_mapped`: an action counts, an app counts, a link counts, and an
+    /// empty binding does not.
+    #[test]
+    fn is_mapped_truth_table() {
+        let mk = |app: Option<&str>, url: Option<&str>, action: Option<Action>| KeyBinding {
+            app: app.map(str::to_string),
+            web_url: url.map(str::to_string),
+            action,
+            ..Default::default()
+        };
+        assert!(!mk(None, None, None).is_mapped());
+        assert!(mk(Some("x.exe"), None, None).is_mapped());
+        assert!(mk(None, Some("https://a"), None).is_mapped());
+        assert!(mk(None, None, Some(Action::Special { id: "pip".into() })).is_mapped());
+        assert!(mk(None, None, Some(Action::Uri { target: "shell:Downloads".into() })).is_mapped());
+        // A binding with ONLY a label is not mapped — the label describes a
+        // target, and there is none.
+        assert!(!KeyBinding { label: Some("Ghost".into()), ..Default::default() }.is_mapped());
+    }
+
+    /// An OLD config — no `action`, no `specials_seeded`, no `advanced_mode`
+    /// — loads, is seeded exactly once, and a profile that already had `esc`
+    /// bound keeps its own binding.
+    #[test]
+    fn an_old_config_loads_gets_seeded_once_and_keeps_an_existing_esc() {
+        let json = r#"{
+            "version": 1,
+            "active_profile": "Founders",
+            "rollover_ms": 120,
+            "guide_hud_delay_ms": 300,
+            "opacity_floor_pct": 25,
+            "browser_path": null,
+            "fullscreen_allowlist": [],
+            "profiles": [
+                { "name": "Founders", "bindings": {
+                    "a": { "app": "a.exe", "web_url": null, "label": "A", "icon_override": null },
+                    "esc": { "app": "esc.exe", "web_url": null, "label": "Hand-bound", "icon_override": null }
+                } },
+                { "name": "Gamers", "bindings": {} }
+            ]
+        }"#;
+        let mut cfg: AppConfig = serde_json::from_str(json).expect("an old config must parse");
+        assert!(!cfg.advanced_mode);
+        assert!(cfg.profiles.iter().all(|p| !p.specials_seeded));
+        assert!(cfg.profiles[0].bindings["a"].action.is_none(), "old bindings read as None");
+
+        assert!(seed_specials(&mut cfg), "the first seed changes something");
+        for p in &cfg.profiles {
+            assert!(p.specials_seeded, "{}: flagged", p.name);
+            for (key, id) in DEFAULT_SPECIALS {
+                if p.name == "Founders" && *key == "esc" {
+                    continue;
+                }
+                assert_eq!(
+                    p.bindings[*key].action,
+                    Some(Action::Special { id: (*id).to_string() }),
+                    "{}: {key} → {id}",
+                    p.name
+                );
+            }
+        }
+        // The hand-bound Esc is untouched.
+        let esc = &cfg.profiles[0].bindings["esc"];
+        assert_eq!(esc.app.as_deref(), Some("esc.exe"));
+        assert!(esc.action.is_none());
+        // The letter is untouched too.
+        assert_eq!(cfg.profiles[0].bindings["a"].label.as_deref(), Some("A"));
+        assert_eq!(cfg.profiles[0].bindings.len(), 2 + DEFAULT_SPECIALS.len() - 1);
+        assert_eq!(cfg.profiles[1].bindings.len(), DEFAULT_SPECIALS.len());
+
+        // Second seed: nothing changes — and a REMOVED special stays removed.
+        cfg.profiles[1].bindings.remove("period");
+        assert!(!seed_specials(&mut cfg), "a seeded profile is never touched again");
+        assert!(!cfg.profiles[1].bindings.contains_key("period"), "removing a special sticks");
+
+        // And it survives a save→load round trip byte-for-byte.
+        let first = serde_json::to_string_pretty(&cfg).unwrap();
+        let back: AppConfig = serde_json::from_str(&first).unwrap();
+        assert_eq!(first, serde_json::to_string_pretty(&back).unwrap());
+        assert!(back.profiles.iter().all(|p| p.specials_seeded));
+    }
+
+    /// The twelve ids in the seed are all real special ids, each special is
+    /// seeded exactly once, and the seed covers every id.
+    #[test]
+    fn the_seed_table_covers_every_special_exactly_once() {
+        assert_eq!(DEFAULT_SPECIALS.len(), SPECIAL_IDS.len());
+        for id in SPECIAL_IDS {
+            assert_eq!(
+                DEFAULT_SPECIALS.iter().filter(|(_, s)| s == id).count(),
+                1,
+                "{id} must be seeded on exactly one key"
+            );
+            assert!(is_special_id(id));
+        }
+        assert!(!is_special_id("nope"));
+        let mut keys: Vec<&str> = DEFAULT_SPECIALS.iter().map(|(k, _)| *k).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), DEFAULT_SPECIALS.len(), "one key, one special");
+    }
+
+    /// A profile export carries the flag, so an export made after the user
+    /// removed a special does not get it back on import.
+    #[test]
+    fn a_profile_export_carries_specials_seeded() {
+        let p = Profile {
+            name: "X".into(),
+            bindings: BindingMap::new(),
+            emoji: None,
+            specials_seeded: true,
+        };
+        let e = ProfileExport::of(&p);
+        assert!(e.specials_seeded);
+        let json = r#"{"spaceadom_profile":1,"name":"Old","bindings":{}}"#;
+        let old: ProfileExport = serde_json::from_str(json).unwrap();
+        assert!(!old.specials_seeded, "an export from before Phase A seeds on import");
     }
 }

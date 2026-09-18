@@ -1538,50 +1538,35 @@ pub fn middle_down_route(style: crate::config::MiddleRingStyle) -> MiddleRoute {
 // Specials on the ring — "All" carries the actionable specials too
 // ---------------------------------------------------------------------------
 
-/// The specials the ring can carry as tiles. `Scroll` and `Up/Dn ×2` from the
-/// Space ring's `HUD_SPECIALS` are gestures, not single actions, so a tile
-/// cannot fire them and they are not listed.
+/// The specials the ring can carry as tiles — PHASE A (2026-09-18): DERIVED
+/// from the active profile's non-letter bindings by
+/// `engine::specials::ring_specials_for`, no longer a static list. The
+/// scroll specials are left out (a tile release is one press; those need
+/// two) and so are the Space ring's two gesture rows.
 ///
 /// `code` is the char `pointer::take_armed_key` hands back for the tile —
-/// Private Use Area so it can never collide with a bound letter — and
-/// `engine::dispatch` turns it back into the same `KeyCombo` the keyboard
-/// produces, through `special_combo_for`. The cascade is not forked: the
-/// release reaches `run_combo` exactly as a Space+Esc does.
-pub const RING_SPECIALS: &[(&str, &str, char)] = &[
-    ("Esc", "Boss Key", '\u{E000}'),
-    ("`", "PiP", '\u{E001}'),
-    ("Tab", "Fullscreen PiP", '\u{E002}'),
-    ("\u{232B}", "Force Close", '\u{E003}'),
-    ("RAlt", "Cycle Profiles", '\u{E004}'),
-    (",", "Search / Input", '\u{E005}'),
-    (".", "Pause Spaceadom", '\u{E006}'),
-    (";", "Voice Typing", '\u{E007}'),
-    ("/", "Screenshot", '\u{E008}'),
-    ("'", "Keyboard", '\u{E009}'),
-];
-
-/// Is this the code of a ring special (as opposed to a bound letter)?
-pub fn is_special_code(c: char) -> bool {
-    RING_SPECIALS.iter().any(|(_, _, code)| *code == c)
+/// Private Use Area (`'\u{E000}' + the key's index in `hook::keys::KEY_TABLE`),
+/// so it can never collide with a bound letter, and stable because that
+/// table is append-only; the seeded specials keep the U+E000–U+E009 codes the
+/// ring has always used. `engine::dispatch` turns it back into the same
+/// `KeyCombo::Vk` the keyboard produces, through `special_combo_for`. The
+/// cascade is not forked: the release reaches `run_combo` exactly as a
+/// Space+Esc does.
+pub fn ring_specials_for(cfg: &AppConfig) -> Vec<(String, String, char)> {
+    crate::engine::specials::ring_specials_for(cfg)
 }
 
-/// The `KeyCombo` a ring special fires — the SAME variants the keyboard hook
-/// sends, so the engine's one combo handler serves both.
+/// Is this the code of a ring special (as opposed to a bound letter)? Pure
+/// and config-free: any code inside the key table's PUA range.
+pub fn is_special_code(c: char) -> bool {
+    crate::engine::specials::key_id_for_code(c).is_some()
+}
+
+/// The `KeyCombo` a ring special fires — the SAME `Vk` the keyboard hook
+/// sends for that key, so the engine's one combo handler serves both.
 pub fn special_combo_for(c: char) -> Option<crate::hook::KeyCombo> {
-    use crate::hook::KeyCombo;
-    match c {
-        '\u{E000}' => Some(KeyCombo::Escape),
-        '\u{E001}' => Some(KeyCombo::Backtick),
-        '\u{E002}' => Some(KeyCombo::Tab),
-        '\u{E003}' => Some(KeyCombo::Backspace),
-        '\u{E004}' => Some(KeyCombo::RightAlt),
-        '\u{E005}' => Some(KeyCombo::Comma),
-        '\u{E006}' => Some(KeyCombo::Period),
-        '\u{E007}' => Some(KeyCombo::Semicolon),
-        '\u{E008}' => Some(KeyCombo::Slash),
-        '\u{E009}' => Some(KeyCombo::Quote),
-        _ => None,
-    }
+    let id = crate::engine::specials::key_id_for_code(c)?;
+    crate::hook::vk_for_key_id(id).map(crate::hook::KeyCombo::Vk)
 }
 
 // ---------------------------------------------------------------------------
@@ -1724,6 +1709,12 @@ pub struct RingEntry {
 /// Classify a binding's target and name the shell target the icon comes from.
 /// Returns `(kind, target)`; `target` is what the extractor is asked about.
 fn classify(bind: &crate::config::KeyBinding) -> (ItemKind, Option<String>) {
+    // PHASE A — a letter bound to an ACTION (a special moved onto a letter,
+    // a URI, a chord, a command) is a special tile: no target to extract an
+    // icon from, the letter disc carries the action's glyph.
+    if bind.action.is_some() {
+        return (ItemKind::Special, None);
+    }
     if let Some(url) = bind.web_url.as_deref() {
         return (ItemKind::Link, Some(url.to_string()));
     }
@@ -1773,19 +1764,16 @@ pub fn build_entries(
             }
         }
     }
-    let mut out = Vec::with_capacity(order.len() + RING_SPECIALS.len());
+    let specials = ring_specials_for(cfg);
+    let mut out = Vec::with_capacity(order.len() + specials.len());
     for c in order {
         let Some(bind) = p.bindings.get(&c.to_string()) else { continue };
         if !bind.is_mapped() {
             continue;
         }
         let (kind, target) = classify(bind);
-        let name = bind
-            .label
-            .clone()
-            .or_else(|| bind.app.clone())
-            .or_else(|| bind.web_url.clone())
-            .unwrap_or_default();
+        // PHASE A — one naming rule for every surface (`specials::binding_name`).
+        let name = crate::engine::specials::binding_name(bind);
         let name = crate::browser_profiles::hud_label(&name, bind.browser_profile_name.as_deref());
         let icon = match kind {
             ItemKind::Link => bind.site_icon.clone().filter(|s| !s.is_empty()),
@@ -1805,14 +1793,8 @@ pub fn build_entries(
         });
     }
     if scope == MiddleRingScope::All {
-        for (key, name, code) in RING_SPECIALS {
-            out.push(RingEntry {
-                key: (*key).to_string(),
-                code: *code,
-                name: (*name).to_string(),
-                icon: None,
-                kind: ItemKind::Special,
-            });
+        for (key, name, code) in specials {
+            out.push(RingEntry { key, code, name, icon: None, kind: ItemKind::Special });
         }
     }
     out
@@ -3279,18 +3261,29 @@ mod route_and_special_tests {
     }
 
     /// Every ring special maps to a real KeyCombo, no code collides with a
-    /// letter, and a letter is never mistaken for a special.
+    /// letter, and a letter is never mistaken for a special. PHASE A: the
+    /// list is derived from a SEEDED profile and the combo is the key's `Vk`.
     #[test]
     fn every_ring_special_has_a_combo_and_a_private_code() {
-        for (_, _, code) in RING_SPECIALS {
+        let cfg = crate::engine::specials::seeded_cfg();
+        let specials = ring_specials_for(&cfg);
+        assert_eq!(specials.len(), 10, "ten tiles: the twelve seeded specials minus the two scroll ones");
+        for (_, _, code) in &specials {
             assert!(is_special_code(*code));
             assert!(special_combo_for(*code).is_some());
             assert!(!code.is_ascii_lowercase());
         }
         assert!(!is_special_code('m'));
         assert!(special_combo_for('m').is_none());
-        assert!(matches!(special_combo_for('\u{E000}'), Some(crate::hook::KeyCombo::Escape)));
-        assert!(matches!(special_combo_for('\u{E006}'), Some(crate::hook::KeyCombo::Period)));
+        // Esc's tile fires Space+Esc's VK; `.`'s fires VK_OEM_PERIOD.
+        assert!(matches!(special_combo_for('\u{E000}'), Some(crate::hook::KeyCombo::Vk(0x1B))));
+        assert!(matches!(special_combo_for('\u{E006}'), Some(crate::hook::KeyCombo::Vk(0xBE))));
+        // A removed special leaves the ring; the others keep their codes.
+        let mut cfg2 = cfg.clone();
+        cfg2.profiles[0].bindings.remove("esc");
+        let after = ring_specials_for(&cfg2);
+        assert_eq!(after.len(), 9);
+        assert_eq!(after[0].2, '\u{E001}', "the backtick keeps U+E001");
     }
 }
 
@@ -3305,7 +3298,7 @@ mod favourites_and_payload_tests {
         for (k, b) in bindings {
             map.insert((*k).to_string(), b.clone());
         }
-        cfg.profiles = vec![Profile { name: "Ring".into(), bindings: map, emoji: None }];
+        cfg.profiles = vec![Profile { name: "Ring".into(), bindings: map, emoji: None, specials_seeded: false }];
         cfg.active_profile = "Ring".into();
         cfg
     }
@@ -3420,6 +3413,9 @@ mod favourites_and_payload_tests {
         }
         let refs: Vec<(&str, KeyBinding)> = binds.iter().map(|(k, b)| (k.as_str(), b.clone())).collect();
         let mut cfg = cfg_with(&refs);
+        // PHASE A — the specials are the profile's own now; seed them so the
+        // "All" scope has its ten tiles as before.
+        assert!(crate::config::seed_specials(&mut cfg));
         cfg.middle_ring_favourites = vec!["k".into(), "a".into()];
         let extract = |_: &str| -> Option<String> { None };
         let eight = build_entries(&cfg, "Ring", MiddleRingScope::MyEight, &extract);
@@ -3428,7 +3424,8 @@ mod favourites_and_payload_tests {
         let codes: Vec<char> = all.iter().map(|e| e.code).collect();
         assert_eq!(&codes[..2], &['k', 'a']);
         assert_eq!(&codes[2..11], &['b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j']);
-        assert_eq!(codes.len(), 11 + RING_SPECIALS.len());
+        assert_eq!(codes.len(), 11 + ring_specials_for(&cfg).len());
+        assert_eq!(codes.len(), 21);
         assert!(all[11..].iter().all(|e| e.kind == ItemKind::Special && is_special_code(e.code)));
         let (payload, _) = build_payload(all, MiddleRingScope::All, false, true, (0.0, 0.0));
         assert_eq!(payload.scope, "all");

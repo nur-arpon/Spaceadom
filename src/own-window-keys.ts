@@ -348,6 +348,14 @@ export function vkForOwnWindow(ev: {
     if (k === "`" || k === "~") return 0xc0; // VK_OEM_3
     if (k === ",") return 0xbc; // VK_OEM_COMMA
     if (k === ".") return 0xbe; // VK_OEM_PERIOD
+    // PHASE A — the three punctuation specials seeded on 2026-09-17/18.
+    // Rust decides whether the key is actually bound (`own_window_combo_for_vk`
+    // reads the same bitmap the hook does) and answers false if not, so an
+    // unbound one costs nothing; keys that are UNBOUND BY DEFAULT (digits,
+    // brackets, -, =) are deliberately still not sent — see the header.
+    if (k === ";" || k === ":") return 0xba; // VK_OEM_1
+    if (k === "/" || k === "?") return 0xbf; // VK_OEM_2
+    if (k === "'" || k === "\"") return 0xde; // VK_OEM_7
     return null;
   }
   // `key` gave a name, not a character (Dead, Unidentified, Process…). Fall

@@ -4034,6 +4034,15 @@ fn open_uri(uri: &str, app_handle: Option<tauri::AppHandle>) -> bool {
     shell_launch(clean, None, app_handle)
 }
 
+/// PHASE A — the ONE launcher for `Action::Uri`: `ms-settings:…`,
+/// `shell:…`, any `scheme:` URI, a folder, a document. The same
+/// `ShellExecuteExW` path the cascade's `ShellVerb` and `ProtocolUri` shapes
+/// take, exposed rather than duplicated in `actions/uri.rs`. `true` when the
+/// shell accepted it.
+pub fn open_target(target: &str, app_handle: Option<tauri::AppHandle>) -> bool {
+    open_uri(target, app_handle)
+}
+
 /// Check for protocol-based URIs (discord://, spotify://, etc.)
 fn protocol_uri(exe: &str) -> Option<String> {
     match exe.to_lowercase().as_str() {

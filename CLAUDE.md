@@ -630,10 +630,15 @@ page rescales everything by `payload.scale / devicePixelRatio`
 (`rescaleForThisPage`) because WebView2's ratio lags a monitor change. Both
 fitters in `commands.rs` MOVE before they SIZE (mixed-DPI: a size set on the
 1.0 monitor is re-scaled 1.5× by WM_DPICHANGED on the way to the panel).
-Space + ; and the ring's "Voice Typing" special (U+E007) open Windows
-dictation; Space + / (U+E008) is Windows' snip (Win+Shift+S); Space + '
-(U+E009, 1.0.114) toggles Windows' on-screen keyboard (Win+Ctrl+O — the
-touch keyboard's COM route is dead on Win11 26200, see actions/osk.rs). Full record: V14_FIXES_AND_CODE.md §PROBLEM 267 — ROUND 6.**
+**SINCE PHASE A (2026-09-18, 1.0.116) THE SPECIALS ARE BINDINGS, NOT KEYS.**
+A profile's `bindings` map holds every key, letters and non-letters alike
+(`esc`, `backtick`, `tab`, `f1`, `7`…), and a `KeyBinding.action` says what
+it does: app/link (`None`), `uri`, `chord`, `command`, `brightness` or one
+of twelve `special` ids seeded once per profile on their old keys
+(`schema::DEFAULT_SPECIALS`). The hook reads ONE published bitmap
+(`hook/keys.rs`), the engine runs `run_binding(key id)`, both rings derive
+their specials from the profile (`engine/specials.rs`). §PHASE A in
+V14_FIXES_AND_CODE.md; ring rounds: §PROBLEM 267 — ROUND 6.**
 **Clamp + warp is "All"'s path:** `clamp_ring_center` slides the
 centre inward by exactly the overhang against the CURSOR's monitor's work
 area (the actual outermost ring's extent) and `SetCursorPos` moves the OS

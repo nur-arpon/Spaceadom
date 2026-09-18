@@ -1133,6 +1133,11 @@ pub fn run() {
     // until the user happens to save something, and Space+Enter / Tab / arrows
     // / F1-F12 are eaten in the meantime.
     hook::publish_bound_specials(&shared_config.read().unwrap_or_else(|p| p.into_inner()));
+    // PHASE A — seed the non-letter trigger bitmap BEFORE the hook thread
+    // starts, same both-ends rule: the atomics start all-clear, and without
+    // this line Esc / ` / Tab / ⌫ and the rest pass through to Windows until
+    // the first save of the session.
+    hook::publish_bound_vks(&shared_config.read().unwrap_or_else(|p| p.into_inner()));
     // PROBLEM 180 — the App-exceptions list has to be published HERE as well
     // as in config::save, or an excluded app is not excluded until the first
     // save of the session.
@@ -1414,6 +1419,11 @@ pub fn run() {
             // holds the foreground. All three guards live in `hook::`.
             commands::own_window_space_down,
             commands::own_window_key,
+            // PHASE A — the key editor's chord recorder and "Try it".
+            commands::chord_record_start,
+            commands::chord_record_poll,
+            commands::chord_record_stop,
+            commands::run_command_once,
             commands::own_window_space_up,
         ])
         // --- App setup callback ---

@@ -16,6 +16,7 @@
  * the v3 lab's SPECIALS array) — CLAUDE.md: the design is a specification.
  */
 import { sfx } from "../sfx";
+import type { AppConfig, KeyBinding } from "../types";
 
 /**
  * The eight card entrances, in the order spec §4 tables them. Index-matched
@@ -38,7 +39,12 @@ export const CARD_ANIMS: [string, string][] = [
 ];
 
 export interface SpecialSpec {
-  /** Matches the board's key id (keyboard-matrix), where one exists. */
+  /**
+   * PHASE A (2026-09-18): the SPECIAL's id (`boss_key`, `pip`, …) — Rust's
+   * `SPECIAL_IDS` — not a board key any more. Which KEY a special sits on is
+   * the active profile's business (`resolveSpecials`). The one non-special
+   * row, the opacity gesture, keeps the id `scroll`.
+   */
   id: string;
   combo: string;
   name: string;
@@ -58,37 +64,40 @@ export interface SpecialSpec {
  *    same day (see focus_engine.rs).
  */
 export const SPECIALS: SpecialSpec[] = [
-  { id: "esc", combo: "␣ Esc", name: "Boss Key",
+  { id: "boss_key", combo: "␣ Esc", name: "Boss Key",
     desc: "Hides every window and mutes your PC in one hit. Press it again and everything comes back exactly as it was.",
     how: "Hold Space, tap Esc" },
-  { id: "grave", combo: "␣ `", name: "PiP Cycle",
+  { id: "pip", combo: "␣ `", name: "PiP Cycle",
     desc: "Shrinks the window you're using into a small corner view. Keep tapping to hop corners, go fullscreen, then back to normal.",
     how: "Hold Space, tap ` (above Tab)" },
-  { id: "backspace", combo: "␣ ⌫", name: "Force Close",
+  { id: "pip_fullscreen", combo: "␣ Tab", name: "Fullscreen PiP",
+    desc: "Like PiP Cycle, but for a window that is playing fullscreen: it shrinks to a corner without leaving fullscreen, and comes back the same way.",
+    how: "Hold Space, tap Tab" },
+  { id: "force_close", combo: "␣ ⌫", name: "Force Close",
     desc: "Force-quits the app in front — even when it's frozen and the close button won't listen.",
     how: "Hold Space, tap Backspace" },
-  { id: "up", combo: "␣ ↑↑", name: "Scroll Top",
+  { id: "scroll_top", combo: "␣ ↑↑", name: "Scroll Top",
     desc: "Jumps straight to the top of whatever you're reading.",
     how: "Hold Space, tap ↑ twice" },
-  { id: "down", combo: "␣ ↓↓", name: "Scroll Bottom",
+  { id: "scroll_bottom", combo: "␣ ↓↓", name: "Scroll Bottom",
     desc: "Jumps straight to the bottom of whatever you're reading.",
     how: "Hold Space, tap ↓ twice" },
-  { id: "comma", combo: "␣ ,", name: "Smart Search",
+  { id: "search", combo: "␣ ,", name: "Smart Search",
     desc: "Puts your cursor where you'd type, in one press: YouTube and Spotify search, the address bar on other pages and new tabs, the message box in WhatsApp and Discord.",
     how: "Hold Space, tap comma" },
-  { id: "period", combo: "␣ .", name: "Pause",
+  { id: "pause", combo: "␣ .", name: "Pause",
     desc: "Puts Spaceadom to sleep so Space acts normal for a while. The same keys wake it up.",
     how: "Hold Space, tap period" },
-  { id: "semicolon", combo: "␣ ;", name: "Voice Typing",
+  { id: "voice_typing", combo: "␣ ;", name: "Voice Typing",
     desc: "Opens Windows' own dictation: speak, and the words are typed wherever your cursor is. The same tile lives on the middle-button ring. If the panel listens but nothing appears, check Windows' default microphone — a virtual device (SteelSeries Sonar, for one) can feed it silence.",
     how: "Hold Space, tap semicolon" },
-  { id: "slash", combo: "␣ /", name: "Screenshot",
+  { id: "screenshot", combo: "␣ /", name: "Screenshot",
     desc: "Opens Windows' own region snip: drag over what you want and it lands on the clipboard (and in your Screenshots folder, if Snipping Tool is set to save). The same tile lives on the middle-button ring.",
     how: "Hold Space, tap /" },
-  { id: "quote", combo: "␣ '", name: "On-screen Keyboard",
+  { id: "osk", combo: "␣ '", name: "On-screen Keyboard",
     desc: "Shows Windows' own on-screen keyboard; press again to hide it. Handy with just a mouse in hand. The same tile lives on the middle-button ring.",
     how: "Hold Space, tap '" },
-  { id: "ralt", combo: "␣ RAlt", name: "Cycle Profile",
+  { id: "cycle_profile", combo: "␣ RAlt", name: "Cycle Profile",
     desc: "Switches to your next profile — a different set of apps on the same keys.",
     how: "Hold Space, tap Right Alt" },
   { id: "scroll", combo: "␣ Scroll", name: "Opacity",
@@ -97,14 +106,101 @@ export const SPECIALS: SpecialSpec[] = [
 ];
 
 /**
- * The lab's `id` for Backspace is "back"; this app's keyboard-matrix calls the
- * key "backspace". The board is the older name and it is used in geometry,
- * bindings and logs, so the CARD adopts the board's id rather than the reverse.
+ * PHASE A — the board's label for a key id, for the cards' "␣ X" combo and
+ * the "Hold Space, tap X" line. Mirrors Rust's `engine::specials::key_label`
+ * (the HUD's key column) so the tray and the ring name a key the same way.
+ * Letters are upper-cased; an unknown id comes back upper-cased too.
  */
-const BOARD_TO_SPECIAL: Record<string, string> = {
-  grave: "grave", backspace: "backspace", comma: "comma",
-  period: "period", semicolon: "semicolon", slash: "slash", quote: "quote", up: "up", down: "down", ralt: "ralt",
+export const KEY_LABELS: Record<string, string> = {
+  esc: "Esc", backtick: "`", tab: "Tab", backspace: "⌫", ralt: "RAlt",
+  comma: ",", period: ".", semicolon: ";", slash: "/", quote: "'",
+  up: "↑", down: "↓", left: "←", right: "→", enter: "↵", delete: "Del",
+  pgup: "PgUp", pgdn: "PgDn", minus: "-", equal: "=", lbracket: "[",
+  rbracket: "]", backslash: "\\", caps: "Caps", lshift: "Shift", rshift: "Shift",
+  lctrl: "Ctrl", rctrl: "Ctrl", lalt: "Alt", win: "Win", home: "Home",
+  end: "End", insert: "Ins",
 };
+
+export function keyLabel(id: string): string {
+  if (id in KEY_LABELS) return KEY_LABELS[id]!;
+  const f = /^f(\d{1,2})$/.exec(id);
+  if (f) return `F${f[1]}`;
+  return id.toUpperCase();
+}
+
+/** The spoken name of a key for "Hold Space, tap …". */
+function keySpoken(id: string): string {
+  switch (id) {
+    case "backtick": return "` (above Tab)";
+    case "backspace": return "Backspace";
+    case "ralt": return "Right Alt";
+    case "comma": return "comma";
+    case "period": return "period";
+    case "semicolon": return "semicolon";
+    case "lshift": case "rshift": return "Shift";
+    case "lctrl": case "rctrl": return "Ctrl";
+    case "lalt": return "Alt";
+    default: return keyLabel(id);
+  }
+}
+
+/**
+ * PHASE A — the short word a special shows under its key on the board
+ * ("Boss", "PiP", "Snip", "Dictate", "Keys"…): today's `SPECIAL_ON_KEY`
+ * words, keyed by special id now that the key is the user's choice.
+ */
+export const SPECIAL_SHORT: Record<string, string> = {
+  boss_key: "Boss", pip: "PiP Cycle", pip_fullscreen: "Full PiP",
+  force_close: "Force Close", cycle_profile: "Profile", search: "Search",
+  pause: "Pause", voice_typing: "Dictate", screenshot: "Snip", osk: "Keys",
+  scroll_top: "Scroll Top", scroll_bottom: "Scroll Btm",
+};
+
+/** The card for a special id (`SPECIALS` entry), or null. */
+export function specialSpec(id: string): SpecialSpec | null {
+  return SPECIALS.find((s) => s.id === id) ?? null;
+}
+
+/**
+ * PHASE A — where each special sits in `config`'s active profile: the key
+ * id whose binding is `{ kind: "special", id }`, or null when it is on no
+ * key. First match in sorted key order; the editor refuses a second copy.
+ */
+export function keyForSpecial(config: AppConfig | null, id: string): string | null {
+  if (!config) return null;
+  const p = config.profiles.find((x) => x.name === config.active_profile);
+  if (!p) return null;
+  for (const k of Object.keys(p.bindings).sort()) {
+    const b: KeyBinding | undefined = p.bindings[k];
+    if (b?.action?.kind === "special" && b.action.id === id) return k;
+  }
+  return null;
+}
+
+/**
+ * PHASE A — `SPECIALS` with `combo` and `how` DERIVED from the active
+ * profile: "␣ F1" / "Hold Space, tap F1" for a Boss Key moved to F1, the
+ * double-tap wording for the two scroll specials wherever they are, and
+ * "Not on any key — assign it from any key's editor" for one that is bound
+ * nowhere. The opacity gesture row is static (it is not a key). The copy of
+ * `desc` is untouched — it is the design's.
+ */
+export function resolveSpecials(config: AppConfig | null): SpecialSpec[] {
+  return SPECIALS.map((spec) => {
+    if (spec.id === "scroll") return spec;
+    const key = keyForSpecial(config, spec.id);
+    if (!key) {
+      return { ...spec, combo: "␣ —", how: "Not on any key — assign it from any key's editor" };
+    }
+    const twice = spec.id === "scroll_top" || spec.id === "scroll_bottom";
+    const label = keyLabel(key);
+    return {
+      ...spec,
+      combo: twice ? `␣ ${label}${label}` : `␣ ${label}`,
+      how: twice ? `Hold Space, tap ${keySpoken(key)} twice` : `Hold Space, tap ${keySpoken(key)}`,
+    };
+  });
+}
 
 let _card: HTMLElement | null = null;
 let _openFor: HTMLElement | null = null;
@@ -124,21 +220,6 @@ function fun(): boolean {
 /** Index of a special by id, or -1. */
 export function specialIndex(id: string): number {
   return SPECIALS.findIndex((s) => s.id === id);
-}
-
-/** The card index for a BOARD key. Spec §4: board keys use i+3 "so neighbors
- *  differ" — the same key never performs the same entrance in both places. */
-export function boardCardIndex(boardKey: string): number {
-  const id = BOARD_TO_SPECIAL[boardKey];
-  if (!id) return -1;
-  const i = specialIndex(id);
-  return i < 0 ? -1 : i + 3;
-}
-
-/** The special a board key describes, or null if it is not a special. */
-export function boardSpecial(boardKey: string): SpecialSpec | null {
-  const id = BOARD_TO_SPECIAL[boardKey];
-  return id ? SPECIALS.find((s) => s.id === id) ?? null : null;
 }
 
 /**

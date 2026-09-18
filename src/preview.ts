@@ -92,7 +92,7 @@ import { renderMiddleRing, setRingArmed, fitPill, previewWave, previewAim, previ
 // fabricated stand-in.
 import thirdPartyRaw from "./generated/third-party.json";
 const THIRD_PARTY = thirdPartyRaw as ThirdPartyEntry[];
-import { SPECIALS, toggleSpecialCard } from "./components/special-cards";
+import { resolveSpecials, toggleSpecialCard } from "./components/special-cards";
 import { openConflictPrompt } from "./components/conflict-prompt";
 import { buildStarrySky } from "./components/starry-sky";
 import { initProfileEditor } from "./components/profile-editor";
@@ -129,6 +129,29 @@ bindings.b = {
   web_url: null, label: "Google Chrome", icon_override: null,
   browser_exe: null, browser_profile_dir: "Profile 1", browser_profile_name: "Arpon",
 };
+// PHASE A (2026-09-18) — the twelve specials Rust seeds into every profile
+// (`schema::DEFAULT_SPECIALS`), on their default keys, so the board's
+// non-letter keys, the tray's combos and the editor's "Spaceadom special"
+// page all render as they do in the app. Same table, same order.
+([
+  ["esc", "boss_key"], ["backtick", "pip"], ["tab", "pip_fullscreen"],
+  ["backspace", "force_close"], ["ralt", "cycle_profile"], ["comma", "search"],
+  ["period", "pause"], ["semicolon", "voice_typing"], ["slash", "screenshot"],
+  ["quote", "osk"], ["up", "scroll_top"], ["down", "scroll_bottom"],
+] as const).forEach(([key, id]) => {
+  bindings[key] = {
+    app: null, web_url: null, label: null, icon_override: null,
+    browser_exe: null, browser_profile_dir: null, browser_profile_name: null,
+    site_icon: null, action: { kind: "special", id },
+  };
+});
+// One non-special action on a non-letter key, so ?editor=7 shows the
+// "Windows setting" page with a current row.
+bindings["7"] = {
+  app: null, web_url: null, label: "Display", icon_override: null,
+  browser_exe: null, browser_profile_dir: null, browser_profile_name: null,
+  site_icon: null, action: { kind: "uri", target: "ms-settings:display" },
+};
 
 const config: AppConfig = {
   version: 1,
@@ -154,6 +177,9 @@ const config: AppConfig = {
   // front of whatever was actually being looked at. ?tour asks for it.
   tour_done: !q.has("tour"),
   opacity_floor_pct: 30,
+  // PHASE A — ?advanced shows the editor's "Run command" page and the full
+  // catalogue; off is the shipped default.
+  advanced_mode: q.has("advanced"),
   browser_path: null,
   fullscreen_allowlist: [],
   dark_mode: q.has("dark"),
@@ -164,7 +190,7 @@ const config: AppConfig = {
     // has always had, and that is only checkable when both are on screen at
     // once. The emoji is a ZWJ family (five code points) so the harness shows
     // the case a naive one-character cap would break.
-    { name: "Founders", bindings, emoji: "👨‍👩‍👧" },
+    { name: "Founders", bindings, emoji: "👨‍👩‍👧", specials_seeded: true },
     { name: "Gamers", bindings: {}, emoji: null },
     { name: "Professionals", bindings: {}, emoji: null },
   ],
@@ -243,7 +269,7 @@ window.addEventListener("resize", fit);
 // Same list and same card the app uses (special-cards.ts), so the 8 entrance
 // animations of spec §4 can be watched here without the backend.
 const tray = document.getElementById("specials-tray")!;
-SPECIALS.forEach((spec, i) => {
+resolveSpecials(config).forEach((spec, i) => {
   const item = document.createElement("button");
   item.type = "button";
   item.className = "special-item";
@@ -302,6 +328,8 @@ const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
  * and the component keeps its own copy exactly as it does in the app.
  */
 const stubState = { config: clone(config), undo: null as AppConfig | null };
+/** PHASE A — the stub recorder's poll counter (see `chord_record_poll`). */
+let _previewChordPolls = 0;
 
 /**
  * Grapheme clusters, the same approximation `schema::cluster_count` makes.
@@ -523,6 +551,13 @@ const stubBackend: Record<string, (a: StubArgs) => unknown> = {
   extract_icon_cmd: () => null,
   pick_file: () => null,
   frontend_log: (a) => { console.info("preview: frontend_log —", a.msg); return null; },
+  // PHASE A — the chord recorder and "Try it". No hook here: the recorder
+  // answers a fixed Win+Shift+S after the first poll so the caps can be
+  // seen; "Try it" only reports what the key would say.
+  chord_record_start: () => { _previewChordPolls = 0; return null; },
+  chord_record_poll: () => (++_previewChordPolls > 3 ? [0x5b, 0x10, 0x53] : []),
+  chord_record_stop: () => null,
+  run_command_once: (a) => `▶ Ran: ${String(a.line)}`,
 
   // ---- REVIEW FIXES 2026-09-05 (H4) — the OS light/dark seed ----
   //
