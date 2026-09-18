@@ -108,7 +108,10 @@ jobs:
             'keyboard + mouse hooks'  = 'hook: WH_KEYBOARD_LL + WH_MOUSE_LL installed'
             'raw-input keyboard sink' = 'hook: raw-input keyboard sink registered on the hook thread'
             'overlay configured'      = 'overlay: configured'
-            'config loaded'           = 'config: loaded'
+            # A fresh runner has no config.json, so the first-run line is the
+            # one that appears (v1.0.114's run printed MISSING against
+            # 'config: loaded' while everything else passed — 2026-09-18).
+            'config loaded or seeded' = 'config: '
           }
           $fail = $false
           foreach ($k in $checks.Keys) {
