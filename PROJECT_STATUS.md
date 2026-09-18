@@ -42,6 +42,16 @@ can fail and the write still runs.
 ================================================================================
 -->
 
+## 2026-09-18 — Claude (Opus, main session, owner awake) — **1.0.115: the Space ring's letter badge on icon pills was CLIPPED to a sliver — `.st-chip span { overflow: hidden }` (the label cap) also matched the icon wrapper, which is a `<span>`. Exempted; badge 14 px / 9 px. Two wrong turns first, both reverted.**
+
+**Symptom (owner, on the 1.0.114 Store screenshots):** "the letter above the icons is not properly showing" — on the SPACE ring, pills that carry an app icon (Brave, Chrome, Discord, Spotify…) show no letter, only a coloured wedge at the icon's corner. **Root cause:** `overlay-earthy.css` line ~365 `.st-chip span { white-space: nowrap; max-width: 118px; overflow: hidden; … }` is the label cap, but `.st-ico` (PROBLEM 267 round 3's icon wrapper) is also a `span`, so its absolutely-positioned `.st-ico-badge` (top −6 px, right −7 px) was clipped to the 20 px icon box. Zoomed crop of the 1.0.114 capture shows exactly a sliver. **Fix:** `.st-chip .st-ico { overflow: visible; max-width: none }`, badge 14 px / 9 px bold, `z-index: 1`. Structure unchanged: icon with the letter at its top-right (as the mouse ring's tiles), letter disc only when there is no icon — the owner's spec, said twice.
+
+**Wrong turns, reverted the same hour:** (1) I first read "ring" as the MOUSE ring and made its `.mr-badge` bigger and accent-filled, built, installed, retook the two Store slides on the external monitor (100 % scaling → tiny ring) — all reverted with `git checkout`, the owner's "get back, I didn't ask for this". (2) Then I put a full letter DISC beside the icon on Space-ring pills — reverted; he wants the badge at the corner. Lesson written into the entry so it is not repeated: **"Space ring" = the Space-hold HUD in `toast.ts`/`overlay-earthy.css`; "mouse ring" = the middle-button icon ring in `middle-ring.ts`/`middle-ring.css`.**
+
+**Also found while testing:** the mouse ring "not showing" for the owner was not a bug — the active profile was `cxvb`, 0 keys bound (log: "the icon ring has NOTHING to show — the active profile has no bound letters"), almost certainly a stray Space+RAlt cycle. Space+RAlt back to *Arpon's Profile* fixes it. The Store submission 2 (1.0.114) was already in certification with the clipped badge; a 1.0.115 resubmission follows once Partner Center is reachable again (Chrome was closed).
+
+**Build:** 1.0.115 installed and running (banner 21:23:37). The ring itself UNPROVEN by me — my injected Space landed on an Explorer window and opened an "Open with" dialog; the owner looks. Files: `src/styles/overlay-earthy.css`, version files, `scripts/install-real.cmd`.
+
 ## 2026-09-18 — Claude (Opus, main session, owner awake) — **1.0.114 BUILT, INSTALLED AND PROVED — the Store/GitHub update over 1.0.109. Space + ' → Windows on-screen keyboard (ring tile "Keyboard", U+E009); Space + / re-proven. Gates 694/0/6, x64 signed, ARM64 building. The touch keyboard's COM route is DEAD on Win11 26200.**
 
 **What the owner asked (2026-09-18, back after a break):** a shortcut to Windows' own screenshot tools (full screen or a chosen area — "don't make stuff of your own"), then a stability check, then the Store update carrying the ring and ARM64, then a brainstorm of five ideas with "if easy, do".

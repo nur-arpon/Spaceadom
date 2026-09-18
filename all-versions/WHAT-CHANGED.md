@@ -41,7 +41,15 @@ tidy. Their rows say what each one got wrong.
 
 ---
 
-## 2026-09-18 (latest) — 1.0.114 — the Store update: the ring, Space + / and Space + ', and ARM64 as a beta
+## 2026-09-18 (latest) — 1.0.115 — the Space ring's letters are back on icon pills
+
+| Version | What changed |
+| --- | --- |
+| **1.0.115** | On the Space ring, a pill that shows an app's icon carries its letter as a small badge at the icon's top-right — and since 1.0.110 that badge was clipped to a sliver by the label's overflow rule. Now it shows. Nothing else changed. |
+
+---
+
+## 2026-09-18 — 1.0.114 — the Store update: the ring, Space + / and Space + ', and ARM64 as a beta
 
 | Version | What changed |
 | --- | --- |
