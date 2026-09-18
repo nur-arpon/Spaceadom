@@ -131,6 +131,12 @@ export function keyName(key: string): string {
   return ALPHA_KEYS.has(key) ? key.toUpperCase() : (KEY_DISPLAY[key] ?? keyLabel(key));
 }
 
+/** PHASE A step 2 — the word under a key that flips a Windows setting. */
+const TOGGLE_SHORT: Record<string, string> = {
+  bluetooth: "Bluetooth", wifi: "Wi‑Fi", dark_mode: "Dark", night_light: "Night",
+  taskbar_autohide: "Taskbar", screen_off: "Screen", sleep: "Sleep", lock: "Lock", show_desktop: "Desktop",
+};
+
 /** The short label under a key for an ACTION binding with no label. */
 export function actionShortLabel(action: Action): string {
   switch (action.kind) {
@@ -139,6 +145,7 @@ export function actionShortLabel(action: Action): string {
     case "chord": return chordLabel(action.keys);
     case "command": return (action.line.trim().split(/\s+/)[0] ?? "Command").split(/[\\/]/).pop() || "Command";
     case "brightness": return action.delta >= 0 ? `Bright +${action.delta}` : `Bright −${-action.delta}`;
+    case "toggle": return TOGGLE_SHORT[action.what] ?? action.what;
   }
 }
 

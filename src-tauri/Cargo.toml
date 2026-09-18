@@ -1,6 +1,6 @@
 [package]
 name = "spaceadom"
-version = "1.0.116"
+version = "1.0.117"
 description = "Spaceadom — hold Space + tap a key to launch, focus or minimise any app"
 authors = ["Spaceadom"]
 edition = "2021"
@@ -207,6 +207,8 @@ features = [
   "Win32_System_Com_Marshal",
   # Token / elevation check
   "Win32_Security",
+  # PHASE A step 2 — LockWorkStation for the `lock` toggle.
+  "Win32_System_Shutdown",
   # PROBLEM 141 — GetFileVersionInfoW on a RIVAL install's exe, so the
   # conflict banner can name the version it is offering to remove
   # ("v1.0.37 is installed at ...") instead of pointing at a bare path.

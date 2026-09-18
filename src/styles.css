@@ -3424,6 +3424,14 @@ body.nocturne .tour-ring {
 /* Windows setting — rows "name — path" under the search field. */
 #ed-cat-search { margin-bottom: 10px; }
 #ed-cat-scroll, #ed-spec-scroll { max-height: 236px; overflow-y: auto; margin: 0 -4px; padding: 0 4px 4px; }
+/* The editor's lists scroll, but the bar must not read as a second scrollbar
+   next to the app grid's ("hide noise, make scroll very small handle" —
+   owner, 2026-09-19). Invisible until the pointer is over the list; then a
+   3px thumb, same shape as the settings panel's. */
+#ed-cat-scroll::-webkit-scrollbar, #ed-spec-scroll::-webkit-scrollbar { width: 3px; }
+#ed-cat-scroll::-webkit-scrollbar-track, #ed-spec-scroll::-webkit-scrollbar-track { background: transparent; margin: 10px 0; }
+#ed-cat-scroll::-webkit-scrollbar-thumb, #ed-spec-scroll::-webkit-scrollbar-thumb { background: transparent; border-radius: 999px; }
+#ed-cat-scroll:hover::-webkit-scrollbar-thumb, #ed-spec-scroll:hover::-webkit-scrollbar-thumb { background: var(--st-border); }
 .ed-cat-list, .ed-spec-list { display: flex; flex-direction: column; gap: 6px; }
 .ed-cat-row, .ed-spec-row {
   display: flex; flex-direction: column; align-items: stretch; gap: 2px;
@@ -3440,6 +3448,11 @@ body.nocturne .tour-ring {
 .ed-cat-row.current, .ed-spec-row.current { border-color: var(--st-accent); background: var(--st-accent-tint); }
 .ed-spec-row.current { border-color: var(--st-sage-brd); background: var(--st-sage-tint); }
 .ed-cat-name, .ed-spec-name { font-size: 13px; font-weight: 700; }
+/* PHASE A step 2 — the two headings inside the list ("Toggles & controls" /
+   "Open a settings page") and the caveat under a toggle row. */
+.ed-cat-heading { margin: 4px 2px 0; }
+.ed-cat-heading:first-child { margin-top: 0; }
+.ed-cat-note { margin-top: 2px; font-size: 10.5px; line-height: 1.4; color: var(--st-text-dim); opacity: .85; }
 .ed-cat-path, .ed-spec-desc { font-size: 11px; line-height: 1.4; color: var(--st-text-dim); }
 .ed-spec-where { margin-left: 6px; font-size: 11px; font-weight: 600; color: var(--st-sage-deep); }
 

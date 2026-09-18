@@ -214,6 +214,15 @@
     { "id": "system.colour_filters", "group": "system", "name": "Colour filters toggle", "kind": "chord", "target": ["VK_LWIN", "VK_CONTROL", "VK_C"], "keywords": ["colorblind filter"] },
     { "id": "system.high_contrast", "group": "system", "name": "High contrast toggle", "kind": "chord", "target": ["VK_LMENU", "VK_LSHIFT", "VK_SNAPSHOT"], "keywords": ["accessibility", "contrast theme"] },
     { "id": "system.copilot", "group": "system", "name": "Copilot", "kind": "chord", "target": ["VK_LWIN", "VK_C"], "keywords": ["ai assistant"], "unsure": true },
+    { "id": "system.toggle_bluetooth", "group": "system", "name": "Bluetooth on/off", "kind": "toggle", "target": "bluetooth", "keywords": ["bluetooth", "radio", "headphones", "toggle"] },
+    { "id": "system.toggle_wifi", "group": "system", "name": "Wi‑Fi on/off", "kind": "toggle", "target": "wifi", "keywords": ["wifi", "wi-fi", "wireless", "radio", "toggle"] },
+    { "id": "system.toggle_dark_mode", "group": "system", "name": "Dark / light mode", "kind": "toggle", "target": "dark_mode", "keywords": ["dark mode", "light mode", "theme", "colours", "toggle"] },
+    { "id": "system.toggle_night_light", "group": "system", "name": "Night light on/off", "kind": "toggle", "target": "night_light", "keywords": ["night light", "blue light", "warm", "toggle"], "note": "Windows has no public switch — this uses the same setting Settings writes; may need re-checking after a Windows update." },
+    { "id": "system.toggle_taskbar_autohide", "group": "system", "name": "Taskbar auto-hide", "kind": "toggle", "target": "taskbar_autohide", "keywords": ["taskbar", "hide taskbar", "auto hide", "toggle"] },
+    { "id": "system.toggle_screen_off", "group": "system", "name": "Screen off", "kind": "toggle", "target": "screen_off", "keywords": ["monitor off", "display off", "screen"] },
+    { "id": "system.toggle_sleep", "group": "system", "name": "Sleep", "kind": "toggle", "target": "sleep", "keywords": ["suspend", "standby", "power"] },
+    { "id": "system.toggle_lock", "group": "system", "name": "Lock", "kind": "toggle", "target": "lock", "keywords": ["lock screen", "lock pc", "workstation"] },
+    { "id": "system.toggle_show_desktop", "group": "system", "name": "Show desktop", "kind": "toggle", "target": "show_desktop", "keywords": ["minimize all", "peek desktop", "win d"] },
     { "id": "system.brightness_up", "group": "system", "name": "Brightness up", "kind": "brightness", "target": "+10", "keywords": ["screen", "dim", "brighter"] },
     { "id": "system.brightness_down", "group": "system", "name": "Brightness down", "kind": "brightness", "target": "-10", "keywords": ["screen", "dim", "darker"] }
   ]

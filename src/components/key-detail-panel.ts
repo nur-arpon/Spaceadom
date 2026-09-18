@@ -100,14 +100,24 @@ interface CatalogueItem {
   group: string;
   name: string;
   path?: string;
-  kind: "uri" | "chord" | "brightness";
+  kind: "uri" | "chord" | "brightness" | "toggle";
   target: string | string[];
   keywords?: string[];
   unsure?: boolean;
+  /** PHASE A step 2 — a caveat shown under the row (night light's
+   *  undocumented switch). */
+  note?: string;
 }
 const CATALOGUE: CatalogueItem[] = (catalogueRaw as { items: CatalogueItem[] }).items;
 /** The groups a NON-advanced editor shows. Advanced mode shows them all. */
 const BASIC_GROUPS = new Set(["settings", "shell", "media"]);
+/** PHASE A step 2 — the rows that FLIP something rather than open a page:
+ *  every toggle, brightness up/down and the three volume chords. They are
+ *  basic whatever group they sit in, and they are listed first. */
+const CONTROL_IDS = new Set(["media.volume_up", "media.volume_down", "media.volume_mute"]);
+function isControl(it: CatalogueItem): boolean {
+  return it.kind === "toggle" || it.kind === "brightness" || CONTROL_IDS.has(it.id);
+}
 /** At most this many catalogue rows at once — the list scrolls, but a search
  *  that matches half the catalogue is not a search. */
 const CATALOGUE_CAP = 40;
@@ -115,7 +125,7 @@ const CATALOGUE_CAP = 40;
 /** The page a binding belongs on. */
 function kindForBinding(b: KeyBinding | undefined): EditorKind {
   switch (b?.action?.kind) {
-    case "uri": case "brightness": return "setting";
+    case "uri": case "brightness": case "toggle": return "setting";
     case "chord": return "keys";
     case "command": return "command";
     case "special": return "special";
@@ -133,6 +143,8 @@ function actionFromItem(item: CatalogueItem): Action | null {
       const delta = Number(item.target);
       return Number.isFinite(delta) ? { kind: "brightness", delta } : null;
     }
+    case "toggle":
+      return typeof item.target === "string" && item.target ? { kind: "toggle", what: item.target } : null;
     case "chord": {
       const names = Array.isArray(item.target) ? item.target : [item.target];
       const keys = chordFromNames(names);
@@ -145,7 +157,7 @@ function actionFromItem(item: CatalogueItem): Action | null {
 function kindOptions(): ReadonlyArray<readonly [EditorKind, string]> {
   const opts: (readonly [EditorKind, string])[] = [
     ["app", "App or link"],
-    ["setting", "Windows setting"],
+    ["setting", "Windows"],
     ["keys", "Send keys"],
   ];
   if (_config?.advanced_mode) opts.push(["command", "Run command"]);
@@ -699,8 +711,7 @@ function otherPaneHtml(kind: EditorKind, binding: KeyBinding | undefined): strin
       return "";
     case "setting":
       return `
-        <input class="input" id="ed-cat-search" placeholder="Search Windows settings…" autocomplete="off" spellcheck="false" />
-        <div class="ed-section">${_config?.advanced_mode ? "Windows settings, folders, Control Panel and shortcuts" : "Windows settings, folders and media"}</div>
+        <input class="input" id="ed-cat-search" placeholder="Search Windows…" autocomplete="off" spellcheck="false" />
         <div id="ed-cat-scroll"><div id="ed-cat-list" class="ed-cat-list"></div>
           <div class="ed-empty" id="ed-cat-empty" hidden>Nothing matches that.</div></div>`;
     case "keys":
@@ -803,19 +814,32 @@ function renderCatalogue(key: string, binding: KeyBinding | undefined): void {
   const q = _catQuery.trim().toLowerCase();
   const advanced = !!_config?.advanced_mode;
   const current = binding?.action;
-  const rows = CATALOGUE.filter((it) => {
+  const matches = (it: CatalogueItem): boolean => {
     if (it.unsure) return false;
-    if (!advanced && !BASIC_GROUPS.has(it.group)) return false;
+    // A control (toggle / brightness / volume) is basic whatever its group —
+    // the owner could not find brightness with Advanced off (2026-09-19).
+    if (!advanced && !BASIC_GROUPS.has(it.group) && !isControl(it)) return false;
     if (!q) return true;
     const hay = [it.name, it.path ?? "", ...(it.keywords ?? [])].join(" ").toLowerCase();
     return hay.includes(q);
-  }).slice(0, CATALOGUE_CAP);
+  };
+  // PHASE A step 2 — the things that FLIP come first, the pages that OPEN
+  // after (owner: "i thought those would toggle settings automatically").
+  const hits = CATALOGUE.filter(matches);
+  const controls = hits.filter(isControl);
+  const pages = hits.filter((it) => !isControl(it)).slice(0, Math.max(0, CATALOGUE_CAP - controls.length));
 
   list.innerHTML = "";
-  empty.hidden = rows.length > 0;
-  for (const it of rows) {
+  empty.hidden = controls.length + pages.length > 0;
+  const heading = (text: string): void => {
+    const h = document.createElement("div");
+    h.className = "ed-section ed-cat-heading";
+    h.textContent = text;
+    list.appendChild(h);
+  };
+  const addRow = (it: CatalogueItem): void => {
     const action = actionFromItem(it);
-    if (!action) continue;
+    if (!action) return;
     const row = document.createElement("button");
     row.type = "button";
     row.className = "ed-cat-row";
@@ -828,8 +852,17 @@ function renderCatalogue(key: string, binding: KeyBinding | undefined): void {
     const path = document.createElement("span");
     path.className = "ed-cat-path";
     path.textContent = it.path
-      ?? (action.kind === "chord" ? chordLabel(action.keys) : action.kind === "brightness" ? "Built-in display" : String(it.target));
+      ?? (action.kind === "chord" ? chordLabel(action.keys)
+        : action.kind === "brightness" ? "Built-in display"
+        : action.kind === "toggle" ? "Flips it — the toast says the new state"
+        : String(it.target));
     row.append(name, path);
+    if (it.note) {
+      const note = document.createElement("span");
+      note.className = "ed-cat-note";
+      note.textContent = it.note;
+      row.appendChild(note);
+    }
     row.addEventListener("click", () => {
       const existing = getBinding(key);
       if (isMapped(existing) && !isCurrent) {
@@ -839,7 +872,9 @@ function renderCatalogue(key: string, binding: KeyBinding | undefined): void {
       commitAction(action, it.name);
     });
     list.appendChild(row);
-  }
+  };
+  if (controls.length) { heading("Toggles & controls"); controls.forEach(addRow); }
+  if (pages.length) { heading("Open a settings page"); pages.forEach(addRow); }
 }
 
 // --- Send keys ---------------------------------------------------------------

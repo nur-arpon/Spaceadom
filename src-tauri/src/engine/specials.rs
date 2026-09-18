@@ -66,6 +66,7 @@ pub fn action_glyph(action: &Action) -> &'static str {
         Action::Chord { .. } => "⌨",
         Action::Command { .. } => ">_",
         Action::Brightness { .. } => "☼",
+        Action::Toggle { .. } => "⇄",
         Action::Special { id } => glyph(id),
     }
 }
@@ -121,6 +122,10 @@ pub fn action_name(action: &Action) -> String {
             .unwrap_or_else(|| "Command".into()),
         Action::Brightness { delta } if *delta >= 0 => format!("Brightness +{delta}"),
         Action::Brightness { delta } => format!("Brightness −{}", delta.abs()),
+        // The catalogue row's name, so the ring says what the editor said.
+        Action::Toggle { what } => crate::engine::actions::toggle::display_name(what)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Toggle {what}")),
         Action::Special { id } => display_name(id),
     }
 }
@@ -338,6 +343,9 @@ mod tests {
         assert_eq!(action_name(&Action::Command { line: "".into() }), "Command");
         assert_eq!(action_name(&Action::Brightness { delta: 10 }), "Brightness +10");
         assert_eq!(action_name(&Action::Brightness { delta: -10 }), "Brightness −10");
+        assert_eq!(action_name(&Action::Toggle { what: "night_light".into() }), "Night light on/off");
+        assert_eq!(action_name(&Action::Toggle { what: "hologram".into() }), "Toggle hologram");
+        assert_eq!(action_glyph(&Action::Toggle { what: "wifi".into() }), "⇄");
         assert_eq!(action_name(&Action::Special { id: "osk".into() }), "On-screen Keyboard");
         assert_eq!(action_glyph(&Action::Command { line: "x".into() }), ">_");
         assert_eq!(action_glyph(&Action::Special { id: "pause".into() }), "⏸");

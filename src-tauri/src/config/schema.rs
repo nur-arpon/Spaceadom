@@ -1007,6 +1007,12 @@ pub enum Action {
     Brightness { delta: i32 },
     /// One of `SPECIAL_IDS`.
     Special { id: String },
+    /// PHASE A step 2 (2026-09-19) — FLIP a Windows setting and toast the
+    /// new state: one of `engine::actions::toggle::TOGGLE_IDS` (`bluetooth`,
+    /// `wifi`, `dark_mode`, `night_light`, `taskbar_autohide`, `screen_off`,
+    /// `sleep`, `lock`, `show_desktop`). An unknown id logs a warning and
+    /// toasts "Unknown toggle" — a config from a newer build.
+    Toggle { what: String },
 }
 
 /// The built-in specials, by id. The order is the order the HUD's inner
@@ -2276,6 +2282,7 @@ mod phase_a_action_tests {
             Action::Command { line: "control.exe /name Microsoft.PowerOptions".into() },
             Action::Brightness { delta: -10 },
             Action::Special { id: "boss_key".into() },
+            Action::Toggle { what: "bluetooth".into() },
         ];
         for a in all {
             let json = serde_json::to_string(&a).expect("serialise");
@@ -2289,6 +2296,10 @@ mod phase_a_action_tests {
         assert_eq!(
             serde_json::to_string(&Action::Brightness { delta: 10 }).unwrap(),
             r#"{"kind":"brightness","delta":10}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Action::Toggle { what: "bluetooth".into() }).unwrap(),
+            r#"{"kind":"toggle","what":"bluetooth"}"#
         );
     }
 

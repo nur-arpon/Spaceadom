@@ -36166,3 +36166,85 @@ Generalise: **a fixed table in a hook callback is a config that cannot be edited
 3. Which keys are bindable: every key with a VK, including Caps, both Shifts, Ctrl, Alt, Win and the digits. Binding a modifier eats that modifier while Space is held; the board offers it because the brief said "where a VK exists".
 4. The page fallback (`own-window-keys.ts`) sends only letters and the nine seeded punctuation keys; a digit or bracket the user binds works through the real hook everywhere except inside the dashboard itself.
 5. Rust's `Special(String)` / `special_keys` path (Enter, F-keys, Left, Right through Settings) is untouched, as the brief asked; a profile binding on `enter` or `f1` loses to a `special_keys` entry for the same key.
+
+## PHASE A — STEP 2: THE `Toggle` ACTION (2026-09-19; in the tree as 1.0.117 — gates green: 728 unit tests / 0 failed / 6 ignored, clippy 0, tsc 0, vite clean; **NOT BUILT AS AN INSTALLER, NOT INSTALLED, NO GIT** — the lead does that; dark mode and taskbar auto-hide were flipped and flipped back on this machine from the real scripts, the radios were READ only, night light exited 3 because this machine's blob is not the documented shape)
+
+### Symptom / decision
+
+Owner, 2026-09-19 01:10, after 1.0.116: "the pointing to windows setting is a useless feature, i thought those would toggle settings automatically" → "all, build it". Step 1's catalogue rows opened `ms-settings:` pages; a key under Space should FLIP the thing and a toast should say the new state. The "open the page" rows stay, demoted below the controls. `docs/PHASE-A-BRIEF-2.md` is the specification.
+
+### Design
+
+* **Config** (`src-tauri/src/config/schema.rs`, `src/types.ts`). `Action::Toggle { what: String }`, serde `{"kind":"toggle","what":"bluetooth"}`. `what` ∈ `bluetooth | wifi | dark_mode | night_light | taskbar_autohide | screen_off | sleep | lock | show_desktop` (`toggle::TOGGLE_IDS`). Unknown `what` → `log::warn!` + toast "⇄ Unknown toggle", nothing else — a config from a newer build.
+* **Engine** (`src-tauri/src/engine/actions/toggle.rs`, new; `engine/mod.rs::run_action` gains the arm; `engine/specials.rs` names it). The shape is `brightness.rs`'s: `script(what) -> Option<String>` pure, `toast_text(what, &Outcome)` pure, `run(what, app_handle)` spawns the `st-toggle` worker and toasts from it — the engine actor is never blocked. `outcome_of(exit, stdout)` is the pure decoder: exit 0 + last stdout line = the NEW state (`on`/`off`, `dark`/`light`, `done`); exit 3 = "not available on this machine"; exit 4 = "Windows refused (Settings › Privacy › Radios)"; anything else = failed. The wait is capped at `TIMEOUT` = 8 s by a `try_wait` poll; past it the child is killed and the toast says "… didn't answer". Each flip is ONE hidden `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command …` (`CREATE_NO_WINDOW`, stdin null), except: `screen_off` = Rust `SendMessageW(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER 0xF170, 2)`; `lock` = Rust `LockWorkStation()` (new `Win32_System_Shutdown` feature in `Cargo.toml`); `show_desktop` = `actions::chord::send(&[0x5B, 0x44])` on the ENGINE thread (Win+D through PROBLEM 227's one-batch path, not reimplemented — `send_keys_checked` is engine-thread only, so this is the one case `run` does not hand to the worker). The three one-shots toast FIRST (350 ms before the call) because the toast cannot be seen afterwards.
+  * `bluetooth` / `wifi` — WinRT `Windows.Devices.Radios.Radio` from PowerShell 5.1: `[Windows.Devices.Radios.Radio,Windows.System.Devices,ContentType=WindowsRuntime]`, `AsTask` via `System.Runtime.WindowsRuntime`, `RequestAccessAsync` (≠ Allowed → exit 4), `GetRadiosAsync`, `Kind -eq 'Bluetooth'`/`'WiFi'` (none → exit 3), `SetStateAsync` to the opposite of `.State` (`On` → `Off`, anything else → `On`). `radio_script(kind, read_only)` has a proof form that prints `current <state>` and never sets — that is what was run here.
+  * `dark_mode` — `HKCU\…\Themes\Personalize`: read `AppsUseLightTheme` (absent = 1), write BOTH `AppsUseLightTheme` and `SystemUsesLightTheme` flipped, then `SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE 0x1A, 0, "ImmersiveColorSet", SMTO_ABORTIFHUNG 2, 100)` through `Add-Type` P/Invoke so the taskbar and open apps repaint. Prints `dark`/`light`.
+  * `night_light` — the CloudStore blob `…\CloudStore\Store\DefaultAccount\Current\default$windows.data.bluelightreduction.bluelightreductionstate\windows.data.bluelightreduction.bluelightreductionstate`, value `Data`: byte 18 = `0x15` (enabled, with `0x10 0x00` at 23–24) or `0x13` (disabled, no extra bytes); flip both, bump the timestamp at bytes 10..14 (little-endian increment with carry). Key missing, blob short, or byte 18 anything else → exit 3, NOTHING written. Undocumented; the module doc and the catalogue row's `note` both say so.
+  * `taskbar_autohide` — `SHAppBarMessage` P/Invoke: `ABM_GETSTATE` (4) → `-bxor ABS_AUTOHIDE` (1) → `ABM_SETSTATE` (10) with `lParam` = new state. Instant, no Explorer restart. NOT the StuckRects registry.
+  * `sleep` — `[System.Windows.Forms.Application]::SetSuspendState('Suspend', $false, $false)` (Suspend, not Hibernate).
+* **Names.** `toggle::display_name(what)` is the catalogue row's name ("Bluetooth on/off", "Wi‑Fi on/off", "Dark / light mode", "Night light on/off", "Taskbar auto-hide", "Screen off", "Sleep", "Lock", "Show desktop"); `specials::action_name(Toggle)` returns it, so the Space ring, the icon ring and the board all say what the editor said. Glyph `⇄`. Toasts: "⇄ Bluetooth on", "⇄ Wi‑Fi off", "⇄ Dark mode" / "⇄ Light mode", "⇄ Night light on", "⇄ Taskbar auto-hide off", "⇄ Screen off", "⇄ Sleeping…", "⇄ Locking…", "⇄ Show desktop", "⇄ <name> — not available on this machine", "⇄ Windows refused (Settings › Privacy › Radios)", "⇄ <name> didn't answer", "⇄ <name> failed", "⇄ Unknown toggle".
+* **Catalogue** (`src/data/windows-catalogue.json`). Nine `"kind": "toggle"` rows `system.toggle_<what>` with `target` = the `what` id, in `TOGGLE_IDS` order, before the two brightness rows; night light carries `"note"`. The volume chords (`media.volume_up/down/mute`) were already there.
+* **Editor** (`src/components/key-detail-panel.ts`, `src/styles.css`). The tab is "Windows" (was "Windows setting"). `isControl(it)` = kind `toggle` or `brightness`, or one of the three volume ids — basic regardless of group (the brightness carve-out generalised), and listed FIRST under an in-list heading "Toggles & controls"; the URI/other rows follow under "Open a settings page". One search matches both. `actionFromItem`: `toggle` → `{ kind: "toggle", what: target }`; `kindForBinding`: `toggle` → the Windows tab. A toggle row's second line reads "Flips it — the toast says the new state"; a `note` renders as `.ed-cat-note` under the row. `keyboard-matrix.ts::actionShortLabel`: `TOGGLE_SHORT` ("Bluetooth", "Wi‑Fi", "Dark", "Night", "Taskbar", "Screen", "Sleep", "Lock", "Desktop").
+
+### Exact files
+
+`src-tauri/src/engine/actions/toggle.rs` (new), `src-tauri/src/engine/actions/mod.rs`, `src-tauri/src/engine/mod.rs`, `src-tauri/src/engine/specials.rs`, `src-tauri/src/config/schema.rs`, `src-tauri/Cargo.toml` (feature + version), `src/types.ts`, `src/components/key-detail-panel.ts`, `src/components/keyboard-matrix.ts`, `src/data/windows-catalogue.json`, `src/styles.css`, `package.json`, `src-tauri/tauri.conf.json`, `scripts/install-real.cmd`.
+
+### Key code
+
+The decoder every script feeds (`toggle.rs`):
+
+```rust
+pub fn outcome_of(code: Option<i32>, stdout: &str) -> Outcome {
+    match code {
+        Some(0) => match stdout.trim().lines().last().map(|l| l.trim().to_ascii_lowercase()) {
+            Some(s) if !s.is_empty() => Outcome::State(s),
+            _ => Outcome::Failed,
+        },
+        Some(3) => Outcome::NotAvailable,
+        Some(4) => Outcome::Refused,
+        _ => Outcome::Failed,
+    }
+}
+```
+
+The engine arm (`engine/mod.rs::run_action`):
+
+```rust
+        Action::Brightness { delta } => actions::brightness::adjust(*delta, app_handle),
+        Action::Toggle { what } => actions::toggle::run(what, app_handle),
+```
+
+The editor's gate and ordering (`key-detail-panel.ts`):
+
+```ts
+const CONTROL_IDS = new Set(["media.volume_up", "media.volume_down", "media.volume_mute"]);
+function isControl(it: CatalogueItem): boolean {
+  return it.kind === "toggle" || it.kind === "brightness" || CONTROL_IDS.has(it.id);
+}
+// in renderCatalogue:
+    if (!advanced && !BASIC_GROUPS.has(it.group) && !isControl(it)) return false;
+  const controls = hits.filter(isControl);
+  const pages = hits.filter((it) => !isControl(it)).slice(0, Math.max(0, CATALOGUE_CAP - controls.length));
+  if (controls.length) { heading("Toggles & controls"); controls.forEach(addRow); }
+  if (pages.length) { heading("Open a settings page"); pages.forEach(addRow); }
+```
+
+### How it was verified
+
+* **Unit tests** (722 → 728): every id has a name and exactly one way to run (script XOR Rust); every script names its key API (`RequestAccessAsync`/`GetRadiosAsync`/`SetStateAsync`, `AppsUseLightTheme`+`SystemUsesLightTheme`+`ImmersiveColorSet`, the CloudStore key + the 0x15/0x10/timestamp bytes, `SHAppBarMessage(4,`/`(10,`, `SetSuspendState('Suspend'` and not Hibernate, no StuckRects); the read-only radio form never sets; the toast table; the exit-code decoder; **the catalogue and the module agree** (the test `include_str!`s `windows-catalogue.json`: one `toggle` row per id, same order, `name` == `display_name`, `id` == `system.toggle_<what>`, night light's note contains "no public switch"); `Action::Toggle` round-trips and serialises to `{"kind":"toggle","what":"bluetooth"}`; `action_name`/`action_glyph` for a known and an unknown `what`.
+* **On this machine, 2026-09-19 01:26–01:28, the real scripts (generated from `toggle.rs` by a scratch script, so no drift), run through `explorer.exe` so they escape the agent shell's HKCU virtualisation (PROBLEM 143):**
+  * `radio_ro_bluetooth` → `current on`, exit 0. `radio_ro_wifi` → `current on`, exit 0. Read only; `SetStateAsync` was never called (the owner's headphones and connection are on them).
+  * `dark_mode` → `light` (4.4 s), then `dark` (3.4 s); `theme_inspect` afterwards: `AppsUseLightTheme=0 SystemUsesLightTheme=0` — restored to what it was. The time is the `HWND_BROADCAST` wait plus `Add-Type`; under the 8 s cap but the toast will lag the repaint by a few seconds.
+  * `taskbar_autohide` → `on` (1.0 s), then `off` (1.0 s) — restored. Took effect instantly, no Explorer restart.
+  * `night_light` → **exit 3, twice, nothing written**; `night_light_inspect` before and after is byte-identical: `len 40`, byte 18 = **`0x12`**, bytes 23–24 = `10 00`. This Windows 11 26200 blob is neither the documented "enabled" (`0x15` + `10 00`) nor "disabled" (`0x13`, no extra bytes) shape, so the script correctly refuses rather than guess — the toast on this machine would read "Night light on/off — not available on this machine". The full blob is in the QUESTION below.
+* **Never run, by rule:** `screen_off`, `sleep`, `lock`, `show_desktop`; nothing was injected; `%APPDATA%\Spaceadom\config.json` untouched; no installer built; not installed; no git.
+
+Generalise: **a script that edits an undocumented blob must refuse every shape it was not written for.** Exit 3 on an unknown byte cost one feature on one machine; a guessed write would have cost the owner's night-light settings.
+
+### QUESTIONS for the lead
+
+1. **Night light on this machine.** The blob is `43 42 01 00 0a 02 01 00 2a 06 b0 b3 b4 d5 06 2a 2b 0e 12 43 42 01 00 10 00 c6 14 8c c8 e2 ca cd eb d1 ee 01 00 00 00 00` — byte 18 is `0x12`, with the `10 00` pair present at 23–24. The 0x15/0x13 rule the brief specifies does not cover it (0x12 may be a schedule-driven "on"; unverified). Options: (a) ship as is — exit 3 → "not available" here; (b) extend the rule after a read of the blob in BOTH known states (toggle night light by hand in Settings, dump the blob each time) — I did not, because that means flipping the owner's night light and guessing the length semantics.
+2. **`dark_mode` takes 3–4 s** (measured twice). It is the theme broadcast, the same wait Settings incurs; the cap is 8 s. If the lag matters, the broadcast could move to Rust after a ~0.6 s script — the brief said P/Invoke in the script, so I left it there.
+3. **`sleep` toasts "Sleeping…" 350 ms before `SetSuspendState`**; on a machine that refuses to sleep the script's non-`done` outcome produces a second toast. Untested, by rule.
+4. **The toggle rows sit in the `system` group** (like brightness) with kind `toggle`; no new `groups` entry was added since the gate is on kind, not group.

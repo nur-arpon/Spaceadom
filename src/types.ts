@@ -18,6 +18,8 @@
  *   chord      virtual-key codes in press order ([0x5B,0x10,0x53] = Win+Shift+S)
  *   command    a command line via cmd.exe /C — Advanced mode only (UI rule)
  *   brightness ±delta on the internal panel (WMI)
+ *   toggle     flip a Windows setting (Bluetooth, Wi‑Fi, dark mode, night light,
+ *              taskbar auto-hide, screen off, sleep, lock, show desktop) — step 2
  *   special    one of `SPECIAL_IDS` — the twelve built-in specials
  */
 export type Action =
@@ -25,6 +27,7 @@ export type Action =
   | { kind: "chord"; keys: number[] }
   | { kind: "command"; line: string }
   | { kind: "brightness"; delta: number }
+  | { kind: "toggle"; what: string }
   | { kind: "special"; id: string };
 
 /** The twelve built-in specials, in Rust's `SPECIAL_IDS` order. */

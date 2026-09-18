@@ -806,6 +806,7 @@ fn run_action(
             crate::show_toast(&app_handle, &msg);
         }
         Action::Brightness { delta } => actions::brightness::adjust(*delta, app_handle),
+        Action::Toggle { what } => actions::toggle::run(what, app_handle),
     }
 }
 

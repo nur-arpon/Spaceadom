@@ -11,3 +11,5 @@ pub mod brightness;
 pub mod chord;
 pub mod command;
 pub mod uri;
+// PHASE A step 2 (2026-09-19) — flip a Windows setting and say the new state.
+pub mod toggle;

@@ -41,7 +41,15 @@ tidy. Their rows say what each one got wrong.
 
 ---
 
-## 2026-09-19 (latest) — 1.0.116 — every key is yours: actions, assignable specials
+## 2026-09-19 (latest) — 1.0.117 — keys that flip things, not just open pages
+
+| Version | What changed |
+| --- | --- |
+| **1.0.117** | "Pointing at a settings page is useless — I thought those would toggle." So now they do. New Toggle action, Windows' own APIs, no elevation, nothing third-party: Bluetooth on/off, Wi‑Fi on/off, dark/light mode, taskbar auto-hide, screen off, sleep, lock, show desktop — and Night light on/off where the setting's blob is one this build recognises (on this laptop it is not yet; the key says "not available" instead of guessing). The key editor's "Windows" tab lists toggles and controls (brightness ±, volume ±, mute) first and the "open a page" rows underneath. Brightness up/down no longer hide behind Advanced mode. The editor's list scrollbar is invisible until you hover it. |
+
+---
+
+## 2026-09-19 — 1.0.116 — every key is yours: actions, assignable specials
 
 | Version | What changed |
 | --- | --- |
