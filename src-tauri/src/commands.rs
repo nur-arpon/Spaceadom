@@ -1456,6 +1456,13 @@ pub fn open_startup_manager() -> bool {
     crate::hook::conflict_close::open_startup_manager()
 }
 
+/// TOUCHPAD T2 — the page ASKS for presence on load (see
+/// `touchpad::current_caps` for why the event alone lost the boot value).
+#[tauri::command]
+pub fn touchpad_caps() -> crate::touchpad::CapsPayload {
+    crate::touchpad::current_caps()
+}
+
 /// TOUCHPAD T2 — open Windows' own touchpad settings (the unavailable screen's
 /// "Open touchpad settings" button). `ms-settings:devices-touchpad` is the
 /// documented URI; `explorer.exe` resolves it without a shell-execute grant.

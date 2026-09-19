@@ -2510,7 +2510,7 @@ const DESC: Record<string, string> = {
   tpthumb:
     "Shows the little touchpad under the keyboard on the home screen, so you can open the touchpad page in one click. Only appears when your PC has a Precision Touchpad. Turn it off and the keyboard sits centred on its own; you can still open the page from the row below.",
   touchpadlook:
-    "How the touchpad page is painted. Matches the app wears your current theme's colours; Chocolate is the page's own dark look, still tinted with your accent. Either way the drawn touchpad stays a dark, physical-looking slab, and the little touchpad under the keyboard always matches the app.",
+    "How the touchpad page is painted. Matches the app wears your current theme's colours; Chocolate is the page's own dark look, still tinted with your accent. The little touchpad under the keyboard always matches the app.",
   wpm:
     "If apps launch by accident while you type, pick a slower speed — Spaceadom then waits longer before treating Space+key as a shortcut.",
   huddelay:
@@ -2944,7 +2944,7 @@ function touchpadAppearanceHtml(): string {
     <div class="set-item set-filterable" style="animation-delay:${60 + 5 * 45}ms">
       <div class="set-row">
         <span class="set-row-label" style="cursor:default;">Touchpad</span>
-        <span class="sp-pill sp-pill--quiet" style="font-size:11.5px;">${statusText}</span>
+        <span class="set-summary-text" style="font-size:11.5px;color:var(--st-text-dim);">${statusText}</span>
       </div>
     </div>`;
 

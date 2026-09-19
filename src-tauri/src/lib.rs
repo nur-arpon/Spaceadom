@@ -1380,6 +1380,7 @@ pub fn run() {
             commands::close_conflict,
             commands::open_startup_manager,
             commands::open_touchpad_settings,
+            commands::touchpad_caps,
             commands::reinstall_hook,
             commands::set_startup_enabled,
             // PROBLEM 250 — the Store build's two extra questions: who owns

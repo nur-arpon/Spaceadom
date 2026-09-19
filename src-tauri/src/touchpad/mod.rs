@@ -93,10 +93,28 @@ pub fn detect_presence() -> Presence {
 }
 
 #[derive(Serialize, Clone)]
-struct CapsPayload {
-    presence: &'static str,
+pub struct CapsPayload {
+    pub presence: &'static str,
     /// `[width_mm, height_mm]`, or `null` when the descriptor gives no size.
-    pad_mm: Option<[f64; 2]>,
+    pub pad_mm: Option<[f64; 2]>,
+}
+
+/// The caps RIGHT NOW, for the page to ASK on load. The `touchpad-caps`
+/// event alone was not enough: it fires once at boot — before the dashboard
+/// page has a listener — and then only on CHANGE, so a freshly loaded page
+/// never heard it and showed "none detected" on a machine whose log said
+/// `presence=precision` (owner, 2026-09-19 16:55, 1.0.120). Same class as the
+/// overlay's theme seeding (CLAUDE.md: an event that only fires on change
+/// leaves a freshly-opened page in the wrong state — seed from a command).
+pub fn current_caps() -> CapsPayload {
+    let pad = find_pad();
+    let presence = if pad.is_some() { Presence::Precision } else { Presence::None };
+    let pad_mm = pad
+        .as_ref()
+        .and_then(|d| d.pad.as_ref())
+        .and_then(|p| p.size_mm())
+        .map(|(w, h)| [w, h]);
+    CapsPayload { presence: presence.wire(), pad_mm }
 }
 
 fn emit_caps(app: &AppHandle, presence: Presence, pad: Option<&raw::DeviceInfo>) {

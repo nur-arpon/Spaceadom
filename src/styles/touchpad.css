@@ -11,7 +11,7 @@
        Navy blue for Starry, Warcry red) — set per body[data-theme] below.
      - "chocolate" (default): the design's dark chocolate surfaces.
      - "app": every surface/line/text token maps onto the app's own --st-*
-       variables; the drawn pad (--sp-inset) stays chocolate in every look
+       variables — the drawn pad included (owner, 2026-09-19: everything follows the theme)
        because the pad is a physical object.
    The two look blocks define the SAME set of --sp-* names
    (scripts/touchpad-tokens.test.ts asserts it).
@@ -93,7 +93,7 @@ body[data-theme="navy"] #touchpad-page {
   --sp-surface-2:   var(--st-card);
   --sp-surface-3:   var(--st-card);
   --sp-key:         var(--st-card);
-  --sp-inset:       #1C1410;   /* the pad is a physical object — always chocolate */
+  --sp-inset:       var(--st-surface);         /* "Matches the app" means the pad too (owner, 2026-09-19) */
   --sp-well:        var(--st-surface);
   --sp-line:        var(--st-border);
   --sp-line-strong: var(--st-border);

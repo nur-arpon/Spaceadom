@@ -1892,7 +1892,18 @@ function wireTouchpad(): void {
     }
   });
 
-  // caps: presence at boot and on device change → thumbnail + page state.
+  // caps: SEED by asking — the boot-time event fired before this page had a
+  // listener, so 1.0.120 showed "none detected" on a Precision pad (the log
+  // said presence=precision). The event below then tracks changes.
+  void invoke<TouchpadCaps>("touchpad_caps")
+    .then((caps) => {
+      const p: TouchpadPresence = caps?.presence === "precision" ? "precision" : "none";
+      setTouchpadPresence(p);
+      renderTouchpadThumb();
+      if (tpPageOpen) renderTouchpadPage();
+    })
+    .catch(() => {});
+  // caps: presence on device change → thumbnail + page state.
   void listen<TouchpadCaps>("touchpad-caps", (ev) => {
     const p: TouchpadPresence = ev.payload?.presence === "precision" ? "precision" : "none";
     setTouchpadPresence(p);

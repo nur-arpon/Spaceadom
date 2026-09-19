@@ -37,6 +37,7 @@ export interface TouchpadPageHost {
 let root: HTMLElement | null = null;
 let host: TouchpadPageHost | null = null;
 let presence: TouchpadPresence = "none";
+let delegated = false;
 let selected: TouchEdge | null = null;
 let live: TouchpadLive | null = null;
 let showDemo = false;
@@ -108,6 +109,19 @@ function esc(s: string): string {
 export function initTouchpadPage(el: HTMLElement, h: TouchpadPageHost): void {
   root = el;
   host = h;
+  // The two buttons every state shares (Esc/Keyboard, Back to the keyboard,
+  // Open touchpad settings) are wired ONCE, by delegation on the root, so no
+  // later innerHTML render can orphan them — in the real app they did
+  // nothing (owner, 2026-09-19 16:55) while the preview stub showed them fine.
+  if (!delegated) {
+    delegated = true;
+    el.addEventListener("click", (e) => {
+      const t = (e.target as HTMLElement | null)?.closest<HTMLElement>("[data-tp]");
+      if (!t || !el.contains(t)) return;
+      if (t.dataset.tp === "close") { e.preventDefault(); host?.onClose(); }
+      else if (t.dataset.tp === "open-settings") { e.preventDefault(); host?.openWindowsTouchpadSettings(); }
+    });
+  }
   selected = null;
   live = null;
   cornerAsk = null;
@@ -526,12 +540,7 @@ function save(): void {
 }
 
 function wireCommon(): void {
-  root?.querySelectorAll<HTMLElement>('[data-tp="close"]').forEach((el) =>
-    el.addEventListener("click", () => host?.onClose()),
-  );
-  root?.querySelectorAll<HTMLElement>('[data-tp="open-settings"]').forEach((el) =>
-    el.addEventListener("click", () => host?.openWindowsTouchpadSettings()),
-  );
+  // Delegated on the root in initTouchpadPage; nothing per render.
 }
 
 function wirePage(): void {

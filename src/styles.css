@@ -1877,6 +1877,9 @@ body.settings-expanded #gear-dock { opacity: 1; z-index: 60; }
   gap: 10px;
   cursor: pointer;
 }
+/* A <button class="set-row"> (the touchpad "Open touchpad page" row) must not
+   wear the UA's white button face — it is a row like any other. */
+button.set-row { background: none; border: 0; padding: 0; font: inherit; color: inherit; text-align: left; }
 
 /* A SWITCH MUST CARRY ITS OWN SIZE. Measured in the harness, 2026-09-01.
    `.toggle-switch` is a <span> — display:inline — and width/height DO NOT
