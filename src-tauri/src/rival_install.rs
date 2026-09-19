@@ -571,6 +571,11 @@ pub(crate) struct Finding {
     pub install_location: String,
     pub display_icon: String,
     pub uninstall_string: String,
+    /// PROBLEM 272 — the package FULL name (`<Name>_<ver>_<arch>__<hash>`) of
+    /// a `store_copy` finding, and `""` for every other kind. This is what
+    /// `remove_store_package` hands to `RemovePackageAsync`; `path` stays a
+    /// sentence so nothing that derives a directory from it can ever get one.
+    pub store_full_name: String,
 }
 
 /// Path 2 (PROBLEM 238): enumerate HKLM's Uninstall keys (native +
@@ -658,6 +663,7 @@ fn detect_msi_uninstall_entry(me: &std::path::Path) -> Option<Finding> {
                 install_location,
                 display_icon,
                 uninstall_string,
+                store_full_name: String::new(),
             });
         }
     }
@@ -713,12 +719,49 @@ fn detect_msi_uninstall_entry(_me: &std::path::Path) -> Option<Finding> {
 // the HKCU entry buys nothing that would justify depending on it.
 //
 // **The reverse direction** — an UNPACKAGED copy noticing that a Store copy is
-// also installed — is the same fault seen from the other side, and it is
+// also installed — is the same fault seen from the other side. Detection is
 // strictly read-only: `PackageManager` for the current user needs no elevation
-// and no capability. There is no repair for it, ever. A Store package is
-// removed from Settings ▸ Apps (or by uninstalling this copy instead); an
-// unpackaged process running `msiexec` or `Remove-Item` at a package is
-// meaningless, and `Program Files\WindowsApps` is ACL'd against exactly that.
+// and no capability.
+//
+// This paragraph used to end "There is no repair for it, ever." That was
+// written with `msiexec` and `Remove-Item` in mind, and for THOSE tools it is
+// still true: an unpackaged process aiming either at a package is meaningless,
+// and `Program Files\WindowsApps` is ACL'd against exactly that. What it
+// missed is that a package is not removed by touching its files at all — it is
+// removed by asking the deployment service, and
+// `PackageManager.RemovePackageAsync` for a package registered to the CALLING
+// USER is the same request `Remove-AppxPackage` makes from an ordinary
+// non-elevated PowerShell (the all-users form is the one that needs an
+// administrator). PROBLEM 272 (2026-09-20) is that path: `remove_store_package`
+// below, offered by the banner on the unpackaged side only, and refused
+// outright by `repair()` while packaged.
+//
+// ───────────────────── PROBLEM 272 (2026-09-20) — every install pair ─────────
+//
+// The owner's friend had the Store copy, installed the `setup.exe` on top, and
+// had two copies with no one-click way out: the Store side showed directions
+// (correct — a packaged process must not touch anything outside its package)
+// and the unpackaged side showed directions too. Three install kinds make nine
+// ordered pairs (`existing × installing`); this is what each RUNNING copy now
+// reaches. EXE = `setup.exe` per-user, MSI = `.msi` per-machine, STORE = MSIX.
+//
+// | existing | installing | the EXE copy reaches | the MSI copy reaches | the STORE copy reaches |
+// | --- | --- | --- | --- | --- |
+// | EXE   | EXE   | `None` — NSIS upgrades in place, one copy | — | — |
+// | EXE   | MSI   | Path 1 `second_copy` → button → `plan_removal` (unchanged) | `None` — the per-user side owns the fix (unchanged) | — |
+// | EXE   | STORE | `StoreBesideUnpackaged` → `store_copy` → **Remove the Store copy** (NEW) | — | `PerUserBesidePackaged` → `packaged_host` → directions |
+// | MSI   | EXE   | as EXE × MSI | as EXE × MSI | — |
+// | MSI   | MSI   | — | `None` — MajorUpgrade replaces in place | — |
+// | MSI   | STORE | — | `StoreBesidePerMachine` → `store_copy` → **Remove the Store copy** (NEW) | `PerMachineBesidePackaged` → `packaged_host` → directions (NEW in the classifier) |
+// | STORE | EXE   | as EXE × STORE — the friend's case | — | as EXE × STORE |
+// | STORE | MSI   | — | as MSI × STORE | as MSI × STORE |
+// | STORE | STORE | — | — | `None` — the Store updates in place |
+//
+// "—" is a copy that does not exist in that pair. Every row is asserted in
+// `tests::the_nine_install_pairs_each_reach_the_documented_verdict`, and every
+// one of the 2^7 input combinations of `classify_cross_kind_all` is pinned
+// against a written-out reference in
+// `tests::every_cross_kind_input_combination_matches_the_reference_rules`.
 
 /// Which cross-kind pairing exists on this machine — the decision, with no
 /// registry, filesystem or WinRT access, so both directions are unit tests
@@ -730,9 +773,45 @@ pub enum CrossKindVerdict {
     /// WE are the packaged (Store) copy, and an unpackaged per-user install
     /// is sitting beside us. Banner: `packaged_host` — directions, no button.
     PerUserBesidePackaged,
-    /// WE are the unpackaged copy, and a Microsoft Store copy is registered
-    /// for this user. Banner: `store_copy` — directions, and NEVER a repair.
+    /// WE are the unpackaged per-user copy, and a Microsoft Store copy is
+    /// registered for this user. Banner: `store_copy` — since PROBLEM 272 a
+    /// **Remove the Store copy** button (`remove_store_package`), with the
+    /// directions kept as the fallback text if the removal fails.
     StoreBesideUnpackaged,
+    /// PROBLEM 272. WE are the packaged (Store) copy, and a per-machine
+    /// `.msi` install (`%ProgramFiles%\Spaceadom`) is sitting beside us.
+    /// Banner: `packaged_host` — directions, no button, same as the per-user
+    /// pairing. (Before PROBLEM 272 `detect_full`'s Path 1 found this shape
+    /// before the classifier was consulted, so the banner was right and the
+    /// classifier was silent; now the classifier says it.)
+    PerMachineBesidePackaged,
+    /// PROBLEM 272. WE are the per-machine `.msi` copy, and a Microsoft Store
+    /// copy is registered for this user. Banner: `store_copy`, the same
+    /// **Remove the Store copy** button as `StoreBesideUnpackaged` — an `.msi`
+    /// process is an ordinary full-trust unpackaged process and may make the
+    /// same per-user deployment request.
+    StoreBesidePerMachine,
+}
+
+/// PROBLEM 272 — everything `classify_cross_kind_all` decides on, as plain
+/// booleans, so every one of the 2^7 combinations is a unit test and none of
+/// them needs a registry, a filesystem or WinRT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CrossKindInputs {
+    /// `packaged::is_packaged()` — we run from an MSIX package.
+    pub we_are_packaged: bool,
+    /// `current_exe()` is under `%ProgramFiles%\Spaceadom` — we are the `.msi`.
+    pub we_are_per_machine: bool,
+    /// `%LOCALAPPDATA%\Spaceadom\spaceadom.exe` is on disk.
+    pub per_user_exe_exists: bool,
+    /// …and it is the file currently running.
+    pub per_user_exe_is_us: bool,
+    /// `%ProgramFiles%\Spaceadom\spaceadom.exe` is on disk.
+    pub per_machine_exe_exists: bool,
+    /// …and it is the file currently running.
+    pub per_machine_exe_is_us: bool,
+    /// A Spaceadom MSIX package is registered for the calling user.
+    pub store_package_registered: bool,
 }
 
 /// Pure. `per_user_exe_is_us` exists so the classifier cannot be talked into
@@ -746,23 +825,97 @@ pub enum CrossKindVerdict {
 /// never consult the appx registration list looking for "a Store copy",
 /// because it would find ITSELF and warn the user about the app they are
 /// looking at.
+///
+/// **PROBLEM 272 kept this four-argument form byte-identical** — every verdict
+/// it returned before is the verdict it returns now — and it is a thin wrapper:
+/// the per-machine inputs it does not know about are `false`, which is exactly
+/// what every caller and test written against it had assumed. New code goes
+/// through `classify_cross_kind_all`.
 pub fn classify_cross_kind(
     we_are_packaged: bool,
     per_user_exe_exists: bool,
     per_user_exe_is_us: bool,
     store_package_registered: bool,
 ) -> CrossKindVerdict {
-    if we_are_packaged {
-        if per_user_exe_exists && !per_user_exe_is_us {
+    classify_cross_kind_all(&CrossKindInputs {
+        we_are_packaged,
+        per_user_exe_exists,
+        per_user_exe_is_us,
+        store_package_registered,
+        ..CrossKindInputs::default()
+    })
+}
+
+/// PROBLEM 272 — the classifier over all nine install pairs (table in the
+/// module comment above). Pure. The rules, in the order they are applied:
+///
+/// 1. **Packaged wins.** A packaged process looks at the filesystem only —
+///    never at the package list, which would name itself — and reports the
+///    per-user copy first (the pairing the 2026-09-05 live test measured and
+///    the one the owner's friend hit), then the per-machine one. Only one
+///    finding is ever reported.
+/// 2. **Otherwise the package list decides.** An unpackaged process — per-user
+///    OR per-machine — that sees a Spaceadom package registered for this user
+///    reports it, as `StoreBesidePerMachine` when we are the `.msi` and
+///    `StoreBesideUnpackaged` otherwise. Both map to the `store_copy` banner
+///    with the removal button; the two verdicts exist so the nine-pair table
+///    can name which copy said it.
+/// 3. **EXE ↔ MSI is not this function's job.** The per-user copy finds a
+///    Program Files install through `detect_full`'s Path 1 and removes it
+///    through `plan_removal` (PROBLEM 244), and the `.msi` copy reports
+///    nothing about a per-user one — both unchanged by PROBLEM 272, which is
+///    why `per_user_exe_exists` is ignored in the unpackaged arm.
+pub fn classify_cross_kind_all(i: &CrossKindInputs) -> CrossKindVerdict {
+    if i.we_are_packaged {
+        if i.per_user_exe_exists && !i.per_user_exe_is_us {
             CrossKindVerdict::PerUserBesidePackaged
+        } else if i.per_machine_exe_exists && !i.per_machine_exe_is_us {
+            CrossKindVerdict::PerMachineBesidePackaged
         } else {
             CrossKindVerdict::None
         }
-    } else if store_package_registered {
-        CrossKindVerdict::StoreBesideUnpackaged
+    } else if i.store_package_registered {
+        if i.we_are_per_machine {
+            CrossKindVerdict::StoreBesidePerMachine
+        } else {
+            CrossKindVerdict::StoreBesideUnpackaged
+        }
     } else {
         CrossKindVerdict::None
     }
+}
+
+/// PROBLEM 272 — is this package identity `Name` OUR Store package?
+///
+/// Pure, and it is the ONE filter both the detector (`find_store_package`) and
+/// the remover (`remove_store_package`) go through, so the package the banner
+/// names and the package the button removes are chosen by the same rule.
+///
+/// **Why a name rule and not a package family name.** A family name is
+/// `<Identity/Name>_<publisher hash>`, and `Identity/Name` comes from
+/// `src-tauri/msix/identity.json` — gitignored, filled from Partner Center,
+/// substituted into `AppxManifest.xml`'s `{{IDENTITY_NAME}}` at pack time by
+/// `build-msix.ps1`, and compiled into this binary in no form at all. There is
+/// no constant to derive one from: the committed manifest holds a placeholder
+/// and the committed `identity.example.json` holds `PUT-YOUR-…-HERE`. The
+/// rule is therefore the shape Partner Center names take —
+/// `<PublisherPrefix>.Spaceadom` (e.g. `12345NurIfranArpon.Spaceadom`; the
+/// local test identity is `LOCALTEST.Spaceadom`) — matched on the LAST
+/// dot-separated segment, case-insensitively, plus the bare `Spaceadom` for a
+/// hand-built package with no prefix at all.
+///
+/// The detector used to accept any name CONTAINING "spaceadom". That was fine
+/// for a banner (a false positive costs a sentence) and is not fine for a
+/// removal (a false positive costs somebody else's app), so the rule is the
+/// stricter one and the detector uses it too: the package it names is one the
+/// button may remove.
+pub fn is_our_store_package_name(identity_name: &str) -> bool {
+    let name = identity_name.trim();
+    if name.is_empty() {
+        return false;
+    }
+    let last = name.rsplit('.').next().unwrap_or(name);
+    last.eq_ignore_ascii_case("Spaceadom")
 }
 
 /// `%LOCALAPPDATA%\Spaceadom\spaceadom.exe` — where `setup.exe` (NSIS,
@@ -803,7 +956,7 @@ fn per_user_exe() -> Option<PathBuf> {
 #[cfg(windows)]
 fn find_store_package() -> Option<(String, String)> {
     use windows::core::HSTRING;
-    use windows::Management::Deployment::PackageManager;
+    use windows::Management::Deployment::{PackageManager, PackageTypes};
 
     let pm = match PackageManager::new() {
         Ok(pm) => pm,
@@ -814,7 +967,13 @@ fn find_store_package() -> Option<(String, String)> {
             return None;
         }
     };
-    let packages = match pm.FindPackagesByUserSecurityId(&HSTRING::new()) {
+    // PROBLEM 272 — `PackageTypes::Main` only: a framework, resource or
+    // optional package can never be "a copy of Spaceadom", and the removal
+    // below re-runs this same enumeration to make sure the name it was handed
+    // is one it just saw.
+    let packages = match pm
+        .FindPackagesByUserSecurityIdWithPackageTypes(&HSTRING::new(), PackageTypes::Main)
+    {
         Ok(p) => p,
         Err(e) => {
             log::debug!(
@@ -827,7 +986,7 @@ fn find_store_package() -> Option<(String, String)> {
     for package in packages {
         let Ok(id) = package.Id() else { continue };
         let Ok(name) = id.Name() else { continue };
-        if !name.to_string().to_ascii_lowercase().contains("spaceadom") {
+        if !is_our_store_package_name(&name.to_string()) {
             continue;
         }
         let full = id
@@ -851,69 +1010,94 @@ fn find_store_package() -> Option<(String, String)> {
 /// The impure half of the two new paths: ask the machine the questions
 /// `classify_cross_kind` decides on, then build the `Finding`.
 #[cfg(windows)]
-fn detect_cross_kind(me: &std::path::Path) -> Option<Finding> {
+fn detect_cross_kind(me: &std::path::Path, we_are_per_machine: bool) -> Option<Finding> {
     let packaged = crate::packaged::is_packaged();
 
-    // Only ask the filesystem question in the direction that can use it…
-    let (exists, is_us, exe) = if packaged {
-        match per_user_exe() {
-            Some(exe) => {
+    // Only ask the filesystem questions in the direction that can use them…
+    let probe = |exe: Option<PathBuf>| -> (bool, bool, Option<PathBuf>) {
+        match exe {
+            Some(exe) if packaged => {
                 let exists = exe.is_file();
                 (exists, exists && is_same_exe(&exe, me), Some(exe))
             }
-            None => (false, false, None),
+            _ => (false, false, None),
         }
-    } else {
-        (false, false, None)
     };
+    let (pu_exists, pu_is_us, pu_exe) = probe(per_user_exe());
+    let (pm_exists, pm_is_us, pm_exe) = probe(Some(per_machine_exe()));
     // …and the WinRT question only in the other one.
     let store = if packaged { None } else { find_store_package() };
 
-    match classify_cross_kind(packaged, exists, is_us, store.is_some()) {
+    let inputs = CrossKindInputs {
+        we_are_packaged: packaged,
+        we_are_per_machine,
+        per_user_exe_exists: pu_exists,
+        per_user_exe_is_us: pu_is_us,
+        per_machine_exe_exists: pm_exists,
+        per_machine_exe_is_us: pm_is_us,
+        store_package_registered: store.is_some(),
+    };
+
+    // One builder for both packaged-side findings: a FILE, not a
+    // registration — no ProductCode, and `repair()` refuses outright while
+    // packaged in any case. The `packaged_host` banner variant is chosen by
+    // `status_kind()` from `is_packaged()`, not from the kind string;
+    // "second_copy" is the honest shape — two live installs.
+    let file_finding = |exe: PathBuf| Finding {
+        version: file_version(&exe).unwrap_or_else(|| "unknown version".to_string()),
+        install_location: exe
+            .parent()
+            .map(|d| d.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        path: exe.to_string_lossy().to_string(),
+        kind: "second_copy",
+        guid: String::new(),
+        display_icon: String::new(),
+        uninstall_string: String::new(),
+        store_full_name: String::new(),
+    };
+
+    match classify_cross_kind_all(&inputs) {
         CrossKindVerdict::None => None,
         CrossKindVerdict::PerUserBesidePackaged => {
-            let exe = exe?;
-            let version = file_version(&exe).unwrap_or_else(|| "unknown version".to_string());
             log::info!(
                 "rival install: this PACKAGED copy found an unpackaged per-user install beside \
                  it (PROBLEM 250 follow-up — LIVE TEST 2026-09-05, FINDING C). The banner shows \
                  directions, never a button: a packaged app must not elevate to remove a \
                  product outside its own package."
             );
-            Some(Finding {
-                path: exe.to_string_lossy().to_string(),
-                version,
-                // The `packaged_host` banner variant is chosen by
-                // `status_kind()` from `is_packaged()`, not from this string;
-                // "second_copy" is the honest shape — two live installs.
-                kind: "second_copy",
-                // A file, not a registration: no ProductCode, and `repair()`
-                // refuses outright while packaged in any case.
-                guid: String::new(),
-                install_location: exe
-                    .parent()
-                    .map(|d| d.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-                display_icon: String::new(),
-                uninstall_string: String::new(),
-            })
+            Some(file_finding(pu_exe?))
         }
-        CrossKindVerdict::StoreBesideUnpackaged => {
+        CrossKindVerdict::PerMachineBesidePackaged => {
+            log::info!(
+                "rival install: this PACKAGED copy found a per-machine (.msi) install beside it \
+                 in Program Files (PROBLEM 272). The banner shows directions, never a button: a \
+                 packaged app must not elevate to remove a product outside its own package."
+            );
+            Some(file_finding(pm_exe?))
+        }
+        verdict @ (CrossKindVerdict::StoreBesideUnpackaged | CrossKindVerdict::StoreBesidePerMachine) => {
             let (full, version) = store?;
+            let which = if verdict == CrossKindVerdict::StoreBesidePerMachine {
+                "the per-machine .msi copy"
+            } else {
+                "the per-user setup.exe copy"
+            };
             log::warn!(
                 "rival install: a Microsoft Store (MSIX) copy of Spaceadom is registered for \
-                 this user ({full}) while THIS copy is unpackaged. Both start with Windows and \
-                 both install a WH_KEYBOARD_LL hook, so one has to go — but there is no repair \
-                 for this shape and the banner offers none: a Store package is removed from \
-                 Settings > Apps, and Program Files\\WindowsApps is ACL'd against anything else."
+                 this user ({full}) while THIS copy is {which}. Both start with Windows and \
+                 both install a WH_KEYBOARD_LL hook, so one has to go. The banner offers to \
+                 remove the Store copy through PackageManager.RemovePackageAsync for this user \
+                 (PROBLEM 272 — no elevation, no files touched by us), with the Settings > Apps \
+                 directions as the fallback if that fails."
             );
             Some(Finding {
                 // A SENTENCE, deliberately — the same device PROBLEM 238 uses
                 // for an orphaned entry. `repair()` derives its delete target
                 // with `Path::parent()` of this value, and a string with no
                 // path separator yields `""`, which `removal_target` answers
-                // `Ok(None)` for. The explicit refusal in `repair()` is the
-                // real guard; this is the second one.
+                // `Ok(None)` for. The `store_copy` arm of `repair()` never
+                // reaches that code; this keeps it true even if it did.
                 path: format!("a Microsoft Store copy is also installed ({full}) — keep one"),
                 version,
                 kind: "store_copy",
@@ -921,13 +1105,137 @@ fn detect_cross_kind(me: &std::path::Path) -> Option<Finding> {
                 install_location: String::new(),
                 display_icon: String::new(),
                 uninstall_string: String::new(),
+                store_full_name: full,
             })
         }
     }
 }
 
+/// PROBLEM 272 — remove OUR Store package for the calling user, from an
+/// unpackaged process. `Ok(())` when the deployment service reports success;
+/// `Err(why)` with the reason the banner should fall back to directions.
+///
+/// **What it does, step by step.**
+/// 1. Enumerate the calling user's MAIN packages
+///    (`FindPackagesByUserSecurityIdWithPackageTypes("", Main)` — the WinRT
+///    `FindPackagesForUserWithPackageTypes` overload; `""` = the calling user)
+///    and require that `full_name` is in that list AND passes
+///    `is_our_store_package_name`. The name was found by that same rule a few
+///    seconds or hours ago; re-checking means a stale or hand-edited value can
+///    never reach step 2.
+/// 2. `RemovePackageWithOptionsAsync(full_name, RemovalOptions::None)`, and
+///    wait for the `DeploymentResult` on a worker thread (`st-store-remove`)
+///    so the blocking wait never sits on the webview's thread. A non-S_OK
+///    `ExtendedErrorCode` is a failure even when the operation "completed".
+/// 3. Verify against the machine, not the result: `find_store_package()` must
+///    now return `None`. PROBLEM 127's lesson — an installer's exit code is a
+///    claim about the installer.
+///
+/// **Why no elevation is needed — and how sure that is.** `RemovePackageAsync`
+/// removes the package *for the current user*; that is the request
+/// `Remove-AppxPackage` (without `-AllUsers`) makes from an ordinary, non-elevated
+/// PowerShell, and it is the form every Store user exercises from Settings >
+/// Apps without a UAC prompt. The all-users removal is the one that needs an
+/// administrator, and nothing here asks for it. Confidence: HIGH on the
+/// documented behaviour, UNPROVEN in this binary — there is no Store copy on
+/// the dev machine, and this function has never been run anywhere (2026-09-20).
+/// A packaged caller would additionally need the `packageManagement` restricted
+/// capability; `repair()` refuses while packaged before this is ever reached.
+///
+/// **What it never touches.** No file under `Program Files\WindowsApps`, no
+/// `msiexec`, no `Remove-Item`, no `runas`. `PackageManager` is the deployment
+/// service's own front door; our process only asks.
+#[cfg(windows)]
+pub fn remove_store_package(full_name: &str) -> Result<(), String> {
+    use windows::core::HSTRING;
+    use windows::Management::Deployment::{PackageManager, PackageTypes, RemovalOptions};
+
+    let full_name = full_name.trim().to_string();
+    if full_name.is_empty() {
+        return Err("no package full name was recorded for the Store copy".to_string());
+    }
+
+    // The whole request lives on one worker thread: activation, the
+    // re-enumeration, the async call and the blocking wait on its result.
+    let target = full_name.clone();
+    let worker = std::thread::Builder::new()
+        .name("st-store-remove".into())
+        .spawn(move || -> Result<(), String> {
+            let pm = PackageManager::new().map_err(|e| format!("PackageManager unavailable: {e}"))?;
+
+            // Step 1 — the name must be one we can see right now, for THIS
+            // user, as a MAIN package, and must pass the one shared filter.
+            let packages = pm
+                .FindPackagesByUserSecurityIdWithPackageTypes(&HSTRING::new(), PackageTypes::Main)
+                .map_err(|e| format!("could not enumerate this user's packages: {e}"))?;
+            let mut seen = false;
+            for package in packages {
+                let Ok(id) = package.Id() else { continue };
+                let Ok(full) = id.FullName() else { continue };
+                if full.to_string() != target {
+                    continue;
+                }
+                let name = id.Name().map(|h| h.to_string()).unwrap_or_default();
+                if !is_our_store_package_name(&name) {
+                    return Err(format!(
+                        "{target} is registered but its identity name {name:?} is not a Spaceadom \
+                         package — refusing to remove it"
+                    ));
+                }
+                seen = true;
+                break;
+            }
+            if !seen {
+                return Err(format!(
+                    "{target} is not registered for this user any more — nothing to remove"
+                ));
+            }
+
+            // Step 2 — ask the deployment service, and wait for its answer.
+            let op = pm
+                .RemovePackageWithOptionsAsync(&HSTRING::from(target.as_str()), RemovalOptions::None)
+                .map_err(|e| format!("RemovePackageAsync could not be started: {e}"))?;
+            let result = op.get().map_err(|e| format!("RemovePackageAsync failed: {e}"))?;
+            let code = result.ExtendedErrorCode().map(|h| h.0).unwrap_or(0);
+            if code != 0 {
+                let text = result.ErrorText().map(|h| h.to_string()).unwrap_or_default();
+                return Err(format!(
+                    "the deployment service refused (ExtendedErrorCode 0x{code:08X}): {text}"
+                ));
+            }
+            Ok(())
+        })
+        .map_err(|e| format!("could not start the removal thread: {e}"))?;
+
+    match worker.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(why)) => return Err(why),
+        Err(_) => return Err("the removal thread panicked".to_string()),
+    }
+
+    // Step 3 — the machine, not the result.
+    match find_store_package() {
+        None => {
+            log::info!(
+                "rival install: the Microsoft Store copy {full_name} is gone — removed for this \
+                 user through PackageManager.RemovePackageAsync, no elevation, no files touched \
+                 by this process (store-copy-removed-by-unpackaged-side-spaceadom-128)"
+            );
+            Ok(())
+        }
+        Some((still, _)) => Err(format!(
+            "RemovePackageAsync reported success but {still} is still registered for this user"
+        )),
+    }
+}
+
 #[cfg(not(windows))]
-fn detect_cross_kind(_me: &std::path::Path) -> Option<Finding> {
+pub fn remove_store_package(_full_name: &str) -> Result<(), String> {
+    Err("not Windows".to_string())
+}
+
+#[cfg(not(windows))]
+fn detect_cross_kind(_me: &std::path::Path, _we_are_per_machine: bool) -> Option<Finding> {
     None
 }
 
@@ -944,12 +1252,24 @@ pub(crate) fn detect_full() -> Option<Finding> {
     // warn about at all — this module only ever offers to remove the
     // per-machine one, and an app must never offer to delete itself.
     let pm = per_machine_exe();
-    if let Some(pm_dir) = pm.parent() {
-        if me.starts_with(pm_dir) {
-            return None;
-        }
+    let we_are_per_machine = pm.parent().map(|d| me.starts_with(d)).unwrap_or(false);
+    if we_are_per_machine {
+        // PROBLEM 272 — the `.msi` copy used to stop here with nothing to say.
+        // It still says nothing about a per-user copy (the per-user side owns
+        // that fix through Path 1 + `plan_removal`) and it must never run Path
+        // 2, whose `classify_msi_entry` would read its OWN HKLM registration as
+        // an `OrphanedEntry` and offer to delete it. What it may do now is the
+        // one thing an unpackaged full-trust process can do about a Store
+        // copy: see it, and offer `remove_store_package`.
+        return detect_cross_kind(&me, true);
     }
-    if pm.exists() {
+    // PROBLEM 272 — a PACKAGED copy does not take Path 1 either. It used to
+    // (and the banner was right: `status_kind()` maps any finding to
+    // `packaged_host`), but the classifier was never consulted, so the pair
+    // "Store copy sees a Program Files install" existed only by accident.
+    // `detect_cross_kind` now names it (`PerMachineBesidePackaged`) and
+    // builds the same file finding Path 1 would have.
+    if pm.exists() && !crate::packaged::is_packaged() {
         let version = file_version(&pm).unwrap_or_else(|| "unknown version".to_string());
         return Some(Finding {
             path: pm.to_string_lossy().to_string(),
@@ -964,12 +1284,14 @@ pub(crate) fn detect_full() -> Option<Finding> {
                 .unwrap_or_default(),
             display_icon: String::new(),
             uninstall_string: String::new(),
+            store_full_name: String::new(),
         });
     }
 
-    // Path 3/4 (PROBLEM 250 follow-up, LIVE TEST 2026-09-05): the two
-    // cross-KIND pairings — a packaged copy beside a per-user NSIS one, or an
-    // unpackaged copy beside a Store package.
+    // Path 3/4 (PROBLEM 250 follow-up, LIVE TEST 2026-09-05; PROBLEM 272 for
+    // the per-machine pairs): the cross-KIND pairings — a packaged copy beside
+    // a per-user NSIS or a per-machine MSI one, or an unpackaged copy beside a
+    // Store package.
     //
     // **Ordered before Path 2 on purpose.** Paths 1, 3 and 4 all find a
     // SECOND LIVE INSTALL; Path 2 usually finds a leftover REGISTRATION
@@ -980,7 +1302,7 @@ pub(crate) fn detect_full() -> Option<Finding> {
     // microseconds (one `LOCALAPPDATA` join + one `is_file`) or, unpackaged,
     // one read-only package enumeration on `scan()`'s background thread — and
     // Path 2 then runs exactly as it did before.
-    if let Some(found) = detect_cross_kind(&me) {
+    if let Some(found) = detect_cross_kind(&me, false) {
         return Some(found);
     }
 
@@ -1067,7 +1389,9 @@ pub fn scan() {
                 "rival install: a MICROSOFT STORE copy of Spaceadom (v{version}) is installed \
                  for this user as well as this unpackaged one — {path}. Both start with Windows \
                  and both install a keyboard hook, so one has to go (PROBLEM 129/141/236). The \
-                 dashboard shows directions; there is no one-click removal for a package."
+                 dashboard is offering a one-click removal of the Store copy through \
+                 PackageManager for this user (PROBLEM 272, no elevation), with directions as \
+                 the fallback."
             );
         } else if kind == "orphaned_entry" {
             log::warn!(
@@ -1144,7 +1468,12 @@ pub fn status_kind() -> &'static str {
     // branch above cannot cover it, and the remedy is different again — a
     // Store package is not in Programs and Features and has no uninstaller we
     // could name. It never reaches `kind` from anywhere but
-    // `detect_cross_kind`, and `repair()` refuses it independently.
+    // `detect_cross_kind`. Since PROBLEM 272 `repair()` no longer refuses it:
+    // it calls `remove_store_package`, the per-user deployment request, and
+    // the banner offers that as a button with the directions as the fallback.
+    // Both the per-user (`StoreBesideUnpackaged`) and the per-machine
+    // (`StoreBesidePerMachine`) copies report this same kind — the remedy is
+    // the same for both, and the packaged check above still comes first.
     kind
 }
 
@@ -1219,25 +1548,36 @@ pub fn repair() -> bool {
         return true; // already gone
     };
 
-    // PROBLEM 250 follow-up (LIVE TEST 2026-09-05) — the OTHER direction, and
-    // it refuses for a different reason than the packaged check above. Here we
-    // are the ordinary unpackaged copy and the rival is an MSIX package. There
-    // is no ProductCode, no `uninstall.exe`, and no directory we may touch:
-    // `Program Files\WindowsApps` is ACL'd against this user by design. The
-    // only correct removal is `Remove-AppxPackage` / Settings > Apps, run by
-    // the person, and a `runas` that ends in "access denied" is worse than no
-    // button at all — it teaches the user to accept a UAC prompt from this app
-    // for an action that cannot work.
+    // PROBLEM 250 follow-up (LIVE TEST 2026-09-05), reversed by PROBLEM 272
+    // (2026-09-20) — the OTHER direction. Here we are an unpackaged copy
+    // (per-user OR per-machine; the packaged check above has already
+    // returned) and the rival is an MSIX package. This arm used to refuse,
+    // and the reasoning it gave is still true of the tools it had in mind:
+    // there is no ProductCode, no `uninstall.exe`, and no directory we may
+    // touch — `Program Files\WindowsApps` is ACL'd against this user by
+    // design, so `runas` + `Remove-Item` would end in "access denied". A
+    // package is not removed by touching its files. It is removed by asking
+    // the deployment service, and `PackageManager.RemovePackageAsync` for a
+    // package registered to the CALLING USER is a plain, unelevated request —
+    // the one `Remove-AppxPackage` makes from a normal PowerShell. No UAC
+    // prompt, no `msiexec`, no `runas`: `remove_store_package` does that and
+    // nothing else, and it re-checks the package against the same name filter
+    // the detector used before it asks.
     if found.kind == "store_copy" {
-        log::warn!(
-            "rival install: REFUSING the one-click removal — the other copy is a Microsoft \
-             Store (MSIX) package ({}). A package is removed from Settings > Apps > Installed \
-             apps, or by uninstalling THIS copy instead; nothing this function can elevate to \
-             is capable of removing it. The banner gives directions and no button; if a button \
-             reached this function anyway, that banner is stale.",
-            found.path
-        );
-        return false;
+        return match remove_store_package(&found.store_full_name) {
+            Ok(()) => {
+                RIVAL_FOUND.store(false, Ordering::Relaxed);
+                true
+            }
+            Err(why) => {
+                log::warn!(
+                    "rival install: the Store copy was NOT removed — {why}. The banner falls \
+                     back to directions: remove it from Settings > Apps > Installed apps, or \
+                     keep it and uninstall this copy instead."
+                );
+                false
+            }
+        };
     }
 
     let path = found.path.clone();
@@ -1977,4 +2317,226 @@ mod tests {
         assert_eq!(removal_target("", r"C:\Users\owner\AppData\Local\Spaceadom", &[]), Ok(None));
     }
 
+    // ───────────────────── PROBLEM 272 (2026-09-20) — every install pair ─────
+    //
+    // What these pin, in one line: the owner's friend on the Store copy ran the
+    // setup.exe on top and had two copies with no one-click way out. Each of
+    // the nine `existing × installing` pairs now has a documented verdict for
+    // every copy that can be running, and the unpackaged side of a Store
+    // pairing gets a removal it can actually perform.
+
+    /// The three ways Spaceadom can be installed, for the table below.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Kind {
+        Exe,
+        Msi,
+        Store,
+    }
+
+    /// The pure inputs the running copy `me` would observe on a machine that
+    /// holds exactly the installs in `present`. Mirrors `detect_cross_kind`:
+    /// a packaged copy probes both exe paths and never the package list; an
+    /// unpackaged copy asks only the package list.
+    fn inputs_for(me: Kind, present: &[Kind]) -> CrossKindInputs {
+        let has = |k: Kind| present.contains(&k);
+        let packaged = me == Kind::Store;
+        CrossKindInputs {
+            we_are_packaged: packaged,
+            we_are_per_machine: me == Kind::Msi,
+            per_user_exe_exists: packaged && has(Kind::Exe),
+            per_user_exe_is_us: false,
+            per_machine_exe_exists: packaged && has(Kind::Msi),
+            per_machine_exe_is_us: false,
+            store_package_registered: !packaged && has(Kind::Store),
+        }
+    }
+
+    /// The nine-pair table from the module comment, one assertion per cell.
+    /// A pair of the same kind is one copy (in-place upgrade), so the only
+    /// copy running sees `None`; a mixed pair is two copies and BOTH are
+    /// asserted. EXE ↔ MSI is `None` from this classifier on purpose — Path 1
+    /// and `plan_removal` own that pair, unchanged.
+    #[test]
+    fn the_nine_install_pairs_each_reach_the_documented_verdict() {
+        use CrossKindVerdict as V;
+        use Kind::*;
+        let table: [(Kind, Kind, &[(Kind, V)]); 9] = [
+            (Exe, Exe, &[(Exe, V::None)]),
+            (Exe, Msi, &[(Exe, V::None), (Msi, V::None)]),
+            (Exe, Store, &[(Exe, V::StoreBesideUnpackaged), (Store, V::PerUserBesidePackaged)]),
+            (Msi, Exe, &[(Exe, V::None), (Msi, V::None)]),
+            (Msi, Msi, &[(Msi, V::None)]),
+            (Msi, Store, &[(Msi, V::StoreBesidePerMachine), (Store, V::PerMachineBesidePackaged)]),
+            // The friend's case, 2026-09-19/20.
+            (Store, Exe, &[(Exe, V::StoreBesideUnpackaged), (Store, V::PerUserBesidePackaged)]),
+            (Store, Msi, &[(Msi, V::StoreBesidePerMachine), (Store, V::PerMachineBesidePackaged)]),
+            (Store, Store, &[(Store, V::None)]),
+        ];
+        for (existing, installing, cells) in table {
+            let present = [existing, installing];
+            for (me, want) in cells.iter() {
+                let got = classify_cross_kind_all(&inputs_for(*me, &present));
+                assert_eq!(
+                    got, *want,
+                    "existing {existing:?} × installing {installing:?}: the {me:?} copy must reach \
+                     {want:?}, got {got:?}"
+                );
+            }
+        }
+    }
+
+    /// Every one of the 2^7 input combinations, against the three rules
+    /// written in `classify_cross_kind_all`'s doc comment — spelled out here a
+    /// second time, independently, so a change to the function that still
+    /// passes the nine-pair table cannot pass this one by accident.
+    #[test]
+    fn every_cross_kind_input_combination_matches_the_reference_rules() {
+        let bit = |n: u32, b: u32| (n >> b) & 1 == 1;
+        for n in 0u32..128 {
+            let i = CrossKindInputs {
+                we_are_packaged: bit(n, 0),
+                we_are_per_machine: bit(n, 1),
+                per_user_exe_exists: bit(n, 2),
+                per_user_exe_is_us: bit(n, 3),
+                per_machine_exe_exists: bit(n, 4),
+                per_machine_exe_is_us: bit(n, 5),
+                store_package_registered: bit(n, 6),
+            };
+            let want = if i.we_are_packaged {
+                // Rule 1: packaged looks at files only, per-user first, never itself.
+                if i.per_user_exe_exists && !i.per_user_exe_is_us {
+                    CrossKindVerdict::PerUserBesidePackaged
+                } else if i.per_machine_exe_exists && !i.per_machine_exe_is_us {
+                    CrossKindVerdict::PerMachineBesidePackaged
+                } else {
+                    CrossKindVerdict::None
+                }
+            } else if i.store_package_registered {
+                // Rule 2: unpackaged asks the package list; which copy said it.
+                if i.we_are_per_machine {
+                    CrossKindVerdict::StoreBesidePerMachine
+                } else {
+                    CrossKindVerdict::StoreBesideUnpackaged
+                }
+            } else {
+                // Rule 3: EXE ↔ MSI is not this function's job.
+                CrossKindVerdict::None
+            };
+            assert_eq!(classify_cross_kind_all(&i), want, "inputs {i:?}");
+        }
+    }
+
+    /// The four-argument form must be byte-identical to what it was before
+    /// PROBLEM 272: for every one of its 16 combinations it equals the full
+    /// classifier with the per-machine inputs false.
+    #[test]
+    fn the_four_argument_classifier_is_unchanged_by_the_per_machine_inputs() {
+        for n in 0u32..16 {
+            let b = |k: u32| (n >> k) & 1 == 1;
+            let (p, e, u, s) = (b(0), b(1), b(2), b(3));
+            let full = CrossKindInputs {
+                we_are_packaged: p,
+                per_user_exe_exists: e,
+                per_user_exe_is_us: u,
+                store_package_registered: s,
+                ..CrossKindInputs::default()
+            };
+            assert_eq!(classify_cross_kind(p, e, u, s), classify_cross_kind_all(&full));
+        }
+        // And it can never produce either new verdict.
+        for n in 0u32..16 {
+            let b = |k: u32| (n >> k) & 1 == 1;
+            let v = classify_cross_kind(b(0), b(1), b(2), b(3));
+            assert!(
+                !matches!(v, CrossKindVerdict::PerMachineBesidePackaged | CrossKindVerdict::StoreBesidePerMachine),
+                "{v:?} from the four-argument form"
+            );
+        }
+    }
+
+    /// A packaged copy with BOTH unpackaged kinds beside it reports the
+    /// per-user one — one finding, and the pairing the live test measured.
+    #[test]
+    fn a_packaged_copy_beside_both_unpackaged_kinds_names_the_per_user_one() {
+        let i = CrossKindInputs {
+            we_are_packaged: true,
+            per_user_exe_exists: true,
+            per_machine_exe_exists: true,
+            ..CrossKindInputs::default()
+        };
+        assert_eq!(classify_cross_kind_all(&i), CrossKindVerdict::PerUserBesidePackaged);
+    }
+
+    /// The self-report guard on the per-machine path, for symmetry with the
+    /// per-user one: a copy that IS the Program Files exe is not its own rival.
+    #[test]
+    fn a_packaged_copy_that_is_somehow_the_per_machine_exe_is_not_its_own_rival() {
+        let i = CrossKindInputs {
+            we_are_packaged: true,
+            per_machine_exe_exists: true,
+            per_machine_exe_is_us: true,
+            ..CrossKindInputs::default()
+        };
+        assert_eq!(classify_cross_kind_all(&i), CrossKindVerdict::None);
+    }
+
+    /// The one filter the detector and the remover share. Partner Center
+    /// names are `<PublisherPrefix>.Spaceadom`; the local test identity is
+    /// `LOCALTEST.Spaceadom`; a hand-built package may be bare `Spaceadom`.
+    /// Anything that merely CONTAINS the word is not ours — a removal aimed by
+    /// a substring is a removal of somebody else's app.
+    #[test]
+    fn the_store_package_name_filter_accepts_ours_and_nothing_that_merely_mentions_us() {
+        for ours in [
+            "12345NurIfranArpon.Spaceadom",
+            "LOCALTEST.Spaceadom",
+            "Spaceadom",
+            "spaceadom",
+            "Vendor.SPACEADOM",
+            "  LOCALTEST.Spaceadom  ",
+            "a.b.c.Spaceadom",
+        ] {
+            assert!(is_our_store_package_name(ours), "{ours:?} must match");
+        }
+        for not_ours in [
+            "",
+            "   ",
+            "Spaceadom.Helper",
+            "Vendor.SpaceadomBeta",
+            "Vendor.MySpaceadom",
+            "Vendor.Spaceadom.Companion",
+            "Spaceadom-Tools",
+            "Vendor.Spaceadom2",
+            "Vendor.Space",
+            "Microsoft.WindowsCalculator",
+        ] {
+            assert!(!is_our_store_package_name(not_ours), "{not_ours:?} must NOT match");
+        }
+    }
+
+    /// A `store_copy` finding carries the full name the remover needs and a
+    /// sentence where a path would be — both, so the button has something to
+    /// remove and nothing that derives a directory ever gets one.
+    #[cfg(windows)]
+    #[test]
+    fn a_store_copy_finding_carries_the_full_name_for_removal_and_no_path() {
+        let full = "LOCALTEST.Spaceadom_1.0.100.0_x64__nj4cr7rfsqc4c";
+        let f = Finding {
+            path: format!("a Microsoft Store copy is also installed ({full}) — keep one"),
+            version: "1.0.100".into(),
+            kind: "store_copy",
+            guid: String::new(),
+            install_location: String::new(),
+            display_icon: String::new(),
+            uninstall_string: String::new(),
+            store_full_name: full.into(),
+        };
+        assert_eq!(f.store_full_name, full);
+        assert_eq!(dir_of_path_value(&f.path), "");
+        assert!(f.guid.is_empty() && f.install_location.is_empty());
+        // And an empty full name is refused by the remover before it asks
+        // anything of the machine.
+        assert!(remove_store_package("").is_err());
+        assert!(remove_store_package("   ").is_err());
+    }
 }

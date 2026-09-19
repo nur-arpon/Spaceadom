@@ -36989,3 +36989,180 @@ volume.SetMasterVolume(next as f32 / 100.0, std::ptr::null())?;
 **How it was verified.** `cargo test --release --lib` 802 / 0 / 9 ignored; `cargo clippy --release --lib` 0 warnings; `npx tsc --noEmit -p .` 0; `npm run build` clean. The READ-ONLY half was run on the owner's laptop (`cargo test --release --lib list_audio_sessions -- --ignored --nocapture`), nothing changed. First run (default endpoint only): 7 sessions — `powertoys.peek.ui.exe` 100%, `discord.exe` (pid 32076) 100%, `[system process]` pid 0, `msedgewebview2.exe` 100%, `discord.exe` (pid 19004) 100%, `chrome.exe` (pid 4504) 90%, `textinputhost.exe` 100%, all inactive; foreground "Chrome" pid 9976 `chrome.exe` → 41 matching pids including 4504. Second run (every active endpoint, after the owner's decision): **20 sessions across 6 endpoints** — Sonar Gaming / Chat / Aux / Microphone each carry `[system process]` + `msedgewebview2.exe`; Speakers (Realtek) carries the 7 above; **Sonar Media carries `gahighlight.exe`, both `discord.exe` pids, `[system process]` and `msedgewebview2.exe`** — so Discord has sessions on TWO endpoints and a default-only walk would have moved only one of them. **That listing is the proof of the helper rule:** by window pid alone Chrome would have toasted "isn't playing anything" while its mixer slider sat at 90%. **UNPROVEN:** the write half — no `SetMasterVolume` has been issued on this machine by this code; the press-to-toast path in the installed app; what the Mixer shows while a session is ACTIVE (only inactive sessions were present at both listing times); and whether moving the same app's sessions on several endpoints at once is what the owner wants to see in the Mixer (every one moves by the same delta from its own level). On the installed build: play something in Chrome, Space+`-`, expect "🔉 Chrome 80%" and the marker in debug.log; the Mixer slider for Chrome should read 80.
 
 **Generalise this.** A per-app OS resource (audio session, GPU context, network connection) is keyed by the PROCESS THAT OPENED IT, and modern apps open it from a helper. Match the app by exe name across a process snapshot, never by the window's pid alone — and write the read-only listing test first, because it is the one that shows you the pids do not line up.
+
+---
+
+## PROBLEM 272 (2026-09-20): every install pair — the Store copy beside a setup.exe (or .msi) copy can now be removed with one click from the unpackaged side — 1.0.128
+
+**Symptom.** The owner's friend had the Microsoft Store copy, ran the `setup.exe` on top, and had two Spaceadoms: two logon entries, two `WH_KEYBOARD_LL` hooks, Space+D opening Discord twice. The Store copy's banner said "open Installed apps and remove the older one" (`packaged_host`, correct — a packaged process must never touch anything outside its package). The `setup.exe` copy's banner said "Keep one: uninstall the other from Settings > Apps" (`store_copy`) with NO button. Neither side offered a click. Two of the nine `existing × installing` pairs were also invisible to the pure classifier: a Store copy beside a Program Files `.msi` install was detected only because `detect_full`'s Path 1 happened to run first, and an `.msi` copy beside a Store package was never detected at all (`detect_full` returned `None` at the top for anything running from `%ProgramFiles%\Spaceadom`).
+
+**Root cause.** The `store_copy` refusal in `rival_install::repair` (PROBLEM 250 follow-up) reasoned from the tools the function had — `runas` + `msiexec` / `Remove-Item` — and concluded "there is no repair for it, ever" because `Program Files\WindowsApps` is ACL'd against the user. True of those tools; wrong as a conclusion. A package is not removed by touching its files. It is removed by ASKING the deployment service, and `Windows.Management.Deployment.PackageManager.RemovePackageAsync` for a package registered to the calling user is an ordinary unelevated request — the one `Remove-AppxPackage` (without `-AllUsers`) makes from a normal PowerShell, and the one Settings > Apps makes with no UAC prompt. The crate feature (`Management_Deployment`) was already enabled for the detector. Separately, `classify_cross_kind` took four booleans and knew nothing about a per-machine copy on either side.
+
+**Exact files.** `src-tauri/src/rival_install.rs` (classifier, finding, removal, `repair()`, `detect_full`, tests); `src/components/rival-banner.ts` (new, pure banner copy); `scripts/rival-banner.test.ts` (new); `src/main.ts` (`checkRivalInstall` keeps DOM + invokes only); `src-tauri/src/commands.rs` (doc comments only); `CLAUDE.md` (MSIX bullet); version → 1.0.128 in `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `scripts/install-real.cmd`.
+
+### The nine pairs
+
+EXE = `setup.exe` per-user, MSI = `.msi` per-machine, STORE = MSIX. "—" = that copy does not exist in the pair. Every cell is one assertion in `tests::the_nine_install_pairs_each_reach_the_documented_verdict`.
+
+| existing | installing | the EXE copy reaches | the MSI copy reaches | the STORE copy reaches |
+| --- | --- | --- | --- | --- |
+| EXE | EXE | `None` — NSIS upgrades in place | — | — |
+| EXE | MSI | Path 1 `second_copy` → **Remove the old copy** → `plan_removal` (unchanged) | `None` — the per-user side owns the fix (unchanged) | — |
+| EXE | STORE | `StoreBesideUnpackaged` → `store_copy` → **Remove the Store copy** (NEW) | — | `PerUserBesidePackaged` → `packaged_host` → directions |
+| MSI | EXE | as EXE × MSI | as EXE × MSI | — |
+| MSI | MSI | — | `None` — MajorUpgrade replaces in place | — |
+| MSI | STORE | — | `StoreBesidePerMachine` → `store_copy` → **Remove the Store copy** (NEW) | `PerMachineBesidePackaged` → `packaged_host` → directions (NEW in the classifier) |
+| STORE | EXE | as EXE × STORE — the friend's case | — | as EXE × STORE |
+| STORE | MSI | — | as MSI × STORE | as MSI × STORE |
+| STORE | STORE | — | — | `None` — the Store updates in place |
+
+### The code
+
+The classifier — pure, seven booleans, three rules in order:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CrossKindInputs {
+    pub we_are_packaged: bool,
+    pub we_are_per_machine: bool,
+    pub per_user_exe_exists: bool,
+    pub per_user_exe_is_us: bool,
+    pub per_machine_exe_exists: bool,
+    pub per_machine_exe_is_us: bool,
+    pub store_package_registered: bool,
+}
+
+pub fn classify_cross_kind_all(i: &CrossKindInputs) -> CrossKindVerdict {
+    if i.we_are_packaged {
+        // Rule 1: packaged looks at FILES only (never the package list — it would name itself),
+        // per-user first, then per-machine, never itself.
+        if i.per_user_exe_exists && !i.per_user_exe_is_us {
+            CrossKindVerdict::PerUserBesidePackaged
+        } else if i.per_machine_exe_exists && !i.per_machine_exe_is_us {
+            CrossKindVerdict::PerMachineBesidePackaged
+        } else {
+            CrossKindVerdict::None
+        }
+    } else if i.store_package_registered {
+        // Rule 2: unpackaged asks the package list; the verdict says which copy said it.
+        if i.we_are_per_machine { CrossKindVerdict::StoreBesidePerMachine }
+        else { CrossKindVerdict::StoreBesideUnpackaged }
+    } else {
+        // Rule 3: EXE <-> MSI is Path 1 + plan_removal's job, unchanged.
+        CrossKindVerdict::None
+    }
+}
+
+/// The four-argument form is byte-identical to before: a wrapper with the per-machine inputs false.
+pub fn classify_cross_kind(we_are_packaged: bool, per_user_exe_exists: bool, per_user_exe_is_us: bool, store_package_registered: bool) -> CrossKindVerdict {
+    classify_cross_kind_all(&CrossKindInputs { we_are_packaged, per_user_exe_exists, per_user_exe_is_us, store_package_registered, ..CrossKindInputs::default() })
+}
+```
+
+`detect_full`'s two ordering changes — the `.msi` copy runs the cross-kind check and nothing else; the packaged copy skips Path 1 so the classifier is what names the per-machine pair:
+
+```rust
+let pm = per_machine_exe();
+let we_are_per_machine = pm.parent().map(|d| me.starts_with(d)).unwrap_or(false);
+if we_are_per_machine {
+    // Never Path 2: classify_msi_entry would read our OWN HKLM registration as an OrphanedEntry.
+    return detect_cross_kind(&me, true);
+}
+if pm.exists() && !crate::packaged::is_packaged() {   // Path 1, unchanged for the per-user copy
+    // ...
+}
+```
+
+The one shared name filter — the detector and the remover both go through it, so the banner names only what the button may remove. There is NO package family name constant: `Identity/Name` is `{{IDENTITY_NAME}}` in the committed `AppxManifest.xml`, filled from gitignored `msix/identity.json` by `build-msix.ps1`, and exists in the binary in no form. The rule is the SHAPE Partner Center names take:
+
+```rust
+/// `<PublisherPrefix>.Spaceadom` (e.g. `12345NurIfranArpon.Spaceadom`, `LOCALTEST.Spaceadom`) or bare `Spaceadom`,
+/// matched on the LAST dot-segment, case-insensitively. `Vendor.SpaceadomBeta` and `Spaceadom.Helper` are not ours.
+pub fn is_our_store_package_name(identity_name: &str) -> bool {
+    let name = identity_name.trim();
+    if name.is_empty() { return false; }
+    let last = name.rsplit('.').next().unwrap_or(name);
+    last.eq_ignore_ascii_case("Spaceadom")
+}
+```
+
+The removal (Windows only; `Finding` gained `store_full_name`, filled from `Id().FullName()` by `detect_cross_kind`; `path` stays a sentence):
+
+```rust
+pub fn remove_store_package(full_name: &str) -> Result<(), String> {
+    use windows::core::HSTRING;
+    use windows::Management::Deployment::{PackageManager, PackageTypes, RemovalOptions};
+    let full_name = full_name.trim().to_string();
+    if full_name.is_empty() { return Err("no package full name was recorded for the Store copy".into()); }
+    let target = full_name.clone();
+    let worker = std::thread::Builder::new().name("st-store-remove".into()).spawn(move || -> Result<(), String> {
+        let pm = PackageManager::new().map_err(|e| format!("PackageManager unavailable: {e}"))?;
+        // 1. The name must be one we can see RIGHT NOW, for THIS user, as a MAIN package, and pass the shared filter.
+        let packages = pm.FindPackagesByUserSecurityIdWithPackageTypes(&HSTRING::new(), PackageTypes::Main)
+            .map_err(|e| format!("could not enumerate this user's packages: {e}"))?;
+        let mut seen = false;
+        for package in packages {
+            let Ok(id) = package.Id() else { continue };
+            let Ok(full) = id.FullName() else { continue };
+            if full.to_string() != target { continue; }
+            let name = id.Name().map(|h| h.to_string()).unwrap_or_default();
+            if !is_our_store_package_name(&name) { return Err(format!("{target} is registered but its identity name {name:?} is not a Spaceadom package — refusing to remove it")); }
+            seen = true; break;
+        }
+        if !seen { return Err(format!("{target} is not registered for this user any more — nothing to remove")); }
+        // 2. Ask the deployment service and wait for its answer (blocking `.get()` on THIS worker thread).
+        let op = pm.RemovePackageWithOptionsAsync(&HSTRING::from(target.as_str()), RemovalOptions::None)
+            .map_err(|e| format!("RemovePackageAsync could not be started: {e}"))?;
+        let result = op.get().map_err(|e| format!("RemovePackageAsync failed: {e}"))?;
+        let code = result.ExtendedErrorCode().map(|h| h.0).unwrap_or(0);
+        if code != 0 {
+            let text = result.ErrorText().map(|h| h.to_string()).unwrap_or_default();
+            return Err(format!("the deployment service refused (ExtendedErrorCode 0x{code:08X}): {text}"));
+        }
+        Ok(())
+    }).map_err(|e| format!("could not start the removal thread: {e}"))?;
+    match worker.join() { Ok(Ok(())) => {}, Ok(Err(why)) => return Err(why), Err(_) => return Err("the removal thread panicked".into()) }
+    // 3. The MACHINE, not the result (PROBLEM 127).
+    match find_store_package() {
+        None => { log::info!("rival install: the Microsoft Store copy {full_name} is gone — removed for this user through PackageManager.RemovePackageAsync, no elevation, no files touched by this process (store-copy-removed-by-unpackaged-side-spaceadom-128)"); Ok(()) }
+        Some((still, _)) => Err(format!("RemovePackageAsync reported success but {still} is still registered for this user")),
+    }
+}
+```
+
+`repair()`'s `store_copy` arm, before → after:
+
+```rust
+// BEFORE (PROBLEM 250 follow-up)
+if found.kind == "store_copy" {
+    log::warn!("rival install: REFUSING the one-click removal — the other copy is a Microsoft Store (MSIX) package ...");
+    return false;
+}
+// AFTER (PROBLEM 272) — the is_packaged() refusal ABOVE this is unchanged and still comes first.
+if found.kind == "store_copy" {
+    return match remove_store_package(&found.store_full_name) {
+        Ok(()) => { RIVAL_FOUND.store(false, Ordering::Relaxed); true }
+        Err(why) => { log::warn!("rival install: the Store copy was NOT removed — {why}. The banner falls back to directions ..."); false }
+    };
+}
+```
+
+The detector's enumeration now uses `FindPackagesByUserSecurityIdWithPackageTypes(&HSTRING::new(), PackageTypes::Main)` and `is_our_store_package_name` (it used `FindPackagesByUserSecurityId` and `contains("spaceadom")`).
+
+The banner — `src/components/rival-banner.ts`, pure, `rivalBannerCopy({ kind, portable, version, path }) -> { text, button: { label, action, busyLabel } | null, okToast, failToast, confirm | null }`. The `store_copy` arm:
+
+```ts
+text: "A Microsoft Store copy of Spaceadom is also installed — remove it? Both start with Windows and fight over the spacebar, so one has to go. Removing the Store copy keeps this one and your settings; no permission prompt.",
+button: { label: "Remove the Store copy", action: "remove_store", busyLabel: "Removing…" },
+okToast: "✅ Store copy removed — one Spaceadom left, no more spacebar conflict",
+failToast: "⚠️ Could not remove the Store copy — " + STORE_COPY_DIRECTIONS,   // "Remove it from Settings > Apps > Installed apps, or keep it and uninstall this copy instead."
+confirm: { title: "Remove the Microsoft Store copy?", body: "Windows will uninstall the Store version of Spaceadom for your account. This copy, and your profiles and settings, stay exactly as they are.\n\nIf you would rather keep the Store version, cancel and uninstall this copy instead.", confirmLabel: "Remove the Store copy" },
+```
+
+The `packaged_host` arm keeps **Open Installed apps** and now says "…The Store version cannot remove the other one for you — remove this copy from Installed apps, or keep it and uninstall the other." `main.ts::checkRivalInstall` builds the DOM from that value; `remove_store` goes through `askConfirm` (the app's own dialog — `window.confirm` never renders here, PROBLEM 106) and then the SAME `repair_rival_install` command as `repair`, so Rust — not the page — picks the removal from the finding's kind.
+
+**How it was verified.** `cargo test --release --lib`: 809 passed / 0 failed / 9 ignored (33 in `rival_install`, 7 of them new: the nine-pair table; all 128 `CrossKindInputs` combinations against an independently written reference; the four-argument wrapper equal to the full form for all 16 of its combinations and never producing a new verdict; packaged beside both kinds names per-user; the per-machine self-report guard; the name filter, 7 accepted / 10 refused; a `store_copy` finding carries the full name, no path, and the remover refuses an empty name before touching the machine). `cargo clippy --release --lib` 0 warnings. `npx tsc --noEmit -p .` 0. `npm run build` clean, "Remove the Store copy" present in `dist2/assets/main-*.js`. `node scripts/rival-banner.test.ts`: 10 passed (the packaged side is never offered a removal; the store sentence and version are never interpolated; the failure toast carries the directions; every other arm verbatim; only `remove_store` sits behind a confirm). **UNPROVEN, and it must be said in capitals: `remove_store_package` has never executed.** There is no Store copy on this machine and the brief forbade running `RemovePackage` here. The first person with both copies who clicks the button is the test; the log line to grep afterwards is `store-copy-removed-by-unpackaged-side-spaceadom-128`, and a refusal prints `rival install: the Store copy was NOT removed — <why>` with the deployment service's `ExtendedErrorCode` and `ErrorText`.
+
+**The no-elevation claim and how sure it is.** HIGH confidence on the documented behaviour, from three things reachable offline: (1) the windows 0.58 metadata exposes the whole per-user `FindPackagesByUserSecurityId*` family and `RemovePackageAsync` on the same `PackageManager` the detector has been calling unelevated on this machine at every launch since the PROBLEM 250 follow-up (the log's "no second copy found" line is that call succeeding); (2) `Cargo.toml`'s own comment already records that only the all-users `FindPackages()` needs an administrator; (3) `Remove-AppxPackage` without `-AllUsers` is this same request from a non-elevated PowerShell, and it is how Settings > Apps removes a Store app with no UAC prompt. Not re-confirmed against a live Microsoft Learn page this session. A PACKAGED caller would need the `packageManagement` restricted capability; ours refuses while packaged before the call exists.
+
+**Generalise this.** "There is no fix" is a claim about the TOOLS the author was holding, not about the problem. When a refusal's reasoning names specific mechanisms (`msiexec`, `Remove-Item`, an ACL), ask what the platform's OWN front door for the object is — a package has a deployment service, a scheduled task has a COM API (PROBLEM 266), a Store app's autostart has `StartupTask` (PROBLEM 250) — before writing "ever". And: a pure classifier that takes N booleans should be tested over all 2^N of them against a reference written a second time in words; the nine-pair table alone would have passed a classifier that got an unlisted combination wrong.

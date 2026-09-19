@@ -41,6 +41,8 @@ import {
   setPausedState,
 } from "./components/settings-panel";
 import { showToast } from "./components/toast";
+import { rivalBannerCopy } from "./components/rival-banner";
+import { askConfirm } from "./components/confirm-dialog";
 // PROBLEM 253 — the report dialog is its own leaf module because TWO owners
 // open it: this file's safe-mode banner, and the settings panel's About
 // section. One dialog, one import, no second copy to drift.
@@ -1322,105 +1324,27 @@ async function checkRivalInstall(): Promise<boolean> {
 
   const el = document.getElementById("conflict-banner");
   if (!el) return false;
+
+  // PROBLEM 272 — the WORDS and the BUTTON are decided by one pure function,
+  // `rivalBannerCopy` (src/components/rival-banner.ts), pinned per verdict by
+  // `scripts/rival-banner.test.ts`. The history of each arm — PROBLEM 129/141
+  // (second copy), 238/244 (orphaned entry, registry-only), 250 (we are the
+  // Store copy: directions and a door, never a removal), 250 follow-up + 272
+  // (a Store copy beside us: now a one-click per-user package removal), 254
+  // (portable) — lives in that file's comments. What stays here is the DOM
+  // and the invokes.
+  const copy = rivalBannerCopy({ kind, portable, version, path });
+  if (!copy) return false;
   el.innerHTML = "";
 
   const txt = document.createElement("span");
   txt.className = "conflict-text";
-  const orphan = kind === "orphaned_entry";
-  // PROBLEM 250 — the third variant: WE are the Microsoft Store copy.
-  //
-  // Everything the other two variants say about the fault is still true — two
-  // copies, both starting at logon, both installing a keyboard hook, both
-  // wanting the spacebar. What is NOT true is the remedy. `repair()` works by
-  // elevating (`runas` → msiexec / Remove-Item), and a packaged app must not
-  // elevate itself to delete a product outside its own package: it is a Store
-  // policy problem, and it is the same shape as PROBLEM 244, which deleted the
-  // running app. Rust refuses on this condition too (`rival_install::repair`),
-  // so a stale frontend cannot get past it — this branch is what makes the
-  // refusal into an instruction the user can act on instead of a dead button.
-  //
-  // The button therefore OPENS the place rather than doing the thing. Naming a
-  // Settings page is four clicks and a search box for someone who has never
-  // been there, and "go and uninstall it yourself" with no door is how a banner
-  // gets dismissed rather than acted on.
-  const packagedHost = kind === "packaged_host";
-  // PROBLEM 250 FOLLOW-UP — the MIRROR of `packaged_host`, and the fourth
-  // shape `status_kind()` can return: WE are the ordinary unpackaged copy and
-  // a Microsoft Store package is registered for the same user.
-  //
-  // Two things make this its own arm rather than a wording tweak on the
-  // default:
-  //
-  // 1. **There is no button at all.** `rival_install::repair` refuses this
-  //    kind outright and says why — `Program Files\WindowsApps` is ACL'd
-  //    against this user by design, there is no ProductCode and no
-  //    `uninstall.exe`, so every removal path an elevated helper could take
-  //    ends in "access denied". A `runas` that cannot work is worse than no
-  //    button: it teaches the user to accept a UAC prompt from this app for
-  //    an action that never succeeds. `packaged_host` at least has a door to
-  //    open; this one does not, because the remedy is a Settings page that
-  //    the OTHER copy is listed on, not a window we can usefully aim at from
-  //    here.
-  // 2. **`path` is a SENTENCE naming the package, not a file path.**
-  //    `detect_cross_kind` fills it from the package full name, so the
-  //    default text's "installed at ${path}" would render prose inside a
-  //    sentence about a location. This arm interpolates neither `path` nor
-  //    `version` — see `rival_install.rs`'s own test,
-  //    `a_store_copy_finding_can_never_yield_a_deletable_directory`.
-  const storeCopy = kind === "store_copy";
-  // PROBLEM 238 — an orphaned HKLM MSI uninstall entry is a different shape
-  // from a real second copy: nothing is running twice, so "fight over the
-  // spacebar" would be misleading. `kind` comes from Rust's status_kind().
-  //
-  // PROBLEM 244 (2026-09-04) — the second sentence is not decoration. The
-  // owner clicked this button, the old code ran `msiexec /X{GUID}`, and
-  // Windows Installer deleted that product's registered files — which were
-  // the LIVE app. The backend now does a registry-only cleanup for this
-  // shape, and the banner has to say so, because "Remove the old copy" over
-  // an entry whose recorded InstallLocation IS the live folder is exactly
-  // the sentence that made deleting the app look safe.
-  txt.textContent = storeCopy
-    ? "A Microsoft Store copy of Spaceadom is also installed. Keep one: " +
-      "uninstall the other from Settings > Apps."
-    : packagedHost
-    ? `This is the Microsoft Store version of Spaceadom, and another copy ` +
-      `(v${version}) is also installed at ${path}. Both start with Windows and ` +
-      "fight over the spacebar, so one has to go. The Store version cannot " +
-      "uninstall the other one for you — open Installed apps, find Spaceadom " +
-      "with the older version number, and remove it. Your settings stay where " +
-      "they are."
-    : portable && !orphan
-    // PROBLEM 254 — the portable shape. Two facts the default sentence gets
-    // wrong for it: "another copy is INSTALLED at …" is true, but it is the
-    // OTHER one that is installed and this one that is not, and a user told
-    // to look in Apps & features will find exactly one entry and conclude the
-    // banner is confused. And "one has to go" is not the whole truth here —
-    // closing the portable copy, or deleting its folder, is a complete remedy
-    // that needs no uninstaller and no permission prompt at all, which is the
-    // remedy most people running an unzipped copy actually want. The button's
-    // one-click removal of the installed copy still works and is still
-    // offered; it is simply no longer the only door named.
-    ? `You're running the PORTABLE copy of Spaceadom (unzipped, nothing ` +
-      `installed), and an installed copy (v${version}) is also on this PC at ` +
-      `${path}. Both put a keyboard hook on the spacebar, so only one can run ` +
-      "at a time. Closing this portable copy — or deleting its folder — settles " +
-      "it with no uninstaller. Or remove the installed one below (Windows will " +
-      "ask for permission once)."
-    : orphan
-    ? "An old installer entry is left over. Nothing is running twice, but " +
-      "Programs and Features lists Spaceadom twice. " +
-      "This only removes the leftover entry from Programs and Features. " +
-      "Your app and settings are not touched."
-    : `Another copy of Spaceadom (v${version}) is installed at ${path}. ` +
-      "Both start with Windows and fight over the spacebar. " +
-      "One click removes the old one (Windows will ask for permission once).";
+  txt.textContent = copy.text;
 
-  // The dismiss control is built BEFORE the repair button on purpose: it lets
-  // the `store_copy` arm finish the banner below without ever constructing a
-  // repair button — not a disabled one, not a hidden one, not one that exists
-  // with a click handler nothing appends. The rule the whole banner is built
-  // on is that a control's presence is a promise; the cheapest way to keep
-  // that promise is to have no control to keep it about.
+  // The dismiss control is built BEFORE the action button on purpose: an arm
+  // with `button: null` finishes the banner without ever constructing one —
+  // not a disabled one, not a hidden one. A control's presence is a promise;
+  // the cheapest way to keep it is to have no control to keep it about.
   const close = document.createElement("button");
   close.className = "conflict-close";
   close.setAttribute("aria-label", "Dismiss for now");
@@ -1429,7 +1353,8 @@ async function checkRivalInstall(): Promise<boolean> {
     el.hidden = true; // this session only — it returns until the copy is gone
   });
 
-  if (storeCopy) {
+  const button = copy.button;
+  if (!button) {
     el.append(txt, close);
     el.hidden = false;
     return true;
@@ -1437,16 +1362,9 @@ async function checkRivalInstall(): Promise<boolean> {
 
   const fix = document.createElement("button");
   fix.className = "btn btn-sm";
-  // The label has to match the action. "Remove the old copy" on an entry that
-  // has no copy behind it is what made a registry cleanup read as a deletion —
-  // and on a Store install there is no removal to promise at all, so the label
-  // promises the only thing this button actually does: it opens a window.
-  const fixLabel = packagedHost
-    ? "Open Installed apps"
-    : orphan ? "Remove the leftover entry" : "Remove the old copy";
-  fix.textContent = fixLabel;
+  fix.textContent = button.label;
   fix.addEventListener("click", async () => {
-    if (packagedHost) {
+    if (button.action === "open_installed_apps") {
       // No disabling and no "Removing…": nothing is being removed, and the
       // banner deliberately STAYS UP. It is the reminder of what to do in the
       // window that just opened, and the next launch's scan is what decides
@@ -1454,25 +1372,40 @@ async function checkRivalInstall(): Promise<boolean> {
       try {
         await invoke<boolean>("open_installed_apps");
       } catch (_) {
-        showToast("⚠️ Could not open Settings — it is under Apps ▸ Installed apps");
+        showToast(copy.failToast);
       }
       return;
     }
+    // PROBLEM 272 — ONE confirm before the Store-copy removal, in the app's
+    // own dialog (window.confirm never renders here — PROBLEM 106). The
+    // elevated arms get their prompt from Windows and need none here.
+    if (copy.confirm) {
+      const go = await askConfirm({
+        title: copy.confirm.title,
+        body: copy.confirm.body,
+        confirmLabel: copy.confirm.confirmLabel,
+        danger: true,
+      });
+      if (!go) return;
+    }
     fix.disabled = true;
-    fix.textContent = "Removing…";
+    fix.textContent = button.busyLabel;
     let ok = false;
     try {
+      // Both `repair` and `remove_store` are the same command: Rust picks the
+      // path from the finding's kind (`rival_install::repair`), so a stale
+      // page can never aim the wrong removal at the wrong thing.
       ok = await invoke<boolean>("repair_rival_install");
     } catch (_) { /* fall through to the retry state */ }
     if (ok) {
       el.hidden = true;
-      showToast(orphan
-        ? "✅ Leftover entry removed — Programs and Features now lists one Spaceadom"
-        : "✅ Old copy removed — one Spaceadom left, no more spacebar conflict");
+      showToast(copy.okToast);
     } else {
       fix.disabled = false;
-      fix.textContent = fixLabel;
-      showToast("⚠️ Not removed — the permission prompt was declined");
+      fix.textContent = button.label;
+      // For `remove_store` this toast IS the fallback: the directions the
+      // banner used to show, and the log line says why it failed.
+      showToast(copy.failToast);
     }
   });
 

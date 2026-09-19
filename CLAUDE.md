@@ -400,7 +400,24 @@ MSIX is 10 MB and takes WebView2 from the system Evergreen runtime.
   logs "AppData not virtualised — nothing to migrate" and writes nothing);
   and **the rival-install banner offers directions, not a button** — a packaged
   app must not elevate to delete files outside its package, and
-  `rival_install::repair` refuses independently of the banner. A FIFTH
+  `rival_install::repair` refuses independently of the banner. **The REVERSE
+  direction has a one-click removal since 1.0.128 (PROBLEM 272, 2026-09-20).**
+  This bullet's neighbour in `rival_install.rs` used to say the unpackaged
+  copy noticing a Store copy had "no repair, ever", reasoning from `msiexec`
+  and `Remove-Item` — and for those tools it is still true (`Program
+  Files\WindowsApps` is ACL'd). But a package is removed by ASKING the
+  deployment service, not by touching its files:
+  `PackageManager.RemovePackageAsync` for a package registered to the CALLING
+  USER is the same unelevated request `Remove-AppxPackage` (without
+  `-AllUsers`) makes from a normal PowerShell. So the unpackaged side — the
+  `setup.exe` copy AND the `.msi` copy — now shows "A Microsoft Store copy of
+  Spaceadom is also installed — remove it?" with a **Remove the Store copy**
+  button (one in-app confirm, no UAC), `rival_install::remove_store_package`,
+  marker `store-copy-removed-by-unpackaged-side-spaceadom-128`, directions as
+  the fallback toast. The packaged side keeps directions only. All nine
+  `existing × installing` pairs are tabulated in `rival_install.rs` and pinned
+  by `classify_cross_kind_all`'s tests. **Never run `RemovePackage` on this
+  machine — there is no Store copy here, and the path is UNPROVEN live.** A FIFTH
   difference was added on 2026-09-05: **a packaged copy does not touch
   `NotifyIconSettings` at all**, because HKCU writes go to the package's
   private hive and the shell never reads them — Store users promote the tray

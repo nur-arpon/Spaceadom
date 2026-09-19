@@ -49,7 +49,15 @@ tidy. Their rows say what each one got wrong.
 
 ---
 
-## 2026-09-19 (latest) — 1.0.127 — Fun off, sound on, Space ring Double, 8-app ring preset
+## 2026-09-20 (latest) — 1.0.128 — Two copies, one click: the Store copy can now be removed from the other side
+
+| Version | What changed |
+| --- | --- |
+| **1.0.128** | My friend on the Store copy installed the setup.exe on top and got two copies with no way out — the Store version's banner said "go to Installed apps" (correctly: a Store app must not touch anything outside its own package), and the setup.exe version's banner said the same thing, so nobody had a button. Now the setup.exe copy (and the .msi copy, if that is what you have) shows "A Microsoft Store copy of Spaceadom is also installed — remove it?" with a **Remove the Store copy** button. One confirmation, no admin prompt: it asks Windows to uninstall the Store version for your account the same way the Settings app does, and your profiles and settings stay exactly where they are. If Windows refuses, you get a toast with the old directions instead. The Store version itself still only gives directions — "Remove this copy from Installed apps, or keep it and uninstall the other" — because that side genuinely cannot do it for you. Under the hood every one of the nine ways two installs can meet (setup.exe, .msi, Store — each on top of each) is now written down and tested, including the Store-copy-sees-a-Program-Files-install pair that used to work by accident. **Not yet pressed on a real machine** — there is no Store copy on mine, so the removal itself is untested until someone with both copies clicks it. |
+
+---
+
+## 2026-09-19 — 1.0.127 — Fun off, sound on, Space ring Double, 8-app ring preset
 
 | Version | What changed |
 | --- | --- |

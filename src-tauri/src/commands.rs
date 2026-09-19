@@ -1351,8 +1351,9 @@ pub fn dashboard_ready(app: tauri::AppHandle, window: tauri::WebviewWindow) {
 /// which is the mechanism the owner already had in mind: "there is an old
 /// version installed, just press this and it will delete the old version".
 /// `kind` is PROBLEM 238's `status_kind()`: `"second_copy"` /
-/// `"orphaned_entry"` / `""` — lets the frontend pick the right banner copy
-/// without guessing from `path`.
+/// `"orphaned_entry"` / `"packaged_host"` / `"store_copy"` / `""` — lets the
+/// frontend pick the right banner copy without guessing from `path`
+/// (`src/components/rival-banner.ts::rivalBannerCopy`, pure, PROBLEM 272).
 #[tauri::command]
 pub fn get_rival_install() -> (bool, String, String, String) {
     let (found, path, version) = crate::rival_install::status();
@@ -1361,7 +1362,10 @@ pub fn get_rival_install() -> (bool, String, String, String) {
 
 /// PROBLEM 141 - remove the second copy. ONE UAC prompt; returns whether the
 /// machine is actually clean afterwards, verified against the DISK rather than
-/// against an exit code (PROBLEM 127's lesson).
+/// against an exit code (PROBLEM 127's lesson). PROBLEM 272: for a
+/// `store_copy` finding there is NO prompt — the removal is
+/// `PackageManager.RemovePackageAsync` for this user, unelevated, and
+/// `false` means "fall back to the directions", not "declined".
 #[tauri::command]
 pub fn repair_rival_install() -> bool {
     crate::rival_install::repair()
