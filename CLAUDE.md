@@ -89,7 +89,10 @@ why), `OVERLAY_ACHIEVED.md` (the confirmed-correct overlay — do not
 re-derive it), `OVERLAY_RUST_HTML_CHANGES.md` (the exact non-TS edits).
 
 Design rules that are not negotiable: radii 13 keys/cards, 16 containers, 999
-everything interactive; shadows warm brown `rgba(90,60,30,…)` in light and
+everything interactive; **no long scrollbars — a panel grows to fit its
+content before it scrolls, and any scroller that must exist uses the 4px
+hint-sized bar with an inset track (`#settings-panel::-webkit-scrollbar`
+is the reference; owner, 2026-09-20: "I don't like long sliders");** shadows warm brown `rgba(90,60,30,…)` in light and
 black-tinted in Nocturne, never pure black on cream; exits run at ~65% of
 entrance time with `--ease-in`; nothing may assume a fixed width around an app
 name; `prefers-reduced-motion` renders final states.

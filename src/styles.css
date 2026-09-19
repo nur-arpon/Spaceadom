@@ -716,7 +716,11 @@ body.nocturne #editor-backdrop { background: rgba(0, 0, 0, .42); }
      `min()` not a fixed value: on a big screen nothing changes. `overflow-y`
      is on the panel rather than a child so the padding scrolls with the
      content instead of the last row hiding under it. */
-  max-height: min(560px, calc(100vh - 32px));
+  /* 2026-09-20 (owner): "make the whole thing bigger so it fits without
+     sliding". The 560px cap made the PANEL scroll on every normal screen;
+     now the panel grows to its content and only the small-screen guard
+     remains. Inside it, the app grid keeps its own short scroller. */
+  max-height: calc(100vh - 32px);
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 20px;
@@ -793,7 +797,14 @@ body.nocturne #key-detail-panel { box-shadow: 0 24px 60px rgba(0, 0, 0, .55); }
 /* The id form is the key editor's markup; the class form is the App-exceptions
    picker in Settings, which renders the SAME grid from components/app-grid.ts.
    One rule for both, so the two pickers cannot drift visually either. */
-#ed-grid-scroll, .ed-grid-scroll { max-height: 212px; overflow-y: auto; margin: 0 -4px; padding: 0 4px 4px; }
+#ed-grid-scroll, .ed-grid-scroll { max-height: 300px; overflow-y: auto; margin: 0 -4px; padding: 0 4px 4px; }
+/* PROJECT RULE (owner, 2026-09-20): no long scrollbars. Any scroller in the
+   editor gets the settings panel's hint-sized bar — 4px wide, track inset so
+   the thumb reads as a short hint, never a slab. */
+#key-detail-panel::-webkit-scrollbar, #ed-grid-scroll::-webkit-scrollbar, .ed-grid-scroll::-webkit-scrollbar { width: 4px; }
+#key-detail-panel::-webkit-scrollbar-track, #ed-grid-scroll::-webkit-scrollbar-track, .ed-grid-scroll::-webkit-scrollbar-track { background: transparent; margin: 14px 0; }
+#key-detail-panel::-webkit-scrollbar-thumb, #ed-grid-scroll::-webkit-scrollbar-thumb, .ed-grid-scroll::-webkit-scrollbar-thumb { background: var(--st-border); border-radius: 999px; }
+#key-detail-panel::-webkit-scrollbar-thumb:hover, #ed-grid-scroll::-webkit-scrollbar-thumb:hover, .ed-grid-scroll::-webkit-scrollbar-thumb:hover { background: var(--st-accent-brd); }
 #ed-grid, .ed-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
 
 .ed-tile {
