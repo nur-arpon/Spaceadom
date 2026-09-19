@@ -220,8 +220,7 @@ export function renderTouchpadPage(): void {
 function render(): void {
   if (!root) return;
   if (recording) stopChordRecording(false);
-  const t = tp();
-  root.dataset.look = t.page_look === "app" ? "app" : "chocolate";
+  root.dataset.look = "app"; // always the app theme (owner, 2026-09-19); `page_look` is ignored
 
   if (presence !== "precision") {
     root.innerHTML = unavailableHtml();

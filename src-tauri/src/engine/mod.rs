@@ -633,7 +633,11 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
             // from the same snapshot as the scope so one hold can never mix
             // a scope from one config with a layout from another.
             let all_layout = cfg_snapshot.all_ring_layout;
-            let fun = cfg_snapshot.fun_mode;
+            // 1.0.127 — the mouse ring's glow/scrim/ripple follow VISUAL
+            // EFFECTS, not Fun mode (owner, 2026-09-19): Fun is the
+            // personality layer (characters, night sky); the ring's finish
+            // is a visual effect like any other.
+            let fun = cfg_snapshot.motion != "reduced";
             let reduced = cfg_snapshot.motion == "reduced";
             let build = tauri::async_runtime::spawn_blocking(move || {
                 let cache = app_handle
@@ -781,7 +785,14 @@ fn run_combo(combo: KeyCombo, repeat: bool, state_arc: &Arc<Mutex<EngineState>>)
 /// dropped? Only a `Chord` repeats; everything else, including an unbound
 /// key and a legacy app / link binding (`None`), fires once per press.
 pub fn repeat_is_dropped(action: Option<&crate::config::Action>) -> bool {
-    !matches!(action, Some(crate::config::Action::Chord { .. }))
+    use crate::config::Action;
+    match action {
+        Some(Action::Chord { .. }) => false,
+        // 1.0.127 — a HELD Space+- / Space+= keeps nudging the app's volume
+        // (owner, 2026-09-19); the live pill updates in place.
+        Some(Action::Special { id }) if id == "app_volume_up" || id == "app_volume_down" => false,
+        _ => true,
+    }
 }
 
 /// PHASE A — Space + `key_id`: look the key up in the active profile and do
@@ -950,8 +961,35 @@ fn handle_app_volume(delta: i32, state_arc: &Arc<Mutex<EngineState>>) {
         let s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
         s.app_handle.clone()
     };
+    // A tap moves 10 points; while the key is HELD (OS auto-repeat arrives
+    // every ~33 ms) each repeat moves 2 points so a hold glides instead of
+    // jumping — "repeat" is inferred from the gap since the last call.
+    static LAST_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let prev = LAST_MS.swap(now_ms, std::sync::atomic::Ordering::Relaxed);
+    let held = prev != 0 && now_ms.saturating_sub(prev) < 150;
+    let delta = if held { delta.signum() * 2 } else { delta };
     let msg = actions::app_volume::adjust(delta);
-    crate::show_toast(&app_handle, &msg);
+    // ONE live pill that updates in place while the key is tapped (owner,
+    // 2026-09-19: "the toast showing up again and again sucks"), fading
+    // 1.2 s after the LAST press — same mechanism as the touchpad slider.
+    static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let my_gen = GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    crate::show_live_toast(&app_handle, "app-volume", &msg);
+    let handle = app_handle.clone();
+    std::thread::Builder::new()
+        .name("st-app-volume-toast".into())
+        .spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1200));
+            if GEN.load(std::sync::atomic::Ordering::Relaxed) == my_gen {
+                crate::end_live_toast(&handle, "app-volume");
+            }
+        })
+        .map(|_| ())
+        .unwrap_or_else(|_| crate::end_live_toast(&app_handle, "app-volume"));
 }
 
 /// Space + / (and the ring's "Screenshot" tile): Windows' own region snip.

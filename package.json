@@ -1,7 +1,7 @@
 {
   "name": "spaceadom",
   "private": true,
-  "version": "1.0.126",
+  "version": "1.0.127",
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "scripts": {

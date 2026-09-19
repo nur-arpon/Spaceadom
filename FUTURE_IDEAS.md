@@ -112,3 +112,21 @@ five presses. Next: a tick-list in Settings, "Cycle these outputs", every
 device listed, all ticked by default; Bluetooth devices appear when
 connected. Owner: "later we will let user choose which devices to cycle
 between."
+
+## 16. The two rings are one ring with two switches — and the settings panel needs a redesign (2026-09-19)
+
+Owner's observation: "the mouse ring shows no names and the Space ring shows
+names — that's the only difference." Not quite (the Space ring is a
+full-screen cloud of every key, keyboard-driven; the mouse ring is a
+cursor-anchored tile ring, pointer-driven, release-to-launch), but the
+SETTINGS for them have sprawled: Point to launch, Middle button shows,
+Middle-button ring shows, Choose your favourites, All layout, Ring layout,
+Show special keys, Guide-to-toast motion, Guide HUD delay. The simplification
+to design: two switches that apply to BOTH rings — "Ring style: Icons /
+Pills" and "Show names" — plus "Favourites / All", and everything else
+under Advanced. Also on the table: summoning the mouse ring while Space is
+held (Space → Space ring, mouse → mouse ring stays the default).
+
+Bigger: the settings panel itself — a full-screen settings page using the
+blank space left and right of the keyboard, Advanced as a real section, a
+Claude Design pass first. Parked until the touchpad and audio work settle.

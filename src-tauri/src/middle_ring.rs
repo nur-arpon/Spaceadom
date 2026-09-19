@@ -3426,12 +3426,28 @@ mod favourites_and_payload_tests {
     /// wins when present and may hold up to fifteen.
     #[test]
     fn favourites_default_to_the_first_six_bound_letters_and_cap_at_fifteen() {
+        // A fresh `AppConfig::default()` no longer starts with an empty
+        // favourites list — 1.0.127 seeds it with the 8-app Founders preset
+        // (owner, 2026-09-19; see `first_install_tests`). This test is about
+        // the OTHER rule, the lazy "first bound letters" fallback that only
+        // ever applies when the list is genuinely empty, so clear the seeded
+        // preset `cfg_with` inherited from `AppConfig::default()` before
+        // exercising it.
         let mut binds: Vec<(String, KeyBinding)> = Vec::new();
         for c in "zyxwvutsrq".chars() {
             binds.push((c.to_string(), app(&c.to_string(), "x.exe")));
         }
         let refs: Vec<(&str, KeyBinding)> = binds.iter().map(|(k, b)| (k.as_str(), b.clone())).collect();
         let mut cfg = cfg_with(&refs);
+        // A fresh config's favourites are exactly the 8-app preset, in order
+        // (1.0.127) — assert it here before clearing it for the rest of the
+        // test, so the preset itself stays covered.
+        assert_eq!(
+            cfg.middle_ring_favourites,
+            vec!["b", "c", "d", "w", "s", "v", "f", "z"],
+            "a fresh AppConfig's ring favourites are the 8-app Founders preset, in order"
+        );
+        cfg.middle_ring_favourites.clear();
         assert_eq!(favourites_for(&cfg, "Ring"), vec!['q', 'r', 's', 't', 'u']);
         // Stored favourites, including one unbound letter and a duplicate.
         cfg.middle_ring_favourites = vec!["z".into(), "a".into(), "Q".into(), "z".into()];
@@ -3461,11 +3477,18 @@ mod favourites_and_payload_tests {
             site_icon: Some("data:image/x-icon;base64,AAEC".into()),
             ..Default::default()
         };
-        let cfg = cfg_with(&[
+        // 1.0.127 seeded `AppConfig::default()` with 8 preset favourites
+        // (b, c, d, w, s, v, f, z — see `first_install_tests`); this profile
+        // only binds b/d/g, so leaving the preset in place would filter the
+        // ring down to just b and d and drop the link entirely. Clear it so
+        // this test keeps exercising the "all three bound letters" case it
+        // was written for.
+        let mut cfg = cfg_with(&[
             ("b", app("Brave", "brave.exe")),
             ("d", app("Downloads", &folder_s)),
             ("g", link),
         ]);
+        cfg.middle_ring_favourites.clear();
         let asked = std::cell::RefCell::new(Vec::new());
         let extract = |target: &str| -> Option<String> {
             asked.borrow_mut().push(target.to_string());

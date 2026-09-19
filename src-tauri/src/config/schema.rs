@@ -247,7 +247,13 @@ pub struct AppConfig {
     pub show_me_around: bool,
 
     /// Whether the optional WebAudio sine-tick sound effects are enabled.
-    /// Sent to the overlay via the "sound-changed" event. Defaults to false.
+    /// Sent to the overlay via the "sound-changed" event.
+    ///
+    /// 1.0.127 — a FRESH install now ships with sound ON (owner, 2026-09-19;
+    /// see `AppConfig::default()`). This field's own `#[serde(default)]`
+    /// stays Rust's bare `false` on purpose: a config predating this field is
+    /// an existing user who never opted in, and an absent field must not
+    /// turn their sound on for them.
     #[serde(default)]
     pub sound_enabled: bool,
 
@@ -426,6 +432,16 @@ pub struct AppConfig {
     /// and never written back — so a user who never opens the picker is never
     /// pinned to a snapshot of a profile they keep editing. Letters that are no
     /// longer bound are skipped at ring time, not deleted here.
+    ///
+    /// 1.0.127 — a FRESH install no longer lands on empty: `AppConfig::default()`
+    /// seeds the 8 Founders apps (`b, c, d, w, s, v, f, z`) so the ring is
+    /// useful before anyone opens the picker (owner, 2026-09-19). This field's
+    /// own `#[serde(default)]` stays Rust's bare `Vec::default()` (empty) on
+    /// purpose: a config that predates this field is an EXISTING install that
+    /// may not have those letters bound to anything the owner intended, so it
+    /// still falls through to the "first six bound letters" rule above rather
+    /// than being handed 8 apps it never chose. Only a brand-new profile gets
+    /// the preset; see `first_install_tests` for both paths.
     #[serde(default)]
     pub middle_ring_favourites: Vec<String>,
 
@@ -500,13 +516,16 @@ pub struct AppConfig {
     /// one; `pointer.rs`'s snapshot is unaffected by this setting because it
     /// only ever holds the APPS ring.
     ///
-    /// Default `"auto"`: this is a brand-new choice, and auto reproduces
-    /// exactly what every existing build already does — pick whatever fits.
-    /// Both paths matter and `first_install_tests` holds both to it: `Default`
-    /// governs a fresh install, the serde attribute governs the config already
-    /// on every existing user's disk, and nothing forces them to agree except
-    /// that test (see `pointer_hud_activation`, where the field-removal path
-    /// was the only one that reached anybody).
+    /// Default `"two"` (Settings' "Double") since 1.0.127 — the owner's
+    /// decision on 2026-09-19: the specials list outgrew one band, so a
+    /// fresh install should land on the layout that fits it rather than
+    /// "auto", which used to be the brand-new choice that reproduced every
+    /// existing build's pick-whatever-fits behaviour. Both paths matter and
+    /// `first_install_tests` holds both to it: `Default` governs a fresh
+    /// install, the serde attribute governs the config already on every
+    /// existing user's disk, and nothing forces them to agree except that
+    /// test (see `pointer_hud_activation`, where the field-removal path was
+    /// the only one that reached anybody).
     #[serde(default = "default_band_count")]
     pub hud_band_count: String,
 
@@ -631,7 +650,7 @@ fn default_true() -> bool { true }
 fn default_motion() -> String { "full".into() }
 /// See `hud_band_count`. `"auto"` — the behaviour every build before 1.0.89
 /// already had, so an upgrading config changes nothing by acquiring the key.
-fn default_band_count() -> String { "auto".into() }
+fn default_band_count() -> String { "two".into() } // 1.0.127: "Double" (two bands) by default — the specials list outgrew one band (owner, 2026-09-19)
 /// PROBLEM 95 — the default is now chosen for SAFETY ACROSS UNKNOWN TYPISTS,
 /// not to reproduce the pre-slider build.
 ///
@@ -758,7 +777,7 @@ impl Default for AppConfig {
             fun_mode: false,
             hide_keyboard: false,
             show_me_around: false,
-            sound_enabled: false,
+            sound_enabled: true, // 1.0.127: sound ticks ON by default (owner, 2026-09-19)
             run_at_startup: true,
             // PROBLEM 237 — ON. Must agree with the `default = "default_true"`
             // on the field; first_install_tests holds both to it.
@@ -781,11 +800,15 @@ impl Default for AppConfig {
             // 2026-09-13; `GuideHud` is the way back to phase 1. Must agree
             // with the `#[serde(default)]` (= the enum's `#[default]`) on the
             // field; first_install_tests holds both to it. Scope: the eight.
-            // Favourites: empty = "the first eight bound letters, lazily".
+            // Favourites: the 1.0.127 preset below, not empty — see its comment.
             middle_ring_style: MiddleRingStyle::IconRing,
             middle_ring_scope: MiddleRingScope::MyEight,
             all_ring_layout: AllRingLayout::Rings,
-            middle_ring_favourites: Vec::new(),
+            // 1.0.127 — a fresh install's ring: the eight everyday APPS of the
+            // Founders profile, no links (owner's preset, 2026-09-19). A user
+            // who ticks their own list replaces this; letters that are unbound
+            // in the active profile are simply skipped by `favourites_for`.
+            middle_ring_favourites: ["b", "c", "d", "w", "s", "v", "f", "z"].iter().map(|s| s.to_string()).collect(),
             // PROBLEM 209 — ON. The specials ring has always been drawn; this
             // setting only lets someone turn it off. An existing config must
             // keep what it had.
@@ -1153,7 +1176,7 @@ impl Default for Touchpad {
             bottom: Self::default_bottom(),
             corner_rule: CornerRule::Ask,
             corners: Corners::default(),
-            page_look: TouchpadLook::Chocolate,
+            page_look: TouchpadLook::App, // the page always follows the app theme since 1.0.127; the field is kept for old configs
             demo_seen: false,
             show_thumbnail: true,
             slide_toast: true,
@@ -1174,7 +1197,7 @@ mod touchpad_tests {
         let c: AppConfig = serde_json::from_value(v).expect("a config predating `touchpad` must load");
         assert_eq!(c.touchpad, Touchpad::default());
         assert!(!c.touchpad.any_enabled());
-        assert_eq!(c.touchpad.page_look, TouchpadLook::Chocolate);
+        assert_eq!(c.touchpad.page_look, TouchpadLook::App);
         assert!(!c.touchpad.demo_seen);
         assert_eq!(c.touchpad.corner_rule, CornerRule::Ask);
     }
@@ -2324,7 +2347,15 @@ mod first_install_tests {
         // it always has, so nothing an existing user sees can change until
         // they flip the pill themselves.
         assert_eq!(d.all_ring_layout, AllRingLayout::Rings, "Rings, never Spiral, by default");
-        assert!(d.middle_ring_favourites.is_empty(), "favourites are computed lazily until chosen");
+        // 1.0.127 — the owner replaced the "start empty, compute lazily"
+        // decision with a concrete preset: the 8 Founders apps, in this
+        // order, so a fresh install's ring is useful without the user
+        // touching Settings first (owner, 2026-09-19).
+        assert_eq!(
+            d.middle_ring_favourites,
+            vec!["b", "c", "d", "w", "s", "v", "f", "z"],
+            "a fresh install's ring favourites are the 8-app Founders preset, in order (1.0.127)"
+        );
         // PROBLEM 209 — the specials ring has been drawn since the HUD
         // existed; making it optional must not change what a first install
         // looks like.
@@ -2332,14 +2363,13 @@ mod first_install_tests {
             d.hud_show_specials,
             "the HUD's specials ring must be SHOWN at first install"
         );
-        // The band count and the specials ring are ONE system (see the field's
-        // comment). "auto" is the only value that reproduces every previous
-        // build's behaviour, so a first install must land there — and it must
-        // not land on "one" or "two", either of which would silently impose a
-        // layout on a user who never asked for one.
+        // 1.0.127 — the owner moved the default off "auto" to "two" (Settings'
+        // "Double"): the specials list outgrew one band, and a fresh install
+        // should show the layout that fits it rather than the equivalent of
+        // asking every new user to find the toggle themselves.
         assert_eq!(
-            d.hud_band_count, "auto",
-            "the HUD band count must be AUTO at first install"
+            d.hud_band_count, "two",
+            "the HUD band count must be DOUBLE at first install (1.0.127, owner 2026-09-19)"
         );
         // 2026-08-27 - the owner asked for the new Magnetic Sector ring to be
         // what a fresh install SEES, with the toggle as the way back to the
@@ -2475,6 +2505,15 @@ mod first_install_tests {
             AllRingLayout::Rings,
             "a config predating all_ring_layout must read as the rings (2026-09-15)"
         );
+        // `middle_ring_favourites` keeps its bare `#[serde(default)]` — Rust's
+        // own `Vec::default()`, i.e. empty — deliberately UNCHANGED by the
+        // 1.0.127 preset. The preset lives on `AppConfig::default()` only
+        // (the fresh-install path, asserted above in
+        // `first_install_is_quiet_and_earthy`); a config predating this
+        // field is an EXISTING install that may already have bindings the
+        // preset's letters don't fit, so it still falls through to
+        // `middle_ring::favourites_for`'s "first six bound letters" rule
+        // rather than being handed 8 apps it never chose.
         assert!(c.middle_ring_favourites.is_empty());
         // PROBLEM 209 — and the opposite direction of the same rule: the
         // specials ring has always been drawn, so a config that never heard
@@ -2492,10 +2531,15 @@ mod first_install_tests {
         // the reading side would have to guess, and a reader that guessed
         // wrong would re-lay-out the HUD for people who never touched a
         // setting. The named default is what stops that.
+        // 1.0.127 — a config predating hud_band_count is again every config
+        // on disk today, so this is the path the owner's "Double by default"
+        // decision actually travels: an ABSENT field reads as "two", not
+        // "auto". (A file that says "auto" explicitly is a user's own choice
+        // and reads as such.)
         assert_eq!(
-            c.hud_band_count, "auto",
-            "a config predating hud_band_count must read as \"auto\", not \"\" \
-             — a bare #[serde(default)] gives a String the empty string"
+            c.hud_band_count, "two",
+            "a config predating hud_band_count must read as \"two\" (1.0.127, owner 2026-09-19), \
+             not \"auto\" and not \"\" — a bare #[serde(default)] gives a String the empty string"
         );
         // AND THIS IS THE PATH THE LAYOUT DEFAULT ACTUALLY TRAVELS. A default
         // only ever reaches users whose file PREDATES the field: every config

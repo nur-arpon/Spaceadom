@@ -49,7 +49,15 @@ tidy. Their rows say what each one got wrong.
 
 ---
 
-## 2026-09-19 (latest) — 1.0.126 — Next speaker on Space+\ by default; App volume on Space+- / Space+=
+## 2026-09-19 (latest) — 1.0.127 — Fun off, sound on, Space ring Double, 8-app ring preset
+
+| Version | What changed |
+| --- | --- |
+| **1.0.127** | Four default changes, all the owner's decisions on 2026-09-19. Fun mode toggle characters/animations stay off by default (unchanged behaviour, called out here because it sits beside the other three). Sound ticks are now ON for a fresh install — the WebAudio sine-tick effects nobody heard unless they found the switch themselves. The Space HUD's band count now starts on "Double" (two bands) instead of "Auto" — the specials list outgrew one band, so a fresh install lands on the layout that actually fits it. And the middle-button icon ring now starts with a preset of 8 Founders apps as its favourites (`b, c, d, w, s, v, f, z`) instead of an empty list, so the ring is useful before anyone opens the picker — existing installs that never chose favourites still fall back to their own first-bound-letters rule, not the preset, so nobody's ring changes under them. Also: the middle ring's glow ("fun" flicker) now follows the Visual effects / reduced-motion setting instead of the Fun mode toggle — a ring that shimmers only because Fun mode happens to be on, independent of whether the user wants extra motion at all, was the wrong knob. |
+
+---
+
+## 2026-09-19 — 1.0.126 — Next speaker on Space+\ by default; App volume on Space+- / Space+=
 
 | Version | What changed |
 | --- | --- |

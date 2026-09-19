@@ -590,6 +590,12 @@ function render(): void {
           ${toggleRow("sound",     "Sound ticks",       sound,     2)}
           ${toggleRow("motion",    "Visual effects",    effects,   3)}
           ${toggleRow("hideboard", "Hide the keyboard", hideBoard, 4)}
+        </div>
+      </div>
+
+      <div class="set-group">
+        ${groupHeadingHtml("touchpad", "Touchpad")}
+        <div class="set-rows">
           ${touchpadAppearanceHtml()}
         </div>
       </div>
@@ -3012,7 +3018,9 @@ function touchpadAppearanceHtml(): string {
       </button>
     </div>`;
 
-  return status + thumbToggle + slideToastToggle + lookRow + openRow;
+  // The look row is gone: the page always follows the app theme (owner, 2026-09-19).
+  void lookRow;
+  return status + thumbToggle + slideToastToggle + openRow;
 }
 
 function middleStyleRow(style: MiddleStyle, inert: boolean, i: number): string {

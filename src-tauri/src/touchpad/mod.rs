@@ -340,7 +340,20 @@ pub(crate) fn live_toast_text(
     match action {
         BandAction::Volume => Some(format!("🔊 Volume {value_pct}%")),
         BandAction::Brightness => Some(format!("☀ Brightness {value_pct}%")),
-        BandAction::Scrub => Some("⏩ Scrubbing".to_string()),
+        BandAction::Scrub => {
+            // Live: direction + how far this slide has scrubbed, as a count of
+            // arrow taps (each is the player's own step: 5 s in YouTube, 10 s
+            // in VLC), plus a speed bar from the current rate.
+            let bars = ((value_pct as usize) / 20).min(5);
+            let speed = "▮".repeat(bars.max(1));
+            if steps == 0 {
+                Some(format!("⏩ Scrub {speed}"))
+            } else if steps > 0 {
+                Some(format!("⏩ +{steps} {speed}"))
+            } else {
+                Some(format!("⏪ {steps} {speed}"))
+            }
+        }
         BandAction::Chords { .. } => {
             let name = chord.unwrap_or("(no keys)");
             if steps == 0 {
@@ -538,6 +551,9 @@ fn reader_loop(app: AppHandle, pad: raw::DeviceInfo) {
                         while scrub_pending >= 1.0 {
                             actions::scrub_tap(forward);
                             scrub_pending -= 1.0;
+                            // Signed tap count for the live pill (owner, 2026-09-19:
+                            // "make the toast live for scrubbing too").
+                            chord_sent += if forward { 1 } else { -1 };
                         }
                         value = Some(live_value_pct(&BandAction::Scrub, travel, band.sensitivity));
                     }
@@ -679,7 +695,9 @@ mod tests {
     fn the_live_toast_text_per_action() {
         assert_eq!(live_toast_text(&BandAction::Volume, 62, None, 0).as_deref(), Some("🔊 Volume 62%"));
         assert_eq!(live_toast_text(&BandAction::Brightness, 40, None, 0).as_deref(), Some("☀ Brightness 40%"));
-        assert_eq!(live_toast_text(&BandAction::Scrub, 77, None, 0).as_deref(), Some("⏩ Scrubbing"));
+        assert_eq!(live_toast_text(&BandAction::Scrub, 77, None, 0).as_deref(), Some("⏩ Scrub ▮▮▮"));
+        assert_eq!(live_toast_text(&BandAction::Scrub, 100, None, 12).as_deref(), Some("⏩ +12 ▮▮▮▮▮"));
+        assert_eq!(live_toast_text(&BandAction::Scrub, 0, None, -3).as_deref(), Some("⏪ -3 ▮"));
         let chords = BandAction::Chords { forward: vec![0x11, 0x09], backward: vec![0x11, 0x10, 0x09] };
         assert_eq!(live_toast_text(&chords, 0, Some("Ctrl+Tab"), 0).as_deref(), Some("⌨ Ctrl+Tab"));
         assert_eq!(live_toast_text(&chords, 0, Some("Ctrl+Tab"), 1).as_deref(), Some("⌨ Ctrl+Tab · 1 step"));
