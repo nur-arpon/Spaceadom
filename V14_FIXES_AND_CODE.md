@@ -36332,3 +36332,70 @@ Legacy `Special(name)` combos drop repeats too. Tests: four in `repeat.rs` (firs
 **No behaviour change.** Whether Favourites should ALSO carry the specials on an outer ring is the owner's call (QUESTION in the step-3 status entry); until then the fix is the log line and the tests, and the answer for the owner is Settings › Middle-button ring shows › All.
 
 **Generalise this.** Before diagnosing a derived list as empty, read the SCOPE the consumer filtered it with — the log line named it (`scope my_eight`) on every raise, and a count without its gate reads as a bug. Print the gate beside the count.
+
+## BRIEF 4 — 1.0.119 (2026-09-19; gates green: 754 unit tests / 0 failed / 6 ignored; clippy 0, tsc 0, vite clean; **NOT BUILT AS AN INSTALLER, NOT INSTALLED, NO GIT** — the lead does that)
+
+### PROBLEM 270: the Space ring sat ~80 px right of (and below) centre on both monitors — Windows "Text size" 109 % is inside WebView2's devicePixelRatio, and the stage was handed over in Windows logical px
+
+**Symptom.** Owner screenshots 11:39–11:40, 2026-09-19: the SPACE pill's centre at x≈930 on the 1707-logical-wide panel (centre 853) and the same shift on the external monitor; the whole cloud moved with the pill. Reported as "since 1.0.116".
+
+**Root cause.** `overlay_fit_hud` computed the stage with `middle_ring::stage_box(canvas, centre, sf, w, h)` where `sf` is the MONITOR's scale factor — i.e. in Windows logical px — and the page placed `#st-hud` at that rectangle in ITS px. The page's px are not logical px on this machine: `HKCU\Software\Microsoft\Accessibility\TextScaleFactor = 109`, and WebView2 folds the text scale into `devicePixelRatio`, so the page runs at 1.5 × 1.09 = 1.635 on the panel and 1.09 on the external. The evidence was already in the log: every `buildHud: BLOOM HEADROOM CLAMPED … (94% of WxH)` line prints the page's `screen.avail*`, which read `1566x906`/`1567x906` for the 2560×1480 canvas (= /1.634) and `1762x918` for the 1920×1000 canvas (= /1.09), on 1.0.113 (2026-09-18 02:29) as well as 1.0.117. Stage (168,76) css → pill centre 853 css → drawn at 853 × 1.09 = 929.5 logical: the owner's 930. Round 3 (1.0.110) is when the stage became a Rust-placed rectangle; before that `#st-hud` was `inset: 0` and 50 % was 50 % whatever the ratio — which is why the icon ring got `rescaleForThisPage` in round 6 and the Space ring only now.
+
+**Exact files.** `src/components/toast.ts` — `pageDpr()`; `dpr: pageDpr()` on the `overlay_fit_hud` call and the three `overlay_fit_handover` calls. `src-tauri/src/commands.rs` — `overlay_fit_hud(app, width, height, dpr: Option<f64>)`:
+
+```rust
+let page = dpr.filter(|d| d.is_finite() && *d > 0.0).unwrap_or(sf);
+let ratio = page / sf;
+let mon_w_css = mon.size().width as f64 / page;
+let mon_h_css = mon.size().height as f64 / page;
+let w = width.clamp(320.0, mon_w_css * 0.94);
+let h = height.clamp(120.0, mon_h_css * 0.94);
+let (sx, sy) = crate::middle_ring::stage_box(canvas, (centre.0 as f64, centre.1 as f64), page, w, h);
+let x = canvas.x / page; let y = canvas.y / page;
+// … log: "page dpr {page:.4} = {ratio:.3} × the monitor scale (stage-in-page-px-not-logical-px-spaceadom-119 …); pill centre lands at (…) physical"
+Some(OverlayRect { x, y, w: canvas.w / page, h: canvas.h / page, stage: Some(StageRect { x: sx, y: sy, w, h }) })
+```
+
+`overlay_fit_handover(app, width, height, dpr)` — `stage_bottom = centre.1 + (height * page) / 2.0`, returned rect in page px. `dpr` is `Option` so an older page still fits as before.
+
+**How it was verified.** `middle_ring::stage_tests::the_stage_centre_is_the_monitor_centre_in_the_pages_own_px`: with the owner's canvas/centre/stage numbers and TEXT_SCALE 1.09, the old maths misses the monitor centre by > 60 logical px and puts the pill at 930.1 on the panel (asserted within 1 px of his 930); the new maths lands the centre on the monitor centre to 1e-6 on both monitors. On hardware: UNPROVEN until a hold on 1.0.119 prints `page dpr 1.6350 = 1.090 × the monitor scale` and the pill is measured at 853.
+
+**Generalise this.** A page's CSS px and Windows logical px are two units that happen to agree at Text size 100 %. Any number crossing from Rust to a webview as a POSITION must be converted with the page's own `devicePixelRatio`, never the monitor's scale — and the fit line must print both, so a 9 % offset is a number in the log rather than a screenshot to argue about.
+
+### PROBLEM 271: toggling "Advanced mode" changed the theme — `dark_mode` was a stale page snapshot re-broadcast on every save
+
+**Symptom.** Owner report on 1.0.118: flip Advanced mode on/off, the theme visibly changes.
+
+**Root cause.** `settings-panel.ts` writes `appConfig.dark_mode = resolveTheme(next) !== "earthy"` ONLY inside the theme pill's click handler. With the theme on `"auto"`, Windows flipping light/dark re-resolves the look (`applyLook`, `os-theme-changed`) but nothing rewrites `dark_mode`, so the persisted bool drifts from the resolved theme. `commands::save_config` then emitted `theme-changed(new_config.dark_mode)` verbatim on EVERY save — `wireToggle("advanced")` is `persistConfig()` and nothing else — and `toast.ts`'s listener toggled `body.nocturne` to the stale value before `theme-name-changed` re-resolved it. The load path had been re-deriving the bool since PROBLEM 144 (`config/mod.rs`: `cfg.dark_mode = dark_mode_for(&cfg.theme, os_prefers_dark())`); the save path never did.
+
+**Exact file.** `src-tauri/src/commands.rs`:
+
+```rust
+// in save_config, before the shared state is replaced and anything is emitted
+let mut new_config = new_config;
+sync_dark_mode(&mut new_config, crate::config::os_prefers_dark());
+
+pub(crate) fn sync_dark_mode(cfg: &mut AppConfig, os_dark: Option<bool>) -> bool {
+    let derived = crate::config::dark_mode_for(&cfg.theme, os_dark);
+    if cfg.dark_mode == derived { return false; }
+    log::info!("save_config: dark_mode {} -> {} — derived from theme \"{}\" (OS dark {:?}) …", cfg.dark_mode, derived, cfg.theme, os_dark);
+    cfg.dark_mode = derived;
+    true
+}
+```
+
+**How it was verified.** `dark_mode_sync_tests`: `auto` + OS dark + stored `false` → `true` (and the reverse); fixed themes and correct values untouched; a named dark theme with a wrong snapshot corrected. Every toggle now saves the theme it is wearing. On hardware: UNPROVEN; the log line `save_config: dark_mode false -> true` on the first save after install is the proof the stale path was live.
+
+**Generalise this.** A derived value that is persisted must be derived at EVERY write, not at the one control that happens to know about it — or the next unrelated write ships the stale copy as a change.
+
+### §2 — the focused app on the Space ring's centre pill
+
+`src-tauri/src/engine/focus.rs` (new; `HudFocus { name, icon }`, `ForegroundInfo { path, stem, class }`, `is_shell_surface`, `short_name_for`, `truncate_name`, `hud_focus_for`; 5 tests), `src-tauri/src/hook/exclusions.rs` (`process_path_for_pid` split out of `process_stem_for_pid`; `foreground_info()` = `GetForegroundWindow` + `GetClassNameW` + the path), `src-tauri/src/engine/mod.rs` (`fg_info` read at hold start beside the `hold start` line, `focus::hud_focus_for(&cfg, &name, fg_info.as_ref(), &own, &lookup)` in the delayed show, `guide_hud: centre pill names …` log), `src-tauri/src/guide_hud/mod_impl.rs` (`GuideHudPayload.focus`, `show_guide_hud(.., focus)`; `preview_payload` sends `None`), `src/components/toast.ts` (`focus?` on the payload type; `spacePillHtml(focus)` — `.space` kept, `.st-focus` added, `data:image/` icons only, HTML-escaped name), `src/styles/overlay-earthy.css` (`.space.st-focus`, `.st-focus-ico` 22 px, `.st-focus-name` max-width 128 px + ellipsis). Measured on `preview.html?spacering` (DOM reads, `window.__spacePill()`): 230×60 / centre (115,30) in every variant; chip `calc(50% + …)` identical. The pill's box is CSS-fixed, so no name can resize it.
+
+### §3 — the mouse ring folds by tile count
+
+`src-tauri/src/middle_ring.rs` — `fits_as_arc(n, room) = layout_arcs(n, room, TILE).is_some()`, `placement_for(n, room, favourites, spiral)`: Favourites → `choose_shape` unconditionally (its whole ladder, shrink included — the owner's answer of 2026-09-19); All → `choose_shape` when `fits_as_arc` (full-size fold, first rung) else the relocate path (circles or spiral). `fold_by_count_tests` (10 at a corner folds, 30 relocates, threshold = Σ arc_capacity, Favourites 1/5/6/8/13/15 byte-identical to `choose_shape` — 13 in a corner still folds by shrinking while 13 under All relocates, a spiral never folds). `src-tauri/src/guide_hud/mod_impl.rs` — the `if scope == MyEight { choose_shape } else { circles }` decision replaced by `placement_for`, with a `fold-by-count` log line. No Favourites behaviour changes; All gains the fold.
+
+### §4 / §5 / §6 — key editor and settings polish
+
+`src/components/key-detail-panel.ts` — `kindOptions` order App or link · Spaceadom special · Key combo (+ Controls / Run command in Advanced); "Key combo" heading; `comboHintHtml(key)` + `wireComboHint()` — expanded once (`key_combo_hint_seen`, `schema.rs` + `types.ts`, `#[serde(default)]`), then a `How does this work?` link; `initKeyDetailPanel(.., onConfigTouched)` and `main.ts` binds `persistConfig`. `src/styles.css` — `.ed-kinds .theme-seg-ind` accent tint + `.ed-kinds .theme-seg-opt.is-on { color: var(--st-text) }`; `.ed-hint-link`. `src/components/setting-subs.ts` (new leaf; `SUB_LINES`, `subLineFor`, `subLineHtml`, `paintSubLine`), `src/components/settings-panel.ts` (row builders read the leaf; the four pill handlers call `paintSubLine`; the Advanced row moved into a `For power users` `.set-group` inside its own `.set-section` immediately before Maintenance, `toggleRow(.., sub)`), `src/components/controls.ts` (`GROUP_ICONS.power`), `src/preview.ts` (same lines from the same leaf), `scripts/setting-subs.test.ts` (3 tests; reads `controls.ts` as text because Node cannot resolve its extensionless `./report-dialog` import).

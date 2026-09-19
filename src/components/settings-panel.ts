@@ -62,6 +62,8 @@ import {
   drawAppGrid, cachedApps, loadApps, exeStem, findAppByStem, paintAppDisc,
 } from "./app-grid";
 import { registerDismissable } from "../dismissable";
+// 1.0.119 (brief 4 §5) — the per-option subtitles under the four pills.
+import { subLineHtml, paintSubLine } from "./setting-subs";
 
 let panelEl: HTMLElement | null = null;
 let _paused = false;
@@ -583,7 +585,6 @@ function render(): void {
           ${toggleRow("sound",     "Sound ticks",       sound,     2)}
           ${toggleRow("motion",    "Visual effects",    effects,   3)}
           ${toggleRow("hideboard", "Hide the keyboard", hideBoard, 4)}
-          ${toggleRow("advanced",  "Advanced mode",     advanced,  5)}
         </div>
       </div>
 
@@ -681,6 +682,21 @@ function render(): void {
          The GROUPING is the part that does the real work: pressing "Re-check
          now" and pressing "Clear all" had exactly the same weight on screen,
          and one of them empties a profile. See .set-act-* in styles.css. -->
+    <!-- 1.0.119 (brief 4 §6) — "For power users": its own group, immediately
+         BEFORE Maintenance (the owner's placement — not the bottom). Advanced
+         mode sat in Appearance with no description and he could not find it.
+         Same toggleRow/wireToggle/config plumbing; the one-liner under the row
+         is a .set-sub like the pills', always visible. -->
+    <div class="set-section set-filterable">
+      <div class="divider" style="margin:14px 0 10px;"></div>
+      <div class="set-group">
+        ${groupHeadingHtml("power", "For power users")}
+        <div class="set-rows">
+          ${toggleRow("advanced", "Advanced mode", advanced, 13, "Adds Run command and Controls to the key editor.")}
+        </div>
+      </div>
+    </div>
+
     <div class="set-section set-filterable">
       <div class="divider" style="margin:14px 0 10px;"></div>
 
@@ -927,6 +943,7 @@ function render(): void {
       // three Ring-layout labels are not equal width either, so the indicator
       // has to be re-measured on every selection, not re-indexed.
       if (seg) positionSegIndicator(seg);
+      paintSubLine(panelEl, "hudring", next);
 
       // THE VISIBLE HALF OF THE DEPENDENCY. Under Double both rings belong to
       // apps, so the specials switch has nothing to do — and a control that
@@ -1217,6 +1234,7 @@ function render(): void {
       appConfig.middle_ring_style = next;
       sfx.toggleOn("middlestyle");
       moveSeg(b, "middlestyleSet", next);
+      paintSubLine(panelEl, "middlestyle", next);
       // The scope pill only means something for the icon ring, and the
       // All-layout pill under it only for the icon ring showing All.
       paintRow("set-middlescope-wrap", "set-middlescope-note", next === "guide_hud");
@@ -1240,6 +1258,7 @@ function render(): void {
       appConfig.middle_ring_scope = next;
       sfx.toggleOn("middlescope");
       moveSeg(b, "middlescopeSet", next);
+      paintSubLine(panelEl, "middlescope", next);
       // The All-layout pill only means something under "All" — greyed from
       // the control that greys it, with no rebuild, exactly as above.
       paintRow("set-alllayout-wrap", "set-alllayout-note", next !== "all");
@@ -1258,6 +1277,7 @@ function render(): void {
       appConfig.all_ring_layout = next;
       sfx.toggleOn("alllayout");
       moveSeg(b, "alllayoutSet", next);
+      paintSubLine(panelEl, "alllayout", next);
       await persistConfig();
     });
   });
@@ -2627,7 +2647,7 @@ function markFlipped(id: string, on: boolean): void {
     ?.setAttribute("data-anim", on ? "on" : "off");
 }
 
-function toggleRow(id: string, label: string, on: boolean, i: number): string {
+function toggleRow(id: string, label: string, on: boolean, i: number, sub = ""): string {
   // PROBLEM 144 — this row used to be one big <label>, so a click anywhere on
   // it flipped the switch. Press-to-expand needs the TEXT to mean "explain
   // this" and only the switch to mean "change this", so the label is now a
@@ -2641,7 +2661,8 @@ function toggleRow(id: string, label: string, on: boolean, i: number): string {
         ${toggleSwitchHtml(id, on,
           _flipped?.id === id && _flipped.on === on ? (on ? "on" : "off") : undefined,
           label, descId(id))}
-      </div>
+      </div>${sub ? `
+      <div class="set-sub">${sub}</div>` : ""}
       ${descBox(id)}
     </div>`;
 }
@@ -2718,6 +2739,7 @@ function ringRow(ring: RingLayout, i: number): string {
                 aria-expanded="false" aria-controls="desc-hudring">Ring layout</button>
         ${segRowHtml("hudring", RING_OPTS, ring, "background:var(--st-accent);", "Ring layout", descId("hudring"))}
       </div>
+      ${subLineHtml("hudring", ring)}
       ${descBox("hudring")}
     </div>`;
 }
@@ -2820,14 +2842,12 @@ function moveSeg(b: HTMLElement, dataKey: string, next: string): void {
    from, for a user curious enough to notice. Deliberately NOT the `DESC`
    text \u2014 these are always visible, so they have to earn their line in four or
    five words. The wording is the owner's, verbatim. */
-const SUB_MIDDLESTYLE = "Sized by the golden ratio.";
-const SUB_MIDDLESCOPE = "A Fibonacci cap, for density.";
-const SUB_ALLLAYOUT = "Packed like a sunflower\u2019s seeds.";
-
-/** The always-visible subtitle under a row's label. */
-function subLine(text: string): string {
-  return `<div class="set-sub">${text}</div>`;
-}
+/* 1.0.119 (brief 4 §5) — the lines now live PER OPTION in
+   `setting-subs.ts` (`SUB_LINES`), and `paintSubLine` swaps them when the
+   selection changes; the three constants and `subLine` that stood here were
+   pinned to the row, so "Sized by the golden ratio." sat under Icon ring
+   and Space ring alike. `scripts/setting-subs.test.ts` asserts the map is
+   complete for every option of every pill. */
 
 /** The reason line under a middle-button row while the switch above is off. */
 const MIDDLE_OFF_NOTE = "Turn on \u201cMiddle button opens the ring\u201d to use this.";
@@ -2851,7 +2871,7 @@ function middleStyleRow(style: MiddleStyle, inert: boolean, i: number): string {
           segRowHtml("middlestyle", MIDDLE_STYLE_OPTS, style, "background:var(--st-accent);", "Middle button shows", descId("middlestyle"))
         }</span>
       </div>
-      ${subLine(SUB_MIDDLESTYLE)}
+      ${subLineHtml("middlestyle", style)}
       <div class="set-note" id="set-middlestyle-note" style="margin-top:6px;display:none;">${MIDDLE_OFF_NOTE}</div>
       ${descBox("middlestyle")}
     </div>`;
@@ -2872,7 +2892,7 @@ function middleScopeRow(scope: MiddleScope, inert: boolean, i: number): string {
           segRowHtml("middlescope", MIDDLE_SCOPE_OPTS, scope, "background:var(--st-accent);", "Middle-button ring shows", descId("middlescope"))
         }<button type="button" class="mscope-choose" id="set-eight-open" aria-expanded="${_eightOpen}">Choose your favourites \u2192</button></span>
       </div>
-      ${subLine(SUB_MIDDLESCOPE)}
+      ${subLineHtml("middlescope", scope)}
       <div class="set-note" id="set-middlescope-note" style="margin-top:6px;display:none;">${MIDDLE_OFF_NOTE} ${MIDDLE_SCOPE_NOTE}</div>
       <div id="set-eight-picker"></div>
       ${descBox("middlescope")}
@@ -2897,7 +2917,7 @@ function allLayoutRow(layout: AllLayout, inert: boolean, i: number): string {
           segRowHtml("alllayout", ALL_LAYOUT_OPTS, layout, "background:var(--st-accent);", "All layout", descId("alllayout"))
         }</span>
       </div>
-      ${subLine(SUB_ALLLAYOUT)}
+      ${subLineHtml("alllayout", layout)}
       <div class="set-note" id="set-alllayout-note" style="margin-top:6px;display:none;">${ALL_LAYOUT_NOTE}</div>
       ${descBox("alllayout")}
     </div>`;

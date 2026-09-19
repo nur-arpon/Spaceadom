@@ -381,6 +381,16 @@ pub(crate) unsafe fn foreground_stem() -> String {
 /// keyboard-hook callback (see the header rule).
 #[cfg(windows)]
 pub(crate) unsafe fn process_stem_for_pid(pid: u32) -> String {
+    normalize_stem(&process_path_for_pid(pid))
+}
+
+/// The FULL exe path for a process id (1.0.119, brief 4 §2 — the Space
+/// ring's centre pill needs the path to find the app's icon in the picker's
+/// cache, which is keyed by path). Empty when it cannot be read. The same
+/// OpenProcess/QueryFullProcessImageNameW plumbing `process_stem_for_pid`
+/// always used; that function is now this one plus `normalize_stem`.
+#[cfg(windows)]
+pub(crate) unsafe fn process_path_for_pid(pid: u32) -> String {
     use windows::core::PWSTR;
     use windows::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
@@ -404,7 +414,39 @@ pub(crate) unsafe fn process_stem_for_pid(pid: u32) -> String {
     if ok.is_err() {
         return String::new();
     }
-    normalize_stem(&String::from_utf16_lossy(&buf[..size as usize]))
+    String::from_utf16_lossy(&buf[..size as usize])
+}
+
+/// 1.0.119 (brief 4 §2) — the foreground window as the Space ring's centre
+/// pill needs it: the owning exe's full path and stem, plus the window
+/// CLASS (the only cheap way to tell the desktop — `Progman` / `WorkerW`,
+/// owned by explorer.exe — from an Explorer file window). `None` when there
+/// is no foreground window or its process cannot be read; the caller shows
+/// "SPACE" for both. Never called from the hook callback (header rule) —
+/// the engine's hold-start path only, which already queries the foreground.
+#[cfg(windows)]
+pub(crate) unsafe fn foreground_info() -> Option<crate::engine::focus::ForegroundInfo> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId,
+    };
+
+    let hwnd = GetForegroundWindow();
+    if hwnd.0.is_null() {
+        return None;
+    }
+    let mut cls = [0u16; 128];
+    let n = GetClassNameW(hwnd, &mut cls);
+    let class = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    if pid == 0 {
+        return None;
+    }
+    let path = process_path_for_pid(pid);
+    if path.is_empty() {
+        return None;
+    }
+    Some(crate::engine::focus::ForegroundInfo { stem: normalize_stem(&path), path, class })
 }
 
 #[cfg(test)]

@@ -72,3 +72,16 @@ The owner's verdict after an hour on 1.0.117: the settings catalogue and most to
 *   **Windows settings catalogue + the slow toggles (Bluetooth, Wi‑Fi, dark mode, night light):** HIDDEN, not deleted, behind `FEATURES.windowsCatalogue` / `FEATURES.hazardousToggles` (`src/config/features.ts` mirrored by `src-tauri/src/features.rs`); everything stays compiled and tested and comes back by flipping two constants. Screen off and Sleep are neutralised at run time as well. Reason: "a shortcut app, not a utility", and screen off cost the owner a restart.
 *   **Show desktop:** stays in the catalogue JSON, not listed anywhere; it returns as a tile on the mouse-ring palette (§8) rather than as a key.
 
+
+## 12. Video guide — "everything this app can do" (2026-09-19)
+
+Proven the same day it shipped: I asked the free Gemini, in plain
+language, for a PowerShell one-liner to do what I wanted, pasted it into
+Space + a key under Advanced mode › Run command, and it just worked. That
+is the demo for the video — you do not need to know PowerShell, you need
+to be able to ask for it. The guide walks the app top to bottom: hold
+Space and tap (apps), the specials (boss key, PiP, force close, cycle
+profile), the Space ring and the mouse ring, profiles, and then the
+"ask an AI for a command, paste it, it is a shortcut now" moment as the
+finale. Record after the Shortcuts page and the touchpad land, so the
+guide is not re-shot in a month.

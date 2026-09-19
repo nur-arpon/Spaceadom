@@ -293,6 +293,10 @@ async function bootstrap(): Promise<void> {
         refreshBoard();
         refreshProfileList(appConfig);
       },
+      undefined,
+      // 1.0.119 (brief 4 §4) — the editor flipped a flag on the shared
+      // config (`key_combo_hint_seen`); persist it the way `tour_done` is.
+      () => { void persistConfig(); },
     );
   }
   mark("boot: key editor wired");

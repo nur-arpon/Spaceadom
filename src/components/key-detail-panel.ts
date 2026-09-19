@@ -72,6 +72,26 @@ let _config: AppConfig | null = null;
 let _currentKey: string | null = null;
 let _onSave: ((key: string, binding: KeyBinding) => void) | null = null;
 let _onClosed: (() => void) | null = null;
+/** 1.0.119 (brief 4 §4) — "a flag on the config changed, please persist":
+ *  main.ts binds `persistConfig`, the harness nothing. The editor never
+ *  saves the config itself (that path is main.ts's, PROBLEM 45's double-save). */
+let _onConfigTouched: (() => void) | null = null;
+
+/** The first open of the Key combo page shows the hint and marks it seen;
+ *  every later open shows the link, and the link expands the hint. */
+function wireComboHint(): void {
+  const link = _panel?.querySelector<HTMLButtonElement>("#ed-combo-hint-link");
+  const hint = _panel?.querySelector<HTMLElement>("#ed-combo-hint");
+  if (!link || !hint) return;
+  link.addEventListener("click", () => {
+    link.hidden = true;
+    hint.hidden = false;
+  });
+  if (_config && _config.key_combo_hint_seen !== true) {
+    _config.key_combo_hint_seen = true;
+    _onConfigTouched?.();
+  }
+}
 
 let _query = "";
 
@@ -183,18 +203,19 @@ function actionFromItem(item: CatalogueItem): Action | null {
 }
 
 /** The segmented control's options. PHASE A step 3: non-advanced users see
- *  three kinds — App or link · Send keys · Spaceadom special. "Controls"
+ *  three kinds — in the owner's 1.0.119 order, App or link · Spaceadom
+ *  special · Key combo (brief 4 §4; "Key combo" was "Send keys"). "Controls"
  *  (the old "Windows" tab, a few clicks deep) and "Run command" appear only
- *  in Advanced mode — or when THIS key already holds a binding of that
- *  kind, so an existing setting / command binding stays visible and
+ *  in Advanced mode, after those — or when THIS key already holds a binding
+ *  of that kind, so an existing setting / command binding stays visible and
  *  editable whatever the mode. */
 function kindOptions(current: EditorKind): ReadonlyArray<readonly [EditorKind, string]> {
   const advanced = !!_config?.advanced_mode;
   const opts: (readonly [EditorKind, string])[] = [["app", "App or link"]];
-  if (advanced || current === "setting") opts.push(["setting", FEATURES.windowsCatalogue ? "Windows" : "Controls"]);
-  opts.push(["keys", "Send keys"]);
-  if (advanced || current === "command") opts.push(["command", "Run command"]);
   opts.push(["special", "Spaceadom special"]);
+  opts.push(["keys", "Key combo"]);
+  if (advanced || current === "setting") opts.push(["setting", FEATURES.windowsCatalogue ? "Windows" : "Controls"]);
+  if (advanced || current === "command") opts.push(["command", "Run command"]);
   return opts;
 }
 
@@ -246,12 +267,14 @@ export function initKeyDetailPanel(
   config: AppConfig,
   onSave: (key: string, binding: KeyBinding) => void,
   onClosed?: () => void,
+  onConfigTouched?: () => void,
 ): void {
   _panel = panel;
   _backdrop = document.getElementById("editor-backdrop");
   _config = config;
   _onSave = onSave;
   _onClosed = onClosed ?? null;
+  _onConfigTouched = onConfigTouched ?? null;
 
   _backdrop?.addEventListener("click", () => closePanel());
 
@@ -578,7 +601,7 @@ function renderPanel(key: string): void {
     </div><!-- /ed-pane-app -->
 
     <!-- PHASE A — the other four pages, one at a time. -->
-    <div id="ed-pane-other"${kind === "app" ? " hidden" : ""}>${otherPaneHtml(kind, binding)}</div>
+    <div id="ed-pane-other"${kind === "app" ? " hidden" : ""}>${otherPaneHtml(kind, binding, key)}</div>
 
     <div id="ed-conflict" hidden></div>
 
@@ -737,8 +760,20 @@ function renderPanel(key: string): void {
 // PHASE A — the four non-app pages
 // ---------------------------------------------------------------------------
 
+/** 1.0.119 (brief 4 §4) — the Key combo hint, example-led and about THIS
+ *  key. Expanded the first time the page opens; afterwards it is a "How does
+ *  this work?" link that expands it (`wireComboHint`). The flag is
+ *  `key_combo_hint_seen` on the config, stored exactly like `tour_done`. */
+function comboHintHtml(key: string): string {
+  const seen = _config?.key_combo_hint_seen === true;
+  const k = `Space+${keyLabel(key)}`;
+  return `
+          <button type="button" class="ed-hint-link" id="ed-combo-hint-link"${seen ? "" : " hidden"}>How does this work?</button>
+          <div class="ed-hint" id="ed-combo-hint"${seen ? " hidden" : ""}>Want ${k} to take a screenshot? Hold Win, Shift and S together, then let go. Whatever you hold is what ${k} will press for you.</div>`;
+}
+
 /** The markup of the page for `kind` (empty for "app", which has its own). */
-function otherPaneHtml(kind: EditorKind, binding: KeyBinding | undefined): string {
+function otherPaneHtml(kind: EditorKind, binding: KeyBinding | undefined, key = ""): string {
   switch (kind) {
     case "app":
       return "";
@@ -749,14 +784,13 @@ function otherPaneHtml(kind: EditorKind, binding: KeyBinding | undefined): strin
           <div class="ed-empty" id="ed-cat-empty" hidden>Nothing matches that.</div></div>`;
     case "keys":
       return `
-        <div class="ed-section">Send keys</div>
+        <div class="ed-section">Key combo</div>
         <div class="ed-chord" id="ed-chord">
           <div class="ed-chord-caps" id="ed-chord-caps"></div>
           <div class="ed-row">
             <button class="btn ed-chord-rec" id="ed-chord-rec">Press the keys…</button>
             <button class="btn btn-primary" id="ed-chord-done" disabled>Done</button>
-          </div>
-          <div class="ed-hint">Hold the whole combination at once — Win, Shift and S together — then let go. The keys still reach Windows while you record, so a screenshot chord takes a screenshot.</div>
+          </div>${comboHintHtml(key)}
         </div>`;
     case "command": {
       // PHASE A step 3 — PowerShell, PowerToys-Run parity: a multi-line box,
@@ -774,7 +808,7 @@ function otherPaneHtml(kind: EditorKind, binding: KeyBinding | undefined): strin
           <button class="btn" id="ed-cmd-try" ${line ? "" : "disabled"}>Try it</button>
           <button class="btn btn-primary" id="ed-cmd-assign" ${line ? "" : "disabled"}>Assign</button>
         </div>
-        <div class="ed-hint">Runs as you, in PowerShell, with no window. Paste any PowerShell one-liner. Advanced mode only.</div>`;
+        <div class="ed-hint">Runs as you, in PowerShell, with no window. Don't know PowerShell? Ask any AI for a one-liner in plain English and paste it here.</div>`;
     }
     case "special":
       return `
@@ -805,6 +839,7 @@ function wireOtherPane(key: string, kind: EditorKind, binding: KeyBinding | unde
     }
     case "keys": {
       renderChordCaps();
+      wireComboHint();
       _panel.querySelector("#ed-chord-rec")!.addEventListener("click", () => {
         if (_recordTimer) stopRecording(); else startRecording();
       });

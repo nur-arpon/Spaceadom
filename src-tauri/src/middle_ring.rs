@@ -814,6 +814,51 @@ pub fn choose_shape(n: usize, room: Room) -> Placement {
     Placement { shape: RingShape::CircleClamped, offset: (0.0, 0.0), slots, arcs }
 }
 
+// ---------------------------------------------------------------------------
+// 1.0.119 (brief 4 §3) — FOLD BY TILE COUNT, NOT BY SCOPE
+// ---------------------------------------------------------------------------
+
+/// True when `n` tiles fit the arcs `room` allows at Favourites' FULL tile
+/// size and spacing — `layout_arcs` at `TILE`, i.e. the same capacity maths
+/// the fold has always used (`feasible_arc` + `arc_capacity` per ring, the
+/// Fibonacci caps binding partial arcs too). Corner arcs hold fewer than
+/// edge arcs, and open space holds `RING_CAPS`' sum, exactly as before. No
+/// tile is ever shrunk to make the answer true: the owner's rule is "adapt
+/// only when it cannot hold any more in a readable way", and readable means
+/// this size.
+pub fn fits_as_arc(n: usize, room: Room) -> bool {
+    layout_arcs(n, room, TILE).is_some()
+}
+
+/// THE DECISION (the owner's 1.0.119 rule, as he settled it):
+///
+/// * FAVOURITES keeps its whole ladder, untouched — `choose_shape`: anchor,
+///   then SHRINK, then nudge, then clamp. A Favourites set that fits an arc
+///   only by shrinking (13 in a corner) folds-with-shrink exactly as before
+///   this brief; the count rule never removes any folding Favourites had.
+/// * ALL now folds too, when its tiles fit the arcs at FULL size
+///   (`fits_as_arc` — `choose_shape` then returns at its first rung:
+///   anchored, offset `(0, 0)`, no shrink). When they do not, it relocates
+///   exactly as it always has: full circles (or the spiral when that is the
+///   All layout), clamped and warped by the caller. A spiral never folds.
+///
+/// Before this, 8 tiles under "All" relocated while the same 8 under
+/// "Favourites" folded — the fold was decided by scope, not by count.
+pub fn placement_for(n: usize, room: Room, favourites: bool, spiral: bool) -> Placement {
+    if favourites {
+        return choose_shape(n, room);
+    }
+    if !spiral && fits_as_arc(n, room) {
+        return choose_shape(n, room);
+    }
+    Placement {
+        shape: if spiral { RingShape::Spiral } else { RingShape::CircleClamped },
+        offset: (0.0, 0.0),
+        slots: if spiral { spiral_slots(n, TILE) } else { layout_ring_slots(n, TILE) },
+        arcs: Vec::new(),
+    }
+}
+
 /// The candidate centre moves `nudge` tries, shortest first: every point of
 /// the `NUDGE_STEP` grid within `NUDGE_MAX` of the press point along each
 /// axis, and never past the middle of the room on an axis (beyond the
@@ -2232,6 +2277,46 @@ mod canvas_tests {
         assert!((sy - ((800.0 - 48.0) / 1.5 - 384.5)).abs() < 1e-9);
     }
 
+    /// 1.0.119 (brief 4 §1) — THE MEASUREMENT behind "the Space ring is
+    /// ~80 px right of centre". The owner's own numbers from debug.log
+    /// (2026-09-19 11:39): canvas 2560x1480 @ (1920,59) physical, monitor
+    /// centre (3200,811), stage 1370x851. The page's `screen.avail*` read
+    /// 1567x906 for that canvas, i.e. the page runs at 2560/1567 = 1.634,
+    /// not the monitor's 1.5 — Windows' Text size is 109 % and WebView2
+    /// folds it into devicePixelRatio. A stage computed with the MONITOR's
+    /// scale and drawn by a page at 1.634 lands its centre 9 % further from
+    /// the window origin: 930 logical on the panel, where the owner measured
+    /// the pill. Computed with the PAGE's ratio the centre is the monitor
+    /// centre again, on both of his monitors.
+    #[test]
+    fn the_stage_centre_is_the_monitor_centre_in_the_pages_own_px() {
+        const TEXT_SCALE: f64 = 1.09;
+        let cases = [
+            // (canvas, monitor centre physical, monitor scale, stage w, h)
+            (WorkArea { x: 1920.0, y: 59.0, w: 2560.0, h: 1480.0 }, (3200.0, 811.0), 1.5, 1370.0, 851.0),
+            (WorkArea { x: 0.0, y: 32.0, w: 1920.0, h: 1000.0 }, (960.0, 540.0), 1.0, 1455.0, 862.0),
+        ];
+        for (canvas, centre, sf, w, h) in cases {
+            let page = sf * TEXT_SCALE;
+            // The bug: a stage in logical px, drawn by a page whose px are
+            // smaller. Its centre, back in physical px, misses the monitor
+            // centre by (ratio − 1) × the stage centre's page offset.
+            let (bx, _) = stage_box(canvas, centre, sf, w, h);
+            let wrong = canvas.x + (bx + w / 2.0) * page;
+            let miss_logical = (wrong - centre.0) / sf;
+            assert!(miss_logical > 60.0, "the bug must reproduce the owner's ~80 px: {miss_logical:.1}");
+            if sf > 1.0 {
+                // The panel: pill centre at 930 logical on a 1707-wide monitor (centre 853).
+                let on_monitor = (wrong - (canvas.x)) / sf;
+                assert!((on_monitor - 930.0).abs() < 1.0, "owner measured x≈930, got {on_monitor:.1}");
+            }
+            // The fix: the same stage in the PAGE's px lands on the centre.
+            let (sx, sy) = stage_box(canvas, centre, page, w, h);
+            let back = (canvas.x + (sx + w / 2.0) * page, canvas.y + (sy + h / 2.0) * page);
+            assert!((back.0 - centre.0).abs() < 1e-6 && (back.1 - centre.1).abs() < 1e-6, "{back:?} vs {centre:?}");
+        }
+    }
+
     /// THE REGRESSION THAT WOULD HAVE CAUGHT THE RIGHT/BOTTOM CLIP
     /// (2026-09-15). The canvas's PHYSICAL right and bottom edges must be
     /// the work area's own, EXACTLY — not "close", not "within rounding" —
@@ -3602,5 +3687,128 @@ mod round6_tests {
             RingShape::CircleClamped => {}
             other => panic!("a 70 px sliver produced {}", other.name()),
         }
+    }
+}
+
+/// 1.0.119 (brief 4 §3) — fold by TILE COUNT, not by scope.
+#[cfg(test)]
+mod fold_by_count_tests {
+    use super::*;
+
+    const AREA: WorkArea = WorkArea { x: 0.0, y: 48.0, w: 2560.0, h: 1552.0 };
+    const SCALE: f64 = 1.5;
+
+    /// A press 40 logical px from the top-left corner: quarter arcs.
+    fn corner() -> Room {
+        Room::at((60.0, 48.0 + 60.0), AREA, SCALE)
+    }
+    /// A press 40 logical px from the left edge, far from the others: half arcs.
+    fn edge() -> Room {
+        Room::at((60.0, 48.0 + 776.0), AREA, SCALE)
+    }
+
+    /// The capacity the room's arcs hold at full size, ring by ring — the
+    /// same maths `layout_arcs` runs (`feasible_arc` then `arc_capacity`).
+    fn arc_capacity_of(room: Room) -> usize {
+        (0..MAX_RINGS)
+            .filter_map(|k| {
+                let r = ring_radius(k, TILE);
+                feasible_arc(room, r, TILE).map(|arc| arc_capacity(k, r, TILE, arc))
+            })
+            .sum()
+    }
+
+    #[test]
+    fn ten_tiles_at_a_corner_fold_and_thirty_relocate() {
+        let ten = placement_for(10, corner(), false, false);
+        assert!(ten.shape.anchored(), "10 at a corner folds: {}", ten.shape.name());
+        assert!(matches!(ten.shape, RingShape::Quarter(_)), "{}", ten.shape.name());
+        assert_eq!(ten.offset, (0.0, 0.0), "a fold never moves the centre");
+        assert_eq!(ten.slots.len(), 10);
+        assert!(ten.slots.iter().all(|s| (s.tile - TILE).abs() < 1e-9), "full-size tiles only");
+        assert!(slots_fit(&ten.slots, corner()));
+
+        let thirty = placement_for(30, corner(), false, false);
+        assert_eq!(thirty.shape, RingShape::CircleClamped, "30 at a corner relocates as All does");
+        assert_eq!(thirty.slots.len(), 30);
+        assert!(thirty.arcs.is_empty());
+    }
+
+    /// The fold/relocate threshold IS the arc capacity constant — the sum of
+    /// `arc_capacity` over the rings `feasible_arc` opens — at a corner and
+    /// at an edge, and in open space it is the Fibonacci caps' sum.
+    #[test]
+    fn the_threshold_equals_the_arc_capacity() {
+        for (what, room) in [("corner", corner()), ("edge", edge()), ("open", Room::OPEN)] {
+            let cap = arc_capacity_of(room);
+            assert!(cap >= 2, "{what}: {cap}");
+            assert!(fits_as_arc(cap, room), "{what}: {cap} tiles must fold");
+            assert!(!fits_as_arc(cap + 1, room), "{what}: {} tiles must relocate", cap + 1);
+            assert!(placement_for(cap, room, false, false).shape.anchored(), "{what}");
+            assert_eq!(placement_for(cap + 1, room, false, false).shape, RingShape::CircleClamped, "{what}");
+        }
+        assert_eq!(arc_capacity_of(Room::OPEN), RING_CAPS.iter().sum::<usize>());
+        let (corner_cap, edge_cap) = (arc_capacity_of(corner()), arc_capacity_of(edge()));
+        assert!(corner_cap < edge_cap, "a corner holds fewer than an edge: {corner_cap} vs {edge_cap}");
+    }
+
+    /// Favourites is UNCHANGED at every size (owner, 2026-09-19): its whole
+    /// ladder stays, so 13 in a corner still folds-with-shrink exactly as
+    /// `choose_shape` did — same shape, same slots, same offset — while the
+    /// same 13 under All (which cannot shrink) relocates.
+    #[test]
+    fn favourites_keeps_its_whole_ladder_including_the_shrink() {
+        for n in [1, 5, 6, 8, 13, FAVOURITES_MAX] {
+            for (what, room) in [("corner", corner()), ("edge", edge()), ("open", Room::OPEN)] {
+                let before = choose_shape(n, room);
+                let after = placement_for(n, room, true, false);
+                assert_eq!(before.shape, after.shape, "{what} n={n}");
+                assert_eq!(before.offset, after.offset, "{what} n={n}");
+                assert_eq!(before.slots, after.slots, "{what} n={n}");
+            }
+        }
+        // The case the owner named: 13 favourites that fit an arc ONLY by
+        // shrinking. Found rather than guessed — the first press, walking in
+        // from the corner, at which full-size arcs cannot hold 13 but
+        // `choose_shape`'s shrink rung still anchors them. Favourites keeps
+        // that fold; the same 13 under All (no shrink) relocates.
+        // Corners at every offset, then SLIVERS (a short work area with the
+        // press at mid-height — the room where the shrink rung bites).
+        let corners = (0..40).map(|i| {
+            Room::at((4.0 + i as f64 * 6.0, 48.0 + 4.0 + i as f64 * 6.0), AREA, SCALE)
+        });
+        let slivers = (3..30).flat_map(|h| {
+            let hh = h as f64 * 20.0; // logical height 60..580
+            (0..6).map(move |k| {
+                let area = WorkArea { x: 0.0, y: 0.0, w: 2560.0, h: hh };
+                let x = 40.0 + k as f64 * 400.0;
+                Room::at((x, hh / 2.0), area, 1.0)
+            })
+        });
+        let shrunk = corners
+            .chain(slivers)
+            .find(|&room| {
+                !fits_as_arc(13, room) && {
+                    let p = choose_shape(13, room);
+                    p.shape.anchored() && p.slots.iter().any(|s| s.tile < TILE - 1e-9)
+                }
+            })
+            .expect("a room where 13 fits only by shrinking");
+        let fav = placement_for(13, shrunk, true, false);
+        assert_eq!(fav, choose_shape(13, shrunk));
+        assert!(fav.shape.anchored(), "{}", fav.shape.name());
+        assert!(fav.slots.iter().any(|s| s.tile < TILE - 1e-9), "it fits only by shrinking");
+        assert_eq!(fav.slots.len(), 13);
+        assert_eq!(placement_for(13, shrunk, false, false).shape, RingShape::CircleClamped);
+    }
+
+    /// A spiral has no arc form: "All + Spiral" keeps the relocate path even
+    /// when the count would have folded.
+    #[test]
+    fn a_spiral_never_folds() {
+        let p = placement_for(6, corner(), false, true);
+        assert_eq!(p.shape, RingShape::Spiral);
+        assert_eq!(p.slots.len(), 6);
+        assert!(!p.shape.anchored());
     }
 }

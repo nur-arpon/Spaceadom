@@ -299,6 +299,10 @@ export interface AppConfig {
    * Windows catalogue. Absent = off. UI only; Rust ignores it.
    */
   advanced_mode?: boolean;
+  /** 1.0.119 (brief 4 §4) — the key editor's "Key combo" hint has been shown
+   *  once; afterwards it collapses to a "How does this work?" link. Same
+   *  shape as `tour_done`: absent = not yet seen, read as `=== true`. */
+  key_combo_hint_seen?: boolean;
   /**
    * How many RINGS of app shortcuts the Space HUD lays out. Default "auto".
    *

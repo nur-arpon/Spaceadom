@@ -189,6 +189,11 @@ pub struct GuideHudPayload {
     /// this rides the Space-hold latency path. Built by `engine::hud_icons_for`.
     pub app_icons: Vec<Option<String>>,
     pub specials: Vec<(String, String)>,
+    /// 1.0.119 (brief 4 §2) — the FOCUSED APP for the centre pill: its short
+    /// name and icon, resolved at hold start by `engine::focus`. `None` keeps
+    /// the word SPACE (the desktop, the lock screen, our own windows, an
+    /// unreadable process, a preview). The pill's box never changes.
+    pub focus: Option<crate::engine::focus::HudFocus>,
     /// `Some` ONLY for a Settings preview (`commands::preview_hud_layout`).
     ///
     /// A real Space-hold sends `None` and the page then reads the user's own
@@ -266,6 +271,7 @@ pub fn show_guide_hud(
     apps: Vec<(String, String)>,
     app_icons: Vec<Option<String>>,
     specials: Vec<(String, String)>,
+    focus: Option<crate::engine::focus::HudFocus>,
 ) {
     show_hud_payload(
         epoch,
@@ -275,6 +281,7 @@ pub fn show_guide_hud(
             apps,
             app_icons,
             specials,
+            focus,
             preview: None,
         },
     );
@@ -905,30 +912,34 @@ pub fn show_middle_ring(
                 // the clamp + warp. "All": full circles, always, clamped and
                 // warped against THIS monitor's work area.
                 let cursor_f = (cursor_phys.0 as f64, cursor_phys.1 as f64);
+                // 1.0.119 (brief 4 §3) — THE FOLD IS DECIDED BY TILE COUNT,
+                // NOT BY SCOPE. `placement_for`: if every tile fits the arcs
+                // the room allows at FULL size (`fits_as_arc` — the same
+                // capacity maths Favourites has always folded by), fold
+                // around the press point whatever the scope; if not,
+                // relocate as "All" always has — full circles (or the
+                // spiral, which never folds) clamped and warped below. The
+                // owner's rule: "adapt only when it cannot hold any more in
+                // a readable way". Before this, Favourites folded and All
+                // relocated regardless of how many tiles each carried.
+                // As the owner settled it (2026-09-19): FAVOURITES is
+                // untouched — its whole ladder (anchor → shrink → nudge →
+                // clamp) stays, so a set that fits only by shrinking still
+                // folds-with-shrink; the count rule only ADDS folding for
+                // All when its tiles fit at full size.
+                let room = mr::Room::at(cursor_f, room_area, sf);
+                let favourites = scope == crate::config::MiddleRingScope::MyEight;
+                let folds = !spiral && mr::fits_as_arc(n_items, room);
+                log::info!(
+                    "guide_hud: fold-by-count — {n_items} tile(s) under scope {:?} {} at full \
+                     tile size in this room, so the ring {} (brief 4 §3: the count decides, \
+                     not the scope)",
+                    scope,
+                    if folds { "FIT the arcs" } else if spiral { "are a spiral (never folds)" } else { "do NOT fit the arcs" },
+                    if favourites { "takes Favourites' own ladder, shrink included" } else if folds { "folds around the press point" } else { "relocates as All always has" },
+                );
                 let mr::Placement { shape, offset, slots, arcs } =
-                    if scope == crate::config::MiddleRingScope::MyEight {
-                        mr::choose_shape(n_items, mr::Room::at(cursor_f, room_area, sf))
-                    } else {
-                        // "All" — the Fibonacci rings, or (owner, 2026-09-15)
-                        // the phyllotaxis SPIRAL. Both take the SAME clamp +
-                        // warp path below: a spiral is a variant of "All",
-                        // not of Favourites, so its containment law is
-                        // unchanged.
-                        mr::Placement {
-                            shape: if spiral {
-                                mr::RingShape::Spiral
-                            } else {
-                                mr::RingShape::CircleClamped
-                            },
-                            offset: (0.0, 0.0),
-                            slots: if spiral {
-                                mr::spiral_slots(n_items, mr::TILE)
-                            } else {
-                                mr::layout_ring_slots(n_items, mr::TILE)
-                            },
-                            arcs: Vec::new(),
-                        }
-                    };
+                    mr::placement_for(n_items, room, favourites, spiral);
                 // Clamp on the TILES plus their hover halo, not on the scrim:
                 // the scrim fades to nothing and may be cut by the screen
                 // edge; a tile may not (artboard 5). `clamp_extent` is

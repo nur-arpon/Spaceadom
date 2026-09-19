@@ -61,10 +61,47 @@ cannot hold any more in a readable way." So:
   threshold equals the arc capacity constant; Favourites' behaviour is
   unchanged for its usual sizes.
 
+## 4. Key editor polish (owner, 12:10, with screenshots)
+
+`src/components/key-detail-panel.ts`, `src/styles.css`:
+- The segmented control's SELECTED label is white on a near-white pill —
+  unreadable. Selected label = the same dark ink as the others; the sliding
+  highlight stays. Check all three themes.
+- Rename the "Send keys" kind to **"Key combo"** everywhere the user sees
+  it (tab, section heading, HUD/ring labels that say "keys", preview).
+  Internal ids unchanged.
+- Order of the kinds: **App or link · Spaceadom special · Key combo**
+  (Controls and Run command still only in Advanced, after those).
+- The hint under the recorder is a lecture shown every time. Replace with
+  the first-time-then-link pattern the settings panel already uses (find
+  it there and reuse the same helper/flag, stored the same way): the FIRST
+  time a user opens Key combo the hint is expanded; afterwards it collapses
+  to a small "How does this work?" link that expands it. The expanded text
+  is EXAMPLE-led and may be a short paragraph: "Want Space+I to take a
+  screenshot? Hold Win, Shift and S together, then let go. Whatever you
+  hold is what Space+I will press for you." Drop the sentence about keys
+  reaching Windows during recording.
+
+## 5. Settings panel: descriptions follow the selected option
+
+`src/components/settings-panel.ts` (owner screenshot): the one-line
+descriptions under the segmented controls do not change with the choice —
+"Sized by the golden ratio" sits under Icon ring/Space ring, "A Fibonacci
+cap, for density" under Favourites/All, "Packed like a sunflower's seeds"
+under Rings/Spiral, and Ring layout (Compact/Wide/Double) has none. Each
+option gets its own one-liner and the text swaps when the selection
+changes (and on load). Write the missing ones in the same voice (short,
+plain, one clause): e.g. Icon ring "App icons around the cursor" / Space
+ring "The same ring the Space key shows"; Favourites "Only the apps you
+pinned" / All "Every key in the profile, plus the specials"; Rings "…" /
+Spiral "Packed like a sunflower's seeds"; Compact / Wide / Double one each.
+Test: a pure `description_for(control, option)` map with an entry for every
+option, asserted complete.
+
 ## Docs + version
 
 `PROJECT_STATUS.md` dated entry (cause of §1 in one sentence, the fold
-rule in one sentence), `V14_FIXES_AND_CODE.md` entry, `all-versions/
+rule in one sentence, the editor/settings polish in one line), `V14_FIXES_AND_CODE.md` entry, `all-versions/
 WHAT-CHANGED.md` row for 1.0.119 in the owner's voice (see 1.0.118's).
 Version → **1.0.119** in package.json, tauri.conf.json, Cargo.toml,
 scripts/install-real.cmd.

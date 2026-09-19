@@ -3418,8 +3418,20 @@ body.nocturne .tour-ring {
    ========================================================================== */
 .ed-kinds { margin: 0 0 12px; }
 .ed-kinds .theme-seg-opt { font-size: 11px; padding: 6px 9px; white-space: nowrap; }
+/* 1.0.119 (brief 4 §4) — the kind pill passes no indicator colour, so its
+   slider was the bare `.theme-seg-ind` (no background at all) under a
+   `.is-on` label painted #fff for the Theme pill's coloured slider: white on
+   the near-white surface, unreadable. Here the slider is the accent tint and
+   the selected label keeps the same ink as its neighbours; the three themes
+   each define both tokens (themes.css). */
+.ed-kinds .theme-seg-ind { background: var(--st-accent-tint); box-shadow: inset 0 0 0 1px var(--st-accent-brd), var(--shadow-sm); }
+.ed-kinds .theme-seg-opt.is-on { color: var(--st-text); }
 
 .ed-hint { margin: 8px 2px 0; font-size: 11.5px; line-height: 1.45; color: var(--st-text-dim); }
+/* 1.0.119 (brief 4 §4) — the collapsed Key combo hint: one small link. */
+.ed-hint-link { margin: 8px 2px 0; padding: 0; border: 0; background: none; font: inherit;
+  font-size: 11.5px; color: var(--st-accent-800); text-decoration: underline; cursor: pointer; }
+.ed-hint-link[hidden], .ed-hint[hidden] { display: none; }
 
 /* PHASE A step 3 — Run command: a multi-line box, the administrator
    checkbox, and the exact line in a monospace block. */

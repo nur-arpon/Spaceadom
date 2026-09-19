@@ -7,6 +7,8 @@ pub mod actions;
 pub mod chord_recorder;
 /// PHASE A — the specials' names and the two derived ring lists.
 pub mod specials;
+/// 1.0.119 (brief 4 §2) — the focused app on the Space ring's centre pill.
+pub mod focus;
 
 use crate::{
     config::SharedConfig,
@@ -269,6 +271,17 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
             // is legal here (the same reasoning as PROBLEM 243's shown-over
             // line). `over own window` is the phrase the install-proof script
             // asserts (CLAUDE.md keyboard-hook law 6).
+            //
+            // 1.0.119 (brief 4 §2) — the foreground window, read ONCE here at
+            // hold start (the same query the line below makes) and carried
+            // into the delayed show, where `focus::hud_focus_for` turns it
+            // into the centre pill's name + icon. Not re-queried at show
+            // time: the delay is the user's, and the app they held Space over
+            // is the one the pill should name.
+            #[cfg(windows)]
+            let fg_info = unsafe { crate::hook::exclusions::foreground_info() };
+            #[cfg(not(windows))]
+            let fg_info: Option<focus::ForegroundInfo> = None;
             #[cfg(windows)]
             {
                 let own = crate::hook::exclusions::own_stem();
@@ -346,7 +359,7 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
                     _ = tokio::time::sleep(tokio::time::Duration::from_millis(hud_delay_ms)) => {
                         // Show HUD if not cancelled
                         if !*cancel_rx.borrow() {
-                            let (profile_name, emoji, bindings, icons, specials) = {
+                            let (profile_name, emoji, bindings, icons, specials, focus) = {
                                 let s = state_clone.lock().unwrap_or_else(|p| p.into_inner());
                                 let cfg = s.config.read().unwrap_or_else(|p| p.into_inner());
                                 let name = cfg.active_profile.clone();
@@ -436,10 +449,26 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
                                     specials::hud_specials_for(&cfg),
                                 );
 
-                                (name, emoji, binds, icons, specials)
+                                // 1.0.119 (brief 4 §2) — the focused app for
+                                // the centre pill, from the SAME cache; the
+                                // shell, ourselves and anything unreadable
+                                // come back None and the pill says SPACE.
+                                let own = crate::hook::exclusions::own_stem();
+                                let focus = focus::hud_focus_for(
+                                    &cfg, &name, fg_info.as_ref(), &own, &lookup,
+                                );
+                                log::info!(
+                                    "guide_hud: centre pill names {} (foreground {:?})",
+                                    focus.as_ref().map_or("SPACE".to_string(), |f| format!(
+                                        "\"{}\" ({})", f.name, if f.icon.is_some() { "icon" } else { "no icon" }
+                                    )),
+                                    fg_info.as_ref().map(|f| (&f.stem, &f.class)),
+                                );
+
+                                (name, emoji, binds, icons, specials, focus)
                             };
                             guide_hud::show_guide_hud(
-                                epoch, &profile_name, emoji, bindings, icons, specials,
+                                epoch, &profile_name, emoji, bindings, icons, specials, focus,
                             );
                         }
                     }
@@ -1606,6 +1635,9 @@ pub(crate) fn preview_payload(
         // site/override icons still show, as they would on a real hold.
         app_icons: hud_icons_for(cfg, &name, &|_| None),
         specials: specials_for_hud(cfg.hud_show_specials, bands, specials::hud_specials_for(cfg)),
+        // A preview is raised from the dashboard, so the "focused app" would
+        // be Spaceadom itself — which is one of the SPACE fallbacks anyway.
+        focus: None,
         profile: name,
         preview: Some(crate::guide_hud::HudPreview {
             layout: mode.to_string(),

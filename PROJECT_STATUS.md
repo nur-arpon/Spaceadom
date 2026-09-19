@@ -42,6 +42,124 @@ can fail and the write still runs.
 ================================================================================
 -->
 
+## 2026-09-19 — Claude (Brief 4 implementing agent, Fable) — **1.0.119: the Space ring recentred (root cause: Windows Text size 109 % inside WebView2's ratio), the pill names the focused app, the mouse ring folds by tile count, key-editor + settings polish, the Advanced-mode theme flip — in the tree as 1.0.119 — gates green (754 unit tests / 0 failed / 6 ignored; clippy 0, tsc 0, vite clean); NOT BUILT AS AN INSTALLER, NOT INSTALLED, NO GIT — the lead does that**
+
+**§1 — the Space ring ~80 px right of centre, in one sentence.** Rust
+computed the ring's stage in Windows LOGICAL px (monitor scale 1.5 / 1.0)
+while the overlay page's CSS px are 9 % smaller, because the owner's Windows
+accessibility "Text size" is 109 % (`HKCU\Software\Microsoft\Accessibility`
+`TextScaleFactor = 109`, read on this machine) and WebView2 folds it into
+`devicePixelRatio` — so a stage handed over at (168,76) css was drawn 9 %
+further from the window origin and the pill's centre landed at 853 × 1.09 =
+930 logical on the panel, exactly where the owner measured it, with the
+whole cloud riding on the same rectangle. **Not a 1.0.116 regression.** The
+log carries the page's own screen reading in every `BLOOM HEADROOM CLAMPED`
+line, and it read `1566x906` for the 2560×1480 canvas on 1.0.113 at 02:29 on
+2026-09-18 (= 2560 / (1.5 × 1.09)), and `1762x918` for the 1920×1000 canvas on
+the external monitor (= 1920 / 1.09) — the ratio was there before Phase A;
+round 3 (1.0.110) is when `#st-hud` moved onto a Rust-placed stage, which is
+when a unit mismatch became an offset. The icon ring has compensated since
+round 6 (`rescaleForThisPage`); the Space ring never had its half. **Fix:**
+`toast.ts` sends `dpr: window.devicePixelRatio` with every `overlay_fit_hud`
+/ `overlay_fit_handover`; `commands.rs` computes the stage, its 94 % clamp
+and the returned rectangle in the PAGE's ratio (`stage_box(canvas, centre,
+page, w, h)`) and prints `page dpr X = Y × the monitor scale` plus the
+physical point the pill centre lands on, in the fit line. **Measured:**
+`middle_ring::stage_tests::the_stage_centre_is_the_monitor_centre_in_the_pages_own_px`
+reproduces the owner's numbers (the old maths puts the pill at 930.1 on the
+panel; the new maths lands the centre on the monitor centre on both of his
+monitors to 1e-6). Both monitors are centred by the same line; UNPROVEN on
+hardware until the lead holds Space on 1.0.119 and reads the new fit line.
+QUESTION: the owner says it appeared with 1.0.116 — does he have a centred
+1.0.115 screenshot? The log says the ratio predates it.
+
+**§7 — Advanced mode flips the theme, in one sentence.** `dark_mode` is a
+persisted snapshot written only when the theme PILL is clicked
+(`resolveTheme` at that instant), so with the theme on "auto" it goes stale
+the moment Windows flips light/dark, and every later `persistConfig()` — the
+Advanced switch included — had `save_config` re-broadcast the stale bool as
+`theme-changed`, which `toast.ts` applies to `body.nocturne` before
+`theme-name-changed` corrects it. **Fix at the source:**
+`commands::sync_dark_mode` derives `dark_mode` from the theme on EVERY save
+(`config::dark_mode_for`, the same rule the load path has used since
+PROBLEM 144) and logs when the page's value was wrong;
+`dark_mode_sync_tests` pin it. The dashboard itself never listened to
+`theme-changed` (only the overlay page does). **Observed symptom (owner,
+same day): the theme pill in the settings panel itself jumped — a "double
+jump" — on the Advanced switch.** That is consistent with the two events
+landing in sequence (stale `dark_mode` first, then the resolved name), and
+the save-time derivation removes the first of the two; whether the panel's
+pill re-renders on either event is NOT established here — if the double
+jump survives 1.0.119 with `save_config: dark_mode … ->` absent from the
+log, there is a second path in the dashboard and this entry is incomplete.
+
+**§2 — the centre pill names the focused app.** `engine/focus.rs`
+(`HudFocus`, `hud_focus_for`, pure, 5 tests): the hold-start path reads
+`hook::exclusions::foreground_info()` (exe path + stem + window class) once,
+and at show time resolves name + icon — the active profile's own binding for
+that exe (label, vendor stripped as the ring does) else a short-name table
+(`winword` → "Word", `msedge` → "Edge") else the capitalised stem; icon from
+the binding's override, then the picker cache by target / path / `name.exe`,
+never a shell call. SPACE for: the desktop and taskbar (explorer with a
+`Progman`/`WorkerW`/`Shell_TrayWnd` class), the lock screen and shell hosts,
+our own exe, an unreadable process, a preview. Names cut to 14 chars with an
+ellipsis (`truncate_name`). `GuideHudPayload.focus`; `toast.ts`
+`spacePillHtml` keeps the `.space` class (same box, same animation) and adds
+`.st-focus` contents only. **Measured on the dev harness (`preview.html?
+spacering`, DOM reads):** the pill is 230×60 with its centre at (115,30) in
+every variant — SPACE, "Brave" + icon, a 35-character name with the profile
+emoji, a name without an icon; the long name is capped at 128 px and
+ellipsized (scrollWidth 249), the emoji's right edge (38 px) clears the
+name's left edge (65 px), and every chip's `calc(50% + …)` is identical
+across variants, so the cloud does not move. A `guide_hud: centre pill names
+…` line prints the decision on every hold. Friendly names for apps that are
+neither bound nor in the table come out as the capitalised exe stem
+(owner: the Start-menu name is preferred but DEFERRED to the next build —
+no change now; it needs a channel to the picker thread).
+
+**§3 — the mouse ring folds by TILE COUNT, in one sentence.**
+`middle_ring::fits_as_arc(n, room)` = `layout_arcs(n, room, TILE).is_some()`
+(the fold's own capacity maths at full tile size, no shrinking) and
+`placement_for(n, room, spiral)` folds around the press point for EITHER
+scope when it is true and relocates as All always has (clamp + warp) when
+it is not; a spiral never folds. `fold_by_count_tests`: 10 at a corner
+folds (a quarter arc, offset 0, full tiles), 30 relocates, the threshold
+equals Σ `arc_capacity` over the rings `feasible_arc` opens (corner < edge
+< open = Σ `RING_CAPS`), Favourites at 1/5/6/8 is byte-identical to
+`choose_shape`. `show_middle_ring` logs `fold-by-count — N tile(s) under
+scope … FIT / do NOT fit`. **Owner's answer the same day: Favourites KEEPS
+its whole ladder, shrink included** — `placement_for(n, room, favourites,
+spiral)` returns `choose_shape` unconditionally for Favourites, so 13 in a
+corner still folds-with-shrink exactly as before this brief; the count
+rule only ADDS folding for All when its tiles fit at full size, and 13
+under All in that corner still relocates (`favourites_keeps_its_whole_
+ladder_including_the_shrink` pins both, at 1/5/6/8/13/15 across corner,
+edge and open space).
+
+**§4 / §5 / §6 in one line each.** Key editor: the kind pill's selected
+label is the same ink as the others on an accent-tint slider (was #fff on a
+transparent slider), "Send keys" → "Key combo" (tab + heading; internal id
+`keys`/`chord` unchanged), order App or link · Spaceadom special · Key combo
+(Controls / Run command after, Advanced only), the recorder hint is
+example-led about THIS key ("Want Space+I to take a screenshot? …") and
+shown once — `key_combo_hint_seen` on the config, stored like `tour_done`,
+persisted through a new `onConfigTouched` callback main.ts binds to
+`persistConfig` — then a "How does this work?" link. Settings: the one-liner
+under each pill follows the option (`setting-subs.ts` `SUB_LINES`, one per
+option incl. Ring layout's three, swapped in place by `paintSubLine`;
+`scripts/setting-subs.test.ts` asserts the map is complete against
+`controls.ts`'s tables, 3/3 pass). Advanced mode moved out of Appearance
+into its own "For power users" group immediately before Maintenance, with
+"Adds Run command and Controls to the key editor." under the row (same
+`toggleRow`/`wireToggle`/config plumbing; still `set-filterable`).
+
+**Pre-existing, not touched:** `node scripts/own-window-keys.test.ts` fails
+1 of 23 ("Escape, Enter, Tab, digits and the F-keys are not ours to take")
+— it predates Phase A making those keys bindable; the file was not changed
+here.
+
+**Files.** `src-tauri/src/commands.rs` (`overlay_fit_hud` + `overlay_fit_handover` take `dpr`, `sync_dark_mode` + tests), `src-tauri/src/middle_ring.rs` (`fits_as_arc`, `placement_for`, `stage_tests` + `fold_by_count_tests`), `src-tauri/src/guide_hud/mod_impl.rs` (`focus` field, `show_guide_hud`, the fold decision + log), `src-tauri/src/engine/mod.rs` (`mod focus`, hold-start `foreground_info`, the show path), `src-tauri/src/engine/focus.rs` (new), `src-tauri/src/hook/exclusions.rs` (`process_path_for_pid`, `foreground_info`), `src-tauri/src/config/schema.rs` (`key_combo_hint_seen`); `src/components/toast.ts` (`pageDpr`, `focus`, `spacePillHtml`, `showGuideHud` exported for the harness), `src/styles/overlay-earthy.css` (`.st-focus`), `src/components/key-detail-panel.ts`, `src/main.ts`, `src/styles.css`, `src/types.ts`, `src/components/setting-subs.ts` (new), `src/components/settings-panel.ts`, `src/components/controls.ts` (`power` icon), `src/preview.ts` (`?spacering`, sub-lines), `scripts/setting-subs.test.ts` (new); version 1.0.119 in package.json, tauri.conf.json, Cargo.toml, install-real.cmd; this entry, V14_FIXES_AND_CODE.md §BRIEF 4, WHAT-CHANGED.md.
+
 ## 2026-09-19 — Claude (Phase A step 3 implementing agent, Fable) — **PHASE A step 3: the prune, the rule, two fixes — in the tree as 1.0.118 — gates green (742 unit tests / 0 failed / 6 ignored, clippy 0, tsc 0, vite clean); NOT BUILT AS AN INSTALLER, NOT INSTALLED, NO GIT — the lead does that**
 
 **The verdict.** After an hour on 1.0.117 the owner's judgement was that the

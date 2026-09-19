@@ -742,6 +742,8 @@ const GROUP_ICONS: Record<string, string> = {
   // (version, install kind, links), not a preference.
   about:
     '<circle cx="7" cy="7" r="5.4"/><path d="M7 6.4v3.4" stroke-linecap="round"/><circle cx="7" cy="4.3" r=".9" fill="currentColor" stroke="none"/>',
+  // 1.0.119 (brief 4 §6) — "For power users": a bolt.
+  power: '<path d="M7.8 1.4 3.4 7.7h3.1l-.9 4.9 4.6-6.4H7z"/>',
 };
 
 /**

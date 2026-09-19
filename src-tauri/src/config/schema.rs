@@ -173,6 +173,13 @@ pub struct AppConfig {
     #[serde(default)]
     pub advanced_mode: bool,
 
+    /// 1.0.119 (brief 4 §4) — has the key editor's "Key combo" hint been
+    /// shown once? Same shape as `tour_done`: written `true` the first time
+    /// the Key combo page opens; afterwards the hint collapses to a "How
+    /// does this work?" link. Absent (every earlier config) = not yet seen.
+    #[serde(default)]
+    pub key_combo_hint_seen: bool,
+
     /// Whether Nocturne (dark) mode is enabled. Drives body.nocturne on both
     /// the dashboard and overlay windows. Defaults to false (Earthy/light).
     #[serde(default)]
@@ -727,6 +734,7 @@ impl Default for AppConfig {
             profiles: Vec::new(),
             special_keys: BindingMap::new(),
             advanced_mode: false,
+            key_combo_hint_seen: false,
             dark_mode: false,
             // FEATURE 2 (2026-09-05) — NEW installs default to "auto", not
             // "earthy". This is `AppConfig::default()`, used ONLY when there

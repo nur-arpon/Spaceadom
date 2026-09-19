@@ -310,6 +310,20 @@ function stageOrigin(): { x: number; y: number } {
   return _stage ? { x: _stage.x, y: _stage.y } : { x: 0, y: 0 };
 }
 
+/** 1.0.119 (brief 4 §1) — the ratio this page ACTUALLY runs at, sent with
+ *  every fit so Rust expresses the stage in THIS page's css px. It is not
+ *  always the monitor's scale: Windows' accessibility "Text size" (109 % on
+ *  the owner's machine) is folded into WebView2's devicePixelRatio, and a
+ *  stage handed over in Windows logical px then lands 9 % too far right and
+ *  down — the whole cloud, pill included, because `#st-hud` sits on that
+ *  rectangle. The icon ring has had the same correction since round 6
+ *  (`pageRescale`); this is the Space ring's half. `1` when the browser
+ *  cannot say (the harness), which is also "no correction". */
+function pageDpr(): number {
+  const d = window.devicePixelRatio;
+  return typeof d === "number" && isFinite(d) && d > 0 ? d : 1;
+}
+
 /** The stage's centre in window CSS px — the ring's centre. Falls back to
  *  the window's centre when there is no stage. */
 function stageCentre(): { x: number; y: number } {
@@ -817,7 +831,7 @@ export function showToast(message: string, options: ToastOptions = {}): void {
          nothing moves afterwards. */
       const ringH = _stage ? _stage.h : window.innerHeight;
       invoke<Rect | null>("overlay_fit_handover", {
-        width: _stage ? _stage.w : window.innerWidth, height: ringH,
+        width: _stage ? _stage.w : window.innerWidth, height: ringH, dpr: pageDpr(),
       }).then(() => {
         pinStage(ringH);                    // ring keeps its old box, so it stays put
         _stageMode = false;                 // normal anchor = the real slot
@@ -862,7 +876,7 @@ export function showToast(message: string, options: ToastOptions = {}): void {
       _slingStaged = true;
       const ringH2 = _stage ? _stage.h : window.innerHeight;
       invoke<Rect | null>("overlay_fit_handover", {
-        width: _stage ? _stage.w : window.innerWidth, height: ringH2,
+        width: _stage ? _stage.w : window.innerWidth, height: ringH2, dpr: pageDpr(),
       }).then(() => {
         pinStage(ringH2);
         const from3 = spaceBox();        // ring pinned, so SPACE has not moved
@@ -954,6 +968,13 @@ interface GuideHudPayload {
    *  `null`/absent is the NORMAL state and must draw the pill exactly as every
    *  build before this one did — see `paintSpacePill`. */
   profile_emoji?: string | null;
+  /** 1.0.119 (brief 4 §2) — the FOCUSED APP for the centre pill: a short
+   *  name (already cut to ~14 chars by Rust) and its icon as a `data:` URL.
+   *  `null`/absent keeps the word SPACE — the desktop, the lock screen, our
+   *  own windows, an unreadable process, a preview. The pill's 230×60 box is
+   *  fixed in CSS and the name is ellipsized inside it, so the cloud never
+   *  moves whatever the name (`spacePillHtml`). */
+  focus?: { name: string; icon?: string | null } | null;
   /** Present ONLY for a Settings preview (`preview_hud_layout`). A real
    *  Space-hold sends `null` and the ring reads the user's own saved settings,
    *  exactly as it always has. See `previewOverride`. */
@@ -2063,6 +2084,21 @@ function hudLayoutMode(): HudLayoutMode {
    animation is switched off by a `:root.reduced-motion` guard in the
    stylesheet, alongside the pill's own.
    =========================================================================== */
+/** 1.0.119 (brief 4 §2) — the centre pill's markup: the focused app's icon
+ *  and short name, or the wordmark when there is no app to name. The class
+ *  stays `.space` so every rule, measurement (`spaceBox`) and animation that
+ *  targets the pill is untouched; `.st-focus` only restyles the contents.
+ *  Only a `data:` icon is accepted — the overlay's CSP allows no host. */
+function spacePillHtml(focus: GuideHudPayload["focus"]): string {
+  const name = focus && typeof focus.name === "string" ? focus.name.trim() : "";
+  if (!name) return '<div class="space">SPACE</div>';
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+  const icon = typeof focus?.icon === "string" && focus.icon.startsWith("data:image/")
+    ? `<img class="st-focus-ico" src="${focus.icon}" alt="" draggable="false">`
+    : "";
+  return `<div class="space st-focus" title="${esc(name)}">${icon}<span class="st-focus-name">${esc(name)}</span></div>`;
+}
+
 function paintSpacePill(emoji: string | null | undefined): void {
   if (!_hudEl) return;
   const pill = _hudEl.querySelector<HTMLElement>(".space");
@@ -2124,7 +2160,7 @@ function buildHud(payload: GuideHudPayload, entranceDelay = 0): Promise<Rect | n
     '<div class="st-beam">' +
       '<div class="jet"></div><div class="lick"></div><div class="core"></div>' +
     '</div>' +
-    '<div class="space">SPACE</div>';
+    spacePillHtml(payload.focus);
   paintSpacePill(payload.profile_emoji);
   // Same handover mechanism as --hud-in/--hud-out: the nominal beam box is
   // owned HERE, in TS, and the stylesheet reads it. paintArmedBeam divides by
@@ -3445,7 +3481,7 @@ function buildHud(payload: GuideHudPayload, entranceDelay = 0): Promise<Rect | n
   // PROBLEM 112 — hand the promise back. The window MOVE is the one thing here
   // that cannot be animated, so callers must be able to wait for it and keep
   // content invisible until it has landed.
-  return invoke<Rect | null>("overlay_fit_hud", { width: w, height: h })
+  return invoke<Rect | null>("overlay_fit_hud", { width: w, height: h, dpr: pageDpr() })
     .then((r) => {
       // One rAF so the webview has actually re-laid-out at the NEW window
       // size before the chip boxes are read — the chips are placed with
@@ -4634,7 +4670,10 @@ function shockAt(at: FlightGeo): void {
   window.setTimeout(() => r.remove(), 480);
 }
 
-function showGuideHud(payload: GuideHudPayload): void {
+/** Exported for the dev harness only (`preview.ts` `?spacering`), so the
+ *  pill can be measured with and without a focused app. The overlay reaches
+ *  it through the `guide-hud-show` listener, as it always has. */
+export function showGuideHud(payload: GuideHudPayload): void {
   _slingHeld = false;
   /* PROBLEM 175 — a fresh hold is proof the previous one finished, so nothing
      from it may still be "busy". Without this, the latch described in
@@ -4796,7 +4835,7 @@ function hideGuideHud(actionPending = false): void {
 
     const ringH = _stage ? _stage.h : window.innerHeight;
     invoke<Rect | null>("overlay_fit_handover", {
-      width: _stage ? _stage.w : window.innerWidth, height: ringH,
+      width: _stage ? _stage.w : window.innerWidth, height: ringH, dpr: pageDpr(),
     }).then(() => {
       if (!_hudEl) return;
       pinStage(ringH);                  // pin: the ring must not move a pixel

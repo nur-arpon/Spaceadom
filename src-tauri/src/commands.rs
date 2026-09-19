@@ -244,6 +244,19 @@ pub fn save_config(
             }
         }
     }
+    // 1.0.119 (brief 4 §7) — `dark_mode` IS DERIVED HERE, ON EVERY SAVE,
+    // never trusted from the page. The dashboard writes it only when the
+    // theme PILL is clicked (`resolveTheme` at that instant), so with the
+    // theme on "auto" it goes stale the moment Windows flips light/dark —
+    // and every later save (the Advanced-mode switch was the one the owner
+    // caught) re-broadcast that stale snapshot as `theme-changed`, which the
+    // overlay applies to `body.nocturne` before `theme-name-changed`
+    // corrects it: a visible palette flip on a switch that has nothing to
+    // do with themes. The load path already re-derives it
+    // (`config/mod.rs`, PROBLEM 144); this is the same rule on the save
+    // path, so the bool the windows are told is the theme they are wearing.
+    let mut new_config = new_config;
+    sync_dark_mode(&mut new_config, crate::config::os_prefers_dark());
     // Update shared state
     *state.0.write().unwrap_or_else(|p| p.into_inner()) = new_config.clone();
     // Sync rollover_ms to hook atomic
@@ -308,6 +321,62 @@ pub fn save_config(
 }
 
 /// Return just the list of profile names and their binding counts.
+/// The pure half of the rule above: `dark_mode` := what the theme resolves
+/// to RIGHT NOW (`config::dark_mode_for`). Returns whether the stored value
+/// was wrong, and says so in the log when it was — that line is the proof
+/// the stale-snapshot path was hit.
+pub(crate) fn sync_dark_mode(cfg: &mut AppConfig, os_dark: Option<bool>) -> bool {
+    let derived = crate::config::dark_mode_for(&cfg.theme, os_dark);
+    if cfg.dark_mode == derived {
+        return false;
+    }
+    log::info!(
+        "save_config: dark_mode {} -> {} — derived from theme \"{}\" (OS dark {:?}) rather than \
+         the page's snapshot, so `theme-changed` cannot flip a window to a palette the theme \
+         does not resolve to (brief 4 §7)",
+        cfg.dark_mode, derived, cfg.theme, os_dark
+    );
+    cfg.dark_mode = derived;
+    true
+}
+
+#[cfg(test)]
+mod dark_mode_sync_tests {
+    use super::sync_dark_mode;
+    use crate::config::AppConfig;
+
+    fn cfg(theme: &str, dark: bool) -> AppConfig {
+        AppConfig { theme: theme.to_string(), dark_mode: dark, ..Default::default() }
+    }
+
+    /// The owner's case: theme "auto", Windows dark, and a `dark_mode: false`
+    /// written back when the pill was last clicked in daylight. Every save
+    /// used to emit `false`; now the save carries `true`.
+    #[test]
+    fn a_stale_snapshot_is_replaced_by_the_resolved_theme() {
+        let mut c = cfg("auto", false);
+        assert!(sync_dark_mode(&mut c, Some(true)));
+        assert!(c.dark_mode);
+        let mut c = cfg("auto", true);
+        assert!(sync_dark_mode(&mut c, Some(false)));
+        assert!(!c.dark_mode);
+    }
+
+    /// A fixed theme never depends on the OS, and an already-correct value
+    /// is left alone (no log line, no change).
+    #[test]
+    fn fixed_themes_and_correct_values_are_untouched() {
+        for (theme, dark) in [("earthy", false), ("warcry", true), ("starry", true)] {
+            let mut c = cfg(theme, dark);
+            assert!(!sync_dark_mode(&mut c, Some(!dark)), "{theme}");
+            assert_eq!(c.dark_mode, dark);
+        }
+        let mut c = cfg("starry", false);
+        assert!(sync_dark_mode(&mut c, None));
+        assert!(c.dark_mode, "a named dark theme with a wrong snapshot is corrected");
+    }
+}
+
 #[tauri::command]
 pub fn get_profiles(state: State<'_, ConfigState>) -> Vec<serde_json::Value> {
     state
@@ -1692,6 +1761,7 @@ pub fn overlay_fit_handover(
     app: tauri::AppHandle,
     width: f64,
     height: f64,
+    dpr: Option<f64>,
 ) -> Option<OverlayRect> {
     crate::crash_context::note_overlay_op(format!(
         "overlay_fit_handover stage {width}x{height} (canvas, bottom edge to the toast slot)"
@@ -1718,9 +1788,14 @@ pub fn overlay_fit_handover(
     // pixel) and set the BOTTOM edge to overlay_fit's own toast bottom
     // (`monitor bottom − 64` logical), never above the stage's bottom, never
     // the monitor's exact bottom.
+    // 1.0.119 (brief 4 §1) — `height` is the stage's height in the PAGE's
+    // css px, so it is scaled back to physical by the page's own ratio, not
+    // the monitor's (see `overlay_fit_hud`: the two differ whenever Windows'
+    // Text size is not 100 %).
+    let page = dpr.filter(|d| d.is_finite() && *d > 0.0).unwrap_or(sf);
     let mon_bottom = mon.position().y as f64 + mon.size().height as f64;
     let toast_bottom = mon_bottom - 64.0 * sf;
-    let stage_bottom = centre.1 as f64 + (height * sf) / 2.0;
+    let stage_bottom = centre.1 as f64 + (height * page) / 2.0;
     let bottom = toast_bottom
         .max(stage_bottom)
         .min(mon_bottom - crate::middle_ring::CANVAS_INSET * sf);
@@ -1739,16 +1814,21 @@ pub fn overlay_fit_handover(
     raise_overlay_topmost(&win);
     let _ = win.show();
     Some(OverlayRect {
-        x: cur_pos.x as f64 / sf,
-        y: cur_pos.y as f64 / sf,
-        w: cur_size.width as f64 / sf,
-        h: h as f64 / sf,
+        x: cur_pos.x as f64 / page,
+        y: cur_pos.y as f64 / page,
+        w: cur_size.width as f64 / page,
+        h: h as f64 / page,
         stage: None,
     })
 }
 
 #[tauri::command]
-pub fn overlay_fit_hud(app: tauri::AppHandle, width: f64, height: f64) -> Option<OverlayRect> {
+pub fn overlay_fit_hud(
+    app: tauri::AppHandle,
+    width: f64,
+    height: f64,
+    dpr: Option<f64>,
+) -> Option<OverlayRect> {
     crate::crash_context::note_overlay_op(format!("overlay_fit_hud {width}x{height} (radial HUD, centred)"));
     use tauri::Manager;
     if !crate::guide_hud::is_visible() {
@@ -1785,6 +1865,31 @@ pub fn overlay_fit_hud(app: tauri::AppHandle, width: f64, height: f64) -> Option
         let (canvas, sf, centre) = hud_canvas_for(&mon);
         let ms = mon.size().to_logical::<f64>(sf);
         let mp = mon.position().to_logical::<f64>(sf);
+        // 1.0.119 (brief 4 §1) — THE STAGE IS COMPUTED IN THE PAGE'S OWN CSS
+        // PX, NOT IN WINDOWS LOGICAL PX. The two are the same only when the
+        // page's `devicePixelRatio` equals the monitor's scale factor, and on
+        // the owner's machine they are NOT: Windows' accessibility "Text
+        // size" is 109 % (HKCU\Software\Microsoft\Accessibility
+        // TextScaleFactor = 109) and WebView2 folds that into the page's
+        // ratio, so the page runs at 1.5 × 1.09 = 1.635 on the panel and
+        // 1.09 on the external monitor. Every stage this function handed
+        // back in logical px was therefore drawn 9 % further from the
+        // window's origin — 853 css → 930 logical on the panel, the exact
+        // pill centre the owner measured (11:39, 2026-09-19) — and the whole
+        // cloud moved with it because `#st-hud` is placed at that rectangle.
+        // The icon ring has compensated for this since round 6
+        // (`rescaleForThisPage`); the Space ring's stage never did. So the
+        // page now sends its ratio and the stage, its clamp and the
+        // returned canvas rectangle are all expressed in that unit:
+        // `page_point` with the PAGE's ratio puts the stage centre on the
+        // monitor centre in physical px whatever Windows' text size is.
+        // `dpr` is optional so an older page (none shipped) still fits as
+        // before. `middle_ring::stage_tests::the_stage_centre_is_the_monitor_
+        // centre_in_the_pages_own_px` is the measurement.
+        let page = dpr.filter(|d| d.is_finite() && *d > 0.0).unwrap_or(sf);
+        let ratio = page / sf;
+        let mon_w_css = mon.size().width as f64 / page;
+        let mon_h_css = mon.size().height as f64 / page;
         // THE STAGE — the ring's own box, clamped to 94% of the monitor as it
         // always was (the page laid the ring out against that budget) — is
         // NOT the window any more. PROBLEM 267 round 3: the window is the
@@ -1794,14 +1899,14 @@ pub fn overlay_fit_hud(app: tauri::AppHandle, width: f64, height: f64) -> Option
         // exactly where the old window was, so every pill lands where it
         // did; only the window around it grew. The page places `#st-hud` at
         // the returned stage rectangle.
-        let w = width.clamp(320.0, ms.width * 0.94);
-        let h = height.clamp(120.0, ms.height * 0.94);
+        let w = width.clamp(320.0, mon_w_css * 0.94);
+        let h = height.clamp(120.0, mon_h_css * 0.94);
         let moved = overlay_fit_canvas(&win, canvas, sf, "space ring");
         let (sx, sy) =
-            crate::middle_ring::stage_box(canvas, (centre.0 as f64, centre.1 as f64), sf, w, h);
+            crate::middle_ring::stage_box(canvas, (centre.0 as f64, centre.1 as f64), page, w, h);
         *HUD_STAGE_CENTRE.lock().unwrap_or_else(|p| p.into_inner()) = Some(centre);
-        let x = canvas.x / sf;
-        let y = canvas.y / sf;
+        let x = canvas.x / page;
+        let y = canvas.y / page;
 
         // INSTRUMENTATION (2026-08-11). This function used to be completely
         // silent, and when the HUD stopped appearing there was no way to tell
@@ -1815,10 +1920,16 @@ pub fn overlay_fit_hud(app: tauri::AppHandle, width: f64, height: f64) -> Option
             "overlay_fit_hud: asked {width:.0}x{height:.0} → stage {w:.0}x{h:.0} @ \
              ({sx:.0},{sy:.0}) css inside the canvas {:.0}x{:.0} @ ({:.0},{:.0}) physical \
              ({}); monitor {:.0}x{:.0} at ({:.0},{:.0}) scale {sf}, stage centre \
-             ({},{}) physical; GOT size {:?} pos {:?}; visible {:?}",
+             ({},{}) physical; page dpr {page:.4} = {ratio:.3} × the monitor scale \
+             (stage-in-page-px-not-logical-px-spaceadom-119: 1.000 means css px = logical px; \
+             anything else is Windows' Text size or a lagging WebView2 ratio, and the stage \
+             is expressed in the page's unit either way, so its centre × dpr + canvas origin \
+             = the monitor centre); pill centre lands at ({:.0},{:.0}) physical; GOT size \
+             {:?} pos {:?}; visible {:?}",
             canvas.w, canvas.h, canvas.x, canvas.y,
             if moved { "window moved/resized" } else { "window already there" },
             ms.width, ms.height, mp.x, mp.y, centre.0, centre.1,
+            canvas.x + (sx + w / 2.0) * page, canvas.y + (sy + h / 2.0) * page,
             got_sz.map(|s| (s.width.round(), s.height.round())),
             got_ps.map(|p| (p.x.round(), p.y.round())),
             win.is_visible(),
@@ -1834,8 +1945,8 @@ pub fn overlay_fit_hud(app: tauri::AppHandle, width: f64, height: f64) -> Option
         return Some(OverlayRect {
             x,
             y,
-            w: canvas.w / sf,
-            h: canvas.h / sf,
+            w: canvas.w / page,
+            h: canvas.h / page,
             stage: Some(StageRect { x: sx, y: sy, w, h }),
         });
     }

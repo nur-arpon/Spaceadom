@@ -41,7 +41,15 @@ tidy. Their rows say what each one got wrong.
 
 ---
 
-## 2026-09-19 (latest) — 1.0.118 — the prune: reversible, or it does not ship
+## 2026-09-19 (latest) — 1.0.119 — the ring is centred again, the pill names the app, the mouse ring folds by count
+
+| Version | What changed |
+| --- | --- |
+| **1.0.119** | The Space ring has been sitting about 80 px right of centre since the stage work, on both screens, and I had put it down to 1.0.116. It was not the pills and it was not the new rows — it was my Windows "Text size", which is 109 %. WebView2 folds that into the page's pixel ratio, Rust was handing the ring's box over in plain Windows pixels, and the page drew it 9 % further right and down. The mouse ring had been correcting for exactly this since round 6; the Space ring never was. Now the page tells Rust its own ratio and the box comes back in the page's units — centred on both monitors, and the log prints the ratio so this can never be a mystery again. The centre pill shows the app I was in when I pressed Space — Brave, Word, Explorer — with its icon, instead of the word SPACE; the desktop, the lock screen and Spaceadom's own windows still say SPACE, and a long name gets cut with an ellipsis rather than stretching the pill. The mouse ring's All scope now folds into an edge or corner arc when its tiles fit at full size, the way Favourites always has; if they don't fit, it moves to the middle as All always did. Favourites is exactly as it was, shrinking included. In the key editor the selected kind is readable again (it was white on white), "Send keys" is "Key combo", the order is App or link · Spaceadom special · Key combo, and the recorder's lecture is shown once and then folds into a "How does this work?" link. Settings: the one-liners under the pills now follow the option you pick (Ring layout has them too), Advanced mode has its own "For power users" group just above Maintenance with a line saying what it adds, and flipping it no longer changes the theme — that was a stale dark-mode flag being re-broadcast on every save, and Rust now derives it from the theme itself. |
+
+---
+
+## 2026-09-19 — 1.0.118 — the prune: reversible, or it does not ship
 
 | Version | What changed |
 | --- | --- |

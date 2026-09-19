@@ -99,6 +99,8 @@ import { initProfileEditor } from "./components/profile-editor";
 // PROBLEM 259 — the own-window fallback, driven by ?ownwindow at the end of
 // this file. A leaf module, so importing it costs the harness nothing.
 import { initOwnWindowKeys } from "./own-window-keys";
+// 1.0.119 (brief 4 §5) — per-option subtitles, the same leaf the panel reads.
+import { subLineHtml } from "./components/setting-subs";
 
 const q = new URLSearchParams(location.search);
 
@@ -1020,7 +1022,7 @@ document.getElementById("settings-panel")!.innerHTML = `
               q.get("middlestyle") === "guide_hud" ? "guide_hud" : "icon_ring",
               "background:var(--st-accent);", "Middle button shows")}</span>
           </div>
-          <div class="set-sub">Sized by the golden ratio.</div>
+          ${subLineHtml("middlestyle", q.get("middlestyle") === "guide_hud" ? "guide_hud" : "icon_ring")}
           <div class="set-note" id="set-middlestyle-note" style="margin-top:6px;display:none;">Turn on \u201cMiddle button opens the ring\u201d to use this.</div>
         </div>
         <div class="set-item set-filterable">
@@ -1030,7 +1032,7 @@ document.getElementById("settings-panel")!.innerHTML = `
               q.get("ring") === "all" ? "all" : "my_eight",
               "background:var(--st-accent);", "Middle-button ring shows")}<button type="button" class="mscope-choose" id="set-eight-open" aria-expanded="${q.has("eight")}">Choose your favourites \u2192</button></span>
           </div>
-          <div class="set-sub">A Fibonacci cap, for density.</div>
+          ${subLineHtml("middlescope", q.get("ring") === "all" ? "all" : "my_eight")}
           <div class="set-note" id="set-middlescope-note" style="margin-top:6px;display:none;">Turn on \u201cMiddle button opens the ring\u201d to use this.</div>
           <div id="set-eight-picker">${q.has("eight") ? eightPickerHtml() : ""}</div>
         </div>
@@ -1045,7 +1047,7 @@ document.getElementById("settings-panel")!.innerHTML = `
               q.get("ring") === "spiral" ? "spiral" : "rings",
               "background:var(--st-accent);", "All layout")}</span>
           </div>
-          <div class="set-sub">Packed like a sunflower’s seeds.</div>
+          ${subLineHtml("alllayout", q.get("ring") === "spiral" ? "spiral" : "rings")}
           <div class="set-note" id="set-alllayout-note" style="margin-top:6px;display:none;">Only for “All” — Favourites arranges itself around the screen edge.</div>
         </div>
         <div class="set-item set-filterable">
@@ -1053,6 +1055,7 @@ document.getElementById("settings-panel")!.innerHTML = `
             <button type="button" class="set-row-label">Ring layout</button>
             ${segRowHtml("hudring", RING_OPTS, previewRing, "background:var(--st-accent);", "Ring layout")}
           </div>
+          ${subLineHtml("hudring", previewRing)}
         </div>
         ${switchRow("hudspecials", "Show special keys", true, 4)}
         ${switchRow("flight", "Guide-to-toast motion", false, 5)}
@@ -1664,6 +1667,63 @@ if (q.has("ownwindow")) {
 // tests. Icons are inline SVG data URLs standing in for real app icons, plus
 // one link with NO icon so the letter disc shows. `?name=App&acct=x` puts a
 // long two-line name on the hovered tile for the pill's auto-fit.
+if (q.has("spacering")) {
+  // 1.0.119 (brief 4 §2) — THE SPACE RING WITH A FOCUSED APP ON ITS PILL.
+  // `?spacering` shows the real `toast.ts` ring (its own stylesheet pulled in
+  // here, since preview.html loads the dashboard's) with a sample focused
+  // app on the centre pill; `&nofocus` shows the plain SPACE pill, `&focus=`
+  // any name (try a long one), `&noicon` a name without an icon. The Rust
+  // fits are stubs here, so the ring lays itself out against the window and
+  // nothing moves; that is enough to MEASURE the pill:
+  // `window.__spacePill()` returns its box and text, and the box must be the
+  // same 230×60 in every variant (the name may never resize the pill or move
+  // the cloud). DOM read, never a screenshot.
+  void (async () => {
+    // The overlay's stylesheet, as a link (Vite serves it; a CSS import has
+    // no type here). Wait for it so the first measurement is of styled boxes.
+    await new Promise<void>((done) => {
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = "/src/styles/overlay-earthy.css";
+      link.onload = () => done();
+      link.onerror = () => done();
+      document.head.appendChild(link);
+    });
+    const { showGuideHud } = await import("./components/toast");
+    const stage = document.createElement("div");
+    stage.style.cssText = "position:fixed;inset:0;z-index:200;background:var(--st-bg);";
+    document.body.appendChild(stage);
+    const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48' viewBox='0 0 48 48'>`
+      + `<rect x='4' y='4' width='40' height='40' rx='10' fill='hsl(20 70% 52%)'/>`
+      + `<text x='24' y='31' font-family='Outfit,sans-serif' font-size='20' font-weight='700' fill='#fff' text-anchor='middle'>B</text></svg>`;
+    const icon = `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+    const focus = q.has("nofocus")
+      ? null
+      : { name: q.get("focus") ?? "Brave", icon: q.has("noicon") ? null : icon };
+    showGuideHud({
+      profile: "Preview",
+      apps: [["B", "Browser"], ["M", "Mail"], ["C", "Chat"], ["N", "Notes"], ["T", "Terminal"], ["P", "Player"]],
+      app_icons: [],
+      specials: [["Esc", "Boss Key"], ["`", "PiP"], ["Tab", "Fullscreen PiP"], ["/", "Screenshot"]],
+      profile_emoji: q.get("emoji"),
+      focus,
+      preview: { layout: "compact", bands: "auto" },
+    });
+    (window as unknown as { __spacePill: () => unknown }).__spacePill = () => {
+      const el = document.querySelector<HTMLElement>("#st-hud .space");
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      const hud = document.getElementById("st-hud")!.getBoundingClientRect();
+      return {
+        w: Math.round(r.width * 100) / 100, h: Math.round(r.height * 100) / 100,
+        cx: r.left + r.width / 2 - hud.left, cy: r.top + r.height / 2 - hud.top,
+        hudW: hud.width, hudH: hud.height, text: el.textContent,
+        icon: !!el.querySelector(".st-focus-ico"),
+      };
+    };
+  })();
+}
+
 if (q.has("ring")) {
   // `?ring=spiral` — the 2026-09-15 phyllotaxis layout for the "All" scope,
   // with the SAME constants Rust uses (`middle_ring::spiral_slots`): golden
