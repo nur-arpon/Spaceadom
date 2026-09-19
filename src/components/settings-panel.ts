@@ -1054,6 +1054,17 @@ function render(): void {
     render();
   });
 
+  // 1.0.123 — "Show a toast while sliding". Rust reads `touchpad.slide_toast`
+  // through `touchpad::apply_config` → the reader's snapshot, so a save is
+  // all it takes; no event of its own.
+  wireToggle("tpslidetoast", async () => {
+    if (!appConfig?.touchpad) return;
+    appConfig.touchpad.slide_toast = !(appConfig.touchpad.slide_toast !== false);
+    if (appConfig.touchpad.slide_toast) sfx.toggleOn("tpslidetoast"); else sfx.toggleOff("tpslidetoast");
+    await persistConfig();
+    render();
+  });
+
   // TOUCHPAD T2 — the "Touchpad page" look pill (Matches the app / Chocolate).
   // In-place pill update, same as the middle-button pills (PROBLEM 157). The
   // page reads `page_look` on its next open, so persistConfig() is the wiring.
@@ -2509,6 +2520,8 @@ const DESC: Record<string, string> = {
     "Clears the whole dashboard away and leaves just the sky. Your shortcuts keep working exactly as they are — press Esc, the small arrow in the corner, or the settings gear, which stays on screen, to bring everything back.",
   tpthumb:
     "Shows the little touchpad under the keyboard on the home screen, so you can open the touchpad page in one click. Only appears when your PC has a Precision Touchpad. Turn it off and the keyboard sits centred on its own; you can still open the page from the row below.",
+  tpslidetoast:
+    "While your finger slides along an edge that changes the volume or brightness, one small pill at the bottom of the screen shows the level as it moves — \"Volume 62%\" — and fades out just after you lift off. Video scrub says so, and a shortcut edge shows the shortcut's name with how many steps you have sent. It is one pill that updates in place, never a pile of them. Turn it off and slides change the level with nothing on screen.",
   touchpadlook:
     "How the touchpad page is painted. Matches the app wears your current theme's colours; Chocolate is the page's own dark look, still tinted with your accent. The little touchpad under the keyboard always matches the app.",
   wpm:
@@ -2933,6 +2946,7 @@ function touchpadAppearanceHtml(): string {
   const t = appConfig?.touchpad;
   const look: TouchpadLookOpt = touchpadLookFor(t?.page_look);
   const showThumb = t?.show_thumbnail !== false;
+  const slideToast = t?.slide_toast !== false;
   const statusText =
     presence === "precision"
       ? "Precision touchpad detected"
@@ -2961,8 +2975,24 @@ function touchpadAppearanceHtml(): string {
     </div>`
       : "";
 
-  const lookRow = `
+  // 1.0.123 — "Show a toast while sliding", right after the thumbnail toggle
+  // and under the same Precision gate (no pad, no slide, no toast).
+  const slideToastToggle =
+    presence === "precision"
+      ? `
     <div class="set-item set-filterable" style="animation-delay:${60 + 7 * 45}ms">
+      <div class="set-row">
+        <button type="button" class="set-row-label" data-desc="tpslidetoast"
+                aria-expanded="false" aria-controls="desc-tpslidetoast">Show a toast while sliding</button>
+        ${toggleSwitchHtml("tpslidetoast", slideToast, undefined, "Show a toast while sliding", descId("tpslidetoast"))}
+      </div>
+      ${subLineHtml("tpslidetoast", slideToast ? "on" : "off")}
+      ${descBox("tpslidetoast")}
+    </div>`
+      : "";
+
+  const lookRow = `
+    <div class="set-item set-filterable" style="animation-delay:${60 + 8 * 45}ms">
       <div class="set-row set-row-stack">
         <button type="button" class="set-row-label" data-desc="touchpadlook"
                 aria-expanded="false" aria-controls="desc-touchpadlook">Touchpad page</button>
@@ -2975,14 +3005,14 @@ function touchpadAppearanceHtml(): string {
     </div>`;
 
   const openRow = `
-    <div class="set-item set-filterable" style="animation-delay:${60 + 8 * 45}ms">
+    <div class="set-item set-filterable" style="animation-delay:${60 + 9 * 45}ms">
       <button type="button" class="set-row" style="width:100%;cursor:pointer;" data-open-touchpad-page="1">
         <span class="set-row-label" style="cursor:pointer;flex:1 1 auto;text-align:left;">Open touchpad page</span>
         <svg width="7" height="12" viewBox="0 0 7 12" fill="none" aria-hidden="true"><path d="M1 1 L6 6 L1 11" style="stroke:var(--st-text-dim);" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
     </div>`;
 
-  return status + thumbToggle + lookRow + openRow;
+  return status + thumbToggle + slideToastToggle + lookRow + openRow;
 }
 
 function middleStyleRow(style: MiddleStyle, inert: boolean, i: number): string {

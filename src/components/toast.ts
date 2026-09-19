@@ -560,6 +560,10 @@ interface ToastEntry {
   leaveIn: number;
   dieIn: number;
   armedAt: number;
+  /** LIVE TOAST (1.0.123): a keyed pill that is updated in place and has no
+   *  clock until `endLiveToast` arms one. Sits out of the depth count so the
+   *  normal stack above it is laid out exactly as if it were not there. */
+  live?: boolean;
 }
 const _toasts: ToastEntry[] = [];
 
@@ -600,7 +604,11 @@ function relayout(): void {
   for (let i = 0; i < _toasts.length; i++) {
     const t = _toasts[i];
     if (t.phase !== "open") continue;
-    const depth = _toasts.slice(i + 1).filter((x) => x.phase === "open").length;
+    // A live pill is always full size and never counts as "newer" for the
+    // pills above it (1.0.123) — with no live pill present this line is the
+    // same computation as before.
+    if (t.live) { t.el.dataset.depth = "0"; continue; }
+    const depth = _toasts.slice(i + 1).filter((x) => x.phase === "open" && !x.live).length;
     t.el.dataset.depth = String(Math.min(depth, 2));
   }
   requestFit();
@@ -950,6 +958,116 @@ export function showToast(message: string, options: ToastOptions = {}): void {
   if (REDUCED()) open(); else window.setTimeout(open, OPEN_AT);
   armEntry(entry, LEAVE_AT, DIE_AT);
   relayout();
+}
+
+/* =======================================================================
+   LIVE TOAST — one keyed pill, updated IN PLACE (owner, 2026-09-19, 1.0.123)
+   =======================================================================
+   A touchpad edge slide reports its value up to 8× a second. Pushing each
+   report through `showToast` would stack eight "Volume 62%" pills; instead
+   Rust sends `toast-live` {key, text} and this side keeps ONE pill per key:
+   the first call builds it (same markup, same entrance, same slot, no life
+   clock), every later call with the same key finds it and swaps the text
+   node — nothing else restarts, no fit, no beep — and `toast-live-end`
+   {key} arms the normal leave/retire clock so it lingers LIVE_LINGER_MS and
+   plays the ordinary exit. `retire` is the same terminal path as every
+   other toast, so `overlay_toasts_done` still fires when the stack empties.
+   A live pill and a normal pill coexist: `order:1` keeps the live one in the
+   bottom slot and `relayout` leaves it out of the depth count, so the normal
+   stack above it behaves as if it were alone. `showToast` is untouched. */
+const LIVE_LINGER_MS = 600;
+const _live = new Map<string, ToastEntry>();
+
+/** The leading-glyph rule `showToast` applies, as a function, for the live
+ *  path only (`showToast`'s own inline copy is left exactly as it was). */
+function splitGlyph(message: string): { letter: string; text: string } {
+  const first = Array.from(message)[0] ?? "•";
+  const isGlyph = !/[a-z0-9]/i.test(first);
+  return {
+    letter: isGlyph ? first : first.toUpperCase(),
+    text: isGlyph ? message.slice(first.length).trim() : message,
+  };
+}
+
+/** Show — or, when a pill for `key` is already up, UPDATE IN PLACE — the live
+ *  toast. Idempotent per key: a second call never adds a second element. */
+export function showLiveToast(key: string, message: string, options: ToastOptions = {}): void {
+  const { letter, text } = splitGlyph(message);
+  const cur = _live.get(key);
+  if (cur && cur.phase !== "leave" && _toasts.includes(cur)) {
+    const m = cur.el.querySelector(".msg") as HTMLSpanElement | null;
+    if (m && m.textContent !== text) m.textContent = text;
+    const ico = cur.el.querySelector(".ico") as HTMLDivElement | null;
+    if (ico && ico.textContent !== letter) ico.textContent = letter;
+    return;
+  }
+  const { accent = "#c67139" } = options;
+  const layer = toastLayer();
+  if (!layer) return;
+  if (_hudActive || _extHud) setToastLayerHidden(true);
+  const glow = document.getElementById("st-toastglow");
+  if (glow && !_extHud) showToastGlow(glow);
+
+  const el = document.createElement("div");
+  el.className = "st-toast";
+  el.setAttribute("role", "status");
+  el.dataset.liveKey = key;
+  el.style.order = "1";
+  // Same markup as a normal pill, minus the drain: a live pill has no
+  // lifetime to show, so its ring stays full until `endLiveToast`.
+  el.innerHTML =
+    `<div class="ico" style="background:${accent}"></div>` +
+    `<span class="msg"></span>` +
+    `<span class="dot" style="background:${accent}"></span>` +
+    `<svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">` +
+    `<circle cx="10" cy="10" r="8" fill="none" stroke="var(--st-track)" stroke-width="2"/>` +
+    `<circle cx="10" cy="10" r="8" fill="none" stroke="${accent}" stroke-width="2" ` +
+    `stroke-linecap="round" stroke-dasharray="50.27" transform="rotate(-90 10 10)"/></svg>`;
+  // textContent, never innerHTML — the text is built from live values.
+  (el.querySelector(".ico") as HTMLDivElement).textContent = letter;
+  (el.querySelector(".msg") as HTMLSpanElement).textContent = text;
+  layer.appendChild(el);
+
+  const entry: ToastEntry = {
+    el, phase: "dot", duration: 0, h: [], leaveIn: 0, dieIn: 0, armedAt: 0, live: true,
+  };
+  _toasts.push(entry);
+  _live.set(key, entry);
+  beep(520);
+
+  // PROBLEM 113's rule, verbatim: a stale handover flag would suppress the
+  // fit, and a suppressed fit is a hidden window.
+  if (!_hudActive && !_hudBusy && _stageMode) {
+    _stageMode = false;
+    setStageAnchor(false);
+    _slingStaged = false;
+    anchorGlow("toast");
+  }
+
+  const open = () => {
+    if (!_toasts.includes(entry) || entry.phase === "leave") return;
+    entry.phase = "open"; el.classList.add("open"); beep(640); relayout();
+  };
+  if (REDUCED()) open(); else entry.h.push(window.setTimeout(open, OPEN_AT));
+  relayout();
+}
+
+/** The pill for `key` lingers LIVE_LINGER_MS, then leaves the way every toast
+ *  leaves. A key with no pill is a no-op. */
+export function endLiveToast(key: string): void {
+  const cur = _live.get(key);
+  _live.delete(key);
+  if (!cur || !_toasts.includes(cur)) return;
+  const wasArmed = cur.h.length > 0 && cur.phase === "dot";
+  // Keep a pending dot→open timer: armEntry clears every timer on the entry,
+  // and a pill that ends before OPEN_AT must still open before it leaves.
+  const leaveIn = LIVE_LINGER_MS + (wasArmed ? OPEN_AT : 0);
+  armEntry(cur, leaveIn, leaveIn + LEAVE_MS);
+  if (wasArmed) {
+    cur.h.push(window.setTimeout(() => {
+      if (cur.phase === "dot") { cur.phase = "open"; cur.el.classList.add("open"); relayout(); }
+    }, OPEN_AT));
+  }
 }
 
 /* =======================================================================
@@ -5170,6 +5288,15 @@ export function applyFlight(on: boolean): void {
 export async function initToastListener(): Promise<void> {
   await listen<string>("toast-notification", (e) => {
     if (typeof e.payload === "string") showToast(e.payload);
+  });
+  // LIVE TOAST (1.0.123) — keyed, updated in place; same global-emit rule.
+  await listen<{ key?: string; text?: string } | null>("toast-live", (e) => {
+    const p = e.payload;
+    if (p && typeof p.key === "string" && typeof p.text === "string") showLiveToast(p.key, p.text);
+  });
+  await listen<{ key?: string } | null>("toast-live-end", (e) => {
+    const p = e.payload;
+    if (p && typeof p.key === "string") endLiveToast(p.key);
   });
   await listen<GuideHudPayload>("guide-hud-show", (e) => {
     if (e.payload) showGuideHud(e.payload);

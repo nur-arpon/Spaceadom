@@ -41,7 +41,15 @@ tidy. Their rows say what each one got wrong.
 
 ---
 
-## 2026-09-19 (latest) — 1.0.122 — every edge, every action, any shortcut
+## 2026-09-19 (latest) — 1.0.123 — the five afternoon fixes, and a pill that counts while you slide
+
+| Version | What changed |
+| --- | --- |
+| **1.0.123** | Five fixes from the afternoon's testing, then one new thing. **Brightness works again** — the app was asking Windows for the screen's brightness through the wrong door (the wrong WMI class); it now asks through the right one. **Your strips are wider** — a config saved by an earlier build still had the old 7 % strip width, so those slides did nothing; the app now brings that value up to the 12 % the probe proved, once, and leaves any width you set yourself alone. **The demo no longer covers the left strip** — on the touchpad page the little demo animation sat on top of the left band, so you could not see it light up. **The pad sits centred under the Space key** on the home screen instead of drifting off to one side. **The idle pad is dimmed** so it reads as a picture until a strip goes live. And the new thing: **a pill that counts while you slide.** Slide a finger along an edge that changes the volume or brightness and one small pill appears at the bottom of the screen — "🔊 Volume 62%" — and the number moves with your finger; lift off and it fades a moment later. It is ONE pill that updates in place, never a pile of them, and if a shortcut fires while you slide, that toast stacks above it as usual. Video scrub says "Scrubbing", and a shortcut edge shows the shortcut's name with how many steps you have sent. New switch in Settings, under the touchpad rows: **Show a toast while sliding**, on by default. **Still untested with a real finger** — please slide once on each edge, watch for one pill (not several), and send me the log. |
+
+---
+
+## 2026-09-19 — 1.0.122 — every edge, every action, any shortcut
 
 | Version | What changed |
 | --- | --- |

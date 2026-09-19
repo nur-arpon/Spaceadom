@@ -452,6 +452,8 @@ export interface Touchpad {
   page_look: TouchpadLook;
   demo_seen: boolean;
   show_thumbnail: boolean;
+  /** 1.0.123 — "Show a toast while sliding"; absent reads as true in Rust. */
+  slide_toast: boolean;
 }
 
 /** `touchpad-caps` event payload. */

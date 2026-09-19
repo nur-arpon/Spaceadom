@@ -1828,6 +1828,36 @@ pub fn run() {
     }
 }
 
+/// `toast-live` payload — a KEYED toast the page updates IN PLACE (1.0.123).
+#[derive(Clone, serde::Serialize)]
+struct LiveToastPayload<'a> {
+    key: &'a str,
+    text: &'a str,
+}
+
+/// `toast-live-end` payload — the key whose pill should now fade.
+#[derive(Clone, serde::Serialize)]
+struct LiveToastEndPayload<'a> {
+    key: &'a str,
+}
+
+/// LIVE TOAST (owner, 2026-09-19, 1.0.123): one pill per `key`, updated in
+/// place. The page (`toast.ts::showLiveToast`) reuses the existing element
+/// when the key matches — it swaps the text node and restarts nothing — so a
+/// touchpad slide that reports 8× a second shows ONE "🔊 Volume 62%" pill,
+/// never a stack of eight. The CALLER rate-limits (`touchpad::LiveToastLimiter`,
+/// ≤ 8 Hz); this function only carries the text. Same GLOBAL emit as
+/// `show_toast`, and for the same reason. `show_toast` itself is untouched.
+pub fn show_live_toast(app_handle: &tauri::AppHandle, key: &str, text: &str) {
+    let _ = app_handle.emit("toast-live", LiveToastPayload { key, text });
+}
+
+/// The other half: the pill for `key` lingers ~600 ms and then plays the
+/// normal toast exit (`toast.ts::endLiveToast`). A key with no pill is a no-op.
+pub fn end_live_toast(app_handle: &tauri::AppHandle, key: &str) {
+    let _ = app_handle.emit("toast-live-end", LiveToastEndPayload { key });
+}
+
 pub fn show_toast(app_handle: &tauri::AppHandle, msg: &str) {
     // Content only. The overlay PAGE owns toast lifecycle now: it renders the
     // stack, measures it, and calls `overlay_fit` to size/position/show the

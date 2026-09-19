@@ -42,9 +42,21 @@ const PILLS: ReadonlyArray<readonly [string, string]> = [
   ["touchpadlook", "TOUCHPAD_LOOK_OPTS"],
 ];
 
+/** 1.0.123 — TOGGLES that carry a sub line have exactly the options "on" and
+ *  "off". Listed here, not parsed: a switch has no option table. */
+const TOGGLES: ReadonlyArray<string> = ["tpslidetoast"];
+const TOGGLE_OPTS = ["on", "off"] as const;
+
+/** Every control with a map is either a pill or a listed toggle — a map for
+ *  a control nothing renders would be an orphan. */
+const ALL_CONTROLS: ReadonlyArray<readonly [string, () => string[]]> = [
+  ...PILLS.map(([control, table]) => [control, () => optionsOf(table)] as const),
+  ...TOGGLES.map((control) => [control, () => [...TOGGLE_OPTS]] as const),
+];
+
 test("every option of every pill has its own one-line subtitle", () => {
-  for (const [control, table] of PILLS) {
-    const opts = optionsOf(table);
+  for (const [control, opts_] of ALL_CONTROLS) {
+    const opts = opts_();
     assert.ok(SUB_LINES[control], `${control} has a map`);
     for (const value of opts) {
       const line = subLineFor(control, value);
@@ -61,9 +73,22 @@ test("every option of every pill has its own one-line subtitle", () => {
 });
 
 test("the lines differ per option, so the text visibly follows the choice", () => {
-  for (const [control, table] of PILLS) {
-    const lines = optionsOf(table).map((v) => subLineFor(control, v));
+  for (const [control, opts_] of ALL_CONTROLS) {
+    const lines = opts_().map((v) => subLineFor(control, v));
     assert.equal(new Set(lines).size, lines.length, `${control}: no two options share a line`);
+  }
+});
+
+test("no map is an orphan: every SUB_LINES key is a pill or a listed toggle", () => {
+  const known = new Set(ALL_CONTROLS.map(([c]) => c));
+  for (const key of Object.keys(SUB_LINES)) {
+    assert.ok(known.has(key), `${key} is rendered by settings-panel.ts (add it to PILLS or TOGGLES)`);
+  }
+  // And the toggle really is wired: the panel renders its line and its switch.
+  const panel = readFileSync(join(here, "..", "src", "components", "settings-panel.ts"), "utf8");
+  for (const control of TOGGLES) {
+    assert.ok(panel.includes(`subLineHtml("${control}"`), `${control}'s sub line is rendered`);
+    assert.ok(panel.includes(`wireToggle("${control}"`), `${control}'s switch is wired`);
   }
 });
 

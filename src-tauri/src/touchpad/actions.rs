@@ -211,7 +211,15 @@ unsafe fn get_u8(obj: &IWbemClassObject, name: &str) -> Option<u8> {
     // The class declares CurrentBrightness as uint8; VARIANT carries it as an
     // integer, so route through u32 (the widest integer TryFrom windows-core
     // gives a VARIANT) and narrow.
-    u32::try_from(&v).ok().map(|n| n.min(255) as u8)
+    // VariantToUInt32 coerces VT_UI1 (the class's uint8) as well as VT_UI4.
+    if let Ok(n) = u32::try_from(&v) {
+        return Some(n.min(255) as u8);
+    }
+    let r = i32::try_from(&v).ok().map(|n| n.clamp(0, 255) as u8);
+    if r.is_none() {
+        log::warn!("touchpad: brightness — property {name} is not an integer VARIANT");
+    }
+    r
 }
 
 /// Read a BSTR-valued property (used for `__PATH`).
@@ -226,7 +234,10 @@ unsafe fn get_bstr(obj: &IWbemClassObject, name: &str) -> Option<BSTR> {
 /// machine has no `WmiMonitorBrightness` instance (a desktop, an external-only
 /// setup).
 pub fn get_brightness() -> Option<u8> {
-    let services = wmi_services()?;
+    let Some(services) = wmi_services() else {
+        log::warn!("touchpad: brightness — could not connect to root/wmi (CoInitialize on this thread?)");
+        return None;
+    };
     // SAFETY: read-only WMI query.
     unsafe {
         let inst = first_instance(&services, "WmiMonitorBrightness")?;
@@ -243,11 +254,31 @@ pub fn set_brightness_abs(pct: u8) -> Option<u8> {
     // SAFETY: the WMI ExecMethod sequence — get the methods instance, read its
     // __PATH, build the in-params from the class's in-signature, ExecMethod.
     unsafe {
-        let methods = first_instance(&services, "WmiMonitorBrightnessMethods")?;
-        let path = get_bstr(&methods, "__PATH")?;
+        let Some(methods) = first_instance(&services, "WmiMonitorBrightnessMethods") else {
+            log::warn!("touchpad: brightness — no WmiMonitorBrightnessMethods instance (no internal panel?)");
+            return None;
+        };
+        let Some(path) = get_bstr(&methods, "__PATH") else {
+            log::warn!("touchpad: brightness — the methods instance has no __PATH");
+            return None;
+        };
 
-        // The class object (not the instance) owns the method signatures.
-        let class = first_instance(&services, "WmiMonitorBrightnessMethods")?;
+        // The CLASS object owns the method signatures — an instance from
+        // ExecQuery does not, and GetMethod on it fails (WBEM_E_INVALID_OPERATION),
+        // which is why 1.0.120–122 never changed brightness while PowerShell's
+        // WMI on the same laptop did (owner, 2026-09-19 18:20).
+        let mut class: Option<IWbemClassObject> = None;
+        if let Err(e) = services.GetObject(
+            &BSTR::from("WmiMonitorBrightnessMethods"),
+            WBEM_GENERIC_FLAG_TYPE(0),
+            None,
+            Some(&mut class),
+            None,
+        ) {
+            log::warn!("touchpad: brightness — GetObject(class) failed: {e}");
+            return None;
+        }
+        let class = class?;
         let mut in_sig: Option<IWbemClassObject> = None;
         class
             .GetMethod(
@@ -258,9 +289,13 @@ pub fn set_brightness_abs(pct: u8) -> Option<u8> {
                 &mut in_sig,
                 &mut None,
             )
+            .map_err(|e| log::warn!("touchpad: brightness — GetMethod failed: {e}"))
             .ok()?;
         let in_sig = in_sig?;
-        let in_params = in_sig.SpawnInstance(0).ok()?;
+        let in_params = in_sig
+            .SpawnInstance(0)
+            .map_err(|e| log::warn!("touchpad: brightness — SpawnInstance failed: {e}"))
+            .ok()?;
 
         let timeout: VARIANT = 0u32.into();
         in_params
@@ -293,7 +328,9 @@ pub fn set_brightness_abs(pct: u8) -> Option<u8> {
                 None,
                 None,
             )
+            .map_err(|e| log::warn!("touchpad: brightness — ExecMethod(WmiSetBrightness) failed: {e}"))
             .ok()?;
+        log::info!("touchpad: brightness set to {pct}% via WMI COM");
         Some(pct)
     }
 }

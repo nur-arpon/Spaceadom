@@ -86,7 +86,7 @@ const TOGGLE_CHAR: Record<string, string> = {
   engine: "thr", fun: "fun", sound: "rng",
   startup: "orb", motion: "wrp", hideboard: "orb",
   flight: "wrp", hudpointer: "rng", hudspecials: "orb", sendlogs: "rng",
-  middlering: "rng",
+  middlering: "rng", tpslidetoast: "rng",
 };
 
 /**

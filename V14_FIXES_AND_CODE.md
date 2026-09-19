@@ -36688,6 +36688,111 @@ the probe's thresholds (12 %), not a redesigned one (7 % × aspect = 5 mm).
 
 ---
 
+### 1.0.123 addendum — the LIVE slide toast: one pill, updated in place, and its switch
+
+**The ask (owner, 2026-09-19).** While an edge slide changes volume or
+brightness, show ONE toast that updates IN PLACE — "🔊 Volume 62%" /
+"☀ Brightness 40%", "⏩ Scrubbing" for scrub, the chord name with the step
+count for a chords band — appearing on Enter (with the first value),
+updating at ≤ 8 Hz while Live, fading ~600 ms after Exit. It must NOT push
+a new toast per tick onto the stack; a live toast and a normal toast must
+coexist, the live one staying where it is; every existing toast behaviour
+stays byte-identical.
+
+**Why a keyed toast and not a faster `show_toast`.** `showToast` is a
+stack: every call is a new element with its own entrance, life clock,
+window fit and beep, and the stack rule evicts at four. Eight of those a
+second is a waterfall of "Volume 61% / 62% / 63%" pills, each fitting the
+window. The value is a single changing number; the page needs one element
+whose text node changes. So the event carries a KEY, the page keeps a
+`Map<key, ToastEntry>`, and the second call for a key is a `textContent`
+assignment and nothing else.
+
+**Rust — `lib.rs`.** `show_live_toast(app, key, text)` emits `toast-live
+{key, text}`; `end_live_toast(app, key)` emits `toast-live-end {key}`. Both
+GLOBAL `emit`, the only arrangement that has ever delivered to the overlay
+page (CLAUDE.md window rules). `show_toast` is unchanged.
+
+**Rust — `touchpad/mod.rs`.** Two pure pieces and one wiring:
+
+- `LiveToastLimiter { last_ms }` — `reset()` on Enter; `allow(now_ms)`
+  passes the first tick after a reset and then one tick per
+  `LIVE_TOAST_MIN_MS` = 125 ms (≤ 8 Hz). `saturating_sub` makes a clock
+  that went backwards read as "too soon", never as a burst. Milliseconds
+  in, bool out — the test drives it with integers.
+- `live_toast_text(action, value_pct, chord, steps) -> Option<String>` —
+  Volume/Brightness with the percent, Scrub the fixed verb, Chords the
+  forward chord's name (or "(no keys)") with the SIGNED step count
+  ("· 3 steps", "· −2 steps", "· 1 step"; the name alone at 0), `None` for
+  a `None` band so a slide that changes nothing shows nothing.
+- The reader keeps `toast_limit`, `toast_sent` (last text SENT) and
+  `toast_pending` (last text COMPUTED). Enter: reset, show the first text
+  at once. Move: compute; send only if it differs from `toast_sent` AND
+  the limiter allows — a resting finger sends nothing. Exit: if the last
+  computed text was throttled, send it (the pill's final value is the true
+  one), then `end_live_toast`. `toast_sent.take().is_some()` is the
+  witness that a pill exists; a `None` band never shows and never ends.
+  All of it under `if cfg.slide_toast`, where `cfg` is the `snapshot()`
+  the callback already takes — the brief's "no config reads on the
+  raw-input callback" holds by construction (pinned: the callback body
+  contains no `config().`).
+
+**Page — `toast.ts`.** `showLiveToast(key, text)`: if `_live.get(key)` is
+an entry still in `_toasts` and not leaving, swap `.msg` (and `.ico`, for a
+glyph change) and RETURN — no `relayout`, no `requestFit`, no `beep`. The
+window was fitted with 420 px of slack, so "62%" → "100%" needs no refit.
+Otherwise build a pill with the normal markup minus the drain animation
+(no lifetime to show), `order:1` (the bottom slot, so a normal toast
+arriving later stacks ABOVE it and the live one does not move), `live:
+true`, no clock; same dot→open entrance at `OPEN_AT`, same PROBLEM 113
+stale-stage clearing so a suppressed fit cannot hide the window.
+`endLiveToast(key)`: drop the key, `armEntry(cur, 600, 600 + LEAVE_MS)` —
+the ordinary leave → `retire` path, so `overlay_toasts_done` remains the
+ONE terminal hide and a live pill ending with the stack empty takes the
+window down exactly as a normal toast does. If Exit lands before the pill
+opened, the linger is extended by `OPEN_AT` and a fresh open timer is
+pushed, because `armEntry` clears every timer on the entry.
+
+`relayout` gained two lines: a live pill's depth is always 0 and it does
+not count as "newer" for the pills above it. With no live pill present the
+computation is what it was. `showToast` itself is untouched — including
+its eviction at four, which can evict a live pill as the oldest; the next
+update then rebuilds it (the `_toasts.includes(cur)` check), which is the
+right answer for a stack that full.
+
+**Settings.** "Show a toast while sliding" (`tpslidetoast`) sits right
+after "Show the touchpad under the keyboard", under the same Precision
+gate. It carries a `setting-subs` line per state — the map's first TOGGLE
+entry, keyed "on"/"off" — a DESC box, and a `TOGGLE_CHAR` entry so the
+Fun-mode fallback warning does not fire. Config `touchpad.slide_toast:
+bool`, `#[serde(default = "default_true")]`, mirrored in `types.ts` and
+`touchpad-page.ts::defaultTouchpad`. The save path is the existing one:
+`persistConfig` → `save_config` → `touchpad::apply_config` → `CONFIG_GEN`
+→ the reader's next idle snapshot.
+
+**Tests.** `touchpad::tests::the_live_toast_limiter_passes_the_first_tick_then_at_most_8_hz`
+(a second of 100 Hz ticks lets through 8–9; reset makes the next tick
+immediate; a backwards clock is refused), `the_live_toast_text_per_action`,
+`config::schema::touchpad_tests::slide_toast_defaults_on_when_the_key_is_absent`
+(absent → ON; explicit false survives `normalised()`),
+`scripts/setting-subs.test.ts` (TOGGLES table + the orphan check that every
+`SUB_LINES` key is rendered and wired by `settings-panel.ts`), and the new
+`scripts/live-toast.test.ts` — `toast.ts` has no DOM harness (Tauri API and
+`AudioContext` at module scope), so it pins the source: the reuse path is
+checked BEFORE `createElement` and returns without `appendChild`, an update
+touches no `relayout`/`requestFit`/`beep`, `endLiveToast` arms the normal
+clock, `showToast` never mentions the live map, both listeners and both
+emits exist, and the limiter gates Move.
+
+**UNPROVEN on hardware:** the pill on a real slide and the in-place
+update — the agent cannot inject touch reports, and the overlay cannot be
+validated in a browser harness (its failure mode lives in the compositor).
+First thing to check on the 1.0.123 build: slide the right edge, watch ONE
+pill count, lift, watch it fade ~600 ms later; then fire a shortcut
+mid-slide and confirm the normal toast stacks above it.
+
+---
+
 ## PHASE A — STEP 4: THE SPACE RING TRIM AND THE SIMPLE EDITOR (2026-09-19; in the 1.0.120 tree beside the touchpad work, no version bump — gates green: 781 unit tests / 0 failed / 6 ignored, clippy 0, tsc 0, vite clean; **NOT BUILT AS AN INSTALLER, NOT INSTALLED, NO GIT** — the lead does that)
 
 **Symptom / decision.** Owner, on the 1.0.119/120 ring: *"we added too many functions, the Space HUD is messed up and it has become hard to do its main aim, launching apps."* Two decisions. (1) The Space ring shows ONLY app/link pills and the Spaceadom specials in their compact inner band, exactly as before Phase A; chord, uri, command, brightness and toggle bindings are not drawn on it at all — they still fire. (2) The key editor is simple by default: with Advanced mode off, clicking a key opens the App or link picker directly with no kind row; Advanced mode on shows all five kinds. The mouse ring is a different surface and was left alone. Touchpad files untouched.

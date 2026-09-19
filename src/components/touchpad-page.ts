@@ -100,6 +100,7 @@ export function defaultTouchpad(): Touchpad {
     page_look: "chocolate",
     demo_seen: false,
     show_thumbnail: true,
+    slide_toast: true,
   };
 }
 
@@ -279,7 +280,7 @@ function bandHtml(edge: TouchEdge): string {
 function demoHtml(): string {
   // One finger lands at the edge and slides; the band lights, a value ticks.
   return `
-    <div class="sp-band sp-band--left" style="--band-w:54px; --band-len:70%;" data-demo="1">
+    <div class="sp-band sp-band--left" style="--band-w:54px; --band-len:70%; pointer-events:none;" data-demo="1">
       <span class="sp-sim">
         <span class="sim-glow"></span>
         <span class="sim-one"><i></i></span>
@@ -308,7 +309,10 @@ function pageHtml(): string {
 
   // The stage: the pad plus (first run) the demo + invitation card, or
   // (live) the readout card + "pointer holding still" pill.
-  const demo = showDemo ? demoHtml() : "";
+  // The demo is a picture, never a control: it must not sit on top of the
+  // real left band (it did, and the left band could not be resized — owner,
+  // 2026-09-19), and it plays only while nothing is on yet.
+  const demo = showDemo && firstRun ? demoHtml() : "";
   const invite = firstRun
     ? `
       <div class="sp-card sp-card--empty">
@@ -905,6 +909,11 @@ function enableEdge(edge: TouchEdge, on: boolean): void {
   const t = tp();
   t[edge].enabled = on;
   selected = edge;
+  if (on && !t.demo_seen) {
+    // The first edge switched on ends the first-run demo for good.
+    t.demo_seen = true;
+    showDemo = false;
+  }
   // Turning a band ON may create a new vertical+horizontal overlap whose
   // corner is unresolved and whose rule is "ask" → ask now (screen 5a).
   if (on && t.corner_rule === "ask") {

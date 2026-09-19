@@ -288,6 +288,74 @@ fn chord_label(a: &BandAction) -> Option<String> {
     }
 }
 
+// --- the live slide toast (owner, 2026-09-19, 1.0.123) -----------------------
+
+/// The one key every edge's live toast shares: only one band can be live at a
+/// time, so one pill is the whole story.
+const LIVE_TOAST_KEY: &str = "touchpad-slide";
+
+/// Minimum spacing between two in-place updates of the live toast: 125 ms is
+/// ≤ 8 Hz, the owner's ceiling. Enter always shows at once; Exit always
+/// flushes the last value. Move updates are what this throttles.
+pub(crate) const LIVE_TOAST_MIN_MS: u64 = 125;
+
+/// The rate limiter for the live toast — PURE (milliseconds in, bool out), so
+/// it can be tested without a clock. `reset` on Enter; `allow(now)` on every
+/// Move says whether an update may go out now and records it if so.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LiveToastLimiter {
+    last_ms: Option<u64>,
+}
+
+impl LiveToastLimiter {
+    pub(crate) fn reset(&mut self) {
+        self.last_ms = None;
+    }
+
+    /// True when an update may go out at `now_ms`, recording it. The first
+    /// call after `reset` always passes; after that, only once per
+    /// `LIVE_TOAST_MIN_MS`. A clock that went backwards is treated as "too
+    /// soon" (saturating), never as a burst.
+    pub(crate) fn allow(&mut self, now_ms: u64) -> bool {
+        match self.last_ms {
+            Some(last) if now_ms.saturating_sub(last) < LIVE_TOAST_MIN_MS => false,
+            _ => {
+                self.last_ms = Some(now_ms);
+                true
+            }
+        }
+    }
+}
+
+/// The live toast's text for one tick — PURE. Volume/brightness carry the
+/// real percent, scrub a fixed verb, chords the forward chord's name and the
+/// signed step count (0 steps shows the name alone). `None` for a band that
+/// does nothing: no toast for a slide that changes nothing.
+pub(crate) fn live_toast_text(
+    action: &BandAction,
+    value_pct: u8,
+    chord: Option<&str>,
+    steps: i32,
+) -> Option<String> {
+    match action {
+        BandAction::Volume => Some(format!("🔊 Volume {value_pct}%")),
+        BandAction::Brightness => Some(format!("☀ Brightness {value_pct}%")),
+        BandAction::Scrub => Some("⏩ Scrubbing".to_string()),
+        BandAction::Chords { .. } => {
+            let name = chord.unwrap_or("(no keys)");
+            if steps == 0 {
+                Some(format!("⌨ {name}"))
+            } else {
+                let n = steps.unsigned_abs();
+                let sign = if steps < 0 { "\u{2212}" } else { "" };
+                let unit = if n == 1 { "step" } else { "steps" };
+                Some(format!("⌨ {name} · {sign}{n} {unit}"))
+            }
+        }
+        BandAction::None => None,
+    }
+}
+
 fn reader_loop(app: AppHandle, pad: raw::DeviceInfo) {
     use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
     use windows::Win32::System::Threading::GetCurrentThreadId;
@@ -329,6 +397,12 @@ fn reader_loop(app: AppHandle, pad: raw::DeviceInfo) {
     let mut last_tick = Instant::now();
     let mut last_bright = Instant::now() - Duration::from_secs(1);
     let mut last_emit = Instant::now() - Duration::from_secs(1);
+    // The live slide toast (1.0.123): the ≤ 8 Hz limiter, the text last SENT
+    // and the text last COMPUTED, so Exit can flush a throttled final value.
+    let t0 = Instant::now();
+    let mut toast_limit = LiveToastLimiter::default();
+    let mut toast_sent: Option<String> = None;
+    let mut toast_pending: Option<String> = None;
     // The 5-second proof line (coordinator, 2026-09-19: the owner's 1.0.121
     // slides did nothing and the log could not say why — the reader logged
     // nothing per gesture). Same shape as the probe's summary.
@@ -405,8 +479,22 @@ fn reader_loop(app: AppHandle, pad: raw::DeviceInfo) {
                     cfg.band(edge).length
                 );
                 let value = live_value_pct(&action, 0.0, cfg.band(edge).sensitivity);
-                emit_live(&app, edge, &action, value, 0.0, chord_label(&action), 0);
+                let label = chord_label(&action);
+                emit_live(&app, edge, &action, value, 0.0, label.clone(), 0);
                 last_emit = Instant::now();
+                // The live toast appears on Enter, with the first value. The
+                // setting is read from `cfg` — the snapshot already taken
+                // above — never from the config lock on this callback.
+                toast_limit.reset();
+                toast_sent = None;
+                toast_pending = None;
+                if cfg.slide_toast {
+                    if let Some(text) = live_toast_text(&action, value, label.as_deref(), 0) {
+                        toast_limit.allow(t0.elapsed().as_millis() as u64);
+                        crate::show_live_toast(&app, LIVE_TOAST_KEY, &text);
+                        toast_sent = Some(text);
+                    }
+                }
             }
             GestureEvent::Move { edge, travel } => {
                 let band = cfg.band(edge).clone();
@@ -472,6 +560,21 @@ fn reader_loop(app: AppHandle, pad: raw::DeviceInfo) {
                     emit_live(&app, edge, &band.action, value.unwrap_or(0), travel, chord_label(&band.action), chord_sent);
                     last_emit = now;
                 }
+                // The live toast, in place, at ≤ 8 Hz. Only when the text
+                // changed: a finger resting still sends nothing.
+                if cfg.slide_toast {
+                    let label = chord_label(&band.action);
+                    toast_pending = live_toast_text(&band.action, value.unwrap_or(0), label.as_deref(), chord_sent);
+                    if toast_pending.is_some()
+                        && toast_pending != toast_sent
+                        && toast_limit.allow(t0.elapsed().as_millis() as u64)
+                    {
+                        if let Some(text) = toast_pending.as_deref() {
+                            crate::show_live_toast(&app, LIVE_TOAST_KEY, text);
+                        }
+                        toast_sent = toast_pending.clone();
+                    }
+                }
             }
             GestureEvent::Exit(edge) => {
                 BAND_LIVE.store(false, Ordering::Relaxed);
@@ -483,6 +586,18 @@ fn reader_loop(app: AppHandle, pad: raw::DeviceInfo) {
                     entered_at.elapsed().as_millis()
                 );
                 emit_end(&app);
+                // Flush a throttled final value, then let the pill fade
+                // (~600 ms on the page). `toast_sent` is the witness that a
+                // pill exists: nothing was shown, nothing to end.
+                if toast_pending.is_some() && toast_pending != toast_sent {
+                    if let Some(text) = toast_pending.as_deref() {
+                        crate::show_live_toast(&app, LIVE_TOAST_KEY, text);
+                    }
+                    toast_sent = toast_pending.take();
+                }
+                if toast_sent.take().is_some() {
+                    crate::end_live_toast(&app, LIVE_TOAST_KEY);
+                }
             }
         }
     });
@@ -527,6 +642,41 @@ fn emit_end(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_live_toast_limiter_passes_the_first_tick_then_at_most_8_hz() {
+        let mut l = LiveToastLimiter::default();
+        assert!(l.allow(0), "the first update after reset always goes out");
+        assert!(!l.allow(1));
+        assert!(!l.allow(LIVE_TOAST_MIN_MS - 1), "one ms early is still too soon");
+        assert!(l.allow(LIVE_TOAST_MIN_MS), "exactly the spacing passes");
+        assert!(!l.allow(LIVE_TOAST_MIN_MS + 60));
+        assert!(l.allow(2 * LIVE_TOAST_MIN_MS + 5));
+        // One second of 100 Hz reports lets through no more than 8 + the first.
+        let mut l = LiveToastLimiter::default();
+        let sent = (0..1000u64).step_by(10).filter(|&ms| l.allow(ms)).count();
+        assert!(sent <= 9, "{sent} updates in a second is more than 8 Hz");
+        assert!(sent >= 8, "{sent} updates in a second is far under 8 Hz");
+        // reset() makes the next tick immediate again, and a clock that goes
+        // backwards is "too soon", never a burst.
+        l.reset();
+        assert!(l.allow(5));
+        assert!(!l.allow(0));
+    }
+
+    #[test]
+    fn the_live_toast_text_per_action() {
+        assert_eq!(live_toast_text(&BandAction::Volume, 62, None, 0).as_deref(), Some("🔊 Volume 62%"));
+        assert_eq!(live_toast_text(&BandAction::Brightness, 40, None, 0).as_deref(), Some("☀ Brightness 40%"));
+        assert_eq!(live_toast_text(&BandAction::Scrub, 77, None, 0).as_deref(), Some("⏩ Scrubbing"));
+        let chords = BandAction::Chords { forward: vec![0x11, 0x09], backward: vec![0x11, 0x10, 0x09] };
+        assert_eq!(live_toast_text(&chords, 0, Some("Ctrl+Tab"), 0).as_deref(), Some("⌨ Ctrl+Tab"));
+        assert_eq!(live_toast_text(&chords, 0, Some("Ctrl+Tab"), 1).as_deref(), Some("⌨ Ctrl+Tab · 1 step"));
+        assert_eq!(live_toast_text(&chords, 0, Some("Ctrl+Tab"), 3).as_deref(), Some("⌨ Ctrl+Tab · 3 steps"));
+        assert_eq!(live_toast_text(&chords, 0, Some("Ctrl+Tab"), -2).as_deref(), Some("⌨ Ctrl+Tab · \u{2212}2 steps"));
+        assert_eq!(live_toast_text(&chords, 0, None, 1).as_deref(), Some("⌨ (no keys) · 1 step"));
+        assert_eq!(live_toast_text(&BandAction::None, 50, None, 0), None, "a band that does nothing shows nothing");
+    }
 
     #[test]
     fn presence_wire_strings() {

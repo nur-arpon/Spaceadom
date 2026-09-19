@@ -451,20 +451,27 @@ body[data-theme="navy"] #touchpad-page {
 }
 .sp-thumb:hover { transform: translateY(-2px); border-color: var(--st-accent); }
 .sp-thumb .empty { position: absolute; inset: 6px; border: 1px dashed var(--st-hairline); border-radius: 12px; }
-.sp-thumb .strip { position: absolute; border-radius: 6px; background: var(--st-accent-tint); border: 1px solid var(--st-accent-brd); }
+/* Each edge on its own: SET = glows, NOT SET = dim (owner, 2026-09-19). */
+.sp-thumb .strip { position: absolute; border-radius: 6px; background: var(--st-accent-tint); border: 1px solid var(--st-accent-brd); box-shadow: 0 0 14px rgb(var(--st-glow-rgb) / .35); transition: opacity 180ms linear, box-shadow 180ms linear; }
 .sp-thumb .strip--left   { left: var(--tp-i);  top: 21%; bottom: 21%; width: var(--tp-s); }
 .sp-thumb .strip--right  { right: var(--tp-i); top: 21%; bottom: 21%; width: var(--tp-s); }
 .sp-thumb .strip--top    { top: var(--tp-i);    left: 12.5%; right: 12.5%; height: var(--tp-s); }
 .sp-thumb .strip--bottom { bottom: var(--tp-i); left: 12.5%; right: 12.5%; height: var(--tp-s); }
-.sp-thumb .strip--off    { background: none; border: 1px dashed var(--st-hairline); }
-.sp-thumb--idle .dots i  { background: none; border: 1px dashed var(--st-hairline); }
+.sp-thumb .strip--off    { opacity: .28; box-shadow: none; }
+/* …and the whole pad dims too when NOTHING is set (owner, 2026-09-19). */
+#touchpad-thumb .sp-thumb--idle { opacity: .55; }
+#touchpad-thumb .sp-thumb--idle:hover { opacity: .85; }
+.sp-thumb--idle .dots i  { opacity: .28; }
 /* The keyboard NEVER moves for the pad (owner, 2026-09-19: "whatever
    position the keyboard has been all these days, let it be"). The pad hangs
    44px beneath the board, centred, outside the board's layout box, so the
    board fit and centring are byte-for-byte what they were; it may overlap
    the gear / Special keys line — accepted. */
 #keyboard-scale { position: relative; }
-#touchpad-thumb { position: absolute; top: 100%; left: 50%; transform: translateX(-50%) scale(var(--tp-fit, 1)); transform-origin: top center; margin-top: 44px; }
+/* Centred on the SPACE key, not the board: the bottom row is 4.75u | Space |
+   5u, so Space's centre is 0.125u = 8px left of the board's — the owner saw
+   the pad sit "a little more than Space" to the right (2026-09-19). */
+#touchpad-thumb { position: absolute; top: 100%; left: calc(50% - 8px); transform: translateX(-50%) scale(var(--tp-fit, 1)); transform-origin: top center; margin-top: 44px; }
 .sp-thumb .dots { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: inline-flex; gap: 6px; }
 .sp-thumb .dots i { width: var(--tp-d); height: var(--tp-d); border-radius: 999px; background: var(--st-accent-tint); border: 1px solid var(--st-accent-brd); }
 #touchpad-thumb .sp-pill {

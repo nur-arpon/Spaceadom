@@ -41,6 +41,11 @@ export const SUB_LINES: Readonly<Record<string, Readonly<Record<string, string>>
     app: "The page wears your app theme’s colours.",
     chocolate: "The design’s dark chocolate, with your accent.",
   },
+  // 1.0.123 — a TOGGLE's line, keyed "on"/"off" (the test's TOGGLES table).
+  tpslidetoast: {
+    on: "One small pill shows the level as you slide.",
+    off: "Slides change the level silently.",
+  },
 };
 
 /** The subtitle for `control` at `option`, or "" when there is none. */

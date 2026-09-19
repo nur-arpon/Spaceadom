@@ -1075,6 +1075,14 @@ pub struct Touchpad {
     /// thumbnail it has always seen once a pad is detected.
     #[serde(default = "default_true")]
     pub show_thumbnail: bool,
+    /// "Show a toast while sliding" (owner, 2026-09-19, 1.0.123) — while an
+    /// edge slide changes volume or brightness (or scrubs / sends chords) the
+    /// overlay shows ONE toast that updates in place ("🔊 Volume 62%") and
+    /// fades ~600 ms after the finger lifts. Read by the reader through the
+    /// existing `snapshot()` / `CONFIG_GEN` path, never on the raw-input
+    /// callback directly. `default_true` so an existing config gets it.
+    #[serde(default = "default_true")]
+    pub slide_toast: bool,
 }
 
 impl Touchpad {
@@ -1113,7 +1121,14 @@ impl Touchpad {
     /// the engine never sees a value the page cannot show.
     pub fn normalised(mut self) -> Touchpad {
         for e in TouchEdge::ALL {
-            let b = self.band(e).clone();
+            let mut b = self.band(e).clone();
+            // 1.0.120/121 saved the old 7% default — a 5 mm band nobody could
+            // land in (owner's left edge never armed, 2026-09-19). A band still
+            // at exactly that old default takes the proven 12%; anything the
+            // user set by hand is left alone.
+            if (b.width - 0.07).abs() < 1e-6 {
+                b.width = Band::default_width();
+            }
             *self.band_mut(e) = b.clamped();
         }
         self
@@ -1141,6 +1156,7 @@ impl Default for Touchpad {
             page_look: TouchpadLook::Chocolate,
             demo_seen: false,
             show_thumbnail: true,
+            slide_toast: true,
         }
     }
 }
@@ -1161,6 +1177,24 @@ mod touchpad_tests {
         assert_eq!(c.touchpad.page_look, TouchpadLook::Chocolate);
         assert!(!c.touchpad.demo_seen);
         assert_eq!(c.touchpad.corner_rule, CornerRule::Ask);
+    }
+
+    /// 1.0.123 — a config written before `slide_toast` existed must read it
+    /// as ON (the owner wants the live toast by default), and an explicit
+    /// `false` must survive the round trip.
+    #[test]
+    fn slide_toast_defaults_on_when_the_key_is_absent() {
+        let mut v = serde_json::to_value(AppConfig::default()).expect("serialise");
+        let tp = v["touchpad"].as_object_mut().expect("touchpad object");
+        assert!(tp.remove("slide_toast").is_some(), "the default config writes the key");
+        let c: AppConfig = serde_json::from_value(v).expect("a 1.0.122 config must load");
+        assert!(c.touchpad.slide_toast, "absent must mean ON");
+
+        let mut v = serde_json::to_value(AppConfig::default()).expect("serialise");
+        v["touchpad"]["slide_toast"] = serde_json::Value::Bool(false);
+        let c: AppConfig = serde_json::from_value(v).expect("explicit false loads");
+        assert!(!c.touchpad.slide_toast);
+        assert!(!c.touchpad.normalised().slide_toast, "normalised() keeps the switch");
     }
 
     #[test]
