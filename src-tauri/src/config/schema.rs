@@ -849,7 +849,15 @@ impl TouchEdge {
 /// What a band does while a finger slides along it. `None` is the page's
 /// "Nothing" — the band stays drawn, arms, freezes the pointer, and changes
 /// nothing (so a user can park an edge without losing its geometry).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+///
+/// `Chords` (1.0.122, the page's "Any shortcut") is step-based: the signed
+/// travel is quantised into steps (`touchpad::actions::chord_steps`) and each
+/// new step sends `forward` or `backward` ONCE through the one-batch
+/// `send_keys_checked` path (PROBLEM 227 cookie). Sliding back sends the other
+/// chord, so it is reversible by the opposite slide. Serialised externally
+/// tagged, so the unit variants stay the plain strings 1.0.120 wrote
+/// (`"scrub"`) and this one is `{"chords":{"forward":[…],"backward":[…]}}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum BandAction {
     Brightness,
@@ -857,13 +865,37 @@ pub enum BandAction {
     Scrub,
     #[default]
     None,
+    Chords {
+        #[serde(default)]
+        forward: Vec<u16>,
+        #[serde(default)]
+        backward: Vec<u16>,
+    },
+}
+
+impl BandAction {
+    /// The page's "Any shortcut" with nothing recorded yet.
+    pub fn empty_chords() -> BandAction {
+        BandAction::Chords { forward: Vec::new(), backward: Vec::new() }
+    }
+
+    /// The wire name (`touchpad-live.action`, the same lowercase serde tags).
+    pub fn wire(&self) -> &'static str {
+        match self {
+            BandAction::Brightness => "brightness",
+            BandAction::Volume => "volume",
+            BandAction::Scrub => "scrub",
+            BandAction::None => "none",
+            BandAction::Chords { .. } => "chords",
+        }
+    }
 }
 
 /// One edge band. `width` is a fraction of the pad's SHORT side, `length` a
 /// fraction of the edge (centred). Both are clamped on load by
 /// `Band::clamped` — the page shows width as px of its drawn 780×520 pad and
 /// length as a percentage, as the design does.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Band {
     #[serde(default)]
     pub enabled: bool,
@@ -887,9 +919,15 @@ impl Band {
     pub const SENS_MIN: u8 = 1;
     pub const SENS_MAX: u8 = 10;
 
+    /// 0.12 of the pad's short side (1.0.122; was 0.07). The T1b probe proved
+    /// its bands at 12 %, and the owner's 1.0.121 run at 7 % (5 mm on this
+    /// pad) never armed.
     pub fn default_width() -> f32 {
-        0.07
+        0.12
     }
+    /// The most keys one recorded chord may hold — `engine::actions::chord`'s
+    /// batch limit, so a saved chord is always sendable.
+    pub const CHORD_MAX_KEYS: usize = 8;
     pub fn default_length_side() -> f32 {
         0.70
     }
@@ -901,7 +939,8 @@ impl Band {
     }
 
     /// The owner's defaults per edge: left = brightness, right = volume,
-    /// top = scrub, bottom = reserved (`None`). All OFF.
+    /// top = scrub, bottom = nothing (a normal edge since 1.0.122; the user
+    /// picks its action). All OFF.
     pub fn for_edge(edge: TouchEdge) -> Band {
         let (action, length) = match edge {
             TouchEdge::Left => (BandAction::Brightness, Self::default_length_side()),
@@ -930,6 +969,10 @@ impl Band {
         self.width = self.width.clamp(Self::WIDTH_MIN, Self::WIDTH_MAX);
         self.length = self.length.clamp(Self::LENGTH_MIN, Self::LENGTH_MAX);
         self.sensitivity = self.sensitivity.clamp(Self::SENS_MIN, Self::SENS_MAX);
+        if let BandAction::Chords { forward, backward } = &mut self.action {
+            forward.truncate(Self::CHORD_MAX_KEYS);
+            backward.truncate(Self::CHORD_MAX_KEYS);
+        }
         self
     }
 }
@@ -1005,8 +1048,8 @@ pub enum TouchpadLook {
     App,
 }
 
-/// The whole touchpad section. Bottom is reserved: shown, disabled, "Later" —
-/// `bottom.enabled` is forced false by `normalised()`.
+/// The whole touchpad section. All four edges are ordinary bands (the bottom
+/// stopped being "reserved" in 1.0.122, owner decision 2026-09-19 17:30).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Touchpad {
     #[serde(default = "Touchpad::default_left")]
@@ -1066,15 +1109,13 @@ impl Touchpad {
         }
     }
 
-    /// Ranges enforced, the reserved bottom band held off. Pure; applied on
-    /// load and on save so the engine never sees a value the page cannot show.
+    /// Ranges enforced on every band. Pure; applied on load and on save so
+    /// the engine never sees a value the page cannot show.
     pub fn normalised(mut self) -> Touchpad {
         for e in TouchEdge::ALL {
-            let b = *self.band(e);
+            let b = self.band(e).clone();
             *self.band_mut(e) = b.clamped();
         }
-        self.bottom.enabled = false;
-        self.bottom.action = BandAction::None;
         self
     }
 
@@ -1131,7 +1172,7 @@ mod touchpad_tests {
         assert_eq!(t.bottom.action, BandAction::None);
         assert!((t.left.length - 0.70).abs() < 1e-6);
         assert!((t.top.length - 0.80).abs() < 1e-6);
-        assert!((t.left.width - 0.07).abs() < 1e-6);
+        assert!((t.left.width - 0.12).abs() < 1e-6, "12 % of the short side (1.0.122)");
         assert_eq!(t.left.sensitivity, 6);
         for e in TouchEdge::ALL {
             assert!(!t.band(e).enabled, "{e:?} must start off");
@@ -1139,7 +1180,7 @@ mod touchpad_tests {
     }
 
     #[test]
-    fn ranges_are_clamped_and_the_bottom_band_is_held_off() {
+    fn ranges_are_clamped_and_the_bottom_band_is_an_ordinary_band() {
         let mut t = Touchpad::default();
         t.left.width = 0.9;
         t.left.length = 0.1;
@@ -1152,8 +1193,43 @@ mod touchpad_tests {
         assert!((n.left.length - Band::LENGTH_MIN).abs() < 1e-6);
         assert_eq!(n.left.sensitivity, Band::SENS_MAX);
         assert!((n.right.width - Band::default_width()).abs() < 1e-6);
-        assert!(!n.bottom.enabled);
-        assert_eq!(n.bottom.action, BandAction::None);
+        // 1.0.122: no reserved edge — the bottom keeps what the user set.
+        assert!(n.bottom.enabled);
+        assert_eq!(n.bottom.action, BandAction::Volume);
+        assert_eq!(n.enabled_edges(), vec![TouchEdge::Bottom]);
+    }
+
+    #[test]
+    fn chords_round_trip_and_a_bare_chords_object_reads_empty() {
+        let mut t = Touchpad::default();
+        t.bottom.enabled = true;
+        t.bottom.action = BandAction::Chords { forward: vec![0x11, 0x54], backward: vec![0x11, 0x57] };
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(json.contains(r#""action":{"chords":{"forward":[17,84],"backward":[17,87]}}"#), "{json}");
+        assert!(json.contains(r#""action":"scrub""#), "the unit variants are still plain strings: {json}");
+        let back: Touchpad = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, t);
+        // A chords object with nothing recorded yet.
+        let t2: Touchpad = serde_json::from_str(r#"{"top":{"action":{"chords":{}}}}"#).unwrap();
+        assert_eq!(t2.top.action, BandAction::empty_chords());
+        assert_eq!(t2.top.action.wire(), "chords");
+        // A 1.0.120 config (plain strings) still loads.
+        let t3: Touchpad = serde_json::from_str(r#"{"left":{"enabled":true,"action":"brightness"}}"#).unwrap();
+        assert_eq!(t3.left.action, BandAction::Brightness);
+    }
+
+    #[test]
+    fn an_over_long_chord_is_cut_to_the_sendable_length() {
+        let mut b = Band::for_edge(TouchEdge::Top);
+        b.action = BandAction::Chords { forward: (1..=12).collect(), backward: Vec::new() };
+        let c = b.clamped();
+        match c.action {
+            BandAction::Chords { forward, backward } => {
+                assert_eq!(forward.len(), Band::CHORD_MAX_KEYS);
+                assert!(backward.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -1163,7 +1239,7 @@ mod touchpad_tests {
         // A bare object has no edge context, so `Band`'s own serde defaults
         // apply: the side length, `None` action. The page sets the action.
         assert_eq!(t.top.action, BandAction::None);
-        assert!((t.top.width - 0.07).abs() < 1e-6);
+        assert!((t.top.width - 0.12).abs() < 1e-6);
         assert_eq!(t.top.sensitivity, 6);
         assert_eq!(t.right, Band::for_edge(TouchEdge::Right));
     }

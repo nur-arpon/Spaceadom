@@ -125,7 +125,8 @@ that starts anywhere in the middle just moves the pointer as it always did, and
 while an edge slide is happening the pointer holds still so nothing jumps.
 Everything is off until you switch it on from the touchpad page — the small
 touchpad drawn under the keyboard on the home screen, or Settings. Lift your
-finger to stop; slide back to undo. The bottom edge is reserved for later.
+finger to stop; slide back to undo. Every edge can also send any shortcut
+you record — one for each direction — a step at a time as you slide.
 
 ---
 

@@ -41,7 +41,15 @@ tidy. Their rows say what each one got wrong.
 
 ---
 
-## 2026-09-19 (latest) — 1.0.120 — the touchpad edges do things now
+## 2026-09-19 (latest) — 1.0.122 — every edge, every action, any shortcut
+
+| Version | What changed |
+| --- | --- |
+| **1.0.122** | The bottom edge of the touchpad is no longer "kept for later" — it is an edge like the other three, off until you switch it on. Every edge now offers the same five choices: Brightness, Volume, Video scrub, Any shortcut, or Nothing. **Any shortcut** is new: pick it and the page shows two boxes, "Slide up sends…" and "Slide down sends…" (right and left on the top and bottom edges). Press the keys together in each box — the same way you record a key combo on a key — and from then on sliding along that edge sends the shortcut once for every small step your finger moves, and sliding back sends the other one, so you can walk through browser tabs, undo and redo, or nudge a track forward and back. The "How fast it moves" slider sets how far a step is. While you slide, the readout shows the shortcut's name and a step count instead of a percentage. Two more things from your afternoon run: the strips are now wider by default (12 % of the pad's short side, the width the probe proved, instead of 7 % — that thin strip is my best explanation for why your slides did nothing in 1.0.121), and the app now writes a line to the log every five seconds saying how many reports it is getting from the pad and whether a strip went live, plus a line every time one does — so if a slide does nothing again, the log will say which of the three things went wrong. **Still untested with a real finger: please slide once on each edge and send me the log.** |
+
+---
+
+## 2026-09-19 — 1.0.120 — the touchpad edges do things now
 
 | Version | What changed |
 | --- | --- |

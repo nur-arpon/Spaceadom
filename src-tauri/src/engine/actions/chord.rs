@@ -44,8 +44,11 @@ pub fn batch_plan(keys: &[u16]) -> Vec<(u16, bool)> {
     plan
 }
 
+/// The one batch every chord in the app goes through — the key editor's
+/// `Action::Chord` and (1.0.122) the touchpad's "Any shortcut" steps and its
+/// ←/→ scrub taps (`touchpad::actions::send_chord`). Not the hook callback.
 #[cfg(windows)]
-unsafe fn send_batch(keys: &[u16]) {
+pub(crate) unsafe fn send_batch(keys: &[u16]) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY,
         KEYEVENTF_KEYUP, VIRTUAL_KEY,

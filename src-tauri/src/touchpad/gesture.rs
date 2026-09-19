@@ -209,7 +209,7 @@ mod tests {
 
     #[test]
     fn a_finger_landing_in_a_band_arms_and_a_slide_reports_travel() {
-        // aspect 1.0 → right band is fx >= 1 - 0.07 = 0.93.
+        // aspect 1.0 → right band is fx >= 1 - 0.12 = 0.88.
         let mut g = Gesture::new(cfg(&[TouchEdge::Right]), 1.0);
         assert_eq!(g.feed(&[c(1, 0.97, 0.5)]), Some(GestureEvent::Enter(TouchEdge::Right)));
         assert!(g.is_live());
@@ -246,7 +246,7 @@ mod tests {
     #[test]
     fn hysteresis_a_live_finger_drifting_out_of_the_band_keeps_the_gesture() {
         let mut g = Gesture::new(cfg(&[TouchEdge::Top]), 1.0);
-        // Top band: fy <= 0.07.
+        // Top band: fy <= 0.12.
         assert_eq!(g.feed(&[c(1, 0.5, 0.02)]), Some(GestureEvent::Enter(TouchEdge::Top)));
         // Drift well below the band — still Move, not Exit.
         let ev = g.feed(&[c(1, 0.7, 0.30)]).unwrap();
@@ -305,6 +305,53 @@ mod tests {
         t.corners = corners;
         let mut g2 = Gesture::new(t, 1.0);
         assert_eq!(g2.feed(&[c(1, 0.98, 0.02)]), Some(GestureEvent::Enter(TouchEdge::Top)));
+    }
+
+    /// The landing rule: a contact whose FIRST report is inside the band arms
+    /// on that very report — no previous frame is needed (coordinator,
+    /// 2026-09-19: the owner's 1.0.121 slides did nothing and the log could
+    /// not say why; this pins the machine's half of the rule).
+    #[test]
+    fn a_contact_that_first_appears_inside_the_band_arms_on_that_report() {
+        for edge in TouchEdge::ALL {
+            let mut g = Gesture::new(cfg(&[edge]), 1.0);
+            // Fresh machine, no prior frame: the landing report itself.
+            let (fx, fy) = match edge {
+                TouchEdge::Left => (0.05, 0.5),
+                TouchEdge::Right => (0.95, 0.5),
+                TouchEdge::Top => (0.5, 0.05),
+                TouchEdge::Bottom => (0.5, 0.95),
+            };
+            assert_eq!(g.feed(&[c(7, fx, fy)]), Some(GestureEvent::Enter(edge)), "{edge:?}");
+            assert!(g.is_live());
+        }
+    }
+
+    /// 1.0.122: the bottom edge is a normal edge — it arms, reports travel
+    /// (right positive, like the top), inverts, and exits like the others.
+    #[test]
+    fn the_bottom_edge_behaves_like_every_other_edge() {
+        let mut g = Gesture::new(cfg(&[TouchEdge::Bottom]), 1.0);
+        // Bottom band: fy >= 1 - 0.12 = 0.88, centred 80 % of X.
+        assert_eq!(g.feed(&[c(1, 0.5, 0.95)]), Some(GestureEvent::Enter(TouchEdge::Bottom)));
+        match g.feed(&[c(1, 0.8, 0.95)]).unwrap() {
+            GestureEvent::Move { edge: TouchEdge::Bottom, travel } => assert!((travel - 0.3).abs() < 1e-6),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(g.feed(&[]), Some(GestureEvent::Exit(TouchEdge::Bottom)));
+        // Off by default, like the others; outside its length it does not arm.
+        assert!(!Touchpad::default().bottom.enabled);
+        let mut g2 = Gesture::new(cfg(&[TouchEdge::Bottom]), 1.0);
+        assert_eq!(g2.feed(&[c(1, 0.05, 0.95)]), None, "outside the centred 80 %");
+        // Inverted, right-slides read negative.
+        let mut t = cfg(&[TouchEdge::Bottom]);
+        t.bottom.invert = true;
+        let mut g3 = Gesture::new(t, 1.0);
+        g3.feed(&[c(1, 0.5, 0.95)]);
+        match g3.feed(&[c(1, 0.8, 0.95)]).unwrap() {
+            GestureEvent::Move { travel, .. } => assert!(travel < 0.0),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

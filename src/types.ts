@@ -411,7 +411,13 @@ export interface AppConfig {
 // ---------------------------------------------------------------------------
 
 export type TouchEdge = "left" | "right" | "top" | "bottom";
-export type BandAction = "brightness" | "volume" | "scrub" | "none";
+/** Externally tagged like serde: the unit variants are plain strings, and
+ *  "Any shortcut" (1.0.122) is `{ chords: { forward, backward } }` — two
+ *  chords in press order, sent once per quantised step of the slide. */
+export type BandChords = { chords: { forward: number[]; backward: number[] } };
+export type BandAction = "brightness" | "volume" | "scrub" | "none" | BandChords;
+/** The action's family — what the page's "Does what" rows pick between. */
+export type BandActionKind = "brightness" | "volume" | "scrub" | "none" | "chords";
 export type CornerRule = "ask" | "always_horizontal" | "always_vertical";
 export type TouchpadLook = "chocolate" | "app";
 /** Emitted by `touchpad::mod`; `"none"` covers "no pad" and "not Precision". */
@@ -457,9 +463,13 @@ export interface TouchpadCaps {
 /** `touchpad-live` event payload; every field is null on gesture end. */
 export interface TouchpadLive {
   edge: TouchEdge | null;
-  action: BandAction | null;
+  action: BandActionKind | null;
   value_pct: number | null;
   travel: number | null;
+  /** Chords only: the forward chord's name ("Ctrl+Tab"). */
+  chord?: string | null;
+  /** Chords only: the signed step count sent so far this gesture. */
+  steps?: number | null;
 }
 
 // ---------------------------------------------------------------------------

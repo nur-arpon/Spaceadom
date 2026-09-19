@@ -125,7 +125,7 @@ body[data-theme="navy"] #touchpad-page {
   white-space: nowrap;
 }
 .sp-pill--quiet { background: var(--sp-surface); border-color: var(--sp-line); color: var(--sp-text-3); padding: 4px 11px 4px 4px; font-size: 11.5px; }
-.sp-pill--off   { background: #241A14; border-color: #3E2E25; color: var(--sp-text-3); padding: 4px 10px 4px 4px; font-size: 11.5px; }
+.sp-pill--off   { background: var(--sp-surface-2); border-color: var(--sp-line-strong); color: var(--sp-text-3); padding: 4px 10px 4px 4px; font-size: 11.5px; }
 
 .sp-badge {
   display: inline-flex; align-items: center; justify-content: center;
@@ -156,7 +156,7 @@ body[data-theme="navy"] #touchpad-page {
 .sp-switch {
   position: relative; flex: 0 0 auto;
   width: 40px; height: 20px; border-radius: var(--sp-r-pill);
-  background: var(--sp-line-strong); border: 1px solid #55402F;
+  background: var(--sp-line-strong); border: 1px solid var(--sp-line-strong);
   transition: background var(--sp-quick) linear, border-color var(--sp-quick) linear;
 }
 .sp-switch::after {
@@ -234,14 +234,14 @@ body[data-theme="navy"] #touchpad-page {
   transition: border-color var(--sp-quick) linear, box-shadow var(--sp-settle) var(--sp-spring);
 }
 .sp-pad.is-armed { border-color: var(--sp-band-edge); box-shadow: var(--sp-sh-pad), 0 0 0 4px var(--sp-accent-faint); }
-.sp-pad.is-dead  { background: #1A1310; border-color: var(--sp-line-soft); box-shadow: var(--sp-hi); }
+.sp-pad.is-dead  { background: var(--sp-well); border-color: var(--sp-line-soft); box-shadow: var(--sp-hi); }
 
 .sp-band {
   --band-w: 54px;
   --band-len: 70%;
   position: absolute;
   border-radius: var(--sp-r-band);
-  border: 1px dashed #4A382D;
+  border: 1px dashed var(--sp-line-strong);
   background: var(--sp-accent-faint);
   display: flex; align-items: center; justify-content: center;
   transition: inset var(--sp-settle) var(--sp-spring),
@@ -258,7 +258,34 @@ body[data-theme="navy"] #touchpad-page {
 
 .sp-band.is-on   { background: var(--sp-band-on); border: 1px solid var(--sp-band-edge); box-shadow: 0 10px 28px rgb(var(--sp-accent-rgb) / .22); }
 .sp-band.is-live { background: var(--sp-band-live); border: 1px solid var(--sp-accent); box-shadow: 0 0 44px var(--sp-glow), inset 0 0 24px var(--sp-accent-soft); }
-.sp-band.is-reserved { border-color: var(--sp-line-soft); background: none; }
+
+/* --- "Any shortcut": the two chord recorder fields (1.0.122) ------------
+   The same recorder as the key editor's Key combo (chord_record_*), drawn in
+   the page's tokens: a label, the recorded chord as key caps, and two
+   buttons (record / clear). Every control is a real <button>, so the Navy
+   theme's #touchpad-page opt-in keeps it clickable. */
+.sp-chord {
+  display: flex; flex-direction: column; gap: 7px;
+  padding: 10px 11px; border-radius: var(--sp-r-ctl);
+  background: var(--sp-surface-2); border: 1px solid var(--sp-line-strong);
+}
+.sp-chord .label { font-size: 12.5px; color: var(--sp-text-2); }
+.sp-chord-caps { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; min-height: 26px; }
+.sp-chord-caps kbd {
+  font: 600 12px/1 inherit; font-family: inherit;
+  padding: 6px 9px; border-radius: 8px;
+  background: var(--sp-well); border: 1px solid var(--sp-line-strong); color: var(--sp-text);
+  box-shadow: 0 1px 0 var(--sp-line-strong);
+}
+.sp-chord-caps .plus, .sp-chord-caps .none { font-size: 12px; color: var(--sp-text-4); }
+.sp-chord-btns { display: flex; gap: 6px; }
+.sp-chord-btns .sp-btn { padding: 5px 10px; font-size: 12px; }
+.sp-chord-btns .sp-btn.is-recording {
+  border-color: var(--sp-accent); color: var(--sp-accent);
+  animation: sp-rec-pulse 1.1s ease-in-out infinite;
+}
+@keyframes sp-rec-pulse { 0%, 100% { box-shadow: 0 0 0 0 var(--sp-accent-faint); } 50% { box-shadow: 0 0 0 4px var(--sp-accent-faint); } }
+:root.reduced-motion .sp-chord-btns .sp-btn.is-recording { animation: none; }
 .sp-band.is-dead     { border-color: var(--sp-line-soft); background: none; }
 
 .sp-band--left  > .sp-pill { transform: rotate(-90deg); }
@@ -286,7 +313,7 @@ body[data-theme="navy"] #touchpad-page {
 .sp-band--top   > .sp-handle--end,
 .sp-band--bottom> .sp-handle--end   { top: 50%; margin-top: -24px; right: -4px; width: 7px; height: 48px; cursor: ew-resize; }
 
-.sp-ghost { position: absolute; border-left: 2px dashed #4A382D; }
+.sp-ghost { position: absolute; border-left: 2px dashed var(--sp-line-strong); }
 
 .sp-chip {
   position: absolute; padding: 4px 9px; border-radius: 8px;
@@ -357,7 +384,7 @@ body[data-theme="navy"] #touchpad-page {
 
 .sp-band--lost { background: var(--sp-accent-soft); border-color: rgb(var(--sp-accent-rgb) / .28); }
 
-.sp-check { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; flex: 0 0 auto; border-radius: 5px; border: 1.5px solid #55402F; }
+.sp-check { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; flex: 0 0 auto; border-radius: 5px; border: 1.5px solid var(--sp-line-strong); }
 .sp-check[aria-checked="true"] { background: var(--sp-accent); border-color: var(--sp-accent); }
 
 /* --- Cards over the pad -------------------------------------------------- */
@@ -410,22 +437,36 @@ body[data-theme="navy"] #touchpad-page {
 }
 #touchpad-thumb[hidden] { display: none; }
 .sp-thumb {
-  position: relative; width: 208px; height: 132px;
-  border-radius: 14px;
-  background: #1C1410; border: 1px solid var(--st-border);
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / .04), 0 6px 18px rgb(0 0 0 / .4);
+  /* Size A from the owner's Claude Design pass (2026-09-19): pad = 0.397 x the
+     1048 board = 416 x 198 (2.1:1), gap 28. Lives inside #keyboard-scale so
+     the board fit scales it with the keyboard. Internals are percentages of
+     the pad (strip thickness 6.25% of width, inset 7, dots 14/6). */
+  --tp-i: 7px; --tp-s: 26px; --tp-d: 14px;
+  position: relative; width: 416px; height: 198px;
+  border-radius: 16px;
+  background: var(--st-card); border: 1px solid var(--st-border);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / .04), 0 10px 26px rgb(0 0 0 / .25);
   transition: transform var(--dur-standard, 180ms) var(--ease-spring, cubic-bezier(.34,1.3,.4,1)), border-color 120ms linear;
   cursor: pointer;
 }
 .sp-thumb:hover { transform: translateY(-2px); border-color: var(--st-accent); }
-.sp-thumb .empty { position: absolute; inset: 6px; border: 1px dashed var(--st-hairline); border-radius: 10px; }
-.sp-thumb .strip { position: absolute; border-radius: 6px; background: rgb(var(--st-glow-rgb) / .30); }
-.sp-thumb .strip--left   { left: 5px;  top: 28px; width: 15px; height: 76px; }
-.sp-thumb .strip--right  { right: 5px; top: 28px; width: 15px; height: 76px; }
-.sp-thumb .strip--top    { top: 5px;    left: 26px; right: 26px; height: 15px; }
-.sp-thumb .strip--bottom { bottom: 5px; left: 26px; right: 26px; height: 15px; background: none; border: 1px dashed var(--st-hairline); }
-.sp-thumb .dots { position: absolute; left: 50%; top: 50%; margin: -7px 0 0 -18px; display: inline-flex; gap: 4px; }
-.sp-thumb .dots i { width: 11px; height: 11px; border-radius: 999px; background: rgb(var(--st-glow-rgb) / .30); }
+.sp-thumb .empty { position: absolute; inset: 6px; border: 1px dashed var(--st-hairline); border-radius: 12px; }
+.sp-thumb .strip { position: absolute; border-radius: 6px; background: var(--st-accent-tint); border: 1px solid var(--st-accent-brd); }
+.sp-thumb .strip--left   { left: var(--tp-i);  top: 21%; bottom: 21%; width: var(--tp-s); }
+.sp-thumb .strip--right  { right: var(--tp-i); top: 21%; bottom: 21%; width: var(--tp-s); }
+.sp-thumb .strip--top    { top: var(--tp-i);    left: 12.5%; right: 12.5%; height: var(--tp-s); }
+.sp-thumb .strip--bottom { bottom: var(--tp-i); left: 12.5%; right: 12.5%; height: var(--tp-s); }
+.sp-thumb .strip--off    { background: none; border: 1px dashed var(--st-hairline); }
+.sp-thumb--idle .dots i  { background: none; border: 1px dashed var(--st-hairline); }
+/* The keyboard NEVER moves for the pad (owner, 2026-09-19: "whatever
+   position the keyboard has been all these days, let it be"). The pad hangs
+   44px beneath the board, centred, outside the board's layout box, so the
+   board fit and centring are byte-for-byte what they were; it may overlap
+   the gear / Special keys line — accepted. */
+#keyboard-scale { position: relative; }
+#touchpad-thumb { position: absolute; top: 100%; left: 50%; transform: translateX(-50%) scale(var(--tp-fit, 1)); transform-origin: top center; margin-top: 44px; }
+.sp-thumb .dots { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: inline-flex; gap: 6px; }
+.sp-thumb .dots i { width: var(--tp-d); height: var(--tp-d); border-radius: 999px; background: var(--st-accent-tint); border: 1px solid var(--st-accent-brd); }
 #touchpad-thumb .sp-pill {
   display: inline-flex; align-items: center; gap: 8px;
   padding: 4px 12px 4px 4px; border-radius: 999px;
@@ -442,7 +483,7 @@ body[data-theme="navy"] #touchpad-page {
 
 /* Hot-plug: the thumbnail slides in/out (≤250ms, spring), no restart. */
 #touchpad-thumb { transition: opacity 220ms var(--ease-spring, cubic-bezier(.34,1.3,.4,1)), transform 220ms var(--ease-spring, cubic-bezier(.34,1.3,.4,1)); }
-#touchpad-thumb.tp-hidden { opacity: 0; transform: translateY(14px) scale(.96); pointer-events: none; }
+#touchpad-thumb.tp-hidden { opacity: 0; transform: translateX(-50%) translateY(14px) scale(calc(var(--tp-fit, 1) * .96)); pointer-events: none; }
 :root.reduced-motion #touchpad-thumb { transition: none; }
 
 /* --- The page container on the home stage --------------------------------
@@ -461,6 +502,13 @@ body[data-theme="navy"] #touchpad-page {
 
 /* While the page is up, the keyboard group and the two docks step aside. */
 body.touchpad-open #keyboard-outer { opacity: 0; pointer-events: none; transition: opacity var(--sp-quick, 120ms) linear; }
+/* …and everything INSIDE it: the starry (Navy) carve-out in themes.css sets
+   `pointer-events: auto` on #keyboard-scale, and a child's auto beats the
+   parent's none — so an invisible keyboard was opening the app picker under
+   every click on this page (owner, 2026-09-19 17:20, 1.0.121). Same class as
+   the sky-mode rule in styles.css. */
+body.touchpad-open #keyboard-outer * { pointer-events: none !important; }
+body.touchpad-open #touchpad-page, body.touchpad-open #touchpad-page * { pointer-events: auto; }
 body.touchpad-open #gear-dock,
 body.touchpad-open #specials-dock,
 body.touchpad-open #topbar,

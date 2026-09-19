@@ -563,7 +563,7 @@ body.is-blurred #halo { animation-play-state: paused; }
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 14px;
+  gap: 0;
 }
 /* Board recedes while the key editor is open */
 #stage.editing #keyboard-scale { filter: blur(5px) saturate(.85); opacity: .5; }

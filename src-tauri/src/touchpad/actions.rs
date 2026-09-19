@@ -11,6 +11,12 @@
 //!   shares `set_brightness`/`get_brightness` here so there is one path.
 //! * **Scrub** — ←/→ taps through `hook::send_keys_checked` (cookie
 //!   `0x7A7A7A7A`, PROBLEM 227), at a rate `scrub_rate(travel, sensitivity)`.
+//!   RATE-based (continuous, a Touch Bar scrubber) — kept that way in 1.0.122.
+//! * **Chords** ("Any shortcut", 1.0.122) — STEP-based: `chord_steps` quantises
+//!   the signed travel into steps (`chord_step_size(sensitivity)` of the pad's
+//!   short side, past the same dead zone as scrub) and `touchpad::mod` sends
+//!   the forward/backward chord once per new step. Both go out through one
+//!   path, `send_chord` → `engine::actions::chord::send_batch`.
 //!
 //! COM must be initialised on the calling thread first; `touchpad::mod`'s
 //! reader thread does that once at start-up.
@@ -52,6 +58,41 @@ pub fn scrub_rate(travel: f32, sensitivity: u8) -> f32 {
     let span = (1.0 - SCRUB_DEAD_ZONE).max(1e-3);
     let t = (((a - SCRUB_DEAD_ZONE) / span) * sens).clamp(0.0, 1.0);
     SCRUB_MIN_RATE + (SCRUB_MAX_RATE - SCRUB_MIN_RATE) * t
+}
+
+// ---------------------------------------------------------------------------
+// Chord steps ("Any shortcut" — pure, tested)
+// ---------------------------------------------------------------------------
+
+/// The same dead zone as scrub, so the two feel alike at the start.
+pub const CHORD_DEAD_ZONE: f32 = SCRUB_DEAD_ZONE;
+/// Step size at sensitivity 1 and 10, as fractions of the pad's SHORT side.
+pub const CHORD_STEP_SLOW: f32 = 0.12;
+pub const CHORD_STEP_FAST: f32 = 0.02;
+
+/// How far (fraction of the pad's short side) the finger travels per step:
+/// 1 = one step per 12 %, 10 = one per 2 %, linear between. Pure.
+pub fn chord_step_size(sensitivity: u8) -> f32 {
+    let t = (sensitivity.clamp(1, 10) - 1) as f32 / 9.0;
+    CHORD_STEP_SLOW + (CHORD_STEP_FAST - CHORD_STEP_SLOW) * t
+}
+
+/// The signed step count for a signed `travel` (already in short-side units,
+/// `invert` already applied): 0 inside the dead zone, then one step per
+/// `chord_step_size` beyond it, sign from the travel. Pure. The caller keeps
+/// the last count it acted on and sends the forward chord for each +1 and the
+/// backward chord for each −1, so a slide back undoes a slide out.
+pub fn chord_steps(travel: f32, sensitivity: u8) -> i32 {
+    let a = travel.abs();
+    if !a.is_finite() || a < CHORD_DEAD_ZONE {
+        return 0;
+    }
+    let n = ((a - CHORD_DEAD_ZONE) / chord_step_size(sensitivity)).floor() as i32 + 1;
+    if travel < 0.0 {
+        -n
+    } else {
+        n
+    }
 }
 
 /// The k in `cur + k·Δtravel` for the analogue actions (volume, brightness).
@@ -269,35 +310,27 @@ pub fn add_brightness(delta: i32) -> Option<u8> {
 // Scrub — ←/→ taps, cookie-tagged so our own hook passes them through
 // ---------------------------------------------------------------------------
 
-const VK_LEFT: u16 = 0x25;
-const VK_RIGHT: u16 = 0x27;
+pub const VK_LEFT: u16 = 0x25;
+pub const VK_RIGHT: u16 = 0x27;
 
-/// Send one ←/→ tap (down+up). `forward` = Right. Cookie `0x7A7A7A7A`, through
-/// `send_keys_checked` (PROBLEM 227): a partial insert leaves nothing latched.
-pub fn scrub_tap(forward: bool) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
-        VIRTUAL_KEY,
-    };
-    let vk = if forward { VK_RIGHT } else { VK_LEFT };
-    let ev = |keyup: bool| INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(vk),
-                wScan: 0,
-                dwFlags: if keyup { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) },
-                time: 0,
-                dwExtraInfo: 0x7A7A7A7A,
-            },
-        },
-    };
-    let inputs = [ev(false), ev(true)];
-    // SAFETY: SendInput of two cookie-tagged keyboard events; not the hook
+/// Press one chord (downs in order, ups in reverse, ONE `send_keys_checked`
+/// batch, cookie `0x7A7A7A7A` — PROBLEM 227: a partial insert leaves nothing
+/// latched). The scrub taps and the "Any shortcut" steps both come here. An
+/// empty or over-long chord sends nothing.
+pub fn send_chord(keys: &[u16]) {
+    if keys.is_empty() || keys.len() > crate::engine::actions::chord::MAX_KEYS {
+        return;
+    }
+    // SAFETY: SendInput of cookie-tagged keyboard events; not the hook
     // callback, so logging inside send_keys_checked is fine.
     unsafe {
-        let _ = crate::hook::send_keys_checked(&inputs, "touchpad scrub: arrow tap");
+        crate::engine::actions::chord::send_batch(keys);
     }
+}
+
+/// Send one ←/→ tap (down+up). `forward` = Right.
+pub fn scrub_tap(forward: bool) {
+    send_chord(&[if forward { VK_RIGHT } else { VK_LEFT }]);
 }
 
 #[cfg(test)]
@@ -328,6 +361,45 @@ mod tests {
                 let r = scrub_rate(i as f32 / 20.0, s);
                 assert!(r == 0.0 || (SCRUB_MIN_RATE..=SCRUB_MAX_RATE).contains(&r), "s={s} r={r}");
             }
+        }
+    }
+
+    #[test]
+    fn chord_steps_quantise_travel_past_the_dead_zone_in_both_signs() {
+        // Dead zone, both signs.
+        assert_eq!(chord_steps(0.0, 6), 0);
+        assert_eq!(chord_steps(0.029, 6), 0);
+        assert_eq!(chord_steps(-0.029, 6), 0);
+        assert_eq!(chord_steps(f32::NAN, 6), 0);
+        // Just past the dead zone: the first step, in the travel's sign.
+        assert_eq!(chord_steps(0.031, 6), 1);
+        assert_eq!(chord_steps(-0.031, 6), -1);
+        // Sensitivity 1: one step per 12 % → 0.03 + 0.12 = 0.15 is step 2.
+        assert!((chord_step_size(1) - 0.12).abs() < 1e-6);
+        assert_eq!(chord_steps(0.149, 1), 1);
+        assert_eq!(chord_steps(0.151, 1), 2);
+        assert_eq!(chord_steps(-0.151, 1), -2);
+        // Sensitivity 10: one step per 2 % → 0.03 + 0.02·k.
+        assert!((chord_step_size(10) - 0.02).abs() < 1e-6);
+        assert_eq!(chord_steps(0.049, 10), 1);
+        assert_eq!(chord_steps(0.051, 10), 2);
+        assert_eq!(chord_steps(0.231, 10), 11);
+        // Monotonic in travel and in sensitivity; a full slide never explodes.
+        for s in 1..=10u8 {
+            let mut last = 0;
+            for i in 0..=100 {
+                let n = chord_steps(i as f32 / 100.0, s);
+                assert!(n >= last, "s={s} i={i}");
+                last = n;
+            }
+            assert!(chord_steps(0.5, s) <= chord_steps(0.5, 10));
+            assert!(chord_steps(1.0, s) <= 49);
+        }
+        // Invert is applied upstream by the gesture (travel sign flips), so
+        // the quantiser only has to be odd: steps(-t) == -steps(t).
+        for i in 0..=20 {
+            let t = i as f32 / 20.0;
+            assert_eq!(chord_steps(-t, 6), -chord_steps(t, 6));
         }
     }
 

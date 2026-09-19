@@ -1602,6 +1602,12 @@ if (q.has("touchpad")) {
     save: () => {},
     onClose: () => {},
     openWindowsTouchpadSettings: () => {},
+    // No hook here: the recorder "hears" a fixed chord so the fields render.
+    recorder: {
+      start: () => Promise.resolve(),
+      poll: () => Promise.resolve([0x11, 0x09]),
+      stop: () => Promise.resolve(),
+    },
   });
   setTouchpadPresence(state === "unavailable" ? "none" : "precision");
   renderTouchpadPage();

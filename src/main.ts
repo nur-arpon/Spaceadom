@@ -1817,19 +1817,16 @@ function renderTouchpadThumb(): void {
   const thumb = document.getElementById("touchpad-thumb");
   if (!thumb) return;
   const t = appConfig?.touchpad;
-  const onCount = t ? (["left", "right", "top"] as const).filter((e) => t[e].enabled).length : 0;
+  const onCount = t ? (["left", "right", "top", "bottom"] as const).filter((e) => t[e].enabled).length : 0;
   const set = onCount > 0;
-  thumb.innerHTML = set
-    ? `<div class="sp-thumb" role="presentation">
-         <span class="strip strip--left"></span>
-         <span class="strip strip--right"></span>
-         <span class="strip strip--top"></span>
-         <span class="strip strip--bottom"></span>
-         <span class="dots"><i></i><i></i></span>
-       </div>
-       <span class="sp-pill"><span class="sp-badge">TP</span>Touchpad · ${onCount} edge${onCount === 1 ? "" : "s"} on</span>`
-    : `<div class="sp-thumb" role="presentation"><span class="empty"></span></div>
-       <span class="sp-pill sp-pill--off"><span class="sp-badge sp-badge--muted">TP</span>Touchpad · not set up</span>`;
+  // No caption: an edge that is on glows, one that is off stays dim
+  // (owner, 2026-09-19 — "this doesn't need writing").
+  thumb.innerHTML = `<div class="sp-thumb${set ? "" : " sp-thumb--idle"}" role="presentation">
+       ${(["left", "right", "top", "bottom"] as const)
+         .map((e) => `<span class="strip strip--${e}${t && t[e].enabled ? "" : " strip--off"}"></span>`)
+         .join("")}
+       <span class="dots"><i></i><i></i></span>
+     </div>`;
 
   const wanted = touchpadThumbWanted();
   if (wanted) {
@@ -1877,6 +1874,13 @@ function wireTouchpad(): void {
       save: () => void persistConfig(),
       onClose: () => closeTouchpadPage(),
       openWindowsTouchpadSettings: () => void invoke("open_touchpad_settings").catch(() => {}),
+      // "Any shortcut" (1.0.122): the SAME recorder as the key editor's Key
+      // combo — the hook's chord recorder behind chord_record_start/poll/stop.
+      recorder: {
+        start: () => invoke("chord_record_start").then(() => undefined),
+        poll: () => invoke<number[]>("chord_record_poll"),
+        stop: () => invoke("chord_record_stop").then(() => undefined),
+      },
     });
   }
 
@@ -1993,12 +1997,12 @@ function wireKeyboardFit(): void {
   const FILL = 0.75;
   const MAX_SCALE = 2.0;
   // TOUCHPAD T2 — the board and the touchpad thumbnail are ONE scaled group.
-  // When the thumbnail is present the group is taller (14px gap + 208x132
-  // thumb + its ~30px pill ≈ 190px), so the fit divides the room by the
+  // When the thumbnail is present the group is taller (44px gap + 416x198
+  // pad, no caption), so the fit divides the room by the
   // GROUP's height, not the board's — otherwise a large thumbnail could run
   // the group off the bottom. When it is hidden the extra is 0 and the board
   // fills the room exactly as before.
-  const THUMB_GROUP_H = 190;
+  const THUMB_GROUP_H = 0; // the pad hangs below the board and never changes the board fit (owner, 2026-09-19)
   const fit = () => {
     const r = outer.getBoundingClientRect();
     if (!r.width || !r.height) return;
@@ -2008,6 +2012,18 @@ function wireKeyboardFit(): void {
     const room = Math.min(r.width / DESIGN_W, r.height / designH);
     const s = Math.min(MAX_SCALE, room * FILL);
     scale.style.transform = `scale(${s.toFixed(4)})`;
+    // The pad hangs below the board and must never leave the window: if a
+    // short window has no room for 44px + 198px under the board, the PAD
+    // alone shrinks (the keyboard never moves — owner, 2026-09-19).
+    if (thumbShown && thumb) {
+      const stage = document.getElementById("stage")?.getBoundingClientRect();
+      const board = document.getElementById("keyboard-matrix")?.getBoundingClientRect();
+      if (stage && board) {
+        const avail = stage.bottom - 8 - board.bottom - 44 * s;
+        const k = Math.max(0.4, Math.min(1, avail / (198 * s)));
+        thumb.style.setProperty("--tp-fit", k.toFixed(3));
+      }
+    }
     // Published for anything else that should grow with the board. Nothing
     // consumes it yet — the popovers are the obvious candidate, but their
     // entry animation already owns `transform`, so scaling them needs `zoom`

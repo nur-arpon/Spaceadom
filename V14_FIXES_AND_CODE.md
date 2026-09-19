@@ -36545,6 +36545,147 @@ page renders in all three states + both looks under the localhost preview
 agent cannot inject touch reports, so the gesture engine, the pointer freeze
 and the three actions have never run against the real pad from this session.
 
+### 1.0.122 addendum — no reserved edge, "Any shortcut" (`BandAction::Chords`), and the reader's proof line
+
+**Symptom / decision.** Owner, 2026-09-19 17:30: the bottom edge is a normal
+edge, every edge offers every action, and "Any shortcut" is live. Separately,
+his 1.0.121 run logged `touchpad: reader started — pad 3751x2327, aspect
+0.620` and then one-finger edge slides did nothing, and the log could not say
+why: the reader logged nothing per gesture.
+
+**Root cause of the silence.** `reader_loop`'s `on_report` closure had no
+`log::info!` on Enter/Exit and no periodic summary — the only touchpad lines
+were start/stop. **Likeliest cause of the dead slides:** band geometry. The
+probe that proved one-finger arming (`examples/touchpad-probe.rs`) tests
+`raw::edge_of(fx, fy, 0.12)` — 12 % of EACH axis, no length limit: left/right
+= 14 mm, top/bottom = 9 mm on this 119×74 mm pad. The app's `Gesture::in_band`
+tested `fx <= width * aspect` with `width = 0.07`, `aspect = 0.62` → 4.3 % of
+X = **5 mm**, and only the centred 70 % of the edge. The sink itself cannot be
+the difference: `touchpad::mod::reader_loop` calls the same
+`raw::run_sink(&pad, on_report)` the probe calls (probe line 509), so the
+message-only window, `RegisterRawInputDevices(0x0D/0x05, RIDEV_INPUTSINK)` on
+the calling thread, the `GetMessageW` pump and `parse_report` are one code
+path. (`CoInitializeEx(MTA)` before it, in the app only, does not touch raw
+input.) The landing rule also holds: `Gesture::feed` records a contact's
+owner on the report it FIRST appears in and evaluates the live candidate in
+the same call — no previous frame is needed.
+
+**Exact files.** `src-tauri/src/config/schema.rs`,
+`src-tauri/src/touchpad/{mod,gesture,actions}.rs`,
+`src-tauri/src/engine/actions/chord.rs`, `src/types.ts`,
+`src/components/touchpad-page.ts`, `src/main.ts`, `src/preview.ts`,
+`src/styles/touchpad.css`, `scripts/touchpad-page.test.ts`.
+
+**The actual code.**
+
+*Config (`schema.rs`)* — `BandAction` is no longer `Copy`; `Band` follows.
+The unit variants keep their plain-string serde form; the new one is
+externally tagged, so a 1.0.120 config loads unchanged:
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BandAction {
+    Brightness, Volume, Scrub, #[default] None,
+    Chords { #[serde(default)] forward: Vec<u16>, #[serde(default)] backward: Vec<u16> },
+}
+// "action":"scrub"   |   "action":{"chords":{"forward":[17,84],"backward":[17,87]}}
+```
+
+`Band::default_width()` → `0.12`; `Band::CHORD_MAX_KEYS = 8` and `clamped()`
+truncates both chords to it; `Touchpad::normalised()` no longer forces the
+bottom band off (it only clamps). `BandAction::wire()` gives the lowercase tag
+(`"chords"`) for `touchpad-live.action`.
+
+*Step engine (`touchpad/actions.rs`)* — pure, tested:
+
+```rust
+pub const CHORD_DEAD_ZONE: f32 = SCRUB_DEAD_ZONE;   // 0.03
+pub const CHORD_STEP_SLOW: f32 = 0.12;              // sensitivity 1
+pub const CHORD_STEP_FAST: f32 = 0.02;              // sensitivity 10
+pub fn chord_step_size(sensitivity: u8) -> f32 {
+    let t = (sensitivity.clamp(1, 10) - 1) as f32 / 9.0;
+    CHORD_STEP_SLOW + (CHORD_STEP_FAST - CHORD_STEP_SLOW) * t
+}
+pub fn chord_steps(travel: f32, sensitivity: u8) -> i32 {
+    let a = travel.abs();
+    if !a.is_finite() || a < CHORD_DEAD_ZONE { return 0; }
+    let n = ((a - CHORD_DEAD_ZONE) / chord_step_size(sensitivity)).floor() as i32 + 1;
+    if travel < 0.0 { -n } else { n }
+}
+```
+
+`travel` must be in units of the pad's SHORT side; `touchpad::mod::
+travel_short_side(edge, travel, aspect)` divides a horizontal edge's travel
+(a fraction of the long side) by `aspect` (short/long). `invert` is already
+applied by the gesture (its travel sign flips), so the quantiser only has to
+be odd.
+
+*One send path* — `engine::actions::chord::send_batch` became `pub(crate)`;
+`touchpad::actions::send_chord(keys)` guards empty/over-long and calls it;
+`scrub_tap(forward)` is now `send_chord(&[VK_RIGHT or VK_LEFT])` (which also
+gives the arrows the `KEYEVENTF_EXTENDEDKEY` flag they lacked). Scrub stays
+RATE-based (`scrub_rate`, continuous); Chords is STEP-based.
+
+*The reader (`touchpad/mod.rs`)* — per-gesture `chord_sent: i32`; on `Move`:
+
+```rust
+BandAction::Chords { forward, backward } => {
+    let target = actions::chord_steps(travel_short_side(edge, travel, aspect), band.sensitivity);
+    while chord_sent < target { actions::send_chord(forward);  chord_sent += 1; }
+    while chord_sent > target { actions::send_chord(backward); chord_sent -= 1; }
+}
+```
+
+Sliding back lowers the target, so the backward chord goes out — reversible by
+the opposite slide. `LivePayload` gained `chord: Option<String>` (the forward
+chord's name via `engine::specials::chord_name`) and `steps: Option<i32>`.
+The three log lines:
+
+```
+touchpad: band LIVE edge=left action=brightness at (0.041,0.512) width=0.12 length=0.70
+touchpad: band DEAD edge=left travel=0.213 steps=0 after 640 ms
+touchpad: 118 reports/s, max contacts 1, band entries 2, live=false enabled=[Left] last contact (0.512,0.488) (touchpad-proof-line-spaceadom-122)
+```
+
+The summary fires from the report callback every 5 s while reports arrive; if
+it never appears the sink is receiving nothing; if it appears with `band
+entries 0` the landings were outside every enabled band (compare `last
+contact` with the band's width/length); if `band LIVE` appears and nothing
+changes, the action is the fault.
+
+*The page (`touchpad-page.ts`)* — `actionKind()` / `chordsOf()` /
+`actionName()` replace the `ACTION_NAME` record; `actionRow("chords", "Any
+shortcut")` is a live radio; `chordFieldsHtml(edge, band)` draws the two
+fields ("Slide up/down sends…" on a vertical edge, "right/left" on a
+horizontal) with `data-chord-rec` / `data-chord-clear` buttons; `start/
+stopChordRecording` + `paintChordCaps` mirror `key-detail-panel.ts`'s
+recorder over `host.recorder` (`main.ts` maps it to `chord_record_start/
+poll/stop`; `preview.ts` stubs it). `paintLive` writes the chord name and
+`stepsText(steps)` when `live.action === "chords"`. The bottom edge is
+`row("bottom")` in the Edges panel, "n of 4 on", clickable on the pad, and
+gets a switch in the unavailable state. `main.ts`'s thumbnail counts four.
+
+**How it was verified.** `cargo test --release --lib` 787/0/6 (new:
+`chords_round_trip_and_a_bare_chords_object_reads_empty`,
+`an_over_long_chord_is_cut_to_the_sendable_length`,
+`ranges_are_clamped_and_the_bottom_band_is_an_ordinary_band`,
+`chord_steps_quantise_travel_past_the_dead_zone_in_both_signs`,
+`a_contact_that_first_appears_inside_the_band_arms_on_that_report`,
+`the_bottom_edge_behaves_like_every_other_edge`,
+`a_chords_band_names_its_forward_chord_and_a_horizontal_edge_travels_in_short_side_units`),
+clippy 0, tsc 0, Vite clean, `scripts/touchpad-page.test.ts` (no "Later"/
+"Reserved" string, all five action rows, the recorder wiring, the starry
+opt-in) + the three older node tests. **UNPROVEN on hardware:** everything
+that moves a finger — the agent cannot inject touch reports.
+
+**Generalise this.** A feature that consumes an input stream must log a
+periodic count of what it received and a line per state change, or "it did
+nothing" cannot be split into "got no input" / "input never matched" /
+"matched and the action failed". And when a probe proves a mechanism, ship
+the probe's thresholds (12 %), not a redesigned one (7 % × aspect = 5 mm).
+
+
 ---
 
 ## PHASE A — STEP 4: THE SPACE RING TRIM AND THE SIMPLE EDITOR (2026-09-19; in the 1.0.120 tree beside the touchpad work, no version bump — gates green: 781 unit tests / 0 failed / 6 ignored, clippy 0, tsc 0, vite clean; **NOT BUILT AS AN INSTALLER, NOT INSTALLED, NO GIT** — the lead does that)

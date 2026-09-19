@@ -204,6 +204,7 @@ body[data-theme="starry"][data-fun="on"] #specials-dock > *,
 body[data-theme="starry"][data-fun="on"] #editor-backdrop:not([hidden]),
 body[data-theme="starry"][data-fun="on"] #conflict-banner,
 body[data-theme="starry"][data-fun="on"] #undo-banner,
-body[data-theme="starry"][data-fun="on"] #context-menu {
+body[data-theme="starry"][data-fun="on"] #context-menu,
+body[data-theme="starry"][data-fun="on"] #touchpad-page {
   pointer-events: auto;
 }

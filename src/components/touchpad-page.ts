@@ -3,9 +3,17 @@
  *
  * Transcribed from design/spaceadom-touchpad_1.html (six screens), with the
  * two-finger copy/demo changed to ONE finger per the T1b hardware result.
- * A LEAF module: it imports only types, so `preview.ts` can render it. The
- * host (main.ts) supplies config access, a save, a close, and the Windows
- * touchpad-settings opener; live values arrive through `setTouchpadLive`.
+ * A LEAF module: it imports only types and the pure `vk-names` labels, so
+ * `preview.ts` can render it. The host (main.ts) supplies config access, a
+ * save, a close, the Windows touchpad-settings opener and the chord recorder
+ * (the key editor's `chord_record_start/poll/stop`); live values arrive
+ * through `setTouchpadLive`.
+ *
+ * 1.0.122 (owner, 2026-09-19 17:30): the bottom is a normal edge like the
+ * other three (nothing is held back for a future version), and every
+ * edge offers Brightness · Volume · Video scrub · Any shortcut · Nothing.
+ * "Any shortcut" records two chords (slide up/right, slide down/left) with
+ * the SAME recorder UI as the key editor's Key combo.
  *
  * Screens, all one component driven by state:
  *   1  default / first-run (the one-finger demo + the invitation card)
@@ -19,20 +27,40 @@ import type {
   AppConfig,
   Band,
   BandAction,
+  BandActionKind,
+  BandChords,
   TouchEdge,
   Touchpad,
   TouchpadLive,
   TouchpadPresence,
 } from "../types";
+import { chordLabel, vkLabel } from "./vk-names";
 
 // --- host + module state ----------------------------------------------------
+
+/** The key editor's chord recorder, behind `chord_record_start/poll/stop`. */
+export interface ChordRecorderHost {
+  start(): Promise<void>;
+  /** The chord as of the last key-down, in press order (empty = nothing yet). */
+  poll(): Promise<number[]>;
+  stop(): Promise<void>;
+}
 
 export interface TouchpadPageHost {
   getConfig(): AppConfig | null;
   save(): void | Promise<void>;
   onClose(): void;
   openWindowsTouchpadSettings(): void;
+  /** Absent (a host with no hook) = the record buttons do nothing. */
+  recorder?: ChordRecorderHost;
 }
+
+type ChordDir = "forward" | "backward";
+/** A recording in progress: which band, which direction, the poll timer. */
+let recording: { edge: TouchEdge; dir: ChordDir; timer: number; polls: number } | null = null;
+/** 100 ms polls; the hook disarms itself past RECORD_MAX_MS anyway (same as
+ *  the key editor's RECORD_POLLS). */
+const RECORD_POLLS = 150;
 
 let root: HTMLElement | null = null;
 let host: TouchpadPageHost | null = null;
@@ -92,13 +120,38 @@ const EDGE_NAME: Record<TouchEdge, string> = {
   top: "Top edge",
   bottom: "Bottom edge",
 };
-const ACTION_NAME: Record<BandAction, string> = {
+const KIND_NAME: Record<BandActionKind, string> = {
   brightness: "Brightness",
   volume: "Volume",
   scrub: "Video scrub",
   none: "Nothing",
+  chords: "Any shortcut",
 };
+
+/** The action's family. */
+export function actionKind(a: BandAction | null | undefined): BandActionKind {
+  if (!a) return "none";
+  return typeof a === "string" ? a : "chords";
+}
+
+/** The two chords of an "Any shortcut" action, or null. */
+export function chordsOf(a: BandAction | null | undefined): BandChords["chords"] | null {
+  return a && typeof a === "object" && a.chords ? a.chords : null;
+}
+
+/** The label on the band's pill and the edge rows: the family name, or for
+ *  "Any shortcut" the forward chord itself once one is recorded. */
+export function actionName(a: BandAction | null | undefined): string {
+  const c = chordsOf(a);
+  if (c) return c.forward.length ? chordLabel(c.forward) : KIND_NAME.chords;
+  return KIND_NAME[actionKind(a)];
+}
+
 const isVertical = (e: TouchEdge) => e === "left" || e === "right";
+/** "up"/"down" on a vertical edge, "right"/"left" on a horizontal one. */
+function dirWord(edge: TouchEdge, dir: ChordDir): string {
+  return isVertical(edge) ? (dir === "forward" ? "up" : "down") : dir === "forward" ? "right" : "left";
+}
 
 function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
@@ -165,6 +218,7 @@ export function renderTouchpadPage(): void {
 
 function render(): void {
   if (!root) return;
+  if (recording) stopChordRecording(false);
   const t = tp();
   root.dataset.look = t.page_look === "app" ? "app" : "chocolate";
 
@@ -201,22 +255,18 @@ function bandHtml(edge: TouchEdge): string {
   const wpx = Math.round(b.width * PAD_W);
   const len = `${Math.round(b.length * 100)}%`;
   const liveOn = live?.edge === edge;
-  const reserved = edge === "bottom";
   const cls = [
     "sp-band",
     `sp-band--${edge}`,
     b.enabled && !liveOn ? "is-on" : "",
     liveOn ? "is-live" : "",
     selected === edge ? "is-selected" : "",
-    reserved && !b.enabled ? "is-reserved" : "",
   ]
     .filter(Boolean)
     .join(" ");
-  const pill = reserved
-    ? `<span class="sp-pill sp-pill--off" style="background:#201812;border-color:#33261F;color:var(--sp-text-4);"><span class="sp-badge sp-badge--dim">B</span>Reserved · Coming later</span>`
-    : b.enabled
-      ? `<span class="sp-pill"><span class="sp-badge">${BADGE[edge]}</span>${ACTION_NAME[b.action]}</span>`
-      : `<span class="sp-pill sp-pill--off"><span class="sp-badge sp-badge--muted">${BADGE[edge]}</span>${ACTION_NAME[b.action]} · Off</span>`;
+  const pill = b.enabled
+    ? `<span class="sp-pill"><span class="sp-badge">${BADGE[edge]}</span>${esc(actionName(b.action))}</span>`
+    : `<span class="sp-pill sp-pill--off"><span class="sp-badge sp-badge--muted">${BADGE[edge]}</span>${esc(actionName(b.action))} · Off</span>`;
   const handles =
     selected === edge && b.enabled
       ? `<span class="sp-handle sp-handle--width" data-drag="width"></span>
@@ -248,7 +298,7 @@ function demoHtml(): string {
 
 function pageHtml(): string {
   const t = tp();
-  const onCount = EDGES.filter((e) => e !== "bottom" && t[e].enabled).length;
+  const onCount = EDGES.filter((e) => t[e].enabled).length;
   const statusText = live?.edge ? "You are sliding now" : onCount === 0 ? "Nothing on yet" : `${onCount} edge${onCount === 1 ? "" : "s"} on`;
   const statusCls = live?.edge ? "sp-status--live" : onCount > 0 ? "sp-status--on" : "";
 
@@ -263,13 +313,13 @@ function pageHtml(): string {
     ? `
       <div class="sp-card sp-card--empty">
         <div style="display:flex;align-items:center;justify-content:center;gap:5px;height:16px;">
-          <span style="width:5px;height:5px;border-radius:999px;background:#5A4538;"></span>
+          <span style="width:5px;height:5px;border-radius:999px;background:var(--sp-text-4);"></span>
           <span style="width:7px;height:7px;border-radius:999px;background:#7A5F4C;"></span>
           <span style="width:11px;height:11px;border-radius:999px;background:var(--sp-accent);margin-left:3px;"></span>
         </div>
         <h2>Start at the edge</h2>
-        <p>One finger in the middle just moves the pointer. Start a finger inside an edge band and slide, and it changes something. Begin with the top edge and a video scrubs back and forth.</p>
-        <button type="button" class="sp-btn sp-btn--primary" style="margin-top:16px;" data-tp="invite-top">Turn on video scrub</button>
+        <p>Watch the left edge: a finger that starts in the middle just moves the pointer; a finger that starts inside the band slides the brightness. Turn on the left edge and try it — then give the top edge to a video.</p>
+        <button type="button" class="sp-btn sp-btn--primary" style="margin-top:16px;" data-tp="invite-left">Turn on the left edge</button>
         <div><button type="button" class="sp-btn sp-btn--ghost" style="margin-top:10px;" data-tp="show-demo">Show me again</button></div>
       </div>`
     : "";
@@ -298,18 +348,29 @@ function pageHtml(): string {
     </div>`;
 }
 
+/** "3 steps" / "1 step" / "−2 steps" for the chords readout. */
+function stepsText(n: number | null | undefined): string {
+  const v = n ?? 0;
+  const shown = v < 0 ? `−${-v}` : String(v);
+  return `${shown} step${Math.abs(v) === 1 ? "" : "s"}`;
+}
+
 function liveCardHtml(): string {
   const pct = live?.value_pct ?? 0;
   const edge = live?.edge as TouchEdge;
-  const action = live?.action ?? "volume";
-  const label = ACTION_NAME[(action as BandAction) ?? "volume"];
+  const kind: BandActionKind = live?.action ?? "volume";
+  const chords = kind === "chords";
+  // Chords: the chord name where the percent goes, a step counter under it,
+  // no meter (a step count has no full scale).
+  const big = chords ? esc(live?.chord || KIND_NAME.chords) : `${pct}%`;
+  const label = chords ? stepsText(live?.steps) : KIND_NAME[kind];
   return `
     <div class="sp-card sp-card--read" data-live-card="1">
       <div style="display:flex;align-items:center;gap:8px;">
         <span class="sp-badge">${BADGE[edge]}</span><span style="font-size:12px;color:var(--sp-text-2);">${EDGE_NAME[edge]}</span>
       </div>
-      <div class="sp-readout"><b data-live-pct>${pct}%</b><span>${label}</span></div>
-      <div class="sp-meter" style="--value:${pct}%;" data-live-meter><i></i></div>
+      <div class="sp-readout"><b data-live-pct${chords ? ' style="font-size:22px;"' : ""}>${big}</b><span data-live-label>${label}</span></div>
+      ${chords ? "" : `<div class="sp-meter" style="--value:${pct}%;" data-live-meter><i></i></div>`}
       <p style="color:var(--sp-text-3);font-size:12.5px;">Keep sliding to change it. Lift your finger when it is right.</p>
     </div>
     <span class="sp-pill sp-pill--off" style="position:absolute;left:50%;transform:translateX(-50%);bottom:76px;">
@@ -327,7 +388,7 @@ function edgesPanelHtml(onCount: number): string {
       <div class="sp-row${suggested ? "" : ""}"${suggested ? ' style="border-color:var(--sp-band-edge);"' : ""}>
         <button type="button" style="display:flex;align-items:center;gap:10px;flex:1 1 auto;text-align:left;" data-open-edge="${edge}">
           <span class="sp-badge ${b.enabled ? "" : "sp-badge--muted"}">${BADGE[edge]}</span>
-          <span style="flex:1 1 auto;"><span class="label">${EDGE_NAME[edge]}</span><span class="sub">${ACTION_NAME[b.action]}${suggested ? " — suggested" : ""}</span></span>
+          <span style="flex:1 1 auto;"><span class="label">${EDGE_NAME[edge]}</span><span class="sub">${esc(actionName(b.action))}${suggested ? " — suggested" : ""}</span></span>
         </button>
         <button type="button" class="sp-switch" role="switch" aria-checked="${b.enabled}" data-toggle-edge="${edge}" aria-label="Turn ${b.enabled ? "off" : "on"} ${EDGE_NAME[edge].toLowerCase()}"></button>
       </div>`;
@@ -335,16 +396,12 @@ function edgesPanelHtml(onCount: number): string {
   return `
     <aside class="sp-panel">
       <div style="display:flex;align-items:baseline;justify-content:space-between;">
-        <h2>Edges</h2><span style="font-size:12px;color:var(--sp-text-3);">${onCount} of 3 on</span>
+        <h2>Edges</h2><span style="font-size:12px;color:var(--sp-text-3);">${onCount} of 4 on</span>
       </div>
       ${row("left")}
       ${row("right")}
       ${row("top", !t.top.enabled)}
-      <div class="sp-row sp-row--dim">
-        <span class="sp-badge sp-badge--dim">B</span>
-        <span style="flex:1 1 auto;"><span class="label">Bottom edge</span><span class="sub">Reserved</span></span>
-        <span class="sp-tag">Later</span>
-      </div>
+      ${row("bottom")}
       <span class="sp-spacer"></span>
       <div class="sp-well">
         <p style="font-weight:600;color:var(--sp-text-2);">How it works</p>
@@ -366,23 +423,22 @@ function bandPanelHtml(edge: TouchEdge): string {
   const lenPct = Math.round(b.length * 100);
   const sensLabel = b.sensitivity <= 3 ? "Slow" : b.sensitivity >= 8 ? "Fast" : "Medium";
   const sensPct = Math.round(((b.sensitivity - 1) / 9) * 100);
-  const actionRow = (a: BandAction, label: string, disabled = false): string => {
-    if (disabled) {
-      return `<div class="sp-row sp-row--dim" style="padding:9px 11px;border-radius:var(--sp-r-ctl);font-size:13px;color:var(--sp-text-4);">
-        <span style="width:16px;height:16px;flex:0 0 auto;border-radius:999px;border:1.5px solid var(--sp-line-strong);"></span>
-        <span style="flex:1 1 auto;">${label}</span><span class="sp-tag">Later</span></div>`;
-    }
-    const on = b.action === a;
+  const kind = actionKind(b.action);
+  const actionRow = (a: BandActionKind, label: string): string => {
+    const on = kind === a;
     return `<button type="button" class="sp-row${on ? " sp-row--picked" : ""}" style="padding:9px 11px;border-radius:var(--sp-r-ctl);font-size:13px;${on ? "font-weight:600;" : ""}" aria-pressed="${on}" data-set-action="${a}">
-      <span style="width:16px;height:16px;flex:0 0 auto;border-radius:999px;border:${on ? "5px solid var(--sp-accent)" : "1.5px solid #5A4538"};"></span>${label}
+      <span style="width:16px;height:16px;flex:0 0 auto;border-radius:999px;border:${on ? "5px solid var(--sp-accent)" : "1.5px solid var(--sp-line-strong)"};"></span>${label}
     </button>`;
   };
   const flipSub =
-    b.action === "volume"
+    kind === "volume"
       ? "Sliding up would lower the volume"
-      : b.action === "brightness"
+      : kind === "brightness"
         ? "Sliding up would dim the screen"
-        : "Sliding right would rewind";
+        : kind === "chords"
+          ? `Sliding ${dirWord(edge, "forward")} would send the ${dirWord(edge, "backward")} shortcut`
+          : "Sliding right would rewind";
+  const chordFields = kind === "chords" ? chordFieldsHtml(edge, b) : "";
   return `
     <aside class="sp-panel">
       <button type="button" class="sp-btn sp-btn--ghost" style="align-self:flex-start;padding:3px 10px 3px 6px;font-size:11.5px;color:var(--sp-text-3);" data-tp="all-edges">&lsaquo;&nbsp; All edges</button>
@@ -397,10 +453,11 @@ function bandPanelHtml(edge: TouchEdge): string {
           ${actionRow("brightness", "Brightness")}
           ${actionRow("volume", "Volume")}
           ${actionRow("scrub", "Video scrub")}
+          ${actionRow("chords", "Any shortcut")}
           ${actionRow("none", "Nothing")}
-          ${actionRow("none", "Any shortcut", true)}
         </div>
       </div>
+      ${chordFields}
       <div>
         <h2>The band</h2>
         <div class="sp-row" style="margin-top:8px;padding:9px 11px;border-radius:var(--sp-r-ctl);">
@@ -435,6 +492,36 @@ function bandPanelHtml(edge: TouchEdge): string {
     </aside>`;
 }
 
+/** The two recorder fields of "Any shortcut": what a slide each way sends. */
+function chordFieldsHtml(edge: TouchEdge, b: Band): string {
+  const c = chordsOf(b.action) ?? { forward: [], backward: [] };
+  const field = (dir: ChordDir): string => {
+    const keys = c[dir];
+    const rec = recording?.edge === edge && recording.dir === dir;
+    const caps = keys.length
+      ? keys.map((vk, i) => `${i ? '<span class="plus">+</span>' : ""}<kbd>${esc(vkLabel(vk))}</kbd>`).join("")
+      : `<span class="none">${rec ? "Listening…" : "No keys yet"}</span>`;
+    return `
+      <div class="sp-chord" data-chord-field="${dir}">
+        <span class="label">Slide ${dirWord(edge, dir)} sends…</span>
+        <div class="sp-chord-caps" data-chord-caps="${dir}">${caps}</div>
+        <div class="sp-chord-btns">
+          <button type="button" class="sp-btn${rec ? " is-recording" : ""}" data-chord-rec="${dir}">${rec ? "Recording… press now" : "Press the keys…"}</button>
+          <button type="button" class="sp-btn sp-btn--ghost" data-chord-clear="${dir}"${keys.length ? "" : " disabled"}>Clear</button>
+        </div>
+      </div>`;
+  };
+  return `
+      <div>
+        <h2>The shortcuts</h2>
+        <p style="margin-top:6px;font-size:11.5px;line-height:1.5;color:var(--sp-text-4);">Press the keys together, then let go. Each step of the slide sends it once; sliding back sends the other one.</p>
+        <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
+          ${field("forward")}
+          ${field("backward")}
+        </div>
+      </div>`;
+}
+
 function unavailableHtml(): string {
   return `
     <div class="sp-app">
@@ -446,7 +533,7 @@ function unavailableHtml(): string {
             <div class="sp-band sp-band--left is-dead" style="--band-w:54px; --band-len:67%;"></div>
             <div class="sp-band sp-band--right is-dead" style="--band-w:54px; --band-len:67%;"></div>
             <div class="sp-band sp-band--bottom is-dead" style="--band-w:54px; --band-len:80%;"></div>
-            <div class="sp-card sp-card--empty" style="top:148px;width:400px;background:#241A14;">
+            <div class="sp-card sp-card--empty" style="top:148px;width:400px;background:var(--sp-surface-2);">
               <div style="display:flex;justify-content:center;">
                 <svg width="44" height="32" viewBox="0 0 44 32" fill="none" aria-hidden="true">
                   <rect x="1.1" y="1.1" width="41.8" height="29.8" rx="5" style="stroke:var(--sp-text-4);" stroke-width="1.6"/>
@@ -463,16 +550,16 @@ function unavailableHtml(): string {
           </div>
           <p class="hint" style="color:var(--sp-text-4);">Everything else in Spaceadom works as usual.</p>
         </main>
-        <aside class="sp-panel" style="background:#1F1712;border-color:var(--sp-line-soft);box-shadow:none;">
-          <div class="sp-well" style="background:#251B15;border-color:#33261F;">
+        <aside class="sp-panel" style="background:var(--sp-surface);border-color:var(--sp-line-soft);box-shadow:none;">
+          <div class="sp-well" style="background:var(--sp-well);border-color:var(--sp-line);">
             <p style="font-size:12px;">These settings are here for when you move to a laptop with a Precision Touchpad.</p>
           </div>
           <h2 style="color:var(--sp-text-4);">Edges</h2>
           ${EDGES.map(
             (e) => `<div class="sp-row sp-row--dim" style="background:var(--sp-surface);">
               <span class="sp-badge sp-badge--dim">${BADGE[e]}</span>
-              <span style="flex:1 1 auto;"><span class="label">${EDGE_NAME[e]}</span><span class="sub">${ACTION_NAME[defaultBand(e).action]}</span></span>
-              ${e === "bottom" ? '<span class="sp-tag">Later</span>' : '<span class="sp-switch" aria-disabled="true"></span>'}
+              <span style="flex:1 1 auto;"><span class="label">${EDGE_NAME[e]}</span><span class="sub">${esc(actionName(defaultBand(e).action))}</span></span>
+              <span class="sp-switch" aria-disabled="true"></span>
             </div>`,
           ).join("")}
           <span class="sp-spacer"></span>
@@ -488,9 +575,9 @@ function cornerHtml(): string {
   const h = ask.horizontal;
   const opt = (edge: TouchEdge, sub: string): string =>
     `<button type="button" class="sp-row" style="padding:11px;" aria-pressed="false" data-corner-owner="${edge}">
-      <span style="width:16px;height:16px;flex:0 0 auto;border-radius:999px;border:1.5px solid #5A4538;"></span>
+      <span style="width:16px;height:16px;flex:0 0 auto;border-radius:999px;border:1.5px solid var(--sp-line-strong);"></span>
       <span class="sp-badge">${BADGE[edge]}</span>
-      <span style="flex:1 1 auto;"><span class="label">${ACTION_NAME[tp()[edge].action]}</span><span class="sub">${sub}</span></span>
+      <span style="flex:1 1 auto;"><span class="label">${esc(actionName(tp()[edge].action))}</span><span class="sub">${sub}</span></span>
     </button>`;
   return `
     <div class="sp-app">
@@ -498,7 +585,7 @@ function cornerHtml(): string {
       <div class="sp-body">
         <main class="sp-stage">
           <div style="display:flex;align-items:center;gap:14px;padding:14px 16px;border-radius:var(--sp-r-card);background:var(--sp-surface);border:1px solid var(--sp-line-strong);box-shadow:var(--sp-sh-card);max-width:520px;">
-            <span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;flex:0 0 auto;border-radius:999px;background:var(--sp-surface-3);border:1px solid #55402F;color:var(--sp-text-2);font-size:15px;font-weight:700;">?</span>
+            <span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;flex:0 0 auto;border-radius:999px;background:var(--sp-surface-3);border:1px solid var(--sp-line-strong);color:var(--sp-text-2);font-size:15px;font-weight:700;">?</span>
             <span style="flex:1 1 auto;">
               <span style="display:block;font-size:13.5px;font-weight:600;">Your ${EDGE_NAME[h].toLowerCase()} and ${EDGE_NAME[v].toLowerCase()} bands now share a corner</span>
               <span style="display:block;margin-top:3px;font-size:12.5px;color:var(--sp-text-2);">A finger landing in the shaded square could mean either one. Pick which.</span>
@@ -526,8 +613,14 @@ function cornerHtml(): string {
 
 function paintLive(): void {
   if (!root) return;
-  const pct = live?.value_pct ?? 0;
   const b = root.querySelector<HTMLElement>("[data-live-pct]");
+  if (live?.action === "chords") {
+    if (b) b.textContent = live.chord || KIND_NAME.chords;
+    const l = root.querySelector<HTMLElement>("[data-live-label]");
+    if (l) l.textContent = stepsText(live.steps);
+    return;
+  }
+  const pct = live?.value_pct ?? 0;
   if (b) b.textContent = `${pct}%`;
   const m = root.querySelector<HTMLElement>("[data-live-meter]");
   if (m) m.style.setProperty("--value", `${pct}%`);
@@ -553,9 +646,9 @@ function wirePage(): void {
       render();
     }),
   );
-  root.querySelectorAll<HTMLElement>('[data-tp="invite-top"]').forEach((el) =>
+  root.querySelectorAll<HTMLElement>('[data-tp="invite-left"]').forEach((el) =>
     el.addEventListener("click", () => {
-      enableEdge("top", true);
+      enableEdge("left", true);
     }),
   );
   root.querySelectorAll<HTMLElement>('[data-tp="all-edges"]').forEach((el) =>
@@ -578,17 +671,43 @@ function wirePage(): void {
   );
   root.querySelectorAll<HTMLElement>("[data-band]").forEach((el) =>
     el.addEventListener("click", () => {
-      const edge = el.dataset.band as TouchEdge;
-      if (edge !== "bottom") {
-        selected = edge;
-        render();
-      }
+      selected = el.dataset.band as TouchEdge;
+      render();
     }),
   );
   root.querySelectorAll<HTMLElement>("[data-set-action]").forEach((el) =>
     el.addEventListener("click", () => {
       if (!selected) return;
-      t[selected].action = el.dataset.setAction as BandAction;
+      const kind = el.dataset.setAction as BandActionKind;
+      const b = t[selected];
+      if (kind === "chords") {
+        // Keep chords already recorded on this band; start empty otherwise.
+        if (!chordsOf(b.action)) b.action = { chords: { forward: [], backward: [] } };
+      } else {
+        b.action = kind;
+      }
+      save();
+      render();
+    }),
+  );
+  root.querySelectorAll<HTMLElement>("[data-chord-rec]").forEach((el) =>
+    el.addEventListener("click", () => {
+      if (!selected) return;
+      const dir = el.dataset.chordRec as ChordDir;
+      if (recording && recording.edge === selected && recording.dir === dir) {
+        stopChordRecording(true);
+      } else {
+        startChordRecording(selected, dir);
+      }
+    }),
+  );
+  root.querySelectorAll<HTMLElement>("[data-chord-clear]").forEach((el) =>
+    el.addEventListener("click", () => {
+      if (!selected) return;
+      const dir = el.dataset.chordClear as ChordDir;
+      const c = chordsOf(t[selected].action);
+      if (!c) return;
+      c[dir] = [];
       save();
       render();
     }),
@@ -697,12 +816,95 @@ function applyBandStyle(edge: TouchEdge): void {
   el.style.setProperty("--band-len", `${Math.round(b.length * 100)}%`);
 }
 
+// --- the chord recorder ("Any shortcut") -------------------------------------
+// The same arrangement as key-detail-panel.ts's startRecording/stopRecording:
+// arm the hook, poll every 100 ms, take the chord as of the last key-down.
+// The recorded keys land in the band's action as they arrive (so a full
+// re-render never loses them); stopping saves.
+
+function startChordRecording(edge: TouchEdge, dir: ChordDir): void {
+  const rec = host?.recorder;
+  if (!rec) return;
+  if (recording) stopChordRecording(false);
+  void rec.start().catch(() => {});
+  const timer = window.setInterval(() => {
+    if (!recording) return;
+    recording.polls += 1;
+    if (recording.polls > RECORD_POLLS) {
+      stopChordRecording(true);
+      return;
+    }
+    rec
+      .poll()
+      .then((keys) => {
+        if (!recording || recording.edge !== edge || recording.dir !== dir) return;
+        if (keys.length) {
+          const c = chordsOf(tp()[edge].action);
+          if (c) {
+            c[dir] = keys.slice(0, 8);
+            paintChordCaps(edge, dir);
+          }
+        }
+      })
+      .catch(() => {});
+  }, 100);
+  recording = { edge, dir, timer, polls: 0 };
+  paintChordCaps(edge, dir);
+  const btn = root?.querySelector<HTMLButtonElement>(`[data-chord-rec="${dir}"]`);
+  if (btn) {
+    btn.textContent = "Recording… press now";
+    btn.classList.add("is-recording");
+  }
+}
+
+/** End the recording; `commit` saves and re-renders (a plain re-render is
+ *  what called us otherwise, so it must not recurse). */
+function stopChordRecording(commit: boolean): void {
+  if (!recording) return;
+  window.clearInterval(recording.timer);
+  recording = null;
+  void host?.recorder?.stop().catch(() => {});
+  if (commit) {
+    save();
+    render();
+  }
+}
+
+/** Repaint one field's key caps in place while recording. */
+function paintChordCaps(edge: TouchEdge, dir: ChordDir): void {
+  const caps = root?.querySelector<HTMLElement>(`[data-chord-caps="${dir}"]`);
+  if (!caps) return;
+  const c = chordsOf(tp()[edge].action);
+  const keys = c ? c[dir] : [];
+  caps.innerHTML = "";
+  if (!keys.length) {
+    const none = document.createElement("span");
+    none.className = "none";
+    none.textContent = recording ? "Listening…" : "No keys yet";
+    caps.appendChild(none);
+  } else {
+    keys.forEach((vk, i) => {
+      if (i) {
+        const plus = document.createElement("span");
+        plus.className = "plus";
+        plus.textContent = "+";
+        caps.appendChild(plus);
+      }
+      const k = document.createElement("kbd");
+      k.textContent = vkLabel(vk);
+      caps.appendChild(k);
+    });
+  }
+  const clear = root?.querySelector<HTMLButtonElement>(`[data-chord-clear="${dir}"]`);
+  if (clear) clear.disabled = !keys.length;
+}
+
 // --- enabling a band (with the corner question) -----------------------------
 
 function enableEdge(edge: TouchEdge, on: boolean): void {
   const t = tp();
   t[edge].enabled = on;
-  if (edge !== "bottom") selected = edge;
+  selected = edge;
   // Turning a band ON may create a new vertical+horizontal overlap whose
   // corner is unresolved and whose rule is "ask" → ask now (screen 5a).
   if (on && t.corner_rule === "ask") {
