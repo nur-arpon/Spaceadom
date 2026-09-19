@@ -27,7 +27,9 @@
 pub mod actions;
 pub mod bands;
 pub mod gesture;
+pub mod presets;
 pub mod raw;
+pub mod seek;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
@@ -230,18 +232,101 @@ fn start_reader(app: AppHandle, pad: raw::DeviceInfo) {
 }
 
 /// The percent shown while a band is live. Volume/brightness read the real
-/// value; scrub shows its own speed as a fraction of the maximum tap rate;
-/// chords show no percent (the page shows the chord name + a step counter).
-fn live_value_pct(action: &BandAction, travel: f32, sensitivity: u8) -> u8 {
+/// value; scrub shows its own speed as a fraction of its cap; seek shows the
+/// position as a percent of the video (the caller computes it — this is the
+/// Enter value, 0 until the session is read); chords and presets show no
+/// percent (the page shows the name + a step counter).
+fn live_value_pct(action: &BandAction, travel: f32, sensitivity: u8, band_length: f32) -> u8 {
     match action {
         BandAction::Volume => actions::get_volume_pct().unwrap_or(0),
         BandAction::Brightness => actions::get_brightness().unwrap_or(0),
-        BandAction::Scrub => {
-            let r = actions::scrub_rate(travel, sensitivity);
-            ((r / actions::SCRUB_MAX_RATE) * 100.0).round().clamp(0.0, 100.0) as u8
-        }
-        BandAction::None | BandAction::Chords { .. } => 0,
+        BandAction::Scrub => scrub_pct(travel, sensitivity, band_length),
+        BandAction::Seek | BandAction::None | BandAction::Chords { .. } | BandAction::Preset { .. } => 0,
     }
+}
+
+/// Scrub's speed bar: the current rate as a percent of the cap. Pure.
+fn scrub_pct(travel: f32, sensitivity: u8, band_length: f32) -> u8 {
+    let r = actions::scrub_rate(travel, sensitivity, band_length);
+    ((r / actions::scrub_cap(sensitivity)) * 100.0).round().clamp(0.0, 100.0) as u8
+}
+
+/// What a live gesture actually DRIVES, resolved once on Enter from the
+/// band's action. A `Seek` band whose session cannot be seeked becomes
+/// `Scrub` for that one gesture (the owner's fallback rule); a `Preset`
+/// becomes a `Steps` pair with its once-per-slide flag; `Chords` is a
+/// `Steps` pair that always steps.
+enum Drive {
+    Volume,
+    Brightness,
+    Scrub,
+    Seek(seek::SeekSession),
+    /// A Seek band that fell back: scrub, but the pill says why.
+    SeekFallback,
+    Steps {
+        forward: Vec<u16>,
+        backward: Vec<u16>,
+        once: bool,
+        /// The Track preset: skip through the media session when one exists.
+        track: bool,
+    },
+    None,
+}
+
+impl Drive {
+    /// Open the drive for `action`. Impure only for `Seek` (one WinRT read).
+    fn open(action: &BandAction) -> Drive {
+        match action {
+            BandAction::Volume => Drive::Volume,
+            BandAction::Brightness => Drive::Brightness,
+            BandAction::Scrub => Drive::Scrub,
+            BandAction::None => Drive::None,
+            BandAction::Seek => match seek::SeekSession::open() {
+                Some(s) => Drive::Seek(s),
+                None => Drive::SeekFallback,
+            },
+            BandAction::Chords { forward, backward } => Drive::Steps {
+                forward: forward.clone(),
+                backward: backward.clone(),
+                once: false,
+                track: false,
+            },
+            BandAction::Preset { id } => {
+                let s = presets::spec(*id);
+                Drive::Steps {
+                    forward: s.forward.to_vec(),
+                    backward: s.backward.to_vec(),
+                    once: s.once_per_slide,
+                    track: matches!(id, crate::config::schema::PresetId::Track),
+                }
+            }
+        }
+    }
+
+    fn scrubs(&self) -> bool {
+        matches!(self, Drive::Scrub | Drive::SeekFallback)
+    }
+
+    /// The log word.
+    fn name(&self) -> &'static str {
+        match self {
+            Drive::Volume => "volume",
+            Drive::Brightness => "brightness",
+            Drive::Scrub => "scrub",
+            Drive::Seek(_) => "seek",
+            Drive::SeekFallback => "seek→scrub",
+            Drive::Steps { once: false, .. } => "steps",
+            Drive::Steps { once: true, .. } => "once",
+            Drive::None => "none",
+        }
+    }
+}
+
+/// The signed travel as a fraction of the BAND'S LENGTH (−1..1), what the seek
+/// mapping wants. Pure.
+fn travel_of_band(travel: f32, band_length: f32) -> f32 {
+    let len = if band_length.is_finite() && band_length > 0.0 { band_length } else { 1.0 };
+    (travel / len).clamp(-1.0, 1.0)
 }
 
 /// Travel in units of the pad's SHORT side (what `chord_steps` wants): a
@@ -261,10 +346,13 @@ struct LivePayload {
     action: Option<&'static str>,
     value_pct: Option<u8>,
     travel: Option<f32>,
-    /// `Chords` only: the forward chord's name ("Ctrl+Tab") for the readout.
+    /// `Chords`: the forward chord's name ("Ctrl+Tab"); `Preset`: its name.
     chord: Option<String>,
-    /// `Chords` only: the signed step count sent so far this gesture.
+    /// `Chords` and stepped presets: the signed step count sent so far.
     steps: Option<i32>,
+    /// `Seek` only: "12:34 / 45:00" while a session is live; `null` for the
+    /// scrub fallback.
+    seek: Option<String>,
 }
 
 fn edge_wire(e: TouchEdge) -> &'static str {
@@ -280,11 +368,23 @@ fn action_wire(a: &BandAction) -> &'static str {
     a.wire()
 }
 
-/// The readout name for a `Chords` band: its forward chord, or "(no keys)".
+/// The readout name for a `Chords` band: its forward chord, or "(no keys)";
+/// for a `Preset` band: the preset's name.
 fn chord_label(a: &BandAction) -> Option<String> {
     match a {
         BandAction::Chords { forward, .. } => Some(crate::engine::specials::chord_name(forward)),
+        BandAction::Preset { id } => Some(presets::spec(*id).name.to_string()),
         _ => None,
+    }
+}
+
+/// Whether the page gets a step counter for this action: chords and the
+/// stepped presets; a once-per-slide preset shows its name alone.
+fn shows_steps(a: &BandAction) -> bool {
+    match a {
+        BandAction::Chords { .. } => true,
+        BandAction::Preset { id } => !presets::spec(*id).once_per_slide,
+        _ => false,
     }
 }
 
@@ -329,13 +429,18 @@ impl LiveToastLimiter {
 
 /// The live toast's text for one tick — PURE. Volume/brightness carry the
 /// real percent, scrub a fixed verb, chords the forward chord's name and the
-/// signed step count (0 steps shows the name alone). `None` for a band that
-/// does nothing: no toast for a slide that changes nothing.
+/// signed step count (0 steps shows the name alone), seek the clock
+/// ("▶ 12:34 / 45:00") or — `seek` = `None`, the fallback — "⏩ Scrubbing (no
+/// seek bar here)", a preset its name plus "· N" when stepped (the caller
+/// passes `steps` = 0 for a once-per-slide preset, so it shows the name
+/// alone). `None` for a band that does nothing: no toast for a slide that
+/// changes nothing.
 pub(crate) fn live_toast_text(
     action: &BandAction,
     value_pct: u8,
     chord: Option<&str>,
     steps: i32,
+    seek: Option<&str>,
 ) -> Option<String> {
     match action {
         BandAction::Volume => Some(format!("🔊 Volume {value_pct}%")),
@@ -354,6 +459,10 @@ pub(crate) fn live_toast_text(
                 Some(format!("⏪ {steps} {speed}"))
             }
         }
+        BandAction::Seek => match seek {
+            Some(clock) => Some(format!("▶ {clock}")),
+            None => Some(seek::SEEK_FALLBACK_TEXT.to_string()),
+        },
         BandAction::Chords { .. } => {
             let name = chord.unwrap_or("(no keys)");
             if steps == 0 {
@@ -363,6 +472,15 @@ pub(crate) fn live_toast_text(
                 let sign = if steps < 0 { "\u{2212}" } else { "" };
                 let unit = if n == 1 { "step" } else { "steps" };
                 Some(format!("⌨ {name} · {sign}{n} {unit}"))
+            }
+        }
+        BandAction::Preset { id } => {
+            let name = chord.unwrap_or(presets::spec(*id).name);
+            if steps == 0 {
+                Some(format!("⌨ {name}"))
+            } else {
+                let sign = if steps < 0 { "\u{2212}" } else { "" };
+                Some(format!("⌨ {name} · {sign}{}", steps.unsigned_abs()))
             }
         }
         BandAction::None => None,
@@ -406,6 +524,12 @@ fn reader_loop(app: AppHandle, pad: raw::DeviceInfo) {
     let mut scrub_pending = 0.0f32;
     let mut chord_sent = 0i32;
     let mut last_travel = 0.0f32;
+    // 1.0.130: what this gesture drives (resolved on Enter), the seek
+    // limiter + last clock text, the once-per-slide latch.
+    let mut drive = Drive::None;
+    let mut seek_limit = seek::SeekLimiter::new(0);
+    let mut seek_clock: Option<String> = None;
+    let mut once_latch = presets::OnceLatch::default();
     let mut entered_at = Instant::now();
     let mut last_tick = Instant::now();
     let mut last_bright = Instant::now() - Duration::from_secs(1);
@@ -479,8 +603,27 @@ fn reader_loop(app: AppHandle, pad: raw::DeviceInfo) {
                 prev_travel = 0.0;
                 scrub_pending = 0.0;
                 chord_sent = 0;
+                once_latch.reset();
+                seek_clock = None;
                 if matches!(action, BandAction::Brightness) {
                     bright_worker = actions::BrightnessWorker::start();
+                }
+                // Resolve the drive — ONE WinRT read for a Seek band, on this
+                // (MTA) reader thread; every other action is instant.
+                drive = Drive::open(&action);
+                let mut value = 0u8;
+                if let Drive::Seek(s) = &drive {
+                    seek_limit.reset(s.p0());
+                    seek_clock = Some(seek::clock_text(s.p0(), s.len()));
+                    value = seek::position_pct(s.p0(), s.len());
+                    log::info!(
+                        "touchpad: seek — session {:?} at {} of {} (span {:.3} at sensitivity {}) (touchpad-seek-bar-anchored-spaceadom-130)",
+                        s.app_id(),
+                        seek::fmt_time(s.p0()),
+                        seek::fmt_time(s.len()),
+                        seek::seek_span(cfg.band(edge).sensitivity),
+                        cfg.band(edge).sensitivity
+                    );
                 }
                 last_travel = 0.0;
                 entered_at = Instant::now();
@@ -489,15 +632,18 @@ fn reader_loop(app: AppHandle, pad: raw::DeviceInfo) {
                 BAND_LIVE.store(true, Ordering::Relaxed);
                 let (fx, fy) = contacts.first().map(|c| (c.fx, c.fy)).unwrap_or((0.0, 0.0));
                 log::info!(
-                    "touchpad: band LIVE edge={} action={} at ({fx:.3},{fy:.3}) width={:.2} length={:.2}",
+                    "touchpad: band LIVE edge={} action={} drive={} at ({fx:.3},{fy:.3}) width={:.2} length={:.2}",
                     edge_wire(edge),
                     action.wire(),
+                    drive.name(),
                     cfg.band(edge).width,
                     cfg.band(edge).length
                 );
-                let value = live_value_pct(&action, 0.0, cfg.band(edge).sensitivity);
+                if !matches!(drive, Drive::Seek(_)) {
+                    value = live_value_pct(&action, 0.0, cfg.band(edge).sensitivity, cfg.band(edge).length);
+                }
                 let label = chord_label(&action);
-                emit_live(&app, edge, &action, value, 0.0, label.clone(), 0);
+                emit_live(&app, edge, &action, value, 0.0, label.clone(), 0, seek_clock.clone());
                 last_emit = Instant::now();
                 // The live toast appears on Enter, with the first value. The
                 // setting is read from `cfg` — the snapshot already taken
@@ -506,7 +652,7 @@ fn reader_loop(app: AppHandle, pad: raw::DeviceInfo) {
                 toast_sent = None;
                 toast_pending = None;
                 if cfg.slide_toast {
-                    if let Some(text) = live_toast_text(&action, value, label.as_deref(), 0) {
+                    if let Some(text) = live_toast_text(&action, value, label.as_deref(), 0, seek_clock.as_deref()) {
                         toast_limit.allow(t0.elapsed().as_millis() as u64);
                         crate::show_live_toast(&app, LIVE_TOAST_KEY, &text);
                         toast_sent = Some(text);
@@ -520,12 +666,12 @@ fn reader_loop(app: AppHandle, pad: raw::DeviceInfo) {
                 last_tick = now;
                 last_travel = travel;
                 let mut value = None;
-                match &band.action {
-                    BandAction::Volume => {
+                match &mut drive {
+                    Drive::Volume => {
                         let delta = actions::analogue_gain(band.sensitivity) * (travel - prev_travel);
                         value = actions::add_volume(delta);
                     }
-                    BandAction::Brightness => {
+                    Drive::Brightness => {
                         // One hidden PowerShell WORKER per slide (started on Enter,
                         // fed values, closed on Exit): the in-process WMI COM read
                         // failed silently on the owner's laptop (1.0.120–123) while
@@ -544,8 +690,8 @@ fn reader_loop(app: AppHandle, pad: raw::DeviceInfo) {
                             value = bright_worker.as_ref().map(|w| w.current());
                         }
                     }
-                    BandAction::Scrub => {
-                        let rate = actions::scrub_rate(travel, band.sensitivity);
+                    Drive::Scrub | Drive::SeekFallback => {
+                        let rate = actions::scrub_rate(travel, band.sensitivity, band.length);
                         scrub_pending += rate * dt;
                         let forward = travel >= 0.0;
                         while scrub_pending >= 1.0 {
@@ -555,9 +701,21 @@ fn reader_loop(app: AppHandle, pad: raw::DeviceInfo) {
                             // "make the toast live for scrubbing too").
                             chord_sent += if forward { 1 } else { -1 };
                         }
-                        value = Some(live_value_pct(&BandAction::Scrub, travel, band.sensitivity));
+                        value = Some(scrub_pct(travel, band.sensitivity, band.length));
                     }
-                    BandAction::Chords { forward, backward } => {
+                    Drive::Seek(s) => {
+                        // The band IS the seek bar, anchored at P0: pure
+                        // proportion of the band's length, clamped to the
+                        // video; sent at ≤ 10 Hz and only for a ≥ 1 s move.
+                        let t = travel_of_band(travel, band.length);
+                        let target = seek::seek_target(s.p0(), s.len(), t, seek::seek_span(band.sensitivity));
+                        if seek_limit.allow(t0.elapsed().as_millis() as u64, target) {
+                            s.seek_to(target);
+                        }
+                        seek_clock = Some(seek::clock_text(target, s.len()));
+                        value = Some(seek::position_pct(target, s.len()));
+                    }
+                    Drive::Steps { forward, backward, once, track } => {
                         // Step-based: bring `chord_sent` up (or down) to the
                         // quantised target, one chord per step, so a slide
                         // back sends the other chord and undoes the slide out.
@@ -565,30 +723,49 @@ fn reader_loop(app: AppHandle, pad: raw::DeviceInfo) {
                             travel_short_side(edge, travel, aspect),
                             band.sensitivity,
                         );
-                        while chord_sent < target {
-                            actions::send_chord(forward);
-                            chord_sent += 1;
-                        }
-                        while chord_sent > target {
-                            actions::send_chord(backward);
-                            chord_sent -= 1;
+                        if *once {
+                            // Copy/Paste, Track: the FIRST notch fires, then
+                            // nothing until lift.
+                            if let Some(fw) = once_latch.fire(target) {
+                                if *track {
+                                    let path = seek::skip_track(fw);
+                                    log::info!("touchpad: track — {} via {path}", if fw { "next" } else { "previous" });
+                                } else {
+                                    actions::send_chord(if fw { forward } else { backward });
+                                }
+                                chord_sent = if fw { 1 } else { -1 };
+                            }
+                        } else {
+                            while chord_sent < target {
+                                actions::send_chord(forward);
+                                chord_sent += 1;
+                            }
+                            while chord_sent > target {
+                                actions::send_chord(backward);
+                                chord_sent -= 1;
+                            }
                         }
                     }
-                    BandAction::None => {}
+                    Drive::None => {}
                 }
                 if !matches!(band.action, BandAction::Brightness) {
                     prev_travel = travel;
                 }
+                // The pill/page see Scrub's text for a Seek gesture that fell
+                // back; the page's `action` stays the band's own so its
+                // readout label is honest ("Video seek", clock null).
+                let pill_action = if matches!(drive, Drive::SeekFallback) { BandAction::Seek } else { band.action.clone() };
+                let pill_steps = if shows_steps(&band.action) { chord_sent } else { 0 };
                 // Emit at ≤ 30 Hz.
                 if now.duration_since(last_emit) >= Duration::from_millis(33) {
-                    emit_live(&app, edge, &band.action, value.unwrap_or(0), travel, chord_label(&band.action), chord_sent);
+                    emit_live(&app, edge, &band.action, value.unwrap_or(0), travel, chord_label(&band.action), pill_steps, seek_clock.clone());
                     last_emit = now;
                 }
                 // The live toast, in place, at ≤ 8 Hz. Only when the text
                 // changed: a finger resting still sends nothing.
                 if cfg.slide_toast {
                     let label = chord_label(&band.action);
-                    toast_pending = live_toast_text(&band.action, value.unwrap_or(0), label.as_deref(), chord_sent);
+                    toast_pending = live_toast_text(&pill_action, value.unwrap_or(0), label.as_deref(), pill_steps, seek_clock.as_deref());
                     if toast_pending.is_some()
                         && toast_pending != toast_sent
                         && toast_limit.allow(t0.elapsed().as_millis() as u64)
@@ -605,13 +782,24 @@ fn reader_loop(app: AppHandle, pad: raw::DeviceInfo) {
                     w.stop();
                 }
                 BAND_LIVE.store(false, Ordering::Relaxed);
+                if let Drive::Seek(s) = &drive {
+                    log::info!(
+                        "touchpad: seek — {} position changes sent, last {} of {} ({:?})",
+                        s.sends(),
+                        seek::fmt_time(s.last_target()),
+                        seek::fmt_time(s.len()),
+                        s.app_id()
+                    );
+                }
                 log::info!(
-                    "touchpad: band DEAD edge={} travel={:.3} steps={} after {} ms",
+                    "touchpad: band DEAD edge={} drive={} travel={:.3} steps={} after {} ms",
                     edge_wire(edge),
+                    drive.name(),
                     last_travel,
                     chord_sent,
                     entered_at.elapsed().as_millis()
                 );
+                drive = Drive::None;
                 emit_end(&app);
                 // Flush a throttled final value, then let the pill fade
                 // (~600 ms on the page). `toast_sent` is the witness that a
@@ -644,8 +832,8 @@ fn emit_live(
     travel: f32,
     chord: Option<String>,
     steps: i32,
+    seek: Option<String>,
 ) {
-    let is_chords = matches!(action, BandAction::Chords { .. });
     let _ = app.emit(
         "touchpad-live",
         LivePayload {
@@ -654,7 +842,8 @@ fn emit_live(
             value_pct: Some(value_pct),
             travel: Some(travel),
             chord,
-            steps: if is_chords { Some(steps) } else { None },
+            steps: if shows_steps(action) { Some(steps) } else { None },
+            seek,
         },
     );
 }
@@ -662,7 +851,7 @@ fn emit_live(
 fn emit_end(app: &AppHandle) {
     let _ = app.emit(
         "touchpad-live",
-        LivePayload { edge: None, action: None, value_pct: None, travel: None, chord: None, steps: None },
+        LivePayload { edge: None, action: None, value_pct: None, travel: None, chord: None, steps: None, seek: None },
     );
 }
 
@@ -693,18 +882,49 @@ mod tests {
 
     #[test]
     fn the_live_toast_text_per_action() {
-        assert_eq!(live_toast_text(&BandAction::Volume, 62, None, 0).as_deref(), Some("🔊 Volume 62%"));
-        assert_eq!(live_toast_text(&BandAction::Brightness, 40, None, 0).as_deref(), Some("☀ Brightness 40%"));
-        assert_eq!(live_toast_text(&BandAction::Scrub, 77, None, 0).as_deref(), Some("⏩ Scrub ▮▮▮"));
-        assert_eq!(live_toast_text(&BandAction::Scrub, 100, None, 12).as_deref(), Some("⏩ +12 ▮▮▮▮▮"));
-        assert_eq!(live_toast_text(&BandAction::Scrub, 0, None, -3).as_deref(), Some("⏪ -3 ▮"));
+        assert_eq!(live_toast_text(&BandAction::Volume, 62, None, 0, None).as_deref(), Some("🔊 Volume 62%"));
+        assert_eq!(live_toast_text(&BandAction::Brightness, 40, None, 0, None).as_deref(), Some("☀ Brightness 40%"));
+        assert_eq!(live_toast_text(&BandAction::Scrub, 77, None, 0, None).as_deref(), Some("⏩ Scrub ▮▮▮"));
+        assert_eq!(live_toast_text(&BandAction::Scrub, 100, None, 12, None).as_deref(), Some("⏩ +12 ▮▮▮▮▮"));
+        assert_eq!(live_toast_text(&BandAction::Scrub, 0, None, -3, None).as_deref(), Some("⏪ -3 ▮"));
         let chords = BandAction::Chords { forward: vec![0x11, 0x09], backward: vec![0x11, 0x10, 0x09] };
-        assert_eq!(live_toast_text(&chords, 0, Some("Ctrl+Tab"), 0).as_deref(), Some("⌨ Ctrl+Tab"));
-        assert_eq!(live_toast_text(&chords, 0, Some("Ctrl+Tab"), 1).as_deref(), Some("⌨ Ctrl+Tab · 1 step"));
-        assert_eq!(live_toast_text(&chords, 0, Some("Ctrl+Tab"), 3).as_deref(), Some("⌨ Ctrl+Tab · 3 steps"));
-        assert_eq!(live_toast_text(&chords, 0, Some("Ctrl+Tab"), -2).as_deref(), Some("⌨ Ctrl+Tab · \u{2212}2 steps"));
-        assert_eq!(live_toast_text(&chords, 0, None, 1).as_deref(), Some("⌨ (no keys) · 1 step"));
-        assert_eq!(live_toast_text(&BandAction::None, 50, None, 0), None, "a band that does nothing shows nothing");
+        assert_eq!(live_toast_text(&chords, 0, Some("Ctrl+Tab"), 0, None).as_deref(), Some("⌨ Ctrl+Tab"));
+        assert_eq!(live_toast_text(&chords, 0, Some("Ctrl+Tab"), 1, None).as_deref(), Some("⌨ Ctrl+Tab · 1 step"));
+        assert_eq!(live_toast_text(&chords, 0, Some("Ctrl+Tab"), 3, None).as_deref(), Some("⌨ Ctrl+Tab · 3 steps"));
+        assert_eq!(live_toast_text(&chords, 0, Some("Ctrl+Tab"), -2, None).as_deref(), Some("⌨ Ctrl+Tab · \u{2212}2 steps"));
+        assert_eq!(live_toast_text(&chords, 0, None, 1, None).as_deref(), Some("⌨ (no keys) · 1 step"));
+        assert_eq!(live_toast_text(&BandAction::None, 50, None, 0, None), None, "a band that does nothing shows nothing");
+    }
+
+    /// 1.0.130: the seek pill is the clock, updated in place; the fallback
+    /// says why it is scrubbing; a preset pill is its name, "· N" when
+    /// stepped, the name alone for a once-per-slide preset (the caller
+    /// passes 0).
+    #[test]
+    fn the_live_toast_text_for_seek_and_presets() {
+        use crate::config::schema::PresetId;
+        assert_eq!(live_toast_text(&BandAction::Seek, 28, None, 0, Some("12:34 / 45:00")).as_deref(), Some("▶ 12:34 / 45:00"));
+        assert_eq!(live_toast_text(&BandAction::Seek, 0, None, 0, Some("0:00 / 1:02:03")).as_deref(), Some("▶ 0:00 / 1:02:03"));
+        assert_eq!(live_toast_text(&BandAction::Seek, 40, None, 5, None).as_deref(), Some("⏩ Scrubbing (no seek bar here)"));
+        let tabs = BandAction::Preset { id: PresetId::Tabs };
+        assert_eq!(live_toast_text(&tabs, 0, Some("Tabs"), 0, None).as_deref(), Some("⌨ Tabs"));
+        assert_eq!(live_toast_text(&tabs, 0, Some("Tabs"), 3, None).as_deref(), Some("⌨ Tabs · 3"));
+        assert_eq!(live_toast_text(&tabs, 0, Some("Tabs"), -2, None).as_deref(), Some("⌨ Tabs · \u{2212}2"));
+        assert_eq!(live_toast_text(&tabs, 0, None, 1, None).as_deref(), Some("⌨ Tabs · 1"), "the name comes from the table when no label is passed");
+        let copy = BandAction::Preset { id: PresetId::CopyPaste };
+        assert_eq!(live_toast_text(&copy, 0, Some("Copy / Paste"), 0, None).as_deref(), Some("⌨ Copy / Paste"));
+        assert_eq!(chord_label(&copy).as_deref(), Some("Copy / Paste"));
+        assert_eq!(chord_label(&BandAction::Preset { id: PresetId::Track }).as_deref(), Some("Track"));
+        assert!(shows_steps(&tabs) && shows_steps(&BandAction::empty_chords()));
+        assert!(!shows_steps(&copy) && !shows_steps(&BandAction::Preset { id: PresetId::Track }));
+        assert!(!shows_steps(&BandAction::Seek) && !shows_steps(&BandAction::Scrub));
+        assert_eq!(action_wire(&BandAction::Seek), "seek");
+        assert_eq!(action_wire(&tabs), "preset");
+        // The seek mapping's input: travel as a fraction of the band's length.
+        assert!((travel_of_band(0.2, 0.8) - 0.25).abs() < 1e-6);
+        assert_eq!(travel_of_band(0.9, 0.8), 1.0, "clamped");
+        assert_eq!(travel_of_band(-0.9, 0.8), -1.0);
+        assert_eq!(travel_of_band(0.5, 0.0), 0.5, "a bad length reads as the whole pad");
     }
 
     #[test]
@@ -724,10 +944,14 @@ mod tests {
 
     #[test]
     fn live_value_for_scrub_is_a_fraction_of_the_cap() {
-        // Full travel → 100 %; dead zone → 0.
-        assert_eq!(live_value_pct(&BandAction::Scrub, 1.0, 6), 100);
-        assert_eq!(live_value_pct(&BandAction::Scrub, 0.0, 6), 0);
-        assert_eq!(live_value_pct(&BandAction::empty_chords(), 1.0, 6), 0, "chords show no percent");
+        // Past the ramp → 100 %; dead zone → 0; halfway up the ramp → ~50 %.
+        assert_eq!(live_value_pct(&BandAction::Scrub, 1.0, 5, 0.8), 100);
+        assert_eq!(live_value_pct(&BandAction::Scrub, 0.32, 5, 0.8), 100);
+        assert_eq!(live_value_pct(&BandAction::Scrub, 0.0, 5, 0.8), 0);
+        let mid = live_value_pct(&BandAction::Scrub, 0.175, 5, 0.8);
+        assert!((55..=70).contains(&mid), "{mid}");
+        assert_eq!(live_value_pct(&BandAction::empty_chords(), 1.0, 6, 0.8), 0, "chords show no percent");
+        assert_eq!(live_value_pct(&BandAction::Seek, 1.0, 6, 0.8), 0, "seek's Enter value is computed from the session");
     }
 
     #[test]

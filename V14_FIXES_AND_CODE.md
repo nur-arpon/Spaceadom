@@ -37166,3 +37166,168 @@ The `packaged_host` arm keeps **Open Installed apps** and now says "…The Store
 **The no-elevation claim and how sure it is.** HIGH confidence on the documented behaviour, from three things reachable offline: (1) the windows 0.58 metadata exposes the whole per-user `FindPackagesByUserSecurityId*` family and `RemovePackageAsync` on the same `PackageManager` the detector has been calling unelevated on this machine at every launch since the PROBLEM 250 follow-up (the log's "no second copy found" line is that call succeeding); (2) `Cargo.toml`'s own comment already records that only the all-users `FindPackages()` needs an administrator; (3) `Remove-AppxPackage` without `-AllUsers` is this same request from a non-elevated PowerShell, and it is how Settings > Apps removes a Store app with no UAC prompt. Not re-confirmed against a live Microsoft Learn page this session. A PACKAGED caller would need the `packageManagement` restricted capability; ours refuses while packaged before the call exists.
 
 **Generalise this.** "There is no fix" is a claim about the TOOLS the author was holding, not about the problem. When a refusal's reasoning names specific mechanisms (`msiexec`, `Remove-Item`, an ACL), ask what the platform's OWN front door for the object is — a package has a deployment service, a scheduled task has a COM API (PROBLEM 266), a Store app's autostart has `StartupTask` (PROBLEM 250) — before writing "ever". And: a pure classifier that takes N booleans should be tested over all 2^N of them against a reference written a second time in words; the nine-pair table alone would have passed a classifier that got an unlisted combination wrong.
+
+
+## TOUCHPAD — SEEK + PRESETS (2026-09-20; 1.0.130 — gates green: 818 unit tests / 0 failed / 10 ignored, clippy 0, tsc 0, vite clean, node scripts pass; **NOT BUILT AS AN INSTALLER, NOT INSTALLED, NO GIT** — the lead does that)
+
+Written so another AI can rebuild it without opening the tree. Follows the
+§TOUCHPAD 1.0.122/1.0.123 addenda above.
+
+### The ask (owner, 2026-09-20 00:50 and 00:58)
+
+1. A new band action, **Video seek**: "the band IS the seek bar, anchored
+   where you land." The video's position follows the finger in pure
+   proportion, through Windows' Global System Media Transport Controls; with
+   no seekable session the gesture behaves exactly as scrub. Seek becomes the
+   top band's default; Scrub stays in the list as its own choice.
+2. **Presets** in the "Does what" list: Tabs, Zoom, Undo/Redo, Copy/Paste,
+   Track — named chord pairs picked without recording, editable afterwards
+   as chords; Copy/Paste and Track fire once per slide.
+3. The list order: Brightness · Volume · Video seek · Video scrub · Tabs ·
+   Zoom · Undo / Redo · Copy / Paste · Track · Any shortcut · Nothing.
+4. (00:58) Scrub's rate "runs away" — cap it at 8 taps/s at sensitivity 5
+   (3 … 15 over 1..10), reach the cap by ~40 % of the band, then flat.
+
+### The seek mapping — `src-tauri/src/touchpad/seek.rs` (new)
+
+| Symbol | What |
+| --- | --- |
+| `sens_scale(s, lo, mid, hi)` | Piecewise linear 1..=10 → `lo` at 1, `mid` at 5, `hi` at 10. Shared with the scrub cap. |
+| `seek_span(s)` | `sens_scale(s, 0.25, 1.0, 2.0)`: 1 → 0.25, 2 → 0.4375, 3 → 0.625, 4 → 0.8125, **5 → 1.0**, 6 → 1.2, 7 → 1.4, 8 → 1.6, 9 → 1.8, 10 → 2.0. |
+| `seek_target(p0, len, t, span)` | `clamp(p0 + t × len × span, 0, len)` in 100 ns ticks; NaN travel = 0; `len ≤ 0` pins to 0. |
+| `SeekLimiter` | `allow(now_ms, target)`: false within 100 ms of the last send (≤ 10 Hz) or within 1 s of the last position SENT; `reset(anchor)` on Enter. |
+| `fmt_time(ticks)` | `m:ss` under an hour, `h:mm:ss` from one hour; negative reads 0; truncates. |
+| `clock_text(pos, len)` | "12:34 / 45:00" — the pill adds "▶ ". |
+| `SEEK_FALLBACK_TEXT` | "⏩ Scrubbing (no seek bar here)". |
+| `position_pct(pos, len)` | The page's meter. |
+
+`t` is the gesture's travel (a pad fraction along the band's axis, `invert`
+already applied) divided by the band's LENGTH and clamped to ±1
+(`touchpad::travel_of_band`), so "the band spans the whole video at
+sensitivity 5" holds whatever length the user set.
+
+**The session.** `SeekSession::open()` on Enter, on the reader thread (an
+MTA COM thread — `IAsyncOperation::get()` needs that, and would deadlock an
+STA UI thread):
+
+```
+GlobalSystemMediaTransportControlsSessionManager::RequestAsync()?.get()?
+  .GetCurrentSession()?                       // Err = "no video open" (info)
+  .GetPlaybackInfo()?.Controls()?.IsPlaybackPositionEnabled()?  // false → None
+  .GetTimelineProperties()?  → StartTime, EndTime, Position
+len = EndTime − StartTime (≤ 0 → None);  p0 = clamp(Position − StartTime, 0, len)
+```
+
+Every gate that fails logs one `info` line naming itself and returns `None`
+— the reader then runs `Drive::SeekFallback`, which is Scrub's code
+byte-for-byte, with the fallback pill. `seek_to(target)` calls
+`TryChangePlaybackPositionAsync(StartTime + target)` and DROPS the returned
+operation (fire-and-forget): one WinRT call, no wait, so the raw-input pump
+is never blocked longer than that. A refused call is logged once per gesture.
+Exit logs `N position changes sent, last X of Y (app id)`.
+
+**Why the media session and not the player's keyboard.** Every player that
+appears in Windows' own media overlay (Win+K / the volume flyout) registers a
+session with position control when it can seek — Chromium pages with a
+`<video>` (YouTube, Netflix), VLC, Media Player, Spotify. The API is
+per-app-agnostic, read-only until `TryChangePlaybackPositionAsync`, and
+carries the timeline the pill needs. The arrow-key scrub cannot know where
+the video is; the session can.
+
+### The presets — `src-tauri/src/touchpad/presets.rs` (new)
+
+`BandAction::Preset { id: PresetId }`, `PresetId ∈ {Tabs, Zoom, UndoRedo,
+CopyPaste, Track}` (snake_case on the wire: `{"preset":{"id":"undo_redo"}}`).
+`spec(id) -> PresetSpec { name, description, forward, backward, once_per_slide }`:
+
+| id | forward (slide up/right) | backward | once |
+| --- | --- | --- | --- |
+| tabs | Ctrl+Tab `[0x11,0x09]` | Ctrl+Shift+Tab `[0x11,0x10,0x09]` | no |
+| zoom | Ctrl+= `[0x11,0xBB]` | Ctrl+− `[0x11,0xBD]` | no |
+| undo_redo | Ctrl+Y (redo) `[0x11,0x59]` | Ctrl+Z (undo) `[0x11,0x5A]` | no |
+| copy_paste | Ctrl+V (paste) `[0x11,0x56]` | Ctrl+C (copy) `[0x11,0x43]` | **yes** |
+| track | next `[0xB0]` | previous `[0xB1]` | **yes** — the session's `TrySkipNextAsync` / `TrySkipPreviousAsync` first (`seek::skip_track`), the VK only when there is no session or it refuses |
+
+`OnceLatch` (pure): `reset()` on Enter; `fire(target)` answers `Some(target > 0)`
+on the first non-zero quantised target and `None` for every later call until
+the next reset — however far the finger goes on or comes back.
+
+### The reader — `touchpad/mod.rs`
+
+Per-gesture state is now a `Drive`, resolved ONCE on Enter by
+`Drive::open(&action)`: `Volume | Brightness | Scrub | Seek(SeekSession) |
+SeekFallback | Steps { forward, backward, once, track } | None`. Chords and
+presets both become `Steps`; only `Seek` is impure to open. Move matches on
+the drive: `Steps` with `once` goes through the latch (Track → `skip_track`),
+otherwise the 1.0.122 `chord_sent` up/down loop; `Seek` computes the target,
+asks the limiter, sends, and refreshes the clock text; `Scrub | SeekFallback`
+share the tap loop. The pill text (`live_toast_text`, now with a `seek:
+Option<&str>` argument) is computed against `pill_action` = `Seek` for a
+fallback gesture (clock `None` → the fallback text) and the band's own action
+otherwise; `steps` is passed as 0 for a once-per-slide preset so its pill is
+the name alone. `LivePayload` gained `seek: Option<String>`; `steps` is
+`Some` for chords and stepped presets only (`shows_steps`).
+
+### Scrub, capped — `touchpad/actions.rs`
+
+`scrub_rate(travel, sensitivity, band_length)`: dead zone `SCRUB_DEAD_ZONE`
+= 0.03 of the pad (unchanged), then linear from `SCRUB_MIN_RATE` = 2 taps/s
+to `scrub_cap(sensitivity)` = `sens_scale(s, 3, 8, 15)` — 1 → 3, 2 → 4.25,
+3 → 5.5, 4 → 6.75, **5 → 8**, 6 → 9.4, 7 → 10.8, 8 → 12.2, 9 → 13.6, 10 → 15
+— reached at `SCRUB_RAMP_FRACTION` (0.40) × the band's length, then FLAT.
+`SCRUB_MAX_RATE` (25) is gone; the speed bar is rate ÷ cap (`scrub_pct`).
+1.0.122's curve kept climbing to 25 taps/s at full pad travel with
+sensitivity multiplying the slope, which is the run-away the owner felt.
+
+### Config — `config/schema.rs`
+
+`BandAction` gains `Seek` (unit, `"seek"`) and `Preset { id }`; `wire()`
+answers `"seek"` / `"preset"`; `Band::for_edge(Top)` = `Seek`. Externally
+tagged as before, so every 1.0.120–1.0.129 config loads unchanged (pinned:
+plain strings, a chords object, `slide_toast:false`, a fresh top band =
+Seek, an unknown preset id is a serde error — the loader's whole-file
+fallback handles it as it always has). `normalised()` leaves both alone.
+
+### Frontend
+
+`types.ts`: `PresetId`, `BandPreset = { preset: { id } }`, `"seek"` in
+`BandAction`, kinds `seek` / `preset`, `TouchpadLive.seek`.
+`touchpad-page.ts`: `PRESETS` (the same table, for the page's copy and for
+seeding "Any shortcut"), `presetOf`, `actionKind` (`"preset" in a`),
+`actionName` (a preset's name); the "Does what" list in the owner's order
+with a `.sub` description under Seek ("The band is the seek bar — the video
+follows your finger"), Scrub ("5-second hops, works in every player"), each
+preset and Any shortcut; a picked preset shows its two chords read-only
+under "The shortcuts" ("Pick Any shortcut to change the keys — it starts
+from these"); picking Any shortcut over a preset seeds the recorder with the
+pair; the readout (`liveReadout`) shows the clock + position meter for seek,
+"Scrubbing / no seek bar here" for the fallback, the name + step count for
+chords and stepped presets, the name + "once per slide" for the others;
+`defaultBand("top")` = seek; the first-run card ends "Turn on the top edge
+and a video follows your finger." Existing styles only (`.sp-row .label`,
+`.sub`, `.sp-chord`, `.sp-chord-caps kbd`); no new tokens.
+
+### How it was verified
+
+- Pure: the span table (all ten), the target (both signs, both ends, three
+  spans, zero length, NaN), the limiter (100 Hz for a second → ≤ 10 sends,
+  the 1 s rule against the last SENT, reset, a backwards clock), the clock
+  text (mm:ss, h:mm:ss, negative, truncation), every preset's pair, the
+  latch (first notch only, both signs, reset), serde round-trips + the
+  1.0.12x shapes, the pill text for seek/fallback/presets, the scrub cap
+  table and the flat region for every sensitivity, `travel_of_band`.
+- `scripts/touchpad-page.test.ts`: the list order, the preset table and its
+  once flags, the Scrub copy, the top default, the first-run copy, the
+  seeding of Any shortcut.
+- **On this machine, READ-ONLY** (`cargo test --release --lib
+  print_current_media_session -- --ignored --nocapture`): app id
+  `Chrome.UserData.Profile1`, status 5 (paused), timeline 0:00 / 0:00 /
+  3:28 (raw 0 / 0 / 2080210000), `IsPlaybackPositionEnabled = true`,
+  next/previous enabled → "seek would be LIVE". Nothing was seeked or
+  skipped.
+- **UNPROVEN on hardware:** every slide — the agent cannot inject touch
+  reports. First real slide: a YouTube tab playing, top edge on, one finger
+  in the band; expect the pill "▶ m:ss / m:ss" ticking with the finger, the
+  marker `touchpad-seek-bar-anchored-spaceadom-130` and the Exit send count
+  in debug.log; then lift with nothing seekable open and expect "⏩
+  Scrubbing (no seek bar here)".

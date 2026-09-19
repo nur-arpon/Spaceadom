@@ -10,8 +10,16 @@
 //!   `actions/brightness.rs` used to drive through PowerShell; that module now
 //!   shares `set_brightness`/`get_brightness` here so there is one path.
 //! * **Scrub** — ←/→ taps through `hook::send_keys_checked` (cookie
-//!   `0x7A7A7A7A`, PROBLEM 227), at a rate `scrub_rate(travel, sensitivity)`.
-//!   RATE-based (continuous, a Touch Bar scrubber) — kept that way in 1.0.122.
+//!   `0x7A7A7A7A`, PROBLEM 227), at a rate `scrub_rate(travel, sensitivity,
+//!   band_length)`. RATE-based (continuous, a Touch Bar scrubber) — kept that
+//!   way in 1.0.122; 1.0.130 capped it (8 taps/s at sensitivity 5, flat past
+//!   40 % of the band). Also the automatic FALLBACK inside a "Video seek"
+//!   gesture that finds no seekable media session (`seek.rs`) — never a
+//!   replacement for the user's own choice of Scrub in the list.
+//! * **Seek** (1.0.130) — `seek.rs`: the media session's position follows the
+//!   finger in pure proportion.
+//! * **Presets** (1.0.130) — `presets.rs`: named chord pairs driven like
+//!   Chords (or once per slide).
 //! * **Chords** ("Any shortcut", 1.0.122) — STEP-based: `chord_steps` quantises
 //!   the signed travel into steps (`chord_step_size(sensitivity)` of the pad's
 //!   short side, past the same dead zone as scrub) and `touchpad::mod` sends
@@ -40,24 +48,42 @@ use windows::Win32::System::Wmi::{
 /// Dead zone before any scrubbing begins: the fraction of the pad a finger
 /// must travel from entry before the first ←/→ tap.
 pub const SCRUB_DEAD_ZONE: f32 = 0.03;
-/// The slowest and fastest continuous tap rates (taps per second).
+/// The slowest continuous tap rate (taps per second), just past the dead zone.
 pub const SCRUB_MIN_RATE: f32 = 2.0;
-pub const SCRUB_MAX_RATE: f32 = 25.0;
+/// The fraction of the BAND'S LENGTH at which the rate reaches its cap and
+/// goes FLAT (owner, 2026-09-20 00:58: "if you go much farther it becomes too
+/// fast, out of control" — 1.0.122's curve kept climbing to 25 taps/s at full
+/// pad travel; now nothing past ~40 % of the band is any faster).
+pub const SCRUB_RAMP_FRACTION: f32 = 0.40;
 
-/// Taps per second for a signed `travel` at `sensitivity` (1..=10). The SIGN
-/// of `travel` picks the direction (the caller reads it); the rate uses the
-/// magnitude. Dead zone `SCRUB_DEAD_ZONE` of the pad, then linear from
-/// `SCRUB_MIN_RATE` to `SCRUB_MAX_RATE` as the magnitude runs to full travel,
-/// with sensitivity reaching the top rate sooner. Pure.
-pub fn scrub_rate(travel: f32, sensitivity: u8) -> f32 {
+/// The cap by sensitivity — 3 taps/s at 1, **8 at 5 (the default)**, 15 at 10,
+/// piecewise linear (`seek::sens_scale`). Pure.
+///
+/// | sens | 1 | 2    | 3   | 4    | 5 | 6   | 7    | 8    | 9    | 10 |
+/// |------|---|------|-----|------|---|-----|------|------|------|----|
+/// | cap  | 3 | 4.25 | 5.5 | 6.75 | 8 | 9.4 | 10.8 | 12.2 | 13.6 | 15 |
+pub fn scrub_cap(sensitivity: u8) -> f32 {
+    super::seek::sens_scale(sensitivity, 3.0, 8.0, 15.0)
+}
+
+/// Taps per second for a signed `travel` (fraction of the pad along the band's
+/// axis) at `sensitivity` (1..=10) on a band `band_length` long (fraction of
+/// the edge, 0.30..=1.0). The SIGN of `travel` picks the direction (the
+/// caller reads it); the rate uses the magnitude. Dead zone `SCRUB_DEAD_ZONE`
+/// of the pad, then linear from `SCRUB_MIN_RATE` up to `scrub_cap` at
+/// `SCRUB_RAMP_FRACTION × band_length`, then FLAT at the cap however far the
+/// finger goes. Pure.
+pub fn scrub_rate(travel: f32, sensitivity: u8, band_length: f32) -> f32 {
     let a = travel.abs();
     if !a.is_finite() || a < SCRUB_DEAD_ZONE {
         return 0.0;
     }
-    let sens = (sensitivity.clamp(1, 10) as f32) / 6.0; // 1.0 at the default 6
-    let span = (1.0 - SCRUB_DEAD_ZONE).max(1e-3);
-    let t = (((a - SCRUB_DEAD_ZONE) / span) * sens).clamp(0.0, 1.0);
-    SCRUB_MIN_RATE + (SCRUB_MAX_RATE - SCRUB_MIN_RATE) * t
+    let cap = scrub_cap(sensitivity);
+    let floor = SCRUB_MIN_RATE.min(cap);
+    let len = if band_length.is_finite() { band_length.clamp(0.30, 1.0) } else { 0.80 };
+    let ramp_end = (SCRUB_RAMP_FRACTION * len).max(SCRUB_DEAD_ZONE + 1e-3);
+    let t = ((a - SCRUB_DEAD_ZONE) / (ramp_end - SCRUB_DEAD_ZONE)).clamp(0.0, 1.0);
+    floor + (cap - floor) * t
 }
 
 // ---------------------------------------------------------------------------
@@ -376,27 +402,57 @@ mod tests {
 
     #[test]
     fn scrub_rate_has_a_dead_zone_then_climbs_to_the_cap() {
-        assert_eq!(scrub_rate(0.0, 6), 0.0);
-        assert_eq!(scrub_rate(0.02, 6), 0.0, "inside the dead zone");
-        assert_eq!(scrub_rate(-0.02, 6), 0.0, "sign does not escape the dead zone");
+        let len = 0.8; // the top band's default length
+        assert_eq!(scrub_rate(0.0, 5, len), 0.0);
+        assert_eq!(scrub_rate(0.02, 5, len), 0.0, "inside the dead zone");
+        assert_eq!(scrub_rate(-0.02, 5, len), 0.0, "sign does not escape the dead zone");
+        assert_eq!(scrub_rate(f32::NAN, 5, len), 0.0);
         // Just past the dead zone → near the minimum rate.
-        let low = scrub_rate(0.04, 6);
-        assert!(low >= SCRUB_MIN_RATE && low < SCRUB_MIN_RATE + 2.0, "{low}");
-        // Full travel → the maximum.
-        assert!((scrub_rate(1.0, 6) - SCRUB_MAX_RATE).abs() < 1e-4);
-        assert!((scrub_rate(-1.0, 6) - SCRUB_MAX_RATE).abs() < 1e-4, "magnitude, not sign");
+        let low = scrub_rate(0.04, 5, len);
+        assert!(low >= SCRUB_MIN_RATE && low < SCRUB_MIN_RATE + 1.0, "{low}");
+        // At 40 % of the band (0.32 of the pad) → the cap, 8 taps/s at 5.
+        assert!((scrub_rate(0.32, 5, len) - 8.0).abs() < 1e-4);
+        assert!((scrub_rate(-0.32, 5, len) - 8.0).abs() < 1e-4, "magnitude, not sign");
+    }
+
+    /// Owner, 2026-09-20 00:58: past ~40 % of the band the rate is FLAT — no
+    /// faster however far the finger goes — and the cap is 8 taps/s at the
+    /// default sensitivity (3 … 15 over 1..10).
+    #[test]
+    fn scrub_rate_is_flat_past_forty_percent_of_the_band_and_capped_per_sensitivity() {
+        let len = 0.8;
+        for s in 1..=10u8 {
+            let cap = scrub_cap(s);
+            for a in [0.32f32, 0.4, 0.5, 0.75, 1.0] {
+                assert!((scrub_rate(a, s, len) - cap).abs() < 1e-4, "s={s} a={a}: {} != {cap}", scrub_rate(a, s, len));
+            }
+        }
+        // The documented cap table.
+        for (s, want) in [(1u8, 3.0f32), (2, 4.25), (3, 5.5), (4, 6.75), (5, 8.0), (6, 9.4), (7, 10.8), (8, 12.2), (9, 13.6), (10, 15.0)] {
+            assert!((scrub_cap(s) - want).abs() < 1e-4, "s={s}: {} != {want}", scrub_cap(s));
+        }
+        // The ramp end follows the band: a full-length band reaches the cap at
+        // 0.40 of the pad, a 0.30 band at 0.12.
+        assert!(scrub_rate(0.32, 5, 1.0) < 8.0 - 1e-3, "a longer band ramps longer");
+        assert!((scrub_rate(0.40, 5, 1.0) - 8.0).abs() < 1e-4);
+        assert!((scrub_rate(0.12, 5, 0.30) - 8.0).abs() < 1e-4, "a short band ramps fast");
     }
 
     #[test]
-    fn scrub_rate_is_monotonic_and_sensitivity_reaches_full_sooner() {
-        assert!(scrub_rate(0.2, 6) < scrub_rate(0.5, 6));
-        assert!(scrub_rate(0.5, 6) <= scrub_rate(0.5, 10), "more sensitive is faster");
-        assert!(scrub_rate(0.5, 3) <= scrub_rate(0.5, 6), "less sensitive is slower");
-        // Every rate stays inside the documented band.
+    fn scrub_rate_is_monotonic_and_sensitivity_only_raises_the_cap() {
+        let len = 0.8;
+        assert!(scrub_rate(0.1, 5, len) < scrub_rate(0.2, 5, len));
+        assert!(scrub_rate(0.5, 5, len) <= scrub_rate(0.5, 10, len), "more sensitive is faster");
+        assert!(scrub_rate(0.5, 3, len) <= scrub_rate(0.5, 5, len), "less sensitive is slower");
+        // Every rate stays inside [min, cap] and never decreases with travel.
         for s in 1..=10u8 {
-            for i in 0..=20 {
-                let r = scrub_rate(i as f32 / 20.0, s);
-                assert!(r == 0.0 || (SCRUB_MIN_RATE..=SCRUB_MAX_RATE).contains(&r), "s={s} r={r}");
+            let cap = scrub_cap(s);
+            let mut last = 0.0f32;
+            for i in 0..=40 {
+                let r = scrub_rate(i as f32 / 40.0, s, len);
+                assert!(r == 0.0 || (SCRUB_MIN_RATE.min(cap)..=cap + 1e-4).contains(&r), "s={s} r={r}");
+                assert!(r >= last - 1e-5, "s={s} i={i}: {r} < {last}");
+                last = r;
             }
         }
     }

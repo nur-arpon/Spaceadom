@@ -880,12 +880,25 @@ impl TouchEdge {
 /// chord, so it is reversible by the opposite slide. Serialised externally
 /// tagged, so the unit variants stay the plain strings 1.0.120 wrote
 /// (`"scrub"`) and this one is `{"chords":{"forward":[…],"backward":[…]}}`.
+///
+/// `Seek` (1.0.130, the page's "Video seek") — the band IS the seek bar,
+/// anchored where the finger lands: the current media session's position
+/// follows the finger in pure proportion (`touchpad::seek`), through Windows'
+/// Global System Media Transport Controls. No session, or no position control
+/// → that gesture behaves exactly as `Scrub`. The top band's default since
+/// 1.0.130 (`Scrub` stays in the list).
+///
+/// `Preset { id }` (1.0.130) — a named forward/backward chord pair the user
+/// picks without recording (`touchpad::presets::spec`): Tabs, Zoom,
+/// Undo/Redo step per notch exactly like `Chords`; Copy/Paste and Track fire
+/// ONCE per slide. Serialised `{"preset":{"id":"tabs"}}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum BandAction {
     Brightness,
     Volume,
     Scrub,
+    Seek,
     #[default]
     None,
     Chords {
@@ -894,6 +907,28 @@ pub enum BandAction {
         #[serde(default)]
         backward: Vec<u16>,
     },
+    Preset {
+        id: PresetId,
+    },
+}
+
+/// The five named shortcut pairs of the touchpad page's "Does what" list
+/// (1.0.130). The table that resolves each to its chords, its once-per-slide
+/// rule and its copy is `touchpad::presets::spec`; this enum is only the
+/// stored id, so the config stays a plain string per band.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresetId {
+    Tabs,
+    Zoom,
+    UndoRedo,
+    CopyPaste,
+    Track,
+}
+
+impl PresetId {
+    pub const ALL: [PresetId; 5] =
+        [PresetId::Tabs, PresetId::Zoom, PresetId::UndoRedo, PresetId::CopyPaste, PresetId::Track];
 }
 
 impl BandAction {
@@ -908,8 +943,10 @@ impl BandAction {
             BandAction::Brightness => "brightness",
             BandAction::Volume => "volume",
             BandAction::Scrub => "scrub",
+            BandAction::Seek => "seek",
             BandAction::None => "none",
             BandAction::Chords { .. } => "chords",
+            BandAction::Preset { .. } => "preset",
         }
     }
 }
@@ -962,13 +999,13 @@ impl Band {
     }
 
     /// The owner's defaults per edge: left = brightness, right = volume,
-    /// top = scrub, bottom = nothing (a normal edge since 1.0.122; the user
-    /// picks its action). All OFF.
+    /// top = seek (1.0.130; was scrub), bottom = nothing (a normal edge since
+    /// 1.0.122; the user picks its action). All OFF.
     pub fn for_edge(edge: TouchEdge) -> Band {
         let (action, length) = match edge {
             TouchEdge::Left => (BandAction::Brightness, Self::default_length_side()),
             TouchEdge::Right => (BandAction::Volume, Self::default_length_side()),
-            TouchEdge::Top => (BandAction::Scrub, Self::default_length_top()),
+            TouchEdge::Top => (BandAction::Seek, Self::default_length_top()),
             TouchEdge::Bottom => (BandAction::None, Self::default_length_top()),
         };
         Band {
@@ -1225,7 +1262,7 @@ mod touchpad_tests {
         let t = Touchpad::default();
         assert_eq!(t.left.action, BandAction::Brightness);
         assert_eq!(t.right.action, BandAction::Volume);
-        assert_eq!(t.top.action, BandAction::Scrub);
+        assert_eq!(t.top.action, BandAction::Seek, "1.0.130: the top band seeks by default");
         assert_eq!(t.bottom.action, BandAction::None);
         assert!((t.left.length - 0.70).abs() < 1e-6);
         assert!((t.top.length - 0.80).abs() < 1e-6);
@@ -1263,7 +1300,7 @@ mod touchpad_tests {
         t.bottom.action = BandAction::Chords { forward: vec![0x11, 0x54], backward: vec![0x11, 0x57] };
         let json = serde_json::to_string(&t).unwrap();
         assert!(json.contains(r#""action":{"chords":{"forward":[17,84],"backward":[17,87]}}"#), "{json}");
-        assert!(json.contains(r#""action":"scrub""#), "the unit variants are still plain strings: {json}");
+        assert!(json.contains(r#""action":"seek""#), "the unit variants are still plain strings: {json}");
         let back: Touchpad = serde_json::from_str(&json).unwrap();
         assert_eq!(back, t);
         // A chords object with nothing recorded yet.
@@ -1289,6 +1326,61 @@ mod touchpad_tests {
         }
     }
 
+    /// 1.0.130: `Seek` is a plain string like the other unit variants,
+    /// `Preset` is `{"preset":{"id":"tabs"}}`, every preset id round-trips,
+    /// and the configs 1.0.120–1.0.129 wrote (plain strings, chords objects)
+    /// still load unchanged.
+    #[test]
+    fn seek_and_preset_round_trip_and_older_touchpad_configs_still_load() {
+        let mut t = Touchpad::default();
+        t.top.enabled = true;
+        t.top.action = BandAction::Seek;
+        t.bottom.enabled = true;
+        t.bottom.action = BandAction::Preset { id: PresetId::UndoRedo };
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(json.contains(r#""action":"seek""#), "{json}");
+        assert!(json.contains(r#""action":{"preset":{"id":"undo_redo"}}"#), "{json}");
+        let back: Touchpad = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, t);
+        assert_eq!(back.top.action.wire(), "seek");
+        assert_eq!(back.bottom.action.wire(), "preset");
+        for id in PresetId::ALL {
+            let a = BandAction::Preset { id };
+            let j = serde_json::to_string(&a).unwrap();
+            let b: BandAction = serde_json::from_str(&j).unwrap();
+            assert_eq!(a, b, "{j}");
+        }
+        for (id, tag) in [
+            (PresetId::Tabs, "tabs"),
+            (PresetId::Zoom, "zoom"),
+            (PresetId::UndoRedo, "undo_redo"),
+            (PresetId::CopyPaste, "copy_paste"),
+            (PresetId::Track, "track"),
+        ] {
+            assert_eq!(serde_json::to_string(&id).unwrap(), format!("\"{tag}\""));
+        }
+        // An unknown preset id is a load ERROR for that value, not a silent
+        // default — serde's externally tagged enum rejects it, and the config
+        // loader's whole-file fallback handles that as it always has.
+        assert!(serde_json::from_str::<BandAction>(r#"{"preset":{"id":"teleport"}}"#).is_err());
+        // 1.0.12x configs: a 1.0.120 plain-string top band, a 1.0.122 chords
+        // band, a 1.0.123 slide_toast switch — all still load as written.
+        let old: Touchpad = serde_json::from_str(
+            r#"{"left":{"enabled":true,"action":"brightness"},"right":{"action":"volume"},"top":{"enabled":true,"action":"scrub","sensitivity":6},"bottom":{"action":{"chords":{"forward":[17,9],"backward":[17,16,9]}}},"slide_toast":false}"#,
+        )
+        .unwrap();
+        assert_eq!(old.top.action, BandAction::Scrub, "a user who had scrub keeps scrub");
+        assert_eq!(old.bottom.action, BandAction::Chords { forward: vec![17, 9], backward: vec![17, 16, 9] });
+        assert!(!old.slide_toast);
+        // A 1.0.12x config with NO top band object gets the new default.
+        let fresh: Touchpad = serde_json::from_str(r#"{"left":{"enabled":true}}"#).unwrap();
+        assert_eq!(fresh.top.action, BandAction::Seek);
+        // The normaliser leaves both new variants alone.
+        let n = t.normalised();
+        assert_eq!(n.top.action, BandAction::Seek);
+        assert_eq!(n.bottom.action, BandAction::Preset { id: PresetId::UndoRedo });
+    }
+
     #[test]
     fn a_partial_band_object_fills_in_its_defaults() {
         let t: Touchpad = serde_json::from_str(r#"{"top":{"enabled":true}}"#).unwrap();
@@ -1311,7 +1403,7 @@ mod touchpad_tests {
         assert!(json.contains(r#""tr":"right""#), "{json}");
         assert!(json.contains(r#""page_look":"app""#), "{json}");
         assert!(json.contains(r#""corner_rule":"always_vertical""#), "{json}");
-        assert!(json.contains(r#""action":"scrub""#), "{json}");
+        assert!(json.contains(r#""action":"seek""#), "{json}");
         assert_eq!(t.corners.get(TouchEdge::Right, TouchEdge::Top), Some(TouchEdge::Right));
         assert_eq!(t.corners.get(TouchEdge::Left, TouchEdge::Top), None);
         assert_eq!(t.corners.set_by_hand(), 1);

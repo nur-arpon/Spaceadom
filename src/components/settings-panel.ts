@@ -2527,7 +2527,7 @@ const DESC: Record<string, string> = {
   tpthumb:
     "Shows the little touchpad under the keyboard on the home screen, so you can open the touchpad page in one click. Only appears when your PC has a Precision Touchpad. Turn it off and the keyboard sits centred on its own; you can still open the page from the row below.",
   tpslidetoast:
-    "While your finger slides along an edge that changes the volume or brightness, one small pill at the bottom of the screen shows the level as it moves — \"Volume 62%\" — and fades out just after you lift off. Video scrub says so, and a shortcut edge shows the shortcut's name with how many steps you have sent. It is one pill that updates in place, never a pile of them. Turn it off and slides change the level with nothing on screen.",
+    "While your finger slides along an edge that changes the volume or brightness, one small pill at the bottom of the screen shows the level as it moves — \"Volume 62%\" — and fades out just after you lift off. Video seek shows the clock (\"12:34 / 45:00\"), video scrub says so, and a shortcut edge shows the shortcut's name with how many steps you have sent. It is one pill that updates in place, never a pile of them. Turn it off and slides change the level with nothing on screen.",
   touchpadlook:
     "How the touchpad page is painted. Matches the app wears your current theme's colours; Chocolate is the page's own dark look, still tinted with your accent. The little touchpad under the keyboard always matches the app.",
   wpm:

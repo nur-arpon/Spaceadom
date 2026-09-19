@@ -29,6 +29,7 @@ import type {
   BandAction,
   BandActionKind,
   BandChords,
+  PresetId,
   TouchEdge,
   Touchpad,
   TouchpadLive,
@@ -77,12 +78,13 @@ const PAD_W = 780;
 // --- defaults (mirror config/schema.rs, so a missing field never crashes) ---
 
 export function defaultBand(edge: TouchEdge): Band {
+  // 1.0.130: the top band seeks by default (was scrub).
   const action: BandAction =
-    edge === "left" ? "brightness" : edge === "right" ? "volume" : edge === "top" ? "scrub" : "none";
+    edge === "left" ? "brightness" : edge === "right" ? "volume" : edge === "top" ? "seek" : "none";
   return {
     enabled: false,
     action,
-    width: 0.07,
+    width: 0.12,
     length: edge === "top" || edge === "bottom" ? 0.8 : 0.7,
     sensitivity: 6,
     invert: false,
@@ -125,26 +127,68 @@ const KIND_NAME: Record<BandActionKind, string> = {
   brightness: "Brightness",
   volume: "Volume",
   scrub: "Video scrub",
+  seek: "Video seek",
   none: "Nothing",
   chords: "Any shortcut",
+  preset: "Preset",
 };
+
+/** The one-line description under each "Does what" row (1.0.130). Seek and
+ *  Scrub are two SEPARATE choices: scrub is only ever the automatic fallback
+ *  inside a seek gesture that finds no seek bar, never a replacement. */
+const KIND_DESC: Partial<Record<BandActionKind, string>> = {
+  seek: "The band is the seek bar — the video follows your finger",
+  scrub: "5-second hops, works in every player",
+  chords: "Record two shortcuts of your own — one per direction",
+};
+
+/** The presets (1.0.130) in list order, mirroring `touchpad/presets.rs`:
+ *  the name, the one-line description, and the pair "Any shortcut" is
+ *  pre-filled with when the user wants to edit them. */
+export const PRESETS: ReadonlyArray<{
+  id: PresetId;
+  name: string;
+  desc: string;
+  forward: number[];
+  backward: number[];
+  once: boolean;
+}> = [
+  { id: "tabs", name: "Tabs", desc: "Next tab, previous tab — a tab per notch", forward: [0x11, 0x09], backward: [0x11, 0x10, 0x09], once: false },
+  { id: "zoom", name: "Zoom", desc: "Zoom in, zoom out — a step per notch", forward: [0x11, 0xbb], backward: [0x11, 0xbd], once: false },
+  { id: "undo_redo", name: "Undo / Redo", desc: "Slide back to undo, forward to redo — one per notch", forward: [0x11, 0x59], backward: [0x11, 0x5a], once: false },
+  { id: "copy_paste", name: "Copy / Paste", desc: "Slide back to copy, forward to paste — once per slide", forward: [0x11, 0x56], backward: [0x11, 0x43], once: true },
+  { id: "track", name: "Track", desc: "Next track, previous track — once per slide", forward: [0xb0], backward: [0xb1], once: true },
+];
+
+function presetSpec(id: PresetId) {
+  return PRESETS.find((p) => p.id === id) ?? PRESETS[0];
+}
 
 /** The action's family. */
 export function actionKind(a: BandAction | null | undefined): BandActionKind {
   if (!a) return "none";
-  return typeof a === "string" ? a : "chords";
+  if (typeof a === "string") return a;
+  return "preset" in a ? "preset" : "chords";
 }
 
 /** The two chords of an "Any shortcut" action, or null. */
 export function chordsOf(a: BandAction | null | undefined): BandChords["chords"] | null {
-  return a && typeof a === "object" && a.chords ? a.chords : null;
+  return a && typeof a === "object" && "chords" in a && a.chords ? a.chords : null;
 }
 
-/** The label on the band's pill and the edge rows: the family name, or for
- *  "Any shortcut" the forward chord itself once one is recorded. */
+/** The preset id of a preset action, or null. */
+export function presetOf(a: BandAction | null | undefined): PresetId | null {
+  return a && typeof a === "object" && "preset" in a && a.preset ? a.preset.id : null;
+}
+
+/** The label on the band's pill and the edge rows: the family name, a
+ *  preset's name, or for "Any shortcut" the forward chord itself once one is
+ *  recorded. */
 export function actionName(a: BandAction | null | undefined): string {
   const c = chordsOf(a);
   if (c) return c.forward.length ? chordLabel(c.forward) : KIND_NAME.chords;
+  const p = presetOf(a);
+  if (p) return presetSpec(p).name;
   return KIND_NAME[actionKind(a)];
 }
 
@@ -321,7 +365,7 @@ function pageHtml(): string {
           <span style="width:11px;height:11px;border-radius:999px;background:var(--sp-accent);margin-left:3px;"></span>
         </div>
         <h2>Start at the edge</h2>
-        <p>Watch the left edge: a finger that starts in the middle just moves the pointer; a finger that starts inside the band slides the brightness. Turn on the left edge and try it — then give the top edge to a video.</p>
+        <p>Watch the left edge: a finger that starts in the middle just moves the pointer; a finger that starts inside the band slides the brightness. Turn on the left edge and try it. Turn on the top edge and a video follows your finger.</p>
         <button type="button" class="sp-btn sp-btn--primary" style="margin-top:16px;" data-tp="invite-left">Turn on the left edge</button>
         <div><button type="button" class="sp-btn sp-btn--ghost" style="margin-top:10px;" data-tp="show-demo">Show me again</button></div>
       </div>`
@@ -358,22 +402,39 @@ function stepsText(n: number | null | undefined): string {
   return `${shown} step${Math.abs(v) === 1 ? "" : "s"}`;
 }
 
+/** The readout's two lines for the current live payload (pure on `live`). */
+function liveReadout(): { big: string; label: string; meter: boolean } {
+  const pct = live?.value_pct ?? 0;
+  const kind: BandActionKind = live?.action ?? "volume";
+  if (kind === "chords" || kind === "preset") {
+    // Chords / presets: the name where the percent goes, a step counter (or
+    // "once per slide") under it, no meter (a step count has no full scale).
+    const big = live?.chord || KIND_NAME[kind];
+    const label = live?.steps == null ? "once per slide" : stepsText(live.steps);
+    return { big, label, meter: false };
+  }
+  if (kind === "seek") {
+    // Seek: the clock where the percent goes, the meter is the position;
+    // a gesture that fell back says so.
+    return live?.seek
+      ? { big: live.seek, label: KIND_NAME.seek, meter: true }
+      : { big: "Scrubbing", label: "no seek bar here", meter: false };
+  }
+  return { big: `${pct}%`, label: KIND_NAME[kind], meter: true };
+}
+
 function liveCardHtml(): string {
   const pct = live?.value_pct ?? 0;
   const edge = live?.edge as TouchEdge;
-  const kind: BandActionKind = live?.action ?? "volume";
-  const chords = kind === "chords";
-  // Chords: the chord name where the percent goes, a step counter under it,
-  // no meter (a step count has no full scale).
-  const big = chords ? esc(live?.chord || KIND_NAME.chords) : `${pct}%`;
-  const label = chords ? stepsText(live?.steps) : KIND_NAME[kind];
+  const r = liveReadout();
+  const small = !r.meter || live?.action === "seek";
   return `
     <div class="sp-card sp-card--read" data-live-card="1">
       <div style="display:flex;align-items:center;gap:8px;">
         <span class="sp-badge">${BADGE[edge]}</span><span style="font-size:12px;color:var(--sp-text-2);">${EDGE_NAME[edge]}</span>
       </div>
-      <div class="sp-readout"><b data-live-pct${chords ? ' style="font-size:22px;"' : ""}>${big}</b><span data-live-label>${label}</span></div>
-      ${chords ? "" : `<div class="sp-meter" style="--value:${pct}%;" data-live-meter><i></i></div>`}
+      <div class="sp-readout"><b data-live-pct${small ? ' style="font-size:22px;"' : ""}>${esc(r.big)}</b><span data-live-label>${esc(r.label)}</span></div>
+      ${r.meter ? `<div class="sp-meter" style="--value:${pct}%;" data-live-meter><i></i></div>` : ""}
       <p style="color:var(--sp-text-3);font-size:12.5px;">Keep sliding to change it. Lift your finger when it is right.</p>
     </div>
     <span class="sp-pill sp-pill--off" style="position:absolute;left:50%;transform:translateX(-50%);bottom:76px;">
@@ -427,10 +488,16 @@ function bandPanelHtml(edge: TouchEdge): string {
   const sensLabel = b.sensitivity <= 3 ? "Slow" : b.sensitivity >= 8 ? "Fast" : "Medium";
   const sensPct = Math.round(((b.sensitivity - 1) / 9) * 100);
   const kind = actionKind(b.action);
-  const actionRow = (a: BandActionKind, label: string): string => {
-    const on = kind === a;
+  const picked = presetOf(b.action);
+  // One radio row. `a` is the family, or `preset:<id>` for one preset row;
+  // `desc` is the one-line description under the label (1.0.130).
+  const actionRow = (a: BandActionKind | `preset:${PresetId}`, label: string, desc = ""): string => {
+    const on = a.startsWith("preset:") ? `preset:${picked}` === a : kind === a;
+    const text = desc
+      ? `<span style="flex:1 1 auto;"><span class="label" style="font-weight:${on ? 600 : 400};">${label}</span><span class="sub">${esc(desc)}</span></span>`
+      : label;
     return `<button type="button" class="sp-row${on ? " sp-row--picked" : ""}" style="padding:9px 11px;border-radius:var(--sp-r-ctl);font-size:13px;${on ? "font-weight:600;" : ""}" aria-pressed="${on}" data-set-action="${a}">
-      <span style="width:16px;height:16px;flex:0 0 auto;border-radius:999px;border:${on ? "5px solid var(--sp-accent)" : "1.5px solid var(--sp-line-strong)"};"></span>${label}
+      <span style="width:16px;height:16px;flex:0 0 auto;border-radius:999px;border:${on ? "5px solid var(--sp-accent)" : "1.5px solid var(--sp-line-strong)"};"></span>${text}
     </button>`;
   };
   const flipSub =
@@ -438,10 +505,10 @@ function bandPanelHtml(edge: TouchEdge): string {
       ? "Sliding up would lower the volume"
       : kind === "brightness"
         ? "Sliding up would dim the screen"
-        : kind === "chords"
+        : kind === "chords" || kind === "preset"
           ? `Sliding ${dirWord(edge, "forward")} would send the ${dirWord(edge, "backward")} shortcut`
           : "Sliding right would rewind";
-  const chordFields = kind === "chords" ? chordFieldsHtml(edge, b) : "";
+  const chordFields = kind === "chords" ? chordFieldsHtml(edge, b) : kind === "preset" && picked ? presetNoteHtml(edge, picked) : "";
   return `
     <aside class="sp-panel">
       <button type="button" class="sp-btn sp-btn--ghost" style="align-self:flex-start;padding:3px 10px 3px 6px;font-size:11.5px;color:var(--sp-text-3);" data-tp="all-edges">&lsaquo;&nbsp; All edges</button>
@@ -455,8 +522,10 @@ function bandPanelHtml(edge: TouchEdge): string {
         <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
           ${actionRow("brightness", "Brightness")}
           ${actionRow("volume", "Volume")}
-          ${actionRow("scrub", "Video scrub")}
-          ${actionRow("chords", "Any shortcut")}
+          ${actionRow("seek", "Video seek", KIND_DESC.seek)}
+          ${actionRow("scrub", "Video scrub", KIND_DESC.scrub)}
+          ${PRESETS.map((p) => actionRow(`preset:${p.id}`, p.name, p.desc)).join("\n          ")}
+          ${actionRow("chords", "Any shortcut", KIND_DESC.chords)}
           ${actionRow("none", "Nothing")}
         </div>
       </div>
@@ -493,6 +562,31 @@ function bandPanelHtml(edge: TouchEdge): string {
       <span class="sp-spacer"></span>
       <p class="foot">Try it now — slide one finger along the ${EDGE_NAME[edge].toLowerCase()} of your touchpad.</p>
     </aside>`;
+}
+
+/** Under a picked preset: what each direction sends, and the way to edit it
+ *  (pick "Any shortcut" — it starts from this pair). Track's keys are the
+ *  media keys the fallback presses; the player's own next/previous is used
+ *  when a media session exists. */
+function presetNoteHtml(edge: TouchEdge, id: PresetId): string {
+  const p = presetSpec(id);
+  const caps = (keys: number[]): string =>
+    keys.map((vk, i) => `${i ? '<span class="plus">+</span>' : ""}<kbd>${esc(vkLabel(vk))}</kbd>`).join("");
+  return `
+      <div>
+        <h2>The shortcuts</h2>
+        <p style="margin-top:6px;font-size:11.5px;line-height:1.5;color:var(--sp-text-4);">${p.once ? "Fires once per slide, on the first notch." : "Each notch of the slide sends it once; sliding back sends the other one."} Pick <b>Any shortcut</b> to change the keys — it starts from these.</p>
+        <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
+          <div class="sp-chord" data-preset-pair="forward">
+            <span class="label">Slide ${dirWord(edge, "forward")} sends…</span>
+            <div class="sp-chord-caps">${caps(p.forward)}</div>
+          </div>
+          <div class="sp-chord" data-preset-pair="backward">
+            <span class="label">Slide ${dirWord(edge, "backward")} sends…</span>
+            <div class="sp-chord-caps">${caps(p.backward)}</div>
+          </div>
+        </div>
+      </div>`;
 }
 
 /** The two recorder fields of "Any shortcut": what a slide each way sends. */
@@ -616,15 +710,13 @@ function cornerHtml(): string {
 
 function paintLive(): void {
   if (!root) return;
+  const r = liveReadout();
   const b = root.querySelector<HTMLElement>("[data-live-pct]");
-  if (live?.action === "chords") {
-    if (b) b.textContent = live.chord || KIND_NAME.chords;
-    const l = root.querySelector<HTMLElement>("[data-live-label]");
-    if (l) l.textContent = stepsText(live.steps);
-    return;
-  }
+  if (b && b.textContent !== r.big) b.textContent = r.big;
+  const l = root.querySelector<HTMLElement>("[data-live-label]");
+  if (l && l.textContent !== r.label) l.textContent = r.label;
+  if (!r.meter) return;
   const pct = live?.value_pct ?? 0;
-  if (b) b.textContent = `${pct}%`;
   const m = root.querySelector<HTMLElement>("[data-live-meter]");
   if (m) m.style.setProperty("--value", `${pct}%`);
 }
@@ -681,13 +773,22 @@ function wirePage(): void {
   root.querySelectorAll<HTMLElement>("[data-set-action]").forEach((el) =>
     el.addEventListener("click", () => {
       if (!selected) return;
-      const kind = el.dataset.setAction as BandActionKind;
+      const picked = el.dataset.setAction ?? "none";
       const b = t[selected];
-      if (kind === "chords") {
-        // Keep chords already recorded on this band; start empty otherwise.
-        if (!chordsOf(b.action)) b.action = { chords: { forward: [], backward: [] } };
+      if (picked.startsWith("preset:")) {
+        b.action = { preset: { id: picked.slice("preset:".length) as PresetId } };
+      } else if (picked === "chords") {
+        // Keep chords already recorded on this band; a preset the band held
+        // becomes the starting pair (1.0.130: "still editable afterwards as
+        // chords"); start empty otherwise.
+        if (!chordsOf(b.action)) {
+          const p = presetOf(b.action);
+          b.action = p
+            ? { chords: { forward: [...presetSpec(p).forward], backward: [...presetSpec(p).backward] } }
+            : { chords: { forward: [], backward: [] } };
+        }
       } else {
-        b.action = kind;
+        b.action = picked as Exclude<BandActionKind, "chords" | "preset">;
       }
       save();
       render();

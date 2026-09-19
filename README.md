@@ -114,7 +114,7 @@ works too.
 | `Space` + `↑↑` | Jump to the top of what you are reading |
 | `Space` + `↓↓` | Jump to the bottom |
 | `Space` alone | A space. Always. |
-| One finger, from a touchpad edge inward | Change something along that edge — left edge brightness, right edge volume, top edge video scrub |
+| One finger, from a touchpad edge inward | Change something along that edge — left edge brightness, right edge volume, top edge video seek |
 
 Every one of these is also explained inside the app: the row along the bottom
 of the dashboard is pressable, and so is each of those keys on the on-screen
@@ -122,14 +122,22 @@ keyboard.
 
 **Touchpad edges.** On a laptop with a Precision Touchpad, Spaceadom can turn
 the edges of the pad into sliders: start one finger *inside* a strip along an
-edge and slide, and it changes brightness (left), volume (right) or scrubs a
-video (top) — the further and faster you slide, the more it moves. A finger
-that starts anywhere in the middle just moves the pointer as it always did, and
-while an edge slide is happening the pointer holds still so nothing jumps.
-Everything is off until you switch it on from the touchpad page — the small
-touchpad drawn under the keyboard on the home screen, or Settings. Lift your
-finger to stop; slide back to undo. Every edge can also send any shortcut
-you record — one for each direction — a step at a time as you slide.
+edge and slide, and it changes brightness (left), volume (right) or seeks a
+video (top). The top edge is the seek bar itself, anchored where your finger
+lands: the video's position follows your finger in proportion — the whole
+band is the whole video at the middle speed — and sliding back puts it back;
+a small pill shows the clock ("12:34 / 45:00") as you go. It works with any
+player that shows up in Windows' own media overlay (Chrome, Edge, Brave, VLC,
+Media Player, Spotify…); when nothing seekable is open, that slide scrubs
+with arrow-key hops instead, and "Video scrub" is still there in the list if
+you prefer 5-second hops everywhere. A finger that starts anywhere in the
+middle just moves the pointer as it always did, and while an edge slide is
+happening the pointer holds still so nothing jumps. Everything is off until
+you switch it on from the touchpad page — the small touchpad drawn under the
+keyboard on the home screen, or Settings. Lift your finger to stop; slide back
+to undo. Every edge can also send a ready-made pair — Tabs, Zoom, Undo / Redo,
+Copy / Paste, Track — or any shortcut you record, one for each direction, a
+step at a time as you slide (Copy / Paste and Track fire once per slide).
 
 ---
 

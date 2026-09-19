@@ -420,9 +420,17 @@ export type TouchEdge = "left" | "right" | "top" | "bottom";
  *  "Any shortcut" (1.0.122) is `{ chords: { forward, backward } }` — two
  *  chords in press order, sent once per quantised step of the slide. */
 export type BandChords = { chords: { forward: number[]; backward: number[] } };
-export type BandAction = "brightness" | "volume" | "scrub" | "none" | BandChords;
-/** The action's family — what the page's "Does what" rows pick between. */
-export type BandActionKind = "brightness" | "volume" | "scrub" | "none" | "chords";
+/** 1.0.130 — the five named shortcut pairs of the "Does what" list
+ *  (`schema::PresetId`); `{ preset: { id } }` on the wire. */
+export type PresetId = "tabs" | "zoom" | "undo_redo" | "copy_paste" | "track";
+export type BandPreset = { preset: { id: PresetId } };
+/** `"seek"` (1.0.130) — "Video seek": the band is the seek bar of the current
+ *  media session, anchored where the finger lands; falls back to scrub for a
+ *  gesture with no seekable session. */
+export type BandAction = "brightness" | "volume" | "scrub" | "seek" | "none" | BandChords | BandPreset;
+/** The action's family — what the page's "Does what" rows pick between
+ *  (every preset is its own row, but one family). */
+export type BandActionKind = "brightness" | "volume" | "scrub" | "seek" | "none" | "chords" | "preset";
 export type CornerRule = "ask" | "always_horizontal" | "always_vertical";
 export type TouchpadLook = "chocolate" | "app";
 /** Emitted by `touchpad::mod`; `"none"` covers "no pad" and "not Precision". */
@@ -473,10 +481,14 @@ export interface TouchpadLive {
   action: BandActionKind | null;
   value_pct: number | null;
   travel: number | null;
-  /** Chords only: the forward chord's name ("Ctrl+Tab"). */
+  /** Chords: the forward chord's name ("Ctrl+Tab"); presets: the preset's name. */
   chord?: string | null;
-  /** Chords only: the signed step count sent so far this gesture. */
+  /** Chords and stepped presets: the signed step count sent so far this
+   *  gesture. Absent for a once-per-slide preset. */
   steps?: number | null;
+  /** Seek only: "12:34 / 45:00" while a session is live; null when that
+   *  gesture fell back to scrubbing. */
+  seek?: string | null;
 }
 
 // ---------------------------------------------------------------------------

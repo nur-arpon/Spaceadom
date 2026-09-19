@@ -49,7 +49,23 @@ tidy. Their rows say what each one got wrong.
 
 ---
 
-## 2026-09-20 (latest) — 1.0.128 — Two copies, one click: the Store copy can now be removed from the other side
+## 2026-09-20 — 1.0.129 — the key editor fits without a scrollbar
+
+| Version | What changed |
+| --- | --- |
+| **1.0.129** | The key editor grows to fit its content instead of scrolling inside a 560px box; the app grid inside is taller and its scrollbar is the thin hint kind. New project rule: no long scrollbars. |
+
+---
+
+## 2026-09-20 (latest) — 1.0.130 — The top edge is a seek bar, five ready-made shortcut pairs, and scrub stops running away
+
+| Version | What changed |
+| --- | --- |
+| **1.0.130** | The top edge of the touchpad now does what I actually wanted from it: it IS the seek bar. Put a finger in the band and the video sits where it is; slide right and it goes forward, slide left and it comes back, in plain proportion — at the middle speed the whole band is the whole video, so a quarter of the band is a quarter of the film, and sliding back to where I landed puts it back where it was. No acceleration, nothing to learn. The little pill shows the clock, "▶ 12:34 / 45:00", ticking as I go. It works with anything that shows up in Windows' own media overlay — Chrome and Edge pages, VLC, Media Player, Spotify — and when nothing seekable is open, that slide quietly falls back to the old arrow-key scrubbing and the pill says "Scrubbing (no seek bar here)". "Video scrub" is still its own choice in the list for anyone who wants 5-second hops everywhere; it just isn't the default any more. Scrub itself got tamed too: it used to keep speeding up the further I went and ran away from me, so now it tops out at 8 hops a second at the middle setting (3 at the slowest, 15 at the fastest) and stops getting faster about 40 % of the way along the band. And the "Does what" list grew five ready-made pairs so you don't have to record anything: Tabs (Ctrl+Tab / Ctrl+Shift+Tab), Zoom (Ctrl+= / Ctrl+−), Undo / Redo (back undoes, forward redoes), Copy / Paste (back copies, forward pastes, once per slide) and Track (next / previous, once per slide — through the player itself when it has a session, else the media keys). Pick one and it just works; pick "Any shortcut" afterwards and it starts from that pair so you can change it. **Not yet slid on the real pad** — the maths, the list and the media-session reading are tested (the reading found my paused Chrome tab at 0:00 of 3:28 with seeking allowed, and touched nothing), but the first real slide is mine to do. |
+
+---
+
+## 2026-09-20 — 1.0.128 — Two copies, one click: the Store copy can now be removed from the other side
 
 | Version | What changed |
 | --- | --- |

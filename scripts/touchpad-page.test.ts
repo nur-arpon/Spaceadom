@@ -30,13 +30,42 @@ test('no "Later" / "Reserved" state remains on the touchpad page', () => {
   assert.ok(!/is-reserved/.test(css), "touchpad.css no longer styles a reserved band");
 });
 
-test("the bottom edge is an ordinary edge row and every edge offers all five actions", () => {
+test("the bottom edge is an ordinary edge row and every edge offers every action", () => {
   assert.match(page, /\$\{row\("bottom"\)\}/, "the Edges panel lists the bottom edge like the others");
   assert.match(page, /of 4 on/, "the count is out of four edges");
-  for (const kind of ["brightness", "volume", "scrub", "chords", "none"]) {
+  for (const kind of ["brightness", "volume", "seek", "scrub", "chords", "none"]) {
     assert.ok(page.includes(`actionRow("${kind}"`), `the Does-what list offers ${kind}`);
   }
   assert.ok(!/actionRow\([^)]*,\s*true\)/.test(page), "no action row is disabled");
+});
+
+// 1.0.130 (owner decisions 2026-09-20 00:50): the "Does what" order is
+// Brightness · Volume · Video seek · Video scrub · Tabs · Zoom · Undo / Redo ·
+// Copy / Paste · Track · Any shortcut · Nothing; Seek is the top band's default;
+// Seek and Scrub are two SEPARATE choices (scrub is only the automatic
+// fallback inside a seek gesture) and the Scrub row says what it is.
+test('the "Does what" list is in the owner\'s order, with the five presets between scrub and Any shortcut', () => {
+  const order = ["brightness", "volume", "seek", "scrub", "PRESETS.map", "chords", "none"];
+  const idx = order.map((k) => (k === "PRESETS.map" ? page.indexOf("PRESETS.map((p) => actionRow(") : page.indexOf(`actionRow("${k}"`)));
+  for (let i = 0; i < idx.length; i++) {
+    assert.ok(idx[i] >= 0, `${order[i]} is in the list`);
+    if (i) assert.ok(idx[i] > idx[i - 1], `${order[i]} comes after ${order[i - 1]}`);
+  }
+  const presets = [...page.matchAll(/\{ id: "([a-z_]+)", name: "([^"]+)"/g)].map((m) => [m[1], m[2]]);
+  assert.deepEqual(presets, [
+    ["tabs", "Tabs"],
+    ["zoom", "Zoom"],
+    ["undo_redo", "Undo / Redo"],
+    ["copy_paste", "Copy / Paste"],
+    ["track", "Track"],
+  ]);
+  assert.match(page, /once: true \},\s*\{ id: "track"/, "Copy / Paste fires once per slide");
+  assert.match(page, /id: "track"[^}]*once: true/, "Track fires once per slide");
+  assert.match(page, /scrub: "5-second hops, works in every player"/, "the Scrub row's description");
+  assert.match(page, /edge === "top" \? "seek"/, "the top band's default is Video seek");
+  assert.match(page, /Turn on the top edge and a video follows your finger\./, "the first-run copy");
+  // Picking "Any shortcut" over a preset starts from the preset's pair.
+  assert.match(page, /presetSpec\(p\)\.forward/, "a preset's pair seeds Any shortcut");
 });
 
 test('"Any shortcut" uses the key editor\'s recorder and two axis-aware fields', () => {

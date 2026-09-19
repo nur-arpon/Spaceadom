@@ -1,6 +1,6 @@
 [package]
 name = "spaceadom"
-version = "1.0.129"
+version = "1.0.130"
 description = "Spaceadom — hold Space + tap a key to launch, focus or minimise any app"
 authors = ["Spaceadom"]
 edition = "2021"
@@ -301,4 +301,12 @@ features = [
   # StartupTask::GetForCurrentPackageAsync, and packaged.rs uses GetAsync(id)
   # with an explicit TaskId instead — one less namespace compiled in.
   "ApplicationModel",
+  # TOUCHPAD 1.0.130 — Windows.Media.Control (the Global System Media
+  # Transport Controls): `GlobalSystemMediaTransportControlsSessionManager::
+  # RequestAsync` → `GetCurrentSession` → timeline (Position/StartTime/EndTime)
+  # and `TryChangePlaybackPositionAsync` for the "Video seek" band, plus
+  # `TrySkipNextAsync` / `TrySkipPreviousAsync` for the Track preset
+  # (`touchpad/seek.rs`). Namespace `Windows.Media.Control` → feature
+  # `Media_Control` (it pulls `Media`, which pulls `Foundation`).
+  "Media_Control",
 ]
