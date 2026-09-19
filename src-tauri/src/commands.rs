@@ -1456,6 +1456,29 @@ pub fn open_startup_manager() -> bool {
     crate::hook::conflict_close::open_startup_manager()
 }
 
+/// TOUCHPAD T2 — open Windows' own touchpad settings (the unavailable screen's
+/// "Open touchpad settings" button). `ms-settings:devices-touchpad` is the
+/// documented URI; `explorer.exe` resolves it without a shell-execute grant.
+#[tauri::command]
+pub fn open_touchpad_settings() -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let ok = std::process::Command::new("explorer.exe")
+            .arg("ms-settings:devices-touchpad")
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .is_ok();
+        log::info!("touchpad: opened Windows touchpad settings: {ok}");
+        ok
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PROBLEM 253 — safe mode, and "Report a problem".
 //

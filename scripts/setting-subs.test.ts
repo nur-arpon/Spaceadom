@@ -39,6 +39,7 @@ const PILLS: ReadonlyArray<readonly [string, string]> = [
   ["middlescope", "MIDDLE_SCOPE_OPTS"],
   ["alllayout", "ALL_LAYOUT_OPTS"],
   ["hudring", "RING_OPTS"],
+  ["touchpadlook", "TOUCHPAD_LOOK_OPTS"],
 ];
 
 test("every option of every pill has its own one-line subtitle", () => {

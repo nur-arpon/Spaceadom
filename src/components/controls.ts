@@ -227,6 +227,19 @@ export function allLayoutFor(raw: unknown): AllLayout {
   return raw === "spiral" ? "spiral" : "rings";
 }
 
+/** TOUCHPAD T2 — the touchpad page's look. Mirrors Rust's `TouchpadLook`.
+ *  Default Chocolate (the design's dark tokens with the theme's accent);
+ *  "app" maps every surface onto the app's own theme variables. */
+export const TOUCHPAD_LOOK_OPTS: ReadonlyArray<readonly [string, string]> = [
+  ["app", "Matches the app"],
+  ["chocolate", "Chocolate"],
+];
+export type TouchpadLookOpt = "app" | "chocolate";
+/** Config → pill. Absent = chocolate (Rust's serde default). */
+export function touchpadLookFor(raw: unknown): TouchpadLookOpt {
+  return raw === "app" ? "app" : "chocolate";
+}
+
 /** The three-state control on every App-exceptions tile (artboard 8). Order
  *  and wording are the design's. Mirrors Rust's `ExceptionScope`. */
 export const EXC_SCOPE_OPTS: ReadonlyArray<readonly [string, string]> = [

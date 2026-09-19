@@ -85,3 +85,14 @@ profile), the Space ring and the mouse ring, profiles, and then the
 "ask an AI for a command, paste it, it is a shortcut now" moment as the
 finale. Record after the Shortcuts page and the touchpad land, so the
 guide is not re-shot in a month.
+
+## 13. A whole-app "Chocolate" theme (2026-09-19)
+
+The touchpad page's design (`design/spaceadom-touchpad_1.html`) carries a
+complete dark-brown token set — surfaces, lines, four text levels, accent
+per theme. I liked it enough to wonder about the whole app in it. Decision
+for now: the touchpad PAGE can be chocolate (a Settings toggle, "Touchpad
+page: Matches the app / Chocolate", default Chocolate; the home thumbnail
+always matches the app). If chocolate wins after living with it, this
+becomes the fourth theme — keyboard, overlay, both rings, settings and the
+night scene all need the palette, so it is a project, not a toggle.

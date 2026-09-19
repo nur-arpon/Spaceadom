@@ -1,6 +1,6 @@
 [package]
 name = "spaceadom"
-version = "1.0.119"
+version = "1.0.120"
 description = "Spaceadom — hold Space + tap a key to launch, focus or minimise any app"
 authors = ["Spaceadom"]
 edition = "2021"
@@ -189,6 +189,18 @@ features = [
   # UI / Windows
   "Win32_UI_WindowsAndMessaging",
   "Win32_UI_Input_KeyboardAndMouse",
+  # Touchpad T1 (docs/TOUCHPAD-BRIEF-T1.md) — Raw Input device enumeration
+  # (GetRawInputDeviceList/Info, GetRawInputData) and the HID parser
+  # (HidP_GetCaps/GetValueCaps/GetUsageValue) for Precision Touchpad reports.
+  "Win32_UI_Input",
+  "Win32_Devices_HumanInterfaceDevice",
+  # TOUCHPAD T2 (docs/TOUCHPAD-BRIEF-T2.md) — brightness via WMI over COM
+  # (IWbemLocator/IWbemServices/IWbemClassObject.WmiSetBrightness), the
+  # in-process replacement for the PowerShell path, plus the VARIANT it
+  # carries values in and the RPC auth constants CoSetProxyBlanket needs.
+  "Win32_System_Wmi",
+  "Win32_System_Variant",
+  "Win32_System_Rpc",
   "Win32_UI_Shell",
   "Win32_UI_HiDpi",
   # Graphics / GDI (icon extraction)

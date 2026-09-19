@@ -23,6 +23,9 @@ import { startTour } from "./tour";
 import {
   appConfig, persistConfig, applySound, applyMotion,
   applyLook, applySkyMode, knownConflicts, refreshConflicts, resolveTheme,
+  // TOUCHPAD T2 — the thumbnail refresh, the "open the page" action, and the
+  // live presence for the read-only status line.
+  refreshTouchpadThumb, openTouchpadPageFromSettings, currentTouchpadPresence,
 } from "../main";
 import { sfx } from "../sfx";
 import { openConflictPrompt } from "./conflict-prompt";
@@ -46,6 +49,8 @@ import {
   // PROBLEM 267 — the icon ring's three settings and the App-exceptions
   // scope, as leaf data shared with preview.ts.
   MIDDLE_STYLE_OPTS, MIDDLE_SCOPE_OPTS, ALL_LAYOUT_OPTS, EXC_SCOPE_OPTS,
+  // TOUCHPAD T2 — the touchpad page's look pill.
+  TOUCHPAD_LOOK_OPTS, touchpadLookFor, type TouchpadLookOpt,
   middleStyleFor, middleScopeFor, allLayoutFor, normaliseExceptions, effectiveFavourites,
   EIGHT_PICKER_NOTE, FAVOURITES_MAX,
   type MiddleStyle, type MiddleScope, type AllLayout, type ExcScope, type ExcRow,
@@ -585,6 +590,7 @@ function render(): void {
           ${toggleRow("sound",     "Sound ticks",       sound,     2)}
           ${toggleRow("motion",    "Visual effects",    effects,   3)}
           ${toggleRow("hideboard", "Hide the keyboard", hideBoard, 4)}
+          ${touchpadAppearanceHtml()}
         </div>
       </div>
 
@@ -692,7 +698,7 @@ function render(): void {
       <div class="set-group">
         ${groupHeadingHtml("power", "For power users")}
         <div class="set-rows">
-          ${toggleRow("advanced", "Advanced mode", advanced, 13, "Adds Run command and Controls to the key editor.")}
+          ${toggleRow("advanced", "Advanced mode", advanced, 13, "Unlocks Spaceadom specials, Key combo, Controls and Run command in the key editor.")}
         </div>
       </div>
     </div>
@@ -1008,8 +1014,9 @@ function render(): void {
     render();
   });
 
-  // PHASE A — Advanced mode: shows "Run command" and the full catalogue in
-  // the key editor. UI-only, so persistConfig() is the whole wiring; the key
+  // PHASE A — Advanced mode: step 4 (2026-09-19) made it the ONLY way into
+  // the key editor's kind row (specials, Key combo, Controls, Run command);
+  // off, the editor is the app picker alone. UI-only, so persistConfig() is the whole wiring; the key
   // editor reads `advanced_mode` off the config it is handed on every open.
   wireToggle("advanced", async () => {
     if (!appConfig) return;
@@ -1032,6 +1039,40 @@ function render(): void {
     applySkyMode(appConfig.hide_keyboard);
     await persistConfig();
     render();
+  });
+
+  // TOUCHPAD T2 — "Show the touchpad under the keyboard". Rust does not read
+  // this (it is a home-dashboard preference); persistConfig() saves it and
+  // refreshTouchpadThumb() slides the thumbnail in/out at once.
+  wireToggle("tpthumb", async () => {
+    if (!appConfig) return;
+    if (!appConfig.touchpad) return;
+    appConfig.touchpad.show_thumbnail = !(appConfig.touchpad.show_thumbnail !== false);
+    if (appConfig.touchpad.show_thumbnail) sfx.toggleOn("tpthumb"); else sfx.toggleOff("tpthumb");
+    await persistConfig();
+    refreshTouchpadThumb();
+    render();
+  });
+
+  // TOUCHPAD T2 — the "Touchpad page" look pill (Matches the app / Chocolate).
+  // In-place pill update, same as the middle-button pills (PROBLEM 157). The
+  // page reads `page_look` on its next open, so persistConfig() is the wiring.
+  panelEl?.querySelectorAll<HTMLElement>("[data-touchpadlook-set]").forEach((b) => {
+    b.addEventListener("click", async () => {
+      if (!appConfig?.touchpad) return;
+      const next = touchpadLookFor(b.dataset.touchpadlookSet);
+      if (next === touchpadLookFor(appConfig.touchpad.page_look)) return;
+      appConfig.touchpad.page_look = next;
+      sfx.toggleOn("touchpadlook");
+      moveSeg(b, "touchpadlookSet", next);
+      paintSubLine(panelEl, "touchpadlook", next);
+      await persistConfig();
+    });
+  });
+
+  // TOUCHPAD T2 — "Open touchpad page" (reachable even with no thumbnail).
+  panelEl?.querySelectorAll<HTMLElement>("[data-open-touchpad-page]").forEach((b) => {
+    b.addEventListener("click", () => openTouchpadPageFromSettings());
   });
 
   wireDescriptions();
@@ -1396,7 +1437,23 @@ function render(): void {
   // every render for the same reason as the call above: it re-finds `.theme-
   // seg` fresh and re-arms its own ResizeObserver rather than accumulating one
   // per render.
+  //
+  // TOUCHPAD-BRIEF-T1 (2026-09-19) — "All layout and Ring layout jump" when
+  // Advanced mode is toggled. render() rebuilds the panel, so every pill's
+  // indicator is born at the stylesheet default (`--ind-x: 3px`); the
+  // `offsetLeft` read inside positionSegIndicator forces a style flush at
+  // THAT value, and the measured `--ind-x` written a line later then plays
+  // the 480 ms slide from segment one to the active one — on every full
+  // rebuild, not only on a pick. Fix: measure with the transition off and
+  // hand it back after the first painted frame (two rAFs: the first runs
+  // before that frame's style pass, so removing the class there would still
+  // animate). Picks keep their slide — they never come through here.
+  const segs = Array.from(panelEl.querySelectorAll<HTMLElement>(".theme-seg"));
+  segs.forEach((s) => s.classList.add("seg-settle"));
   wireSegIndicators(panelEl);
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    segs.forEach((s) => s.classList.remove("seg-settle"));
+  }));
 
   // PROBLEM 109 — the way back from deleting a preset. Additive: it restores
   // only the presets that are MISSING and never overwrites one the user still
@@ -2450,6 +2507,10 @@ const DESC: Record<string, string> = {
     "Shows Run command and the full catalogue in the key editor. Run command lets a key run any command line, with no window and never as administrator; the full catalogue adds Control Panel pages and system shortcuts to the Windows-setting search. Off keeps the editor to apps, links, everyday settings, key chords and Spaceadom's own specials.",
   hideboard:
     "Clears the whole dashboard away and leaves just the sky. Your shortcuts keep working exactly as they are — press Esc, the small arrow in the corner, or the settings gear, which stays on screen, to bring everything back.",
+  tpthumb:
+    "Shows the little touchpad under the keyboard on the home screen, so you can open the touchpad page in one click. Only appears when your PC has a Precision Touchpad. Turn it off and the keyboard sits centred on its own; you can still open the page from the row below.",
+  touchpadlook:
+    "How the touchpad page is painted. Matches the app wears your current theme's colours; Chocolate is the page's own dark look, still tinted with your accent. Either way the drawn touchpad stays a dark, physical-looking slab, and the little touchpad under the keyboard always matches the app.",
   wpm:
     "If apps launch by accident while you type, pick a slower speed — Spaceadom then waits longer before treating Space+key as a shortcut.",
   huddelay:
@@ -2861,6 +2922,69 @@ const MIDDLE_SCOPE_NOTE = "Only for the icon ring \u2014 the Space ring has its 
  * addition of 2026-09-13). Same shape as `ringRow`; the wrap + note pair is
  * what lets `paintRow` grey it without a rebuild, exactly as `specialsRow`.
  */
+/**
+ * TOUCHPAD T2 — the Appearance rows for the touchpad, after "Hide the
+ * keyboard": a read-only presence status line, the "Show the touchpad under
+ * the keyboard" toggle (only when a Precision pad is present), the "Touchpad
+ * page" look pill (Matches the app / Chocolate), and "Open touchpad page".
+ */
+function touchpadAppearanceHtml(): string {
+  const presence = currentTouchpadPresence();
+  const t = appConfig?.touchpad;
+  const look: TouchpadLookOpt = touchpadLookFor(t?.page_look);
+  const showThumb = t?.show_thumbnail !== false;
+  const statusText =
+    presence === "precision"
+      ? "Precision touchpad detected"
+      : presence === "none"
+        ? "Touchpad: none detected"
+        : "Touchpad detected, not Precision";
+
+  const status = `
+    <div class="set-item set-filterable" style="animation-delay:${60 + 5 * 45}ms">
+      <div class="set-row">
+        <span class="set-row-label" style="cursor:default;">Touchpad</span>
+        <span class="sp-pill sp-pill--quiet" style="font-size:11.5px;">${statusText}</span>
+      </div>
+    </div>`;
+
+  const thumbToggle =
+    presence === "precision"
+      ? `
+    <div class="set-item set-filterable" style="animation-delay:${60 + 6 * 45}ms">
+      <div class="set-row">
+        <button type="button" class="set-row-label" data-desc="tpthumb"
+                aria-expanded="false" aria-controls="desc-tpthumb">Show the touchpad under the keyboard</button>
+        ${toggleSwitchHtml("tpthumb", showThumb, undefined, "Show the touchpad under the keyboard", descId("tpthumb"))}
+      </div>
+      ${descBox("tpthumb")}
+    </div>`
+      : "";
+
+  const lookRow = `
+    <div class="set-item set-filterable" style="animation-delay:${60 + 7 * 45}ms">
+      <div class="set-row set-row-stack">
+        <button type="button" class="set-row-label" data-desc="touchpadlook"
+                aria-expanded="false" aria-controls="desc-touchpadlook">Touchpad page</button>
+        <span id="set-touchpadlook-wrap">${
+          segRowHtml("touchpadlook", TOUCHPAD_LOOK_OPTS, look, "background:var(--st-accent);", "Touchpad page", descId("touchpadlook"))
+        }</span>
+      </div>
+      ${subLineHtml("touchpadlook", look)}
+      ${descBox("touchpadlook")}
+    </div>`;
+
+  const openRow = `
+    <div class="set-item set-filterable" style="animation-delay:${60 + 8 * 45}ms">
+      <button type="button" class="set-row" style="width:100%;cursor:pointer;" data-open-touchpad-page="1">
+        <span class="set-row-label" style="cursor:pointer;flex:1 1 auto;text-align:left;">Open touchpad page</span>
+        <svg width="7" height="12" viewBox="0 0 7 12" fill="none" aria-hidden="true"><path d="M1 1 L6 6 L1 11" style="stroke:var(--st-text-dim);" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>`;
+
+  return status + thumbToggle + lookRow + openRow;
+}
+
 function middleStyleRow(style: MiddleStyle, inert: boolean, i: number): string {
   return `
     <div class="set-item set-filterable" style="animation-delay:${60 + i * 45}ms">

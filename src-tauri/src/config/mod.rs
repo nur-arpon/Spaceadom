@@ -366,6 +366,12 @@ pub fn load_or_init() -> SharedConfig {
 /// that reached the engine unseeded would have no Boss Key, no PiP and no
 /// pause, with nothing in the log to say why.
 fn seeded(mut cfg: AppConfig, path: &PathBuf) -> SharedConfig {
+    // TOUCHPAD T2 — every load path funnels through here, so this is the one
+    // place the edge-band ranges are clamped and the reserved bottom band is
+    // held off (`Touchpad::normalised`). A config the engine reads must never
+    // carry a width/length/sensitivity the page cannot draw, nor an enabled
+    // bottom band. `save_config` applies the same rule on the way out.
+    cfg.touchpad = std::mem::take(&mut cfg.touchpad).normalised();
     if schema::seed_specials(&mut cfg) {
         log::info!(
             "config: seeded the default specials (Esc=boss key, `=PiP, Tab=fullscreen PiP,              Backspace=force close, RAlt=cycle profile, ,=search, .=pause, ;=voice typing,              /=screenshot, '=on-screen keyboard, Up/Down=scroll) into every profile that had              not been seeded yet (Phase A, 2026-09-18) — written back to config.json"
@@ -418,6 +424,14 @@ pub fn save(config: &AppConfig) -> Result<(), String> {
     // both reach the overlay page as a Tauri event from `save_config`. An
     // atomic here would be a second source of truth with no reader — see
     // `hud_band_count`'s comment in schema.rs. Do not add one.
+    //
+    // TOUCHPAD T2 — the same PROBLEM 180 funnel rule: enabling a band must
+    // start the reader thread and disabling the last one must stop it, without
+    // a restart. `apply_config` refreshes the touchpad engine's config
+    // snapshot; the supervisor picks up the start/stop within its next tick.
+    // Cheap and idempotent, and a no-op before `touchpad::init` has run.
+    #[cfg(windows)]
+    crate::touchpad::apply_config(config);
     save_to_disk(config, &path).map_err(|e| e.to_string())
 }
 

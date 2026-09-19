@@ -37,6 +37,10 @@ export const SUB_LINES: Readonly<Record<string, Readonly<Record<string, string>>
     wide: "One roomy ring, every name written out.",
     double: "Two rings of apps; the specials step aside.",
   },
+  touchpadlook: {
+    app: "The page wears your app theme’s colours.",
+    chocolate: "The design’s dark chocolate, with your accent.",
+  },
 };
 
 /** The subtitle for `control` at `option`, or "" when there is none. */

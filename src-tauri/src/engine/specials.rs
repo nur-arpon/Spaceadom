@@ -226,21 +226,55 @@ fn special_id(bind: &KeyBinding) -> Option<&str> {
     }
 }
 
+/// PHASE A step 4 (2026-09-19, owner's trim) — is this binding one the SPACE
+/// ring may show at all? Two kinds only: an app or link (`action == None`,
+/// the pills) and a Spaceadom special (the inner band). A chord, uri,
+/// command, brightness or toggle binding still FIRES on its key — the hook
+/// and `run_binding` never consult this — but the Space ring, whose one job
+/// is launching apps, does not draw it. The mouse ring is a different
+/// surface and keeps `ring_specials_for` as it was.
+pub fn hud_shows(bind: &KeyBinding) -> bool {
+    bind.is_mapped() && matches!(bind.action, None | Some(Action::Special { .. }))
+}
+
+/// Is this a mapped app / link binding — a Space-ring PILL?
+pub fn is_app_or_link(bind: &KeyBinding) -> bool {
+    bind.is_mapped() && bind.action.is_none()
+}
+
 /// The Space ring's inner-band rows for `cfg`'s active profile:
-/// `(key label, name)`, in key-table order, then the two GESTURE rows the
-/// ring has always carried — "Scroll → Layer Opacity" (Space + wheel is a
-/// gesture, not a key) and the double-tap row for the scroll specials, ONE
-/// row for both when both are bound ("Up/Dn ×2" on their default keys), one
-/// each otherwise, none when neither is.
+/// `(key label, name)` for every SPECIAL binding — non-letter keys in
+/// key-table order, then any special a user moved onto a letter, in letter
+/// order — then the two GESTURE rows the ring has always carried — "Scroll →
+/// Layer Opacity" (Space + wheel is a gesture, not a key) and the double-tap
+/// row for the scroll specials, ONE row for both when both are bound ("Up/Dn
+/// ×2" on their default keys), one each otherwise, none when neither is.
+///
+/// PHASE A step 4: ONLY specials. Before the trim every mapped non-letter
+/// binding was a row, so a chord on `[` or a uri on `7` crowded the band the
+/// owner reads for the Boss Key; now those bindings fire but are not drawn
+/// (`hud_shows`).
 pub fn hud_specials_for(cfg: &AppConfig) -> Vec<(String, String)> {
     let mut rows: Vec<(String, String)> = Vec::new();
     let mut top: Option<&str> = None;
     let mut bottom: Option<&str> = None;
-    for (id, bind) in non_letter_bindings(cfg) {
+    let mut letters: Vec<(&str, &KeyBinding)> = active_profile(cfg)
+        .map(|p| {
+            p.bindings
+                .iter()
+                .filter(|(id, b)| is_letter_id(id) && special_id(b).is_some())
+                .map(|(id, b)| (id.as_str(), b))
+                .collect()
+        })
+        .unwrap_or_default();
+    letters.sort_by(|a, b| a.0.cmp(b.0));
+    let all = non_letter_bindings(cfg).into_iter().chain(letters);
+    for (id, bind) in all {
         match special_id(bind) {
             Some("scroll_top") => top = Some(id),
             Some("scroll_bottom") => bottom = Some(id),
-            _ => rows.push((key_label(id), binding_name(bind))),
+            Some(_) => rows.push((key_label(id), binding_name(bind))),
+            None => {}
         }
     }
     rows.push(("Scroll".into(), "Layer Opacity".into()));
@@ -400,7 +434,8 @@ pub(crate) mod tests {
 
     /// Remove one special and its row goes; remove ONE scroll special and
     /// the double-tap row names only the other; move the Boss Key to F1 and
-    /// the row follows it; a label wins over the special's name.
+    /// the row follows it; a label wins over the special's name. PHASE A
+    /// step 4: a uri on `7` is NOT a row any more (it still fires).
     #[test]
     fn the_hud_rows_follow_the_bindings() {
         let mut cfg = seeded_cfg();
@@ -415,10 +450,10 @@ pub(crate) mod tests {
         );
         let rows = hud_specials_for(&cfg);
         let keys: Vec<&str> = rows.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(keys, vec!["`", "Tab", "⌫", "RAlt", ",", ";", "/", "'", "←", "→", "7", "F1", "Scroll", "Up ×2"]);
-        assert_eq!(rows[10].1, "ms-settings:display");
-        assert_eq!(rows[11].1, "Panic");
-        assert_eq!(rows[13].1, "Scroll Top");
+        assert_eq!(keys, vec!["`", "Tab", "⌫", "RAlt", ",", ";", "/", "'", "←", "→", "F1", "Scroll", "Up ×2"]);
+        assert!(!rows.iter().any(|(_, n)| n == "ms-settings:display"), "a uri is not a Space-ring row (step 4)");
+        assert_eq!(rows[10].1, "Panic");
+        assert_eq!(rows[12].1, "Scroll Top");
         // Neither scroll special → no double-tap row at all.
         cfg.profiles[0].bindings.remove("up");
         let rows = hud_specials_for(&cfg);
@@ -536,9 +571,58 @@ pub(crate) mod tests {
         assert!(names.contains(&"Force Close"), "the label wins: {names:?}");
         assert!(names.contains(&"Bluetooth on/off"));
         assert!(names.contains(&"Night light"));
-        // And the Space ring sees the same profile.
+        // And the Space ring sees the same profile — but (PHASE A step 4) ONLY
+        // its specials: the ten non-scroll specials + the two gesture rows.
+        // The Enter toggle, the `[` chord and the `]` uri fire, and are not
+        // drawn.
         let hud = hud_specials_for(&cfg);
-        assert!(hud.len() >= 8 + 2, "{hud:?}");
+        assert_eq!(hud.len(), 10 + 2, "{hud:?}");
+        assert!(!hud.iter().any(|(_, n)| n == "Bluetooth on/off" || n == "Win+H" || n == "Night light"), "{hud:?}");
+    }
+
+    /// PHASE A step 4 (2026-09-19, the owner's trim): the Space ring shows
+    /// app/link pills and the specials' inner band, NOTHING ELSE. A letter
+    /// bound to a chord, a uri, a command, a brightness step or a toggle
+    /// produces no row anywhere on the Space ring; a special moved onto a
+    /// letter is still an inner-band row; and the 12 + 2 seeded specials
+    /// still appear. `hud_shows` / `is_app_or_link` are the two gates.
+    #[test]
+    fn step_4_the_space_ring_shows_only_apps_and_specials() {
+        let mut cfg = seeded_cfg();
+        let p = &mut cfg.profiles[0];
+        let act = |a: Action| KeyBinding { action: Some(a), label: Some("X".into()), ..Default::default() };
+        p.bindings.insert("q".into(), act(Action::Chord { keys: vec![0x5B, 0x10, 0x53] }));
+        p.bindings.insert("w".into(), act(Action::Uri { target: "ms-settings:display".into() }));
+        p.bindings.insert("e".into(), act(Action::Command { line: "Get-Date".into(), elevated: false }));
+        p.bindings.insert("r".into(), act(Action::Brightness { delta: 10 }));
+        p.bindings.insert("t".into(), act(Action::Toggle { what: "dark_mode".into() }));
+        p.bindings.insert("b".into(), KeyBinding { app: Some("brave.exe".into()), label: Some("Brave".into()), ..Default::default() });
+        p.bindings.insert("m".into(), KeyBinding { action: Some(Action::Special { id: "pause".into() }), ..Default::default() });
+        p.bindings.insert("rbracket".into(), act(Action::Chord { keys: vec![0x5B, 0x48] }));
+
+        for (id, b) in &cfg.profiles[0].bindings {
+            let expect = matches!(b.action, None | Some(Action::Special { .. }));
+            assert_eq!(hud_shows(b), expect, "{id}");
+        }
+        assert!(is_app_or_link(cfg.profiles[0].bindings.get("b").unwrap()));
+        assert!(!is_app_or_link(cfg.profiles[0].bindings.get("m").unwrap()), "a special is not a pill");
+        assert!(!is_app_or_link(cfg.profiles[0].bindings.get("q").unwrap()));
+
+        let rows = hud_specials_for(&cfg);
+        let keys: Vec<&str> = rows.iter().map(|(k, _)| k.as_str()).collect();
+        // The twelve seeded non-scroll specials, the pause special on M, the
+        // two gesture rows — and none of the five action letters nor `]`.
+        assert_eq!(
+            keys,
+            vec!["Esc", "`", "Tab", "⌫", "RAlt", ",", ".", ";", "/", "'", "←", "→", "M", "Scroll", "Up/Dn ×2"]
+        );
+        assert_eq!(rows[12].1, "Pause Spaceadom");
+        assert!(!rows.iter().any(|(_, n)| n == "X"), "{rows:?}");
+        // The seeded 12 + 2 are all still there: 14 special bindings, of
+        // which the two scroll ones fold into the double-tap row.
+        let seeded_specials = crate::config::DEFAULT_SPECIALS.len();
+        assert_eq!(seeded_specials, 14);
+        assert_eq!(rows.len(), seeded_specials - 2 + 1 + 2);
     }
 
     /// The SAME assertion against the real file, when the lead points the

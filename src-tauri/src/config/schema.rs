@@ -605,6 +605,14 @@ pub struct AppConfig {
     /// stop receiving updates. `first_install_tests` holds both paths to it.
     #[serde(default = "default_true")]
     pub auto_update: bool,
+
+    /// TOUCHPAD T2 (1.0.120, docs/TOUCHPAD-BRIEF-T2.md) — the four edge bands
+    /// of a Precision Touchpad. Everything OFF by default; a config that
+    /// predates the field reads as "nothing set up" (bare `#[serde(default)]`),
+    /// which is exactly what a fresh install shows too. `first_install_tests`
+    /// holds both paths to it.
+    #[serde(default)]
+    pub touchpad: Touchpad,
 }
 
 /// PROBLEM 105 — the profile every OTHER profile silently falls back to.
@@ -805,7 +813,377 @@ impl Default for AppConfig {
             // PROBLEM 245 — ON. Must agree with `default = "default_true"` on
             // the field; first_install_tests holds both to it.
             auto_update: true,
+            // TOUCHPAD T2 — every band off, the page in its Chocolate look,
+            // the one-finger demo not yet seen. Must agree with the bare
+            // `#[serde(default)]` on the field; `touchpad_tests` holds both.
+            touchpad: Touchpad::default(),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TOUCHPAD T2 (1.0.120) — the edge-band settings
+// ---------------------------------------------------------------------------
+
+/// Which edge of the touchpad a band lives on. Stored lowercase
+/// (`"left"` …). The gesture engine's `Edge` is this same type; `raw.rs`'s
+/// probe-only `Edge` predates it and stays where the example expects it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TouchEdge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl TouchEdge {
+    pub const ALL: [TouchEdge; 4] = [TouchEdge::Left, TouchEdge::Right, TouchEdge::Top, TouchEdge::Bottom];
+
+    /// Left/right run along Y; top/bottom along X.
+    pub fn is_vertical(self) -> bool {
+        matches!(self, TouchEdge::Left | TouchEdge::Right)
+    }
+}
+
+/// What a band does while a finger slides along it. `None` is the page's
+/// "Nothing" — the band stays drawn, arms, freezes the pointer, and changes
+/// nothing (so a user can park an edge without losing its geometry).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BandAction {
+    Brightness,
+    Volume,
+    Scrub,
+    #[default]
+    None,
+}
+
+/// One edge band. `width` is a fraction of the pad's SHORT side, `length` a
+/// fraction of the edge (centred). Both are clamped on load by
+/// `Band::clamped` — the page shows width as px of its drawn 780×520 pad and
+/// length as a percentage, as the design does.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Band {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub action: BandAction,
+    #[serde(default = "Band::default_width")]
+    pub width: f32,
+    #[serde(default = "Band::default_length_side")]
+    pub length: f32,
+    #[serde(default = "Band::default_sensitivity")]
+    pub sensitivity: u8,
+    #[serde(default)]
+    pub invert: bool,
+}
+
+impl Band {
+    pub const WIDTH_MIN: f32 = 0.04;
+    pub const WIDTH_MAX: f32 = 0.25;
+    pub const LENGTH_MIN: f32 = 0.30;
+    pub const LENGTH_MAX: f32 = 1.0;
+    pub const SENS_MIN: u8 = 1;
+    pub const SENS_MAX: u8 = 10;
+
+    pub fn default_width() -> f32 {
+        0.07
+    }
+    pub fn default_length_side() -> f32 {
+        0.70
+    }
+    pub fn default_length_top() -> f32 {
+        0.80
+    }
+    pub fn default_sensitivity() -> u8 {
+        6
+    }
+
+    /// The owner's defaults per edge: left = brightness, right = volume,
+    /// top = scrub, bottom = reserved (`None`). All OFF.
+    pub fn for_edge(edge: TouchEdge) -> Band {
+        let (action, length) = match edge {
+            TouchEdge::Left => (BandAction::Brightness, Self::default_length_side()),
+            TouchEdge::Right => (BandAction::Volume, Self::default_length_side()),
+            TouchEdge::Top => (BandAction::Scrub, Self::default_length_top()),
+            TouchEdge::Bottom => (BandAction::None, Self::default_length_top()),
+        };
+        Band {
+            enabled: false,
+            action,
+            width: Self::default_width(),
+            length,
+            sensitivity: Self::default_sensitivity(),
+            invert: false,
+        }
+    }
+
+    /// Every number inside its range; NaN reads as the default. Pure.
+    pub fn clamped(mut self) -> Band {
+        if !self.width.is_finite() {
+            self.width = Self::default_width();
+        }
+        if !self.length.is_finite() {
+            self.length = Self::default_length_side();
+        }
+        self.width = self.width.clamp(Self::WIDTH_MIN, Self::WIDTH_MAX);
+        self.length = self.length.clamp(Self::LENGTH_MIN, Self::LENGTH_MAX);
+        self.sensitivity = self.sensitivity.clamp(Self::SENS_MIN, Self::SENS_MAX);
+        self
+    }
+}
+
+impl Default for Band {
+    fn default() -> Self {
+        Band::for_edge(TouchEdge::Left)
+    }
+}
+
+/// What happens when a finger LANDS in the square two enabled bands share.
+/// `Ask` = no default: the page asks the moment the second overlapping band
+/// is switched on, and until the user answers a landing in that square
+/// belongs to NO band (normal pointing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CornerRule {
+    #[default]
+    Ask,
+    AlwaysHorizontal,
+    AlwaysVertical,
+}
+
+/// Per-corner owner when the user set one by hand. `None` = follow
+/// `corner_rule`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Corners {
+    #[serde(default)]
+    pub tl: Option<TouchEdge>,
+    #[serde(default)]
+    pub tr: Option<TouchEdge>,
+    #[serde(default)]
+    pub bl: Option<TouchEdge>,
+    #[serde(default)]
+    pub br: Option<TouchEdge>,
+}
+
+impl Corners {
+    /// The owner recorded for the corner where `vertical` meets `horizontal`.
+    pub fn get(&self, vertical: TouchEdge, horizontal: TouchEdge) -> Option<TouchEdge> {
+        match (vertical, horizontal) {
+            (TouchEdge::Left, TouchEdge::Top) => self.tl,
+            (TouchEdge::Right, TouchEdge::Top) => self.tr,
+            (TouchEdge::Left, TouchEdge::Bottom) => self.bl,
+            (TouchEdge::Right, TouchEdge::Bottom) => self.br,
+            _ => None,
+        }
+    }
+
+    pub fn set(&mut self, vertical: TouchEdge, horizontal: TouchEdge, owner: Option<TouchEdge>) {
+        match (vertical, horizontal) {
+            (TouchEdge::Left, TouchEdge::Top) => self.tl = owner,
+            (TouchEdge::Right, TouchEdge::Top) => self.tr = owner,
+            (TouchEdge::Left, TouchEdge::Bottom) => self.bl = owner,
+            (TouchEdge::Right, TouchEdge::Bottom) => self.br = owner,
+            _ => {}
+        }
+    }
+
+    /// How many corners were set by hand (the page's "1 corner set by hand").
+    pub fn set_by_hand(&self) -> usize {
+        [self.tl, self.tr, self.bl, self.br].iter().filter(|c| c.is_some()).count()
+    }
+}
+
+/// The page's look: the design's Chocolate tokens (default) or the app's
+/// own theme variables. The home thumbnail always matches the app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TouchpadLook {
+    #[default]
+    Chocolate,
+    App,
+}
+
+/// The whole touchpad section. Bottom is reserved: shown, disabled, "Later" —
+/// `bottom.enabled` is forced false by `normalised()`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Touchpad {
+    #[serde(default = "Touchpad::default_left")]
+    pub left: Band,
+    #[serde(default = "Touchpad::default_right")]
+    pub right: Band,
+    #[serde(default = "Touchpad::default_top")]
+    pub top: Band,
+    #[serde(default = "Touchpad::default_bottom")]
+    pub bottom: Band,
+    #[serde(default)]
+    pub corner_rule: CornerRule,
+    #[serde(default)]
+    pub corners: Corners,
+    #[serde(default)]
+    pub page_look: TouchpadLook,
+    #[serde(default)]
+    pub demo_seen: bool,
+    /// "Show the touchpad under the keyboard" (owner, 2026-09-19) — the home
+    /// thumbnail. Default ON, and only shown in Settings when a Precision
+    /// Touchpad is present; OFF hides the thumbnail and the keyboard centres
+    /// as board-only. `default_true` so an existing config keeps the
+    /// thumbnail it has always seen once a pad is detected.
+    #[serde(default = "default_true")]
+    pub show_thumbnail: bool,
+}
+
+impl Touchpad {
+    fn default_left() -> Band {
+        Band::for_edge(TouchEdge::Left)
+    }
+    fn default_right() -> Band {
+        Band::for_edge(TouchEdge::Right)
+    }
+    fn default_top() -> Band {
+        Band::for_edge(TouchEdge::Top)
+    }
+    fn default_bottom() -> Band {
+        Band::for_edge(TouchEdge::Bottom)
+    }
+
+    pub fn band(&self, edge: TouchEdge) -> &Band {
+        match edge {
+            TouchEdge::Left => &self.left,
+            TouchEdge::Right => &self.right,
+            TouchEdge::Top => &self.top,
+            TouchEdge::Bottom => &self.bottom,
+        }
+    }
+
+    pub fn band_mut(&mut self, edge: TouchEdge) -> &mut Band {
+        match edge {
+            TouchEdge::Left => &mut self.left,
+            TouchEdge::Right => &mut self.right,
+            TouchEdge::Top => &mut self.top,
+            TouchEdge::Bottom => &mut self.bottom,
+        }
+    }
+
+    /// Ranges enforced, the reserved bottom band held off. Pure; applied on
+    /// load and on save so the engine never sees a value the page cannot show.
+    pub fn normalised(mut self) -> Touchpad {
+        for e in TouchEdge::ALL {
+            let b = *self.band(e);
+            *self.band_mut(e) = b.clamped();
+        }
+        self.bottom.enabled = false;
+        self.bottom.action = BandAction::None;
+        self
+    }
+
+    /// Edges with an enabled band, in the ALL order.
+    pub fn enabled_edges(&self) -> Vec<TouchEdge> {
+        TouchEdge::ALL.iter().copied().filter(|e| self.band(*e).enabled).collect()
+    }
+
+    pub fn any_enabled(&self) -> bool {
+        !self.enabled_edges().is_empty()
+    }
+}
+
+impl Default for Touchpad {
+    fn default() -> Self {
+        Touchpad {
+            left: Self::default_left(),
+            right: Self::default_right(),
+            top: Self::default_top(),
+            bottom: Self::default_bottom(),
+            corner_rule: CornerRule::Ask,
+            corners: Corners::default(),
+            page_look: TouchpadLook::Chocolate,
+            demo_seen: false,
+            show_thumbnail: true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod touchpad_tests {
+    use super::*;
+
+    #[test]
+    fn a_config_predating_the_field_reads_as_nothing_set_up() {
+        // Same fixture rule as `first_install_tests`: delete the field from a
+        // current config rather than hand-write an old one.
+        let mut v = serde_json::to_value(AppConfig::default()).expect("serialise");
+        v.as_object_mut().expect("object").remove("touchpad");
+        let c: AppConfig = serde_json::from_value(v).expect("a config predating `touchpad` must load");
+        assert_eq!(c.touchpad, Touchpad::default());
+        assert!(!c.touchpad.any_enabled());
+        assert_eq!(c.touchpad.page_look, TouchpadLook::Chocolate);
+        assert!(!c.touchpad.demo_seen);
+        assert_eq!(c.touchpad.corner_rule, CornerRule::Ask);
+    }
+
+    #[test]
+    fn the_owner_defaults_per_edge() {
+        let t = Touchpad::default();
+        assert_eq!(t.left.action, BandAction::Brightness);
+        assert_eq!(t.right.action, BandAction::Volume);
+        assert_eq!(t.top.action, BandAction::Scrub);
+        assert_eq!(t.bottom.action, BandAction::None);
+        assert!((t.left.length - 0.70).abs() < 1e-6);
+        assert!((t.top.length - 0.80).abs() < 1e-6);
+        assert!((t.left.width - 0.07).abs() < 1e-6);
+        assert_eq!(t.left.sensitivity, 6);
+        for e in TouchEdge::ALL {
+            assert!(!t.band(e).enabled, "{e:?} must start off");
+        }
+    }
+
+    #[test]
+    fn ranges_are_clamped_and_the_bottom_band_is_held_off() {
+        let mut t = Touchpad::default();
+        t.left.width = 0.9;
+        t.left.length = 0.1;
+        t.left.sensitivity = 40;
+        t.right.width = f32::NAN;
+        t.bottom.enabled = true;
+        t.bottom.action = BandAction::Volume;
+        let n = t.normalised();
+        assert!((n.left.width - Band::WIDTH_MAX).abs() < 1e-6);
+        assert!((n.left.length - Band::LENGTH_MIN).abs() < 1e-6);
+        assert_eq!(n.left.sensitivity, Band::SENS_MAX);
+        assert!((n.right.width - Band::default_width()).abs() < 1e-6);
+        assert!(!n.bottom.enabled);
+        assert_eq!(n.bottom.action, BandAction::None);
+    }
+
+    #[test]
+    fn a_partial_band_object_fills_in_its_defaults() {
+        let t: Touchpad = serde_json::from_str(r#"{"top":{"enabled":true}}"#).unwrap();
+        assert!(t.top.enabled);
+        // A bare object has no edge context, so `Band`'s own serde defaults
+        // apply: the side length, `None` action. The page sets the action.
+        assert_eq!(t.top.action, BandAction::None);
+        assert!((t.top.width - 0.07).abs() < 1e-6);
+        assert_eq!(t.top.sensitivity, 6);
+        assert_eq!(t.right, Band::for_edge(TouchEdge::Right));
+    }
+
+    #[test]
+    fn corners_and_looks_serialise_lowercase() {
+        let mut t = Touchpad::default();
+        t.corners.set(TouchEdge::Right, TouchEdge::Top, Some(TouchEdge::Right));
+        t.page_look = TouchpadLook::App;
+        t.corner_rule = CornerRule::AlwaysVertical;
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(json.contains(r#""tr":"right""#), "{json}");
+        assert!(json.contains(r#""page_look":"app""#), "{json}");
+        assert!(json.contains(r#""corner_rule":"always_vertical""#), "{json}");
+        assert!(json.contains(r#""action":"scrub""#), "{json}");
+        assert_eq!(t.corners.get(TouchEdge::Right, TouchEdge::Top), Some(TouchEdge::Right));
+        assert_eq!(t.corners.get(TouchEdge::Left, TouchEdge::Top), None);
+        assert_eq!(t.corners.set_by_hand(), 1);
+        let back: Touchpad = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, t);
     }
 }
 

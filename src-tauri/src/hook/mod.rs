@@ -2455,6 +2455,9 @@ const _KEYEVENTF_KEYUP: u32 = 0x0002;
 // Mouse hook WM values
 const WM_MOUSEWHEEL: u32 = 0x020A;
 const _WHEEL_DELTA: i32 = 120;
+/// TOUCHPAD T2 — the horizontal wheel, eaten alongside WM_MOUSEWHEEL while a
+/// band is live so a pad that emits it cannot scroll the page underneath.
+const WM_MOUSEHWHEEL: u32 = 0x020E;
 // PROBLEM 206 — pointer activation needs the move and the left button too.
 const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONDOWN: u32 = 0x0201;
@@ -4684,6 +4687,24 @@ unsafe extern "system" fn ms_hook_proc(
     LAST_MS_CALLBACK.store(ms_now, Ordering::Relaxed);
     MS_EVENTS.fetch_add(1, Ordering::Relaxed);
     let msg = w_param.0 as u32;
+
+    // TOUCHPAD T2 — freeze the pointer while an edge band is live. This is the
+    // ONE extra atomic test the brief adds at the top of the existing mouse
+    // callback (there is exactly one WH_MOUSE_LL in this process; no second
+    // hook). A single finger that landed inside an enabled band sets
+    // `touchpad::bands::BAND_LIVE` (from the touchpad reader thread), and
+    // while it is set we eat WM_MOUSEMOVE, WM_MOUSEWHEEL and WM_MOUSEHWHEEL so
+    // the cursor holds still and the window underneath does not scroll — the
+    // T1b hardware result. Above every other gate on purpose: the freeze must
+    // win over MODIFIER_ACTIVE, the exception list and bypass. Keyboard-hook
+    // laws: one relaxed atomic load, no win32k call, no allocation. Cost on
+    // the common path: one load per mouse event (PROBLEM 58's envelope —
+    // short-circuit `&&` keeps a non-freeze event to a single load).
+    if (msg == WM_MOUSEMOVE || msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL)
+        && crate::touchpad::bands::BAND_LIVE.load(Ordering::Relaxed)
+    {
+        return LRESULT(1);
+    }
 
     // PROBLEM 206 — the second half of a suppressed click, and it must run
     // BEFORE every gate below. Gesture B swallows a WM_LBUTTONDOWN; if its

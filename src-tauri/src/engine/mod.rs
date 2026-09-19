@@ -1456,7 +1456,12 @@ pub(crate) fn hud_apps_for(
     let Some(profile) = cfg.profiles.iter().find(|p| p.name == profile_name) else {
         return binds;
     };
-    let mut keys: Vec<_> = profile.bindings.iter().filter(|(_, b)| b.is_mapped()).collect();
+    // PHASE A step 4 (2026-09-19, the owner's trim) — PILLS ARE APPS AND
+    // LINKS, full stop. A letter that runs a chord, a uri, a command, a
+    // brightness step or a toggle still fires (the hook and `run_binding`
+    // never read this) but draws no pill; a special on a letter is an
+    // inner-band row (`specials::hud_specials_for`), not a pill.
+    let mut keys: Vec<_> = profile.bindings.iter().filter(|(_, b)| specials::is_app_or_link(b)).collect();
     keys.sort_by(|a, b| a.0.cmp(b.0));
     for (key, bind) in keys {
         // PHASE A — one naming rule for every surface: the label, else the
@@ -1498,7 +1503,9 @@ pub(crate) fn hud_icons_for(
     let Some(profile) = cfg.profiles.iter().find(|p| p.name == profile_name) else {
         return Vec::new();
     };
-    let mut keys: Vec<_> = profile.bindings.iter().filter(|(_, b)| b.is_mapped()).collect();
+    // Step 4 — the SAME gate as `hud_apps_for`, so the two vecs stay
+    // index-aligned: apps and links only.
+    let mut keys: Vec<_> = profile.bindings.iter().filter(|(_, b)| specials::is_app_or_link(b)).collect();
     keys.sort_by(|a, b| a.0.cmp(b.0));
     keys.into_iter()
         .map(|(_, bind)| {
@@ -1818,12 +1825,18 @@ mod band_gate_tests {
         );
         // Present but UNMAPPED — the ring must not draw a chip for it.
         bindings.insert("z".to_string(), KeyBinding::default());
-        // PHASE A — a LETTER whose binding is an ACTION with no label is still
-        // a chip, named after the action.
+        // PHASE A step 4 — a LETTER whose binding is a uri / chord / command
+        // / toggle is NOT a chip any more (the owner's trim: pills are apps
+        // and links). It still fires on its key.
         bindings.insert(
             "d".to_string(),
             KeyBinding { action: Some(crate::config::Action::Uri { target: "ms-settings:display".into() }),
                          ..Default::default() },
+        );
+        bindings.insert(
+            "e".to_string(),
+            KeyBinding { action: Some(crate::config::Action::Chord { keys: vec![0x5B, 0x48] }),
+                         label: Some("Win+H".into()), ..Default::default() },
         );
         cfg.profiles = vec![Profile { name: "Preview Test".into(), bindings, emoji: None, specials_seeded: true }];
         cfg.active_profile = "Preview Test".into();
@@ -1834,9 +1847,13 @@ mod band_gate_tests {
             vec![
                 ("A".to_string(), "Afterburner".to_string()),
                 ("C".to_string(), "Chrome".to_string()),
-                ("D".to_string(), "ms-settings:display".to_string()),
             ],
-            "mapped keys only, sorted by key, badge upper-cased"
+            "mapped app/link keys only, sorted by key, badge upper-cased — no uri, no chord"
+        );
+        assert_eq!(
+            hud_icons_for(&cfg, "Preview Test", &|_| None).len(),
+            apps.len(),
+            "icons stay index-aligned with the pills"
         );
         assert!(
             hud_apps_for(&cfg, "A Profile That Does Not Exist").is_empty(),
@@ -1962,6 +1979,48 @@ mod band_gate_tests {
         assert!(sent.iter().all(|(k, _)| k != "`"));
         assert_eq!(sent[0].0, "Esc");
         assert_eq!(sent[1].0, "Tab", "Tab moves up into the backtick's place");
+    }
+
+    /// PHASE A step 4 (2026-09-19, the owner's trim) — THE SPACE RING'S ROW
+    /// COUNT for a profile of MIXED kinds: seeded specials + three apps + a
+    /// link + a chord letter + a uri letter + a command letter + a toggle on
+    /// Enter. The whole payload (pills + inner band) is 4 pills + 12 special
+    /// rows + 2 gesture rows; the four non-app, non-special bindings still
+    /// fire but appear nowhere on the Space ring.
+    #[test]
+    fn step_4_a_mixed_profile_draws_only_its_apps_and_specials() {
+        use crate::config::{Action, KeyBinding};
+        let mut cfg = seeded();
+        let p = &mut cfg.profiles[0];
+        let app = |n: &str| KeyBinding { app: Some(format!("{n}.exe")), label: Some(n.into()), ..Default::default() };
+        p.bindings.insert("b".into(), app("Brave"));
+        p.bindings.insert("c".into(), app("Code"));
+        p.bindings.insert("d".into(), app("Discord"));
+        p.bindings.insert("g".into(), KeyBinding { web_url: Some("https://github.com".into()), label: Some("GitHub".into()), ..Default::default() });
+        let act = |a: Action| KeyBinding { action: Some(a), label: Some("hidden".into()), ..Default::default() };
+        p.bindings.insert("h".into(), act(Action::Chord { keys: vec![0x5B, 0x48] }));
+        p.bindings.insert("s".into(), act(Action::Uri { target: "ms-settings:display".into() }));
+        p.bindings.insert("x".into(), act(Action::Command { line: "Get-Date".into(), elevated: false }));
+        p.bindings.insert("enter".into(), act(Action::Toggle { what: "dark_mode".into() }));
+        cfg.hud_show_specials = true;
+        cfg.hud_band_count = "one".into();
+
+        let name = cfg.active_profile.clone();
+        let apps = hud_apps_for(&cfg, &name);
+        assert_eq!(
+            apps.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            vec!["B", "C", "D", "G"],
+            "four pills: three apps and a link — the seeded specials are not pills either"
+        );
+        assert_eq!(hud_icons_for(&cfg, &name, &|_| None).len(), 4);
+        let specials = specials_for_hud(cfg.hud_show_specials, &cfg.hud_band_count, specials::hud_specials_for(&cfg));
+        assert_eq!(specials.len(), 12 + 2, "{specials:?}");
+        assert!(specials.iter().all(|(_, n)| n != "hidden"), "{specials:?}");
+        assert_eq!(apps.len() + specials.len(), 18, "the whole Space ring");
+        // And the preview payload — the Settings preview — agrees.
+        let pv = preview_payload(&cfg, PreviewLayout::Compact);
+        assert_eq!(pv.apps.len(), 4);
+        assert_eq!(pv.specials.len(), 14);
     }
 
     /// PHASE A — the double-tap rule, pure.

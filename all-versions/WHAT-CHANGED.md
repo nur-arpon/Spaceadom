@@ -41,7 +41,15 @@ tidy. Their rows say what each one got wrong.
 
 ---
 
-## 2026-09-19 (latest) — 1.0.119 — the ring is centred again, the pill names the app, the mouse ring folds by count
+## 2026-09-19 (latest) — 1.0.120 — the touchpad edges do things now
+
+| Version | What changed |
+| --- | --- |
+| **1.0.120** | Your touchpad's edges can do things now. Start one finger inside a strip along an edge and slide, and it changes something — the left edge is brightness, the right is volume, the top scrubs a video back and forth as fast as you slide. A finger that starts in the middle still just moves the pointer, exactly as always; only a finger that *begins* at the edge is caught, and while you slide the pointer holds still so nothing jumps around. Lift your finger and it stops — slide the other way to undo it. Everything is off until you turn it on, from a new touchpad page: there is a little touchpad drawn under the keyboard on the home screen (only if your laptop has a proper "Precision" touchpad — most since about 2016 do), click it and you get the page where you switch each edge on, choose what it does, and drag the strips wider or shorter. The bottom edge is kept for later. If two edges meet at a corner the page asks, once, which one owns the corner. The page comes in its own dark "Chocolate" look or one that matches your app theme — your choice in Settings, where you can also hide the little touchpad if you would rather the keyboard sat on its own. The "Special keys" button moved to the bottom-right corner to make room. **I could not test the sliding itself — that needs your fingers on the pad — so try each edge once and tell me if brightness, volume and scrubbing feel right.** Same build, later the same day: the Space ring is back to doing one job. Hold Space and you see your apps and links as pills, and the Spaceadom specials in the small inner ring, and nothing else — a key that runs a key combo, a control or a command still works when you press it, it just does not clutter the ring any more. And the key editor is simple again: click a key and you get the app picker straight away, no row of choices at the top. If a key already runs something that is not an app, one line says so and tells you to turn on Advanced mode to change it. Advanced mode (in Settings) is now the one switch that unlocks the rest — Spaceadom specials, Key combo, Controls and Run command. |
+
+---
+
+## 2026-09-19 — 1.0.119 — the ring is centred again, the pill names the app, the mouse ring folds by count
 
 | Version | What changed |
 | --- | --- |

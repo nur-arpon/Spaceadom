@@ -295,8 +295,10 @@ export interface AppConfig {
    */
   hud_show_specials?: boolean;
   /**
-   * PHASE A — Advanced mode: the key editor shows "Run command" and the full
-   * Windows catalogue. Absent = off. UI only; Rust ignores it.
+   * PHASE A — Advanced mode. Step 4 (2026-09-19): OFF, the key editor is the
+   * App or link picker alone — no kind row; ON, the row unlocks Spaceadom
+   * special, Key combo, Controls and Run command. Absent = off. UI only;
+   * Rust ignores it.
    */
   advanced_mode?: boolean;
   /** 1.0.119 (brief 4 §4) — the key editor's "Key combo" hint has been shown
@@ -398,6 +400,66 @@ export interface AppConfig {
    * and it ignores this field entirely.
    */
   tour_done?: boolean;
+
+  /** TOUCHPAD T2 (1.0.120) — the four edge bands. Optional: a config written
+   *  before 1.0.120 has no `touchpad` and reads as `Touchpad`'s defaults. */
+  touchpad?: Touchpad;
+}
+
+// ---------------------------------------------------------------------------
+// TOUCHPAD T2 (1.0.120) — mirrors `config/schema.rs`'s Touchpad types.
+// ---------------------------------------------------------------------------
+
+export type TouchEdge = "left" | "right" | "top" | "bottom";
+export type BandAction = "brightness" | "volume" | "scrub" | "none";
+export type CornerRule = "ask" | "always_horizontal" | "always_vertical";
+export type TouchpadLook = "chocolate" | "app";
+/** Emitted by `touchpad::mod`; `"none"` covers "no pad" and "not Precision". */
+export type TouchpadPresence = "precision" | "none";
+
+export interface Band {
+  enabled: boolean;
+  action: BandAction;
+  /** Fraction of the pad's short side (0.04..=0.25). */
+  width: number;
+  /** Fraction of the edge, centred (0.30..=1.0). */
+  length: number;
+  /** 1..=10. */
+  sensitivity: number;
+  invert: boolean;
+}
+
+export interface Corners {
+  tl: TouchEdge | null;
+  tr: TouchEdge | null;
+  bl: TouchEdge | null;
+  br: TouchEdge | null;
+}
+
+export interface Touchpad {
+  left: Band;
+  right: Band;
+  top: Band;
+  bottom: Band;
+  corner_rule: CornerRule;
+  corners: Corners;
+  page_look: TouchpadLook;
+  demo_seen: boolean;
+  show_thumbnail: boolean;
+}
+
+/** `touchpad-caps` event payload. */
+export interface TouchpadCaps {
+  presence: TouchpadPresence;
+  pad_mm: [number, number] | null;
+}
+
+/** `touchpad-live` event payload; every field is null on gesture end. */
+export interface TouchpadLive {
+  edge: TouchEdge | null;
+  action: BandAction | null;
+  value_pct: number | null;
+  travel: number | null;
 }
 
 // ---------------------------------------------------------------------------

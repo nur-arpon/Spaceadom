@@ -36399,3 +36399,190 @@ pub(crate) fn sync_dark_mode(cfg: &mut AppConfig, os_dark: Option<bool>) -> bool
 ### §4 / §5 / §6 — key editor and settings polish
 
 `src/components/key-detail-panel.ts` — `kindOptions` order App or link · Spaceadom special · Key combo (+ Controls / Run command in Advanced); "Key combo" heading; `comboHintHtml(key)` + `wireComboHint()` — expanded once (`key_combo_hint_seen`, `schema.rs` + `types.ts`, `#[serde(default)]`), then a `How does this work?` link; `initKeyDetailPanel(.., onConfigTouched)` and `main.ts` binds `persistConfig`. `src/styles.css` — `.ed-kinds .theme-seg-ind` accent tint + `.ed-kinds .theme-seg-opt.is-on { color: var(--st-text) }`; `.ed-hint-link`. `src/components/setting-subs.ts` (new leaf; `SUB_LINES`, `subLineFor`, `subLineHtml`, `paintSubLine`), `src/components/settings-panel.ts` (row builders read the leaf; the four pill handlers call `paintSubLine`; the Advanced row moved into a `For power users` `.set-group` inside its own `.set-section` immediately before Maintenance, `toggleRow(.., sub)`), `src/components/controls.ts` (`GROUP_ICONS.power`), `src/preview.ts` (same lines from the same leaf), `scripts/setting-subs.test.ts` (3 tests; reads `controls.ts` as text because Node cannot resolve its extensionless `./report-dialog` import).
+
+---
+
+## TOUCHPAD — the edge-gesture feature (T1 + T2, 1.0.120, docs/TOUCHPAD-BRIEF-T1/T2.md)
+
+Written so another AI can rebuild it without opening the tree.
+
+### The hardware fact that shaped everything (T1/T1b, owner's runs 2026-09-19)
+
+The pad is a **Goodix Precision Touchpad**, 119 x 74 mm, 100+ reports/s, 5
+contacts. Two probes settled the design:
+
+- **Two-finger edge slides CANNOT be used.** The LL mouse hook ate every
+  `WM_MOUSEWHEEL` (536/0 in the summary) and Brave still panned: Chromium, UWP
+  Store apps and Win11 Explorer scroll through **Direct Manipulation**, which no
+  `WH_MOUSE_LL` hook ever sees. Three fingers fire Windows' own gestures.
+- **ONE finger works.** Arm on the LANDING report inside a band and, while the
+  finger is down, eat `WM_MOUSEMOVE` in the LL hook: the cursor moved **0 px**
+  over a 1.2 s hold with 53 moves eaten, and the page did not scroll.
+
+So the feature is **one finger that STARTS inside an edge band**. The proven
+code is `raw.rs` (the HID reader) and the example's N=1 `LandingTracker`; T2
+promotes that path, NOT the two-finger `BandTracker`.
+
+### Reading the fingers — `src-tauri/src/touchpad/raw.rs` (T1, unchanged)
+
+A Precision Touchpad is a HID digitizer top-level collection **usage page
+0x0D / usage 0x05**. Each finger is a nested `0x0D/0x22` (Finger) collection
+carrying Tip Switch `0x0D/0x42`, Contact ID `0x0D/0x51`, X `0x01/0x30`,
+Y `0x01/0x31`; the top level carries Contact Count `0x0D/0x54`.
+`enumerate()` walks `GetRawInputDeviceList` + `GetRawInputDeviceInfoW`
+(RIDI_DEVICEINFO/DEVICENAME/PREPARSEDDATA) and reads the value caps via
+`HidP_GetCaps`/`HidP_GetLinkCollectionNodes`/`HidP_GetValueCaps`; the physical
+min/max plus the unit/exponent give the pad size in mm. `run_sink()` makes a
+message-only window, `RegisterRawInputDevices(0x0D/0x05, RIDEV_INPUTSINK)`,
+pumps `WM_INPUT` and parses each report with `HidP_GetUsageValue`/`GetUsages`.
+
+### The pure gesture machine — `touchpad/gesture.rs`
+
+Contacts as pad fractions in → `Enter(edge)`/`Move{edge,travel}`/`Exit(edge)`
+out. Rule: live iff **exactly one contact is down AND it LANDED inside an
+enabled band** (`landed: HashMap<id, Option<edge>>` records the landing edge
+once; a contact that lands outside and drifts in stays `None`). Band membership
+uses a UNIFORM physical thickness — `width * aspect` on the long (X) axis for
+left/right, `width` on the short (Y) axis for top/bottom, where
+`aspect = short_mm/long_mm` — so the drawn band looks the same on every edge.
+Corners (a point in both a vertical and a horizontal band) resolve by
+`corners.get(v,h)` then `corner_rule` (`Ask` => nobody owns it). `travel` is
+signed along the band's axis from the entry point (up/right positive), with
+`invert` applied. **Hysteresis is total**: once live we do not re-test
+membership; we exit only on lift or a second contact, so a finger that owns a
+band keeps it however far it drifts. 9 unit tests.
+
+### The pointer freeze — `touchpad/bands.rs` + `hook/mod.rs`
+
+`bands::BAND_LIVE: AtomicBool` is the ENTIRE interface to the LL hook (keyboard
+laws: atomics only in the callback; there is exactly one `WH_MOUSE_LL` in the
+process — no second hook). `ms_hook_proc` gets ONE test at its very top, above
+every other gate:
+
+```rust
+if (msg == WM_MOUSEMOVE || msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL)
+    && crate::touchpad::bands::BAND_LIVE.load(Ordering::Relaxed)
+{
+    return LRESULT(1);
+}
+```
+
+The touchpad reader thread sets it true on `Enter`, false on `Exit`/teardown.
+
+### The actions — `touchpad/actions.rs` (in-process; a slide ticks 30-60 Hz)
+
+- **Volume** — Core Audio `IAudioEndpointVolume` on the default render endpoint
+  (same interface as `boss_key::set_system_mute`): read
+  `GetMasterVolumeLevelScalar`, set `clamp(cur + k*dtravel)`, read back for the
+  readout.
+- **Brightness** — WMI over COM: `CoCreateInstance(WbemLocator)` →
+  `ConnectServer("root\\wmi")` → `CoSetProxyBlanket` → `ExecQuery` for
+  `WmiMonitorBrightness` (`CurrentBrightness`) and, to set,
+  `WmiMonitorBrightnessMethods`: read its `__PATH`,
+  `GetMethod("WmiSetBrightness")` in-signature, `SpawnInstance`, `Put`
+  Timeout=0 + Brightness=pct (VARIANT via `u32.into()`),
+  `ExecMethod(path,"WmiSetBrightness",..)`. `engine/actions/brightness.rs` now
+  calls `touchpad::actions::add_brightness` first and keeps its PowerShell
+  `script()` only as a fallback (its tests still pass). Sets rate-limited ~20 Hz.
+- **Scrub** — `scrub_rate(travel, sensitivity)` (pure, tested): dead zone 3 %
+  of the pad, then linear 2..25 taps/s to full travel, sensitivity reaches the
+  top sooner; direction from the sign of travel, `invert` flips. Each left/right
+  tap is `send_keys_checked` with the `0x7A7A7A7A` cookie (PROBLEM 227), so our
+  own keyboard hook passes it through. Works in YouTube/VLC/Netflix/Media Player.
+
+### The engine + lifecycle — `touchpad/mod.rs`
+
+`init(app,cfg)` (from `lib.rs setup()`) seeds a config snapshot and spawns the
+**supervisor** thread: every 1.5 s it `detect_presence()` (a `0x0D/0x05` device
+present => `Precision`, else `None`), emits `touchpad-caps {presence, pad_mm}`
+on change, and starts the **reader** thread when a Precision pad is present AND
+any band is enabled / stops it (via `PostThreadMessageW(WM_QUIT)`) otherwise.
+The reader `CoInitializeEx(MTA)`, runs `raw::run_sink`, converts contacts to
+fractions, feeds the gesture, drives the action, sets `BAND_LIVE`, and emits
+`touchpad-live {edge,action,value_pct,travel}` at <=30 Hz (edge=null on end).
+`config::save` calls `touchpad::apply_config` (the PROBLEM 180 funnel) so
+enabling a band starts the reader with no restart. **Non-Precision touchpad
+detection is NOT implemented** — Raw Input cannot tell a mouse-only touchpad
+from a mouse — so presence is only ever `precision`/`none` (documented in
+mod.rs; the brief permits treating the unknown case as `none`).
+
+### Config — `config/schema.rs`
+
+`Touchpad { left,right,top,bottom: Band, corner_rule: CornerRule,
+corners: Corners, page_look: TouchpadLook, demo_seen: bool, show_thumbnail:
+bool }`, all `#[serde(default)]`. `Band { enabled, action:
+Brightness|Volume|Scrub|None, width 0.04..=0.25 (default 0.07), length
+0.30..=1.0 (0.70 side / 0.80 top), sensitivity 1..=10 (6), invert }`.
+`Touchpad::normalised()` clamps every range and forces the reserved bottom band
+off; applied in `config::mod::seeded` (load) and — via `apply_config` — save.
+Defaults: left=brightness, right=volume, top=scrub, all OFF, look Chocolate.
+
+### Frontend
+
+`src/components/touchpad-page.ts` (leaf) + `src/styles/touchpad.css`,
+transcribed from `design/spaceadom-touchpad_1.html` with the two-finger
+copy/demo changed to one finger. The page root `#touchpad-page` carries
+`data-look="chocolate|app"`: the accent triple is the app theme's in both looks
+(coral / navy for Starry / red for Warcry), Chocolate uses the design's dark
+surfaces, App maps `--sp-*` onto the app's `--st-*` and keeps `--sp-inset`
+chocolate (the pad is physical). The two look blocks define the same `--sp-*`
+names (`scripts/touchpad-tokens.test.ts`). Home thumbnail lives INSIDE
+`#keyboard-scale` (board + 14 px + thumb = one scaled, centred group; the fit
+divides room by the group height when the thumb shows), visible only when a
+Precision pad is present AND `show_thumbnail`; the "Special keys" pill moved to
+the bottom-right (a direct `#stage` child so `body.sky-mode`'s hide rule still
+catches it — `scripts/sky-mode-exemptions.test.ts`). Settings (Appearance) gets
+a read-only presence status line, the "Show the touchpad under the keyboard"
+toggle (Precision only), the "Touchpad page" look pill, and "Open touchpad
+page". Events are plumbed in `main.ts` (`touchpad-caps`/`touchpad-live`).
+
+### How it was verified
+
+`cargo test --release --lib` 779/0/6, `cargo clippy --release --lib` 0,
+`npx tsc --noEmit` 0, `npm run build` clean, the three node tests pass, and the
+page renders in all three states + both looks under the localhost preview
+(DOM reads). **UNPROVEN on hardware: everything that moves a finger** — the
+agent cannot inject touch reports, so the gesture engine, the pointer freeze
+and the three actions have never run against the real pad from this session.
+
+---
+
+## PHASE A — STEP 4: THE SPACE RING TRIM AND THE SIMPLE EDITOR (2026-09-19; in the 1.0.120 tree beside the touchpad work, no version bump — gates green: 781 unit tests / 0 failed / 6 ignored, clippy 0, tsc 0, vite clean; **NOT BUILT AS AN INSTALLER, NOT INSTALLED, NO GIT** — the lead does that)
+
+**Symptom / decision.** Owner, on the 1.0.119/120 ring: *"we added too many functions, the Space HUD is messed up and it has become hard to do its main aim, launching apps."* Two decisions. (1) The Space ring shows ONLY app/link pills and the Spaceadom specials in their compact inner band, exactly as before Phase A; chord, uri, command, brightness and toggle bindings are not drawn on it at all — they still fire. (2) The key editor is simple by default: with Advanced mode off, clicking a key opens the App or link picker directly with no kind row; Advanced mode on shows all five kinds. The mouse ring is a different surface and was left alone. Touchpad files untouched.
+
+### §1 The trim — in the derivation, not in CSS
+
+`src-tauri/src/engine/specials.rs`:
+
+```rust
+/// Two kinds only: an app or link (`action == None`, the pills) and a
+/// Spaceadom special (the inner band). Anything else still FIRES on its key.
+pub fn hud_shows(bind: &KeyBinding) -> bool {
+    bind.is_mapped() && matches!(bind.action, None | Some(Action::Special { .. }))
+}
+/// Is this a mapped app / link binding — a Space-ring PILL?
+pub fn is_app_or_link(bind: &KeyBinding) -> bool {
+    bind.is_mapped() && bind.action.is_none()
+}
+```
+
+`hud_specials_for` now walks `non_letter_bindings` (key-table order) chained with any LETTER whose action is a special (letter order), and pushes a row only for `Some(Action::Special)` — the scroll pair still folds into the double-tap row, and the "Scroll → Layer Opacity" gesture row is unchanged. Before this, every mapped non-letter binding was a row, so a chord on `[` or a uri on `7` sat in the band the owner reads for the Boss Key.
+
+`src-tauri/src/engine/mod.rs`: `hud_apps_for` and `hud_icons_for` filter on `specials::is_app_or_link` instead of `is_mapped` — the same gate in both, so the two vecs stay index-aligned. That also removes a pre-existing double: a seeded special on Esc was a mapped binding and therefore ALSO a pill "ESC" in the outer ring's data (the page reads `payload.apps` as "already only assigned letters").
+
+**What did not change.** `hook/keys.rs`'s bound bitmap, `run_binding`, `ring_specials_for` / `middle_ring` (the mouse ring), the PUA glyph mapping (`code_for_key_id`), `specials_for_hud`'s band truth table, `toast.ts`, `overlay-earthy.css`.
+
+**Tests.** `specials::tests::step_4_the_space_ring_shows_only_apps_and_specials` — a chord/uri/command/brightness/toggle letter and a chord on `]` produce no row; a special moved onto M is a row; the 12 + 2 seeded specials still appear (`DEFAULT_SPECIALS.len() == 14`, rows = 14 − 2 + 1 + 2). `band_gate_tests::step_4_a_mixed_profile_draws_only_its_apps_and_specials` — seeded profile + 3 apps + 1 link + chord/uri/command letters + a toggle on Enter: 4 pills + 12 special rows + 2 gesture rows = 18 on the whole ring, the four hidden bindings nowhere, and `preview_payload` agrees. Re-pinned: `hud_apps_for_returns_only_mapped_keys_sorted_and_upper_cased` (the uri letter is no pill; icons aligned), `the_hud_rows_follow_the_bindings` (the uri on `7` is no row), `the_owners_live_shaped_profile_yields_at_least_eight_ring_specials` (Space ring = exactly 10 + 2 for the owner's shape; the mouse ring still 13).
+
+### §2 The simple editor — `src/components/key-detail-panel.ts`
+
+`kindOptions()` returns `[["app", "App or link"]]` with Advanced off and all five (App or link · Spaceadom special · Key combo · Controls · Run command) with it on. `renderPanel`: `kind = advanced ? (_kindOverride ?? kindForBinding(binding)) : "app"`, the `#ed-kinds` row is emitted only when `advanced`, and `simpleNoteHtml(binding)` goes at the top of `#ed-pane-app` when the key holds any `action`: *"This key runs **X** — turn on Advanced mode to change it."* (`.ed-simple-note` in `styles.css`, the `.ed-hint` ink). The picker below still replaces the action with an app through the ordinary `confirmReplace` → `commit` (which states `action: null`). The Key-combo first-time hint (`wireComboHint`, `key_combo_hint_seen`) is untouched — it lives on the Key combo page, now Advanced-only. `preview.ts`: `?editor=7` shows the note, `?editor=7&advanced` the Controls page; comments updated, fixture unchanged.
+
+### §3 Settings
+
+`settings-panel.ts` Advanced-mode row description: "Unlocks Spaceadom specials, Key combo, Controls and Run command in the key editor."
+
+### How it was verified
+
+`cargo test --release --lib` 781/0/6 (779 + 2), `cargo clippy --release --lib` 0 warnings, `npx tsc --noEmit -p .` 0, `npm run build` clean, `scripts/setting-subs.test.ts` passes. Not run on hardware — the ring's row count is proved by the mixed-profile test, and the editor by the type gate; the owner's hold of Space on the next build is the visual check.

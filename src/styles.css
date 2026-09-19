@@ -17,6 +17,8 @@
 @import "./styles/themes.css";
 @import "./styles/starry-sky.css";
 @import "./styles/characters.css";
+/* TOUCHPAD T2 (1.0.120) — the touchpad edge-gestures page + home thumbnail. */
+@import "./styles/touchpad.css";
 /* The dashboard shows its own toasts now (PROBLEM 45) and needs the pill
    styles. This also pulls in the #st-hud rules, which are inert here because
    the dashboard never creates that element. Keeping ONE stylesheet for the
@@ -554,6 +556,14 @@ body.is-blurred #halo { animation-play-state: paused; }
   transform-origin: center center;
   transition: filter var(--dur-standard) var(--ease-out),
               opacity var(--dur-standard) var(--ease-out);
+  /* TOUCHPAD T2 — the board and the touchpad thumbnail are ONE group: a
+     centred column with the design's 14px gap, scaled together by the board
+     fit. When the thumbnail is hidden (no Precision pad, or the toggle off)
+     the group is board-only and the keyboard centres exactly as before. */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
 }
 /* Board recedes while the key editor is open */
 #stage.editing #keyboard-scale { filter: blur(5px) saturate(.85); opacity: .5; }
@@ -2491,14 +2501,20 @@ body.nocturne #conflict-banner {
 /* --------------------------------------------------------------------------
    Bottom-centre: special keys tray
    -------------------------------------------------------------------------- */
+/* TOUCHPAD T2 (owner, 2026-09-19) — the touchpad thumbnail sits centred
+   directly under the keyboard, so the "Special keys" pill moves to the
+   BOTTOM-RIGHT corner, mirroring the settings gear at bottom-left (same size,
+   same 22px/20px margin). It stays a direct #stage child so the sky-mode rule
+   `#stage > *:not(#sky-return):not(#gear-dock)` still hides it with the
+   keyboard — it never overlaps the #sky-return arrow. The tray opens above,
+   right-aligned. */
 #specials-dock {
   position: absolute;
-  left: 50%; bottom: 16px;
-  transform: translateX(-50%);
+  right: 22px; bottom: 20px;
   z-index: 6;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: flex-end;
   gap: 10px;
 }
 
@@ -2830,6 +2846,11 @@ body.nocturne .confirm-box {
 /* Fun off = no overshoot anywhere, per the master gate. */
 body[data-fun="off"] .theme-seg-ind { transition: transform 200ms var(--ease-out), width 200ms var(--ease-out); }
 @media (prefers-reduced-motion: reduce) { .theme-seg-ind { transition: none; } }
+/* TOUCHPAD-BRIEF-T1 (2026-09-19) — a full panel rebuild measures every pill
+   with this class on and drops it after the first painted frame, so the
+   indicator appears IN PLACE instead of sliding in from segment one
+   (settings-panel.ts render()). A pick never carries it. */
+.theme-seg.seg-settle .theme-seg-ind { transition: none; }
 
 /* --------------------------------------------------------------------------
    SKY MODE — the dashboard clears away and leaves only the sky
@@ -3428,6 +3449,11 @@ body.nocturne .tour-ring {
 .ed-kinds .theme-seg-opt.is-on { color: var(--st-text); }
 
 .ed-hint { margin: 8px 2px 0; font-size: 11.5px; line-height: 1.45; color: var(--st-text-dim); }
+/* PHASE A step 4 — the simple editor's one-line "This key runs X — turn on
+   Advanced mode to change it." over the app picker. Same ink as the hints;
+   the bold is the binding's name. */
+.ed-simple-note { margin: 0 2px 10px; }
+.ed-simple-note b { font-weight: 700; color: var(--st-text); }
 /* 1.0.119 (brief 4 §4) — the collapsed Key combo hint: one small link. */
 .ed-hint-link { margin: 8px 2px 0; padding: 0; border: 0; background: none; font: inherit;
   font-size: 11.5px; color: var(--st-accent-800); text-decoration: underline; cursor: pointer; }

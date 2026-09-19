@@ -56,11 +56,23 @@
     </div>
 
     <!-- ── The keyboard, centred and scaled to fit ──────────────────── -->
+    <!-- TOUCHPAD T2: the touchpad thumbnail is part of the scaled keyboard
+         group, 14px below the board (owner, 2026-09-19). Shown only when a
+         Precision Touchpad is present AND "Show the touchpad under the
+         keyboard" is on; hidden otherwise (board-only geometry). It is a
+         normal child of #keyboard-scale so the board fit scales the whole
+         group and it centres together. main.ts fills and toggles it. -->
     <div id="keyboard-outer">
       <div id="keyboard-scale">
         <div id="keyboard-matrix" role="group" aria-label="QWERTY keyboard layout"></div>
+        <div id="touchpad-thumb" role="button" tabindex="0" aria-label="Open the touchpad page" hidden></div>
       </div>
     </div>
+
+    <!-- TOUCHPAD T2: the touchpad edge-gestures page. A direct #stage child so
+         the sky-mode rule hides it with the keyboard; opaque, shown only while
+         body.touchpad-open. Filled by touchpad-page.ts. -->
+    <div id="touchpad-page" hidden></div>
 
     <!-- Key editor: backdrop + panel that blooms out of the pressed key -->
     <div id="editor-backdrop" hidden></div>

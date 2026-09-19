@@ -1,0 +1,467 @@
+/* ==========================================================================
+   TOUCHPAD EDGE GESTURES — the page (1.0.120, TOUCHPAD-BRIEF-T2).
+
+   Transcribed from design/spaceadom-touchpad_1.html (the design is a
+   specification — values are literal). §10 "THIS SHEET ONLY" and the sheet's
+   theme switcher are dropped. Two-finger copy/demo → one finger, per the
+   brief's T1b hardware result.
+
+   LOOK: the page root #touchpad-page carries data-look="chocolate|app".
+     - The ACCENT triple is the app theme's, in BOTH looks (Earthy coral,
+       Navy blue for Starry, Warcry red) — set per body[data-theme] below.
+     - "chocolate" (default): the design's dark chocolate surfaces.
+     - "app": every surface/line/text token maps onto the app's own --st-*
+       variables; the drawn pad (--sp-inset) stays chocolate in every look
+       because the pad is a physical object.
+   The two look blocks define the SAME set of --sp-* names
+   (scripts/touchpad-tokens.test.ts asserts it).
+   ========================================================================== */
+
+/* --- Derived, radii, motion, font — identical in every look/theme. --------- */
+#touchpad-page {
+  --sp-accent:       rgb(var(--sp-accent-rgb));
+  --sp-accent-faint: rgb(var(--sp-accent-rgb) / .05);
+  --sp-accent-soft:  rgb(var(--sp-accent-rgb) / .12);
+  --sp-band-on:      rgb(var(--sp-accent-rgb) / .20);
+  --sp-band-live:    rgb(var(--sp-accent-rgb) / .32);
+  --sp-band-edge:    rgb(var(--sp-accent-rgb) / .55);
+  --sp-glow:         rgb(var(--sp-accent-rgb) / .28);
+
+  --sp-r-card: 16px;
+  --sp-r-pad:  22px;
+  --sp-r-band: 14px;
+  --sp-r-ctl:  10px;
+  --sp-r-pill: 999px;
+
+  --sp-hi:        inset 0 1px 0 rgb(255 255 255 / .04);
+  --sp-sh-card:   var(--sp-hi), 0 12px 32px rgb(0 0 0 / .35);
+  --sp-sh-pad:    inset 0 1px 0 rgb(255 255 255 / .05), 0 20px 44px rgb(0 0 0 / .5);
+  --sp-sh-pop:    0 18px 44px rgb(0 0 0 / .55);
+  --sp-sh-key:    var(--sp-hi), 0 2px 4px rgb(0 0 0 / .35);
+
+  --sp-spring:  cubic-bezier(.22, 1.2, .36, 1);
+  --sp-quick:   120ms;
+  --sp-settle:  180ms;
+  --sp-max:     250ms;
+
+  --sp-font: "Segoe UI Variable Display", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+
+  /* Accent (both looks) — Earthy coral is the default; overridden per theme. */
+  --sp-accent-rgb:  217 105 75;
+  --sp-accent-ink:  #1A0E08;
+  --sp-knob:        #B9A797;
+  --sp-finger:      #FFF1EA;
+}
+body[data-theme="warcry"] #touchpad-page {
+  --sp-accent-rgb:  212 56 47;
+  --sp-accent-ink:  #1A0705;
+  --sp-finger:      #FFEDEA;
+}
+body[data-theme="starry"] #touchpad-page,
+body[data-theme="navy"] #touchpad-page {
+  --sp-accent-rgb:  78 141 212;
+  --sp-accent-ink:  #061220;
+  --sp-finger:      #EAF3FF;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #touchpad-page { --sp-quick: 1ms; --sp-settle: 1ms; --sp-max: 1ms; }
+}
+
+/* --- Look: CHOCOLATE (the design's dark tokens) --------------------------- */
+#touchpad-page[data-look="chocolate"] {
+  --sp-bg:          #17110E;
+  --sp-surface:     #221913;
+  --sp-surface-2:   #2A1E17;
+  --sp-surface-3:   #33261E;
+  --sp-key:         #2D211A;
+  --sp-inset:       #1C1410;
+  --sp-well:        #1E1611;
+  --sp-line:        #33241C;
+  --sp-line-strong: #43332A;
+  --sp-line-soft:   #2F231B;
+  --sp-text:        #F5EDE6;
+  --sp-text-2:      #B9A797;
+  --sp-text-3:      #8A7767;
+  --sp-text-4:      #6E5B4C;
+}
+
+/* --- Look: MATCHES THE APP (map onto the app's --st-* tokens) ------------- */
+#touchpad-page[data-look="app"] {
+  --sp-bg:          var(--st-bg);
+  --sp-surface:     var(--st-surface);
+  --sp-surface-2:   var(--st-card);
+  --sp-surface-3:   var(--st-card);
+  --sp-key:         var(--st-card);
+  --sp-inset:       #1C1410;   /* the pad is a physical object — always chocolate */
+  --sp-well:        var(--st-surface);
+  --sp-line:        var(--st-border);
+  --sp-line-strong: var(--st-border);
+  --sp-line-soft:   var(--st-hairline);
+  --sp-text:        var(--st-text);
+  --sp-text-2:      var(--st-text-soft);
+  --sp-text-3:      var(--st-text-dim);
+  --sp-text-4:      var(--st-text-dim);
+}
+
+/* --- Base ---------------------------------------------------------------- */
+#touchpad-page *, #touchpad-page *::before, #touchpad-page *::after { box-sizing: border-box; }
+#touchpad-page h1, #touchpad-page h2, #touchpad-page h3, #touchpad-page p { margin: 0; }
+#touchpad-page button { font: inherit; color: inherit; border: 0; background: none; cursor: pointer; }
+#touchpad-page a { color: var(--sp-accent); }
+#touchpad-page a:hover { color: rgb(var(--sp-accent-rgb) / .8); }
+#touchpad-page :focus-visible { outline: 2px solid var(--sp-accent); outline-offset: 2px; border-radius: 6px; }
+
+/* --- Pills and badges ---------------------------------------------------- */
+.sp-pill {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 5px 13px 5px 5px;
+  border-radius: var(--sp-r-pill);
+  background: var(--sp-key);
+  border: 1px solid var(--sp-line-strong);
+  box-shadow: var(--sp-hi);
+  color: var(--sp-text);
+  font-size: 12.5px; font-weight: 500;
+  white-space: nowrap;
+}
+.sp-pill--quiet { background: var(--sp-surface); border-color: var(--sp-line); color: var(--sp-text-3); padding: 4px 11px 4px 4px; font-size: 11.5px; }
+.sp-pill--off   { background: #241A14; border-color: #3E2E25; color: var(--sp-text-3); padding: 4px 10px 4px 4px; font-size: 11.5px; }
+
+.sp-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 22px; height: 18px; padding: 0 6px;
+  border-radius: 6px;
+  background: var(--sp-accent); color: var(--sp-accent-ink);
+  font-size: 10.5px; font-weight: 700; letter-spacing: .02em;
+}
+.sp-badge--muted { background: var(--sp-line-strong); color: var(--sp-text-3); }
+.sp-badge--dim   { background: var(--sp-line-soft);   color: var(--sp-text-4); }
+
+.sp-tag { padding: 3px 8px; border-radius: var(--sp-r-pill); background: var(--sp-surface-2); color: var(--sp-text-4); font-size: 10.5px; font-weight: 600; }
+.sp-tag--win { background: var(--sp-accent); color: var(--sp-accent-ink); font-weight: 700; }
+
+.sp-btn {
+  padding: 9px 16px; border-radius: var(--sp-r-pill);
+  background: var(--sp-surface-3); border: 1px solid var(--sp-line-strong);
+  font-size: 13px; color: var(--sp-text);
+  transition: transform var(--sp-quick) var(--sp-spring), background var(--sp-quick) linear;
+}
+.sp-btn:hover  { background: var(--sp-line-strong); }
+.sp-btn:active { transform: scale(.97); }
+.sp-btn--primary { background: var(--sp-accent); border-color: transparent; color: var(--sp-accent-ink); font-weight: 600; box-shadow: 0 4px 12px rgb(0 0 0 / .4); }
+.sp-btn--primary:hover { background: rgb(var(--sp-accent-rgb) / .88); }
+.sp-btn--ghost { background: none; border-color: transparent; color: var(--sp-text-2); padding: 6px 12px; font-size: 12.5px; }
+
+/* --- Switch -------------------------------------------------------------- */
+.sp-switch {
+  position: relative; flex: 0 0 auto;
+  width: 40px; height: 20px; border-radius: var(--sp-r-pill);
+  background: var(--sp-line-strong); border: 1px solid #55402F;
+  transition: background var(--sp-quick) linear, border-color var(--sp-quick) linear;
+}
+.sp-switch::after {
+  content: ""; position: absolute; left: 3px; top: 3px;
+  width: 12px; height: 12px; border-radius: var(--sp-r-pill);
+  background: var(--sp-knob);
+  transition: transform var(--sp-settle) var(--sp-spring), background var(--sp-quick) linear;
+}
+.sp-switch[aria-checked="true"] { background: var(--sp-accent); border-color: var(--sp-accent); }
+.sp-switch[aria-checked="true"]::after { transform: translateX(20px); background: var(--sp-accent-ink); }
+.sp-switch[aria-disabled="true"] { background: var(--sp-line-soft); border-color: var(--sp-line); }
+.sp-switch[aria-disabled="true"]::after { background: var(--sp-text-4); }
+
+/* --- Page shell (fills the stage; the design's fixed 1280x800 is dropped) - */
+.sp-app { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--sp-bg); }
+
+.sp-topbar { flex: 0 0 56px; display: flex; align-items: center; gap: 14px; padding: 0 24px; border-bottom: 1px solid #2A1F19; }
+.sp-topbar h1 { font-size: 15px; font-weight: 600; }
+.sp-spacer { flex: 1 1 auto; }
+
+.sp-status { display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: var(--sp-r-pill); background: var(--sp-surface); border: 1px solid var(--sp-line); color: var(--sp-text-3); font-size: 12px; }
+.sp-status .dot { width: 7px; height: 7px; border-radius: var(--sp-r-pill); background: var(--sp-text-4); }
+.sp-status--on   { color: var(--sp-text-2); }
+.sp-status--on .dot { background: var(--sp-accent); }
+.sp-status--live { background: var(--sp-accent-soft); border-color: var(--sp-band-edge); color: var(--sp-text); font-weight: 600; }
+.sp-status--live .dot { background: var(--sp-accent); box-shadow: 0 0 0 4px var(--sp-accent-soft); }
+
+.sp-body { flex: 1 1 auto; display: flex; gap: 20px; padding: 20px 24px 24px; min-height: 0; }
+
+.sp-stage {
+  flex: 1 1 auto; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 18px;
+  padding: 22px;
+  background: var(--sp-surface); border: 1px solid var(--sp-line);
+  border-radius: var(--sp-r-card); box-shadow: var(--sp-sh-card);
+}
+.sp-stage .hint { font-size: 12.5px; color: var(--sp-text-3); }
+
+.sp-panel {
+  width: 320px; flex: 0 0 auto;
+  padding: 18px;
+  background: var(--sp-surface); border: 1px solid var(--sp-line);
+  border-radius: var(--sp-r-card); box-shadow: var(--sp-sh-card);
+  display: flex; flex-direction: column; gap: 12px;
+  overflow-y: auto;
+}
+.sp-panel h2 { font-size: 11.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--sp-text-3); }
+.sp-panel .foot { font-size: 11.5px; line-height: 1.5; color: var(--sp-text-4); }
+
+.sp-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 11px; border-radius: 12px;
+  background: var(--sp-surface-2); border: 1px solid var(--sp-line-strong);
+  text-align: left; width: 100%;
+}
+.sp-row .label { display: block; font-size: 13px; font-weight: 600; }
+.sp-row .sub   { display: block; margin-top: 2px; font-size: 11.5px; color: var(--sp-text-3); }
+.sp-row--dim   { background: var(--sp-well); border-color: var(--sp-line-soft); }
+.sp-row--dim .label { color: var(--sp-text-3); }
+.sp-row--dim .sub   { color: var(--sp-text-4); }
+.sp-row--picked { background: var(--sp-accent-soft); border-color: var(--sp-band-edge); }
+
+.sp-well { padding: 12px; border-radius: 12px; background: var(--sp-well); border: 1px solid var(--sp-line-soft); }
+.sp-well p { font-size: 11.5px; line-height: 1.55; color: var(--sp-text-3); }
+
+/* --- The drawn touchpad -------------------------------------------------- */
+.sp-pad {
+  --pad-inset: 8px;
+  position: relative;
+  width: 780px; height: 520px;
+  border-radius: var(--sp-r-pad);
+  background: var(--sp-inset);
+  border: 1px solid var(--sp-line-strong);
+  box-shadow: var(--sp-sh-pad);
+  transition: border-color var(--sp-quick) linear, box-shadow var(--sp-settle) var(--sp-spring);
+}
+.sp-pad.is-armed { border-color: var(--sp-band-edge); box-shadow: var(--sp-sh-pad), 0 0 0 4px var(--sp-accent-faint); }
+.sp-pad.is-dead  { background: #1A1310; border-color: var(--sp-line-soft); box-shadow: var(--sp-hi); }
+
+.sp-band {
+  --band-w: 54px;
+  --band-len: 70%;
+  position: absolute;
+  border-radius: var(--sp-r-band);
+  border: 1px dashed #4A382D;
+  background: var(--sp-accent-faint);
+  display: flex; align-items: center; justify-content: center;
+  transition: inset var(--sp-settle) var(--sp-spring),
+              width var(--sp-settle) var(--sp-spring),
+              height var(--sp-settle) var(--sp-spring),
+              background var(--sp-quick) linear,
+              border-color var(--sp-quick) linear,
+              box-shadow var(--sp-settle) var(--sp-spring);
+}
+.sp-band--left   { left:  var(--pad-inset); width: var(--band-w); top: calc(50% - var(--band-len) / 2); height: var(--band-len); }
+.sp-band--right  { right: var(--pad-inset); width: var(--band-w); top: calc(50% - var(--band-len) / 2); height: var(--band-len); }
+.sp-band--top    { top:    var(--pad-inset); height: var(--band-w); left: calc(50% - var(--band-len) / 2); width: var(--band-len); }
+.sp-band--bottom { bottom: var(--pad-inset); height: var(--band-w); left: calc(50% - var(--band-len) / 2); width: var(--band-len); }
+
+.sp-band.is-on   { background: var(--sp-band-on); border: 1px solid var(--sp-band-edge); box-shadow: 0 10px 28px rgb(var(--sp-accent-rgb) / .22); }
+.sp-band.is-live { background: var(--sp-band-live); border: 1px solid var(--sp-accent); box-shadow: 0 0 44px var(--sp-glow), inset 0 0 24px var(--sp-accent-soft); }
+.sp-band.is-reserved { border-color: var(--sp-line-soft); background: none; }
+.sp-band.is-dead     { border-color: var(--sp-line-soft); background: none; }
+
+.sp-band--left  > .sp-pill { transform: rotate(-90deg); }
+.sp-band--right > .sp-pill { transform: rotate(90deg); }
+
+.sp-handle {
+  position: absolute; border-radius: var(--sp-r-pill);
+  background: var(--sp-accent);
+  box-shadow: 0 0 0 4px var(--sp-accent-soft), 0 2px 6px rgb(0 0 0 / .5);
+  opacity: 0; transition: opacity var(--sp-quick) linear, transform var(--sp-settle) var(--sp-spring);
+}
+.sp-handle::before { content: ""; position: absolute; inset: -9px; }
+.sp-band:hover > .sp-handle,
+.sp-band.is-selected > .sp-handle { opacity: 1; }
+.sp-band--right > .sp-handle--width { left: -4px;  top: 50%; margin-top: -26px; width: 7px; height: 52px; cursor: ew-resize; }
+.sp-band--left  > .sp-handle--width { right: -4px; top: 50%; margin-top: -26px; width: 7px; height: 52px; cursor: ew-resize; }
+.sp-band--top   > .sp-handle--width { left: 50%; margin-left: -26px; bottom: -4px; width: 52px; height: 7px; cursor: ns-resize; }
+.sp-band--bottom> .sp-handle--width { left: 50%; margin-left: -26px; top: -4px;    width: 52px; height: 7px; cursor: ns-resize; }
+.sp-band--left  > .sp-handle--start,
+.sp-band--right > .sp-handle--start { left: 50%; margin-left: -24px; top: -4px;    width: 48px; height: 7px; cursor: ns-resize; }
+.sp-band--left  > .sp-handle--end,
+.sp-band--right > .sp-handle--end   { left: 50%; margin-left: -24px; bottom: -4px; width: 48px; height: 7px; cursor: ns-resize; }
+.sp-band--top   > .sp-handle--start,
+.sp-band--bottom> .sp-handle--start { top: 50%; margin-top: -24px; left: -4px;  width: 7px; height: 48px; cursor: ew-resize; }
+.sp-band--top   > .sp-handle--end,
+.sp-band--bottom> .sp-handle--end   { top: 50%; margin-top: -24px; right: -4px; width: 7px; height: 48px; cursor: ew-resize; }
+
+.sp-ghost { position: absolute; border-left: 2px dashed #4A382D; }
+
+.sp-chip {
+  position: absolute; padding: 4px 9px; border-radius: 8px;
+  background: var(--sp-key); border: 1px solid var(--sp-line-strong);
+  color: var(--sp-text-2); font-size: 11px; font-weight: 600; white-space: nowrap;
+  box-shadow: 0 6px 16px rgb(0 0 0 / .5);
+}
+.sp-chip--active { border-color: var(--sp-band-edge); color: var(--sp-text); }
+
+/* One finger, with a short trail behind it (one-finger feature). */
+.sp-fingers { position: absolute; left: 0; right: 0; display: flex; flex-direction: column; align-items: center; gap: 9px; }
+.sp-fingers .pair { display: flex; gap: 8px; }
+.sp-fingers .pair i { display: block; border-radius: var(--sp-r-pill); background: var(--sp-accent); }
+.sp-fingers .pair:nth-child(1) i { width: 14px; height: 14px; background: var(--sp-finger); box-shadow: 0 0 0 5px var(--sp-glow); }
+.sp-fingers .pair:nth-child(2) i { width: 11px; height: 11px; background: rgb(var(--sp-accent-rgb) / .85); }
+.sp-fingers .pair:nth-child(3) i { width: 8px;  height: 8px;  background: var(--sp-band-edge); }
+.sp-fingers .pair:nth-child(4) i { width: 5px;  height: 5px;  background: var(--sp-band-live); }
+
+/* --- One-finger demo ----------------------------------------------------
+   A diagram, not feedback: 4s cycle, three plays, first run + "Show me again"
+   only. One finger lands at the edge and slides; the band lights and a value
+   ticks. Beats: 0.0-1.1 finger lands in the band (dark) · 1.4 band lights ·
+   1.6-2.8 the finger slides up, value ticks · 2.8-4.0 hold, fade.           */
+.sp-sim { position: absolute; inset: 0; border-radius: var(--sp-r-band); overflow: hidden; }
+.sp-sim .sim-glow { position: absolute; inset: 0; border-radius: var(--sp-r-band); background: var(--sp-band-live); opacity: 0; animation: sim-band 4s ease-in-out 3 both; }
+.sp-sim .sim-one  { position: absolute; left: 0; right: 0; top: 0; display: flex; justify-content: center; opacity: 0; animation: sim-one 4s ease-in-out 3 both; }
+.sp-sim .sim-one i { display: block; width: 18px; height: 22px; border-radius: 50%; background: var(--sp-finger); box-shadow: 0 0 0 6px var(--sp-glow); }
+
+.sp-cap { position: absolute; opacity: 0; animation: cap-show 4s ease-in-out 3 both; }
+.sp-cap .line { position: absolute; left: calc(-1 * var(--tail, 178px)); top: 14px; width: var(--tail, 178px); border-top: 1px dashed var(--sp-band-edge); }
+.sp-cap .dot  { position: absolute; left: calc(-4px - var(--tail, 178px)); top: 11px; width: 7px; height: 7px; border-radius: var(--sp-r-pill); background: var(--sp-band-edge); }
+.sp-cap .box  { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; border-radius: var(--sp-r-pill); background: var(--sp-key); border: 1px solid var(--sp-line-strong); box-shadow: 0 8px 20px rgb(0 0 0 / .5); }
+.sp-cap .nub  { position: absolute; left: -6px; top: 50%; margin-top: -5px; width: 10px; height: 10px; transform: rotate(45deg); background: var(--sp-key); border-left: 1px solid var(--sp-line-strong); border-bottom: 1px solid var(--sp-line-strong); }
+.sp-cap .t    { position: absolute; display: inline-flex; align-items: center; gap: 7px; font-size: 11.5px; white-space: nowrap; opacity: 0; }
+.sp-cap .t .d { width: 8px; height: 8px; border-radius: var(--sp-r-pill); background: var(--sp-text-4); }
+.sp-cap .t1   { color: var(--sp-text-2); animation: cap-one 4s ease-in-out 3 both; }
+.sp-cap .t2   { color: var(--sp-text); animation: cap-two 4s ease-in-out 3 both; }
+.sp-cap .t2 .d { background: var(--sp-accent); }
+
+@keyframes sim-one  { 0% { opacity: 0; transform: translateY(30px); } 5% { opacity: 1; transform: translateY(30px); } 40% { opacity: 1; transform: translateY(30px); } 70%, 92% { opacity: 1; transform: translateY(-210px); } 100% { opacity: 0; transform: translateY(-214px); } }
+@keyframes sim-band { 0%, 33% { opacity: 0; } 40%, 92% { opacity: 1; } 100% { opacity: 0; } }
+@keyframes cap-show { 0%, 3% { opacity: 0; transform: translateY(4px); } 8%, 92% { opacity: 1; transform: none; } 97%, 100% { opacity: 0; } }
+@keyframes cap-one  { 0%, 5% { opacity: 0; } 10%, 30% { opacity: 1; } 34%, 100% { opacity: 0; } }
+@keyframes cap-two  { 0%, 42% { opacity: 0; } 48%, 90% { opacity: 1; } 95%, 100% { opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .sp-sim .sim-glow { animation: none; opacity: 1; }
+  .sp-sim .sim-one  { animation: none; opacity: 1; transform: translateY(-90px); }
+  .sp-cap, .sp-cap .t2 { animation: none; opacity: 1; }
+  .sp-cap .t1 { display: none; }
+}
+
+/* --- Corner ownership ---------------------------------------------------- */
+.sp-corner {
+  --corner: 62px;
+  position: absolute; z-index: 2;
+  width: var(--corner); height: var(--corner);
+  display: flex; align-items: center; justify-content: center;
+  transition: background var(--sp-quick) linear, border-color var(--sp-quick) linear;
+}
+.sp-corner--tl    { left: 8px; top: 8px; border-radius: var(--sp-r-band) 0 0 0; }
+.sp-corner--tr    { right: 8px; top: 8px; border-radius: 0 var(--sp-r-band) 0 0; }
+.sp-corner--bl    { left: 8px; bottom: 8px; border-radius: 0 0 0 var(--sp-r-band); }
+.sp-corner--br    { right: 8px; bottom: 8px; border-radius: 0 0 var(--sp-r-band) 0; }
+.sp-corner--ask   { background: var(--sp-surface-2); border: 1px dashed var(--sp-text-4); color: var(--sp-text-3); font-size: 18px; font-weight: 700; }
+.sp-corner--owned { background: rgb(var(--sp-accent-rgb) / .42); border: 1px solid var(--sp-accent); }
+.sp-corner--owned:hover { background: rgb(var(--sp-accent-rgb) / .52); }
+
+.sp-band--lost { background: var(--sp-accent-soft); border-color: rgb(var(--sp-accent-rgb) / .28); }
+
+.sp-check { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; flex: 0 0 auto; border-radius: 5px; border: 1.5px solid #55402F; }
+.sp-check[aria-checked="true"] { background: var(--sp-accent); border-color: var(--sp-accent); }
+
+/* --- Cards over the pad -------------------------------------------------- */
+.sp-card {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  padding: 22px 24px 20px;
+  border-radius: var(--sp-r-card);
+  background: var(--sp-surface-2); border: 1px solid var(--sp-line-strong);
+  box-shadow: var(--sp-sh-pop);
+}
+.sp-card--empty { top: 152px; width: 340px; text-align: center; }
+.sp-card--read  { top: 174px; width: 372px; border-color: var(--sp-band-edge); }
+.sp-card h2 { margin-top: 14px; font-size: 17px; font-weight: 600; }
+.sp-card p  { margin-top: 8px; font-size: 13px; line-height: 1.5; color: var(--sp-text-2); }
+
+.sp-readout { display: flex; align-items: baseline; gap: 10px; margin-top: 14px; }
+.sp-readout b { font-size: 46px; font-weight: 600; letter-spacing: -.02em; }
+.sp-readout span { font-size: 15px; color: var(--sp-text-2); }
+
+.sp-meter { position: relative; height: 6px; margin-top: 14px; border-radius: var(--sp-r-pill); background: var(--sp-line-strong); overflow: hidden; }
+.sp-meter i { position: absolute; inset: 0 auto 0 0; width: var(--value, 50%); border-radius: var(--sp-r-pill); background: var(--sp-accent); transition: width var(--sp-quick) linear; }
+
+/* --- Slider + stepper ---------------------------------------------------- */
+.sp-slider { position: relative; height: 18px; margin-top: 8px; }
+.sp-slider .track { position: absolute; inset: 7px 0 auto 0; height: 4px; border-radius: var(--sp-r-pill); background: var(--sp-line-strong); }
+.sp-slider .fill  { position: absolute; inset: 7px auto auto 0; height: 4px; width: var(--value, 50%); border-radius: var(--sp-r-pill); background: var(--sp-accent); }
+.sp-slider input[type="range"] {
+  position: relative; z-index: 2; -webkit-appearance: none; appearance: none;
+  width: 100%; height: 18px; margin: 0; background: transparent;
+}
+.sp-slider input[type="range"]::-webkit-slider-runnable-track { height: 4px; background: transparent; }
+.sp-slider input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 16px; height: 16px; margin-top: -6px; border-radius: var(--sp-r-pill);
+  background: var(--sp-text); border: 1px solid var(--sp-bg);
+  box-shadow: 0 2px 5px rgb(0 0 0 / .55);
+}
+
+.sp-stepper { display: flex; align-items: center; gap: 10px; }
+.sp-stepper button { width: 26px; height: 26px; border-radius: 8px; background: var(--sp-surface-3); border: 1px solid var(--sp-line-strong); font-size: 14px; color: var(--sp-text-2); }
+.sp-stepper .value { min-width: 48px; text-align: center; font-size: 13px; font-weight: 600; }
+
+/* --- Home dashboard thumbnail (app-themed; NOT under #touchpad-page) ------
+   The thumbnail lives INSIDE #keyboard-scale, below the board, so the board
+   fit scales it with the keyboard and the whole group centres — the keyboard
+   rises by half the thumb's height when the thumb is present (owner decision,
+   2026-09-19). It always matches the app theme, reading --st-* directly. */
+#touchpad-thumb {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+}
+#touchpad-thumb[hidden] { display: none; }
+.sp-thumb {
+  position: relative; width: 208px; height: 132px;
+  border-radius: 14px;
+  background: #1C1410; border: 1px solid var(--st-border);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / .04), 0 6px 18px rgb(0 0 0 / .4);
+  transition: transform var(--dur-standard, 180ms) var(--ease-spring, cubic-bezier(.34,1.3,.4,1)), border-color 120ms linear;
+  cursor: pointer;
+}
+.sp-thumb:hover { transform: translateY(-2px); border-color: var(--st-accent); }
+.sp-thumb .empty { position: absolute; inset: 6px; border: 1px dashed var(--st-hairline); border-radius: 10px; }
+.sp-thumb .strip { position: absolute; border-radius: 6px; background: rgb(var(--st-glow-rgb) / .30); }
+.sp-thumb .strip--left   { left: 5px;  top: 28px; width: 15px; height: 76px; }
+.sp-thumb .strip--right  { right: 5px; top: 28px; width: 15px; height: 76px; }
+.sp-thumb .strip--top    { top: 5px;    left: 26px; right: 26px; height: 15px; }
+.sp-thumb .strip--bottom { bottom: 5px; left: 26px; right: 26px; height: 15px; background: none; border: 1px dashed var(--st-hairline); }
+.sp-thumb .dots { position: absolute; left: 50%; top: 50%; margin: -7px 0 0 -18px; display: inline-flex; gap: 4px; }
+.sp-thumb .dots i { width: 11px; height: 11px; border-radius: 999px; background: rgb(var(--st-glow-rgb) / .30); }
+#touchpad-thumb .sp-pill {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 4px 12px 4px 4px; border-radius: 999px;
+  background: var(--st-card); border: 1px solid var(--st-border);
+  color: var(--st-text); font-size: 11.5px; font-weight: 500; white-space: nowrap;
+}
+#touchpad-thumb .sp-pill--off { background: var(--st-surface); color: var(--st-text-dim); }
+#touchpad-thumb .sp-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px; height: 17px; padding: 0 5px; border-radius: 6px;
+  background: var(--st-accent); color: #fff; font-size: 10px; font-weight: 700;
+}
+#touchpad-thumb .sp-badge--muted { background: var(--st-border); color: var(--st-text-dim); }
+
+/* Hot-plug: the thumbnail slides in/out (≤250ms, spring), no restart. */
+#touchpad-thumb { transition: opacity 220ms var(--ease-spring, cubic-bezier(.34,1.3,.4,1)), transform 220ms var(--ease-spring, cubic-bezier(.34,1.3,.4,1)); }
+#touchpad-thumb.tp-hidden { opacity: 0; transform: translateY(14px) scale(.96); pointer-events: none; }
+:root.reduced-motion #touchpad-thumb { transition: none; }
+
+/* --- The page container on the home stage --------------------------------
+   Shown only while body.touchpad-open; it is opaque, so it takes the stage
+   from the keyboard the way the key editor's bloom does (≤250ms, spring). */
+#touchpad-page {
+  position: absolute; inset: 0; z-index: 8;
+  color: var(--sp-text);
+  font-family: var(--sp-font);
+  -webkit-font-smoothing: antialiased;
+  animation: tp-page-in var(--sp-max) var(--sp-spring) both;
+}
+#touchpad-page[hidden] { display: none; }
+@keyframes tp-page-in { 0% { opacity: 0; transform: scale(.98); } 100% { opacity: 1; transform: none; } }
+:root.reduced-motion #touchpad-page { animation: none; }
+
+/* While the page is up, the keyboard group and the two docks step aside. */
+body.touchpad-open #keyboard-outer { opacity: 0; pointer-events: none; transition: opacity var(--sp-quick, 120ms) linear; }
+body.touchpad-open #gear-dock,
+body.touchpad-open #specials-dock,
+body.touchpad-open #topbar,
+body.touchpad-open #profile-pill { opacity: 0; pointer-events: none; }

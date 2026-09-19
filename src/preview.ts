@@ -101,6 +101,13 @@ import { initProfileEditor } from "./components/profile-editor";
 import { initOwnWindowKeys } from "./own-window-keys";
 // 1.0.119 (brief 4 §5) — per-option subtitles, the same leaf the panel reads.
 import { subLineHtml } from "./components/setting-subs";
+import {
+  initTouchpadPage,
+  renderTouchpadPage,
+  setTouchpadPresence,
+  setTouchpadLive,
+  defaultTouchpad,
+} from "./components/touchpad-page";
 
 const q = new URLSearchParams(location.search);
 
@@ -148,8 +155,10 @@ bindings.b = {
     site_icon: null, action: { kind: "special", id },
   };
 });
-// One non-special action on a non-letter key, so ?editor=7 shows the
-// "Windows setting" page with a current row.
+// One non-special action on a non-letter key. PHASE A step 4: ?editor=7
+// shows the SIMPLE editor — the app picker under the note "This key runs
+// Display — turn on Advanced mode to change it."; ?editor=7&advanced shows
+// the Controls page with its current row and the five-option kind row.
 bindings["7"] = {
   app: null, web_url: null, label: "Display", icon_override: null,
   browser_exe: null, browser_profile_dir: null, browser_profile_name: null,
@@ -180,8 +189,9 @@ const config: AppConfig = {
   // front of whatever was actually being looked at. ?tour asks for it.
   tour_done: !q.has("tour"),
   opacity_floor_pct: 30,
-  // PHASE A — ?advanced shows the editor's "Run command" page and the full
-  // catalogue; off is the shipped default.
+  // PHASE A — ?advanced shows the editor's kind row (App or link · Spaceadom
+  // special · Key combo · Controls · Run command); off, the shipped default,
+  // is the simple editor: the app picker and nothing else (step 4).
   advanced_mode: q.has("advanced"),
   browser_path: null,
   fullscreen_allowlist: [],
@@ -1564,6 +1574,41 @@ if (q.has("editor")) {
 // them — Show me, then click a letter — not by pairing ?tour with ?editor,
 // which opens the panel before the tour is armed and so advances nothing.
 maybeStartTour();
+
+// ---- TOUCHPAD T2 — the page fixture ----
+// ?touchpad[=default|band|live|unavailable]&look=app|chocolate
+if (q.has("touchpad")) {
+  const state = q.get("touchpad") || "default";
+  const look = q.get("look") === "app" ? "app" : "chocolate";
+  const t = (config as unknown as { touchpad: import("./types").Touchpad }).touchpad ?? defaultTouchpad();
+  (config as unknown as { touchpad: import("./types").Touchpad }).touchpad = t;
+  t.page_look = look;
+  if (state !== "unavailable") {
+    // A couple of edges on so the page has something to show.
+    t.top.enabled = true;
+    t.right.enabled = true;
+    t.demo_seen = state === "default" ? false : true;
+  }
+  let page = document.getElementById("touchpad-page");
+  if (!page) {
+    page = document.createElement("div");
+    page.id = "touchpad-page";
+    document.getElementById("stage")!.appendChild(page);
+  }
+  page.hidden = false;
+  document.body.classList.add("touchpad-open");
+  initTouchpadPage(page, {
+    getConfig: () => config as unknown as import("./types").AppConfig,
+    save: () => {},
+    onClose: () => {},
+    openWindowsTouchpadSettings: () => {},
+  });
+  setTouchpadPresence(state === "unavailable" ? "none" : "precision");
+  renderTouchpadPage();
+  if (state === "live") {
+    setTouchpadLive({ edge: "right", action: "volume", value_pct: 62, travel: 0.3 });
+  }
+}
 
 // ---- cursor glow ----
 const stage = document.getElementById("stage")!;

@@ -202,21 +202,31 @@ function actionFromItem(item: CatalogueItem): Action | null {
   }
 }
 
-/** The segmented control's options. PHASE A step 3: non-advanced users see
- *  three kinds — in the owner's 1.0.119 order, App or link · Spaceadom
- *  special · Key combo (brief 4 §4; "Key combo" was "Send keys"). "Controls"
- *  (the old "Windows" tab, a few clicks deep) and "Run command" appear only
- *  in Advanced mode, after those — or when THIS key already holds a binding
- *  of that kind, so an existing setting / command binding stays visible and
- *  editable whatever the mode. */
-function kindOptions(current: EditorKind): ReadonlyArray<readonly [EditorKind, string]> {
-  const advanced = !!_config?.advanced_mode;
-  const opts: (readonly [EditorKind, string])[] = [["app", "App or link"]];
-  opts.push(["special", "Spaceadom special"]);
-  opts.push(["keys", "Key combo"]);
-  if (advanced || current === "setting") opts.push(["setting", FEATURES.windowsCatalogue ? "Windows" : "Controls"]);
-  if (advanced || current === "command") opts.push(["command", "Run command"]);
-  return opts;
+/** The segmented control's options. PHASE A step 4 (2026-09-19, the owner's
+ *  "simple by default"): with Advanced mode OFF there is NO kind row at all —
+ *  clicking a key opens the App or link picker directly, the pre-Phase-A
+ *  experience — so this returns the one option and `renderPanel` omits the
+ *  row. With Advanced mode ON the row shows all five: App or link · Spaceadom
+ *  special · Key combo · Controls · Run command. (Step 3 had three kinds for
+ *  everyone and two Advanced-only; brief 4 §4 named "Key combo".) */
+function kindOptions(): ReadonlyArray<readonly [EditorKind, string]> {
+  if (!_config?.advanced_mode) return [["app", "App or link"]];
+  return [
+    ["app", "App or link"],
+    ["special", "Spaceadom special"],
+    ["keys", "Key combo"],
+    ["setting", FEATURES.windowsCatalogue ? "Windows" : "Controls"],
+    ["command", "Run command"],
+  ];
+}
+
+/** Step 4 — the one-line note the SIMPLE editor shows over the picker when
+ *  the key already runs something that is not an app or link (a special, a
+ *  chord, a control, a command). The picker below still replaces it with an
+ *  app through the ordinary replace-confirm. */
+function simpleNoteHtml(binding: KeyBinding | undefined): string {
+  if (!binding?.action) return "";
+  return `<div class="ed-hint ed-simple-note" id="ed-simple-note">This key runs <b>${escapeHtml(bindingLabel(binding))}</b> — turn on Advanced mode to change it.</div>`;
 }
 
 /** Everything a cleared key is: what `commit` normalises a clear to, spelled
@@ -478,7 +488,12 @@ function renderPanel(key: string): void {
   // and the label follows the one naming rule the board uses.
   const bound = isMapped(binding);
   const boundLabel = bound ? bindingLabel(binding!) : "";
-  const kind: EditorKind = _kindOverride ?? kindForBinding(binding);
+  // PHASE A step 4 — SIMPLE BY DEFAULT. Advanced mode off: the App or link
+  // picker, always, whatever the key holds (a non-app binding gets the
+  // one-line note instead of a page). Advanced mode on: the binding's own
+  // page, or the one picked with the kind row this open.
+  const advanced = !!_config.advanced_mode;
+  const kind: EditorKind = advanced ? (_kindOverride ?? kindForBinding(binding)) : "app";
   _chord = binding?.action?.kind === "chord" ? [...binding.action.keys] : [];
 
   _panel.innerHTML = `
@@ -493,12 +508,13 @@ function renderPanel(key: string): void {
 
     <!-- PHASE A — WHAT KIND of thing this key does. The same segmented pill
          as the Theme row in Settings (controls.ts segRowHtml), so the two
-         cannot drift. "Run command" appears only in Advanced mode. -->
-    <div class="ed-kinds" id="ed-kinds">
-      ${segRowHtml("edkind", kindOptions(kind), kind, "", "What this key does")}
-    </div>
+         cannot drift. Step 4: the row exists ONLY in Advanced mode. -->
+    ${advanced ? `<div class="ed-kinds" id="ed-kinds">
+      ${segRowHtml("edkind", kindOptions(), kind, "", "What this key does")}
+    </div>` : ""}
 
     <div id="ed-pane-app"${kind === "app" ? "" : " hidden"}>
+    ${advanced ? "" : simpleNoteHtml(binding)}
 
     <!-- "Open this in a specific browser profile" (2026-08-26). Hidden unless
          this binding is a URL or a detected browser; see wireProfileChip.

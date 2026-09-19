@@ -37,6 +37,9 @@ mod engine;
 mod features;
 mod guide_hud;
 mod hook;
+// Touchpad T1 — Precision Touchpad raw-input reader. `pub` because the
+// `touchpad-probe` example is its only caller; nothing in the app runs it.
+pub mod touchpad;
 mod icon_extractor;
 mod logger;
 /// PROBLEM 267 — the middle button's cursor-anchored ICON RING: pure geometry
@@ -1376,6 +1379,7 @@ pub fn run() {
             commands::get_conflicts,
             commands::close_conflict,
             commands::open_startup_manager,
+            commands::open_touchpad_settings,
             commands::reinstall_hook,
             commands::set_startup_enabled,
             // PROBLEM 250 — the Store build's two extra questions: who owns
@@ -1557,6 +1561,20 @@ pub fn run() {
                         conflicts.len()
                     );
                 }
+            }
+
+            // 9e. TOUCHPAD T2 — the edge-gesture engine. Started here, after
+            // the engine actor, because it emits `touchpad-caps`/`touchpad-live`
+            // to the page and drives brightness/volume/scrub. Safe on a machine
+            // with no Precision Touchpad: its supervisor simply reports
+            // `presence=none` and never starts a reader. Not gated on safe mode
+            // — it installs no keyboard hook; the only shared-hook touch is the
+            // one BAND_LIVE atomic the existing mouse callback reads.
+            #[cfg(windows)]
+            {
+                let cfg = shared_config.read().unwrap_or_else(|p| p.into_inner());
+                touchpad::init(app_handle.clone(), &cfg);
+                log::info!("setup: touchpad edge-gesture engine started");
             }
 
             // 10. Build system tray

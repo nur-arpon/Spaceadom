@@ -72,8 +72,25 @@ import { resolveTheme, onSystemThemeChange, THEME_AUTO } from "./theme-resolve";
 // window that has been told which colour scheme to prefer cannot report which
 // one the USER asked for, and this one had been told "Light".
 import { initOsTheme } from "./os-theme";
+// TOUCHPAD T2 (1.0.120) — the edge-gestures page. A LEAF module (imports only
+// types), so `preview.ts` can render it. main.ts owns WHEN it opens, the
+// thumbnail's presence-driven visibility, and the caps/live event plumbing.
+import {
+  initTouchpadPage,
+  renderTouchpadPage,
+  setTouchpadPresence,
+  setTouchpadLive,
+  touchpadPresence as getTouchpadPresence,
+} from "./components/touchpad-page";
 
-import type { AppConfig, HookStatus, KeyBinding } from "./types";
+import type {
+  AppConfig,
+  HookStatus,
+  KeyBinding,
+  TouchpadCaps,
+  TouchpadLive,
+  TouchpadPresence,
+} from "./types";
 
 // PROBLEM 217 — the dashboard had NO global error handler at all, and
 // `frontend_log` (its only bridge to Rust) logs at INFO, which is below the
@@ -390,6 +407,7 @@ async function bootstrap(): Promise<void> {
   renderSpecials();
   wireCursorGlow();
   wireKeyboardFit();
+  wireTouchpad();
   // PROBLEM 179 — the board reacts to a cursor SWEEP, not only to dwelling.
   // AFTER wireKeyboardFit: the wake measures key rectangles once, and doing
   // that before the board has been scaled to the window would cache every
@@ -474,7 +492,10 @@ async function bootstrap(): Promise<void> {
       el.blur();
     }
     if (e.key === "Escape") {
-      if (getCurrentKey()) closePanel();
+      // TOUCHPAD T2 — the page owns Esc while it is up (its "Keyboard" pill
+      // does the same), before the editor/popovers.
+      if (tpPageOpen) closeTouchpadPage();
+      else if (getCurrentKey()) closePanel();
       else closeAllPopovers();
     }
   });
@@ -1778,6 +1799,133 @@ function wireCursorGlow(): void {
  * bottom/right of the display — this is that failure's fix, so do not
  * "simplify" it back to a single-axis scale.
  */
+// ---------------------------------------------------------------------------
+// TOUCHPAD T2 (1.0.120) — the edge-gestures page, its home thumbnail, and the
+// caps/live event plumbing. The thumbnail is shown only when a Precision
+// Touchpad is present AND "Show the touchpad under the keyboard" is on.
+// ---------------------------------------------------------------------------
+
+let tpPageOpen = false;
+
+/** Is the thumbnail meant to be visible right now? */
+function touchpadThumbWanted(): boolean {
+  return getTouchpadPresence() === "precision" && appConfig?.touchpad?.show_thumbnail !== false;
+}
+
+/** Fill and slide the home thumbnail in or out (hot-plug, no restart). */
+function renderTouchpadThumb(): void {
+  const thumb = document.getElementById("touchpad-thumb");
+  if (!thumb) return;
+  const t = appConfig?.touchpad;
+  const onCount = t ? (["left", "right", "top"] as const).filter((e) => t[e].enabled).length : 0;
+  const set = onCount > 0;
+  thumb.innerHTML = set
+    ? `<div class="sp-thumb" role="presentation">
+         <span class="strip strip--left"></span>
+         <span class="strip strip--right"></span>
+         <span class="strip strip--top"></span>
+         <span class="strip strip--bottom"></span>
+         <span class="dots"><i></i><i></i></span>
+       </div>
+       <span class="sp-pill"><span class="sp-badge">TP</span>Touchpad · ${onCount} edge${onCount === 1 ? "" : "s"} on</span>`
+    : `<div class="sp-thumb" role="presentation"><span class="empty"></span></div>
+       <span class="sp-pill sp-pill--off"><span class="sp-badge sp-badge--muted">TP</span>Touchpad · not set up</span>`;
+
+  const wanted = touchpadThumbWanted();
+  if (wanted) {
+    thumb.hidden = false;
+    // Next frame: clear the slid-out state so it springs in, and re-fit the
+    // keyboard group now that it is taller.
+    requestAnimationFrame(() => {
+      thumb.classList.remove("tp-hidden");
+      window.dispatchEvent(new Event("resize"));
+    });
+  } else if (!thumb.hidden) {
+    thumb.classList.add("tp-hidden");
+    window.setTimeout(() => {
+      if (!touchpadThumbWanted()) {
+        thumb.hidden = true;
+        window.dispatchEvent(new Event("resize"));
+      }
+    }, 240);
+  }
+}
+
+function openTouchpadPage(): void {
+  if (tpPageOpen) return;
+  const page = document.getElementById("touchpad-page");
+  if (!page) return;
+  tpPageOpen = true;
+  document.body.classList.add("touchpad-open");
+  page.hidden = false;
+  renderTouchpadPage();
+}
+
+function closeTouchpadPage(): void {
+  if (!tpPageOpen) return;
+  tpPageOpen = false;
+  document.body.classList.remove("touchpad-open");
+  const page = document.getElementById("touchpad-page");
+  if (page) page.hidden = true;
+}
+
+function wireTouchpad(): void {
+  const pageEl = document.getElementById("touchpad-page");
+  if (pageEl) {
+    initTouchpadPage(pageEl, {
+      getConfig: () => appConfig,
+      save: () => void persistConfig(),
+      onClose: () => closeTouchpadPage(),
+      openWindowsTouchpadSettings: () => void invoke("open_touchpad_settings").catch(() => {}),
+    });
+  }
+
+  const thumb = document.getElementById("touchpad-thumb");
+  const openFromThumb = () => {
+    if (touchpadThumbWanted()) openTouchpadPage();
+  };
+  thumb?.addEventListener("click", openFromThumb);
+  thumb?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      openFromThumb();
+    }
+  });
+
+  // caps: presence at boot and on device change → thumbnail + page state.
+  void listen<TouchpadCaps>("touchpad-caps", (ev) => {
+    const p: TouchpadPresence = ev.payload?.presence === "precision" ? "precision" : "none";
+    setTouchpadPresence(p);
+    renderTouchpadThumb();
+    // A pad pulled out from under an open page drops to the unavailable screen;
+    // the page component handles that in its own render.
+    if (p !== "precision" && tpPageOpen) renderTouchpadPage();
+  }).catch(() => {});
+
+  // live: the readout while a band is live.
+  void listen<TouchpadLive>("touchpad-live", (ev) => {
+    setTouchpadLive(ev.payload);
+  }).catch(() => {});
+
+  renderTouchpadThumb();
+}
+
+/** Called by settings when the "Show the touchpad" toggle changes. */
+export function refreshTouchpadThumb(): void {
+  renderTouchpadThumb();
+}
+
+/** Open the touchpad page from Settings' "Open touchpad page" row. */
+export function openTouchpadPageFromSettings(): void {
+  closeSettingsPanel();
+  openTouchpadPage();
+}
+
+/** The current presence, for Settings' read-only status line. */
+export function currentTouchpadPresence(): TouchpadPresence {
+  return getTouchpadPresence();
+}
+
 function wireKeyboardFit(): void {
   const outer = document.getElementById("keyboard-outer");
   const scale = document.getElementById("keyboard-scale");
@@ -1833,10 +1981,20 @@ function wireKeyboardFit(): void {
    */
   const FILL = 0.75;
   const MAX_SCALE = 2.0;
+  // TOUCHPAD T2 — the board and the touchpad thumbnail are ONE scaled group.
+  // When the thumbnail is present the group is taller (14px gap + 208x132
+  // thumb + its ~30px pill ≈ 190px), so the fit divides the room by the
+  // GROUP's height, not the board's — otherwise a large thumbnail could run
+  // the group off the bottom. When it is hidden the extra is 0 and the board
+  // fills the room exactly as before.
+  const THUMB_GROUP_H = 190;
   const fit = () => {
     const r = outer.getBoundingClientRect();
     if (!r.width || !r.height) return;
-    const room = Math.min(r.width / DESIGN_W, r.height / DESIGN_H);
+    const thumb = document.getElementById("touchpad-thumb");
+    const thumbShown = !!thumb && !thumb.hidden;
+    const designH = DESIGN_H + (thumbShown ? THUMB_GROUP_H : 0);
+    const room = Math.min(r.width / DESIGN_W, r.height / designH);
     const s = Math.min(MAX_SCALE, room * FILL);
     scale.style.transform = `scale(${s.toFixed(4)})`;
     // Published for anything else that should grow with the board. Nothing

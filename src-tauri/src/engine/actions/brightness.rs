@@ -46,14 +46,37 @@ pub fn adjust(delta: i32, app_handle: tauri::AppHandle) {
     std::thread::Builder::new()
         .name("st-brightness".into())
         .spawn(move || {
-            let msg = toast_text(run_script(delta));
+            let msg = toast_text(set_via_wmi_or_powershell(delta));
             crate::show_toast(&app_handle, &msg);
         })
         .map(|_| ())
         .unwrap_or_else(|e| log::warn!("brightness: could not start the worker thread: {e}"));
 }
 
+/// TOUCHPAD T2 — one brightness path for the whole app. The COM WMI setter in
+/// `touchpad::actions` is instant (the touchpad slider ticks at 30–60 Hz and
+/// cannot spawn a PowerShell per step); this Phase-A key action shares it, and
+/// falls back to the PowerShell `script()` only if COM returns nothing (an
+/// older Windows, a WMI provider that refused). Off the engine thread already
+/// (see `adjust`), so a fallback spawn is harmless here.
+fn set_via_wmi_or_powershell(delta: i32) -> Option<u8> {
+    #[cfg(windows)]
+    {
+        if let Some(pct) = crate::touchpad::actions::add_brightness(delta) {
+            log::info!("brightness: WMI (COM) set → {pct}");
+            return Some(pct);
+        }
+        log::info!("brightness: COM path returned nothing — falling back to PowerShell");
+        return run_script(delta);
+    }
+    #[cfg(not(windows))]
+    {
+        run_script(delta)
+    }
+}
+
 /// Runs the script; `Some(new percent)` or `None` for no panel / failure.
+/// Kept as the fallback for `set_via_wmi_or_powershell` (and its own tests).
 fn run_script(delta: i32) -> Option<u8> {
     #[cfg(windows)]
     {
