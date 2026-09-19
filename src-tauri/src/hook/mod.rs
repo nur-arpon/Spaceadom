@@ -18,6 +18,7 @@ pub mod orbit_apps;
 /// PHASE A — the non-letter key table (`key_id_for_vk` / `vk_for_key_id`),
 /// the "Space owns this VK" bitmap and the chord recorder's switch.
 pub mod keys;
+pub mod repeat;
 pub use keys::{bound_vk, key_id_for_vk, publish_bound_vks, vk_for_key_id};
 
 use crossbeam_channel::Sender;
@@ -50,7 +51,11 @@ pub enum KeyCombo {
 pub enum HookEvent {
     SpaceDown,
     SpaceUp { modifier_fired: bool },
-    KeyCombo(KeyCombo),
+    /// Space + a key. PHASE A step 3 (§6): `repeat` is `true` when the
+    /// key-down was an OS auto-repeat of a key already held (`repeat::KEYS_DOWN`
+    /// had its bit set) — the engine runs a `Chord` binding again and drops
+    /// every other kind (`engine::repeat_is_dropped`).
+    KeyCombo { combo: KeyCombo, repeat: bool },
     WheelUp,
     WheelDown,
     /// PROBLEM 206 — pointer activation on the Guide HUD: the cursor was
@@ -2798,6 +2803,11 @@ unsafe fn install_hooks() -> (
 ) {
     use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, WINDOWS_HOOK_ID};
 
+    // PHASE A step 3 (§6) — a fresh chain forgets which keys it saw go down:
+    // an evicted hook (law 7) may have missed an up, and a stale bit would
+    // drop the next real press of that key as a repeat.
+    repeat::KEYS_DOWN.reset();
+
     // ═══ PROBLEM 230 — INSTALL ORDER IS THE INSTRUMENT'S CORRECTNESS ═══
     //
     // `SetWindowsHookExW` puts the new hook at the HEAD of the chain, so the
@@ -4108,6 +4118,23 @@ unsafe extern "system" fn kb_hook_proc(
     // close.
     track_modifier(vk, is_down);
 
+    // PHASE A step 3 (§6) — auto-repeat detection. `WH_KEYBOARD_LL` has no
+    // repeat flag, so the hook keeps a 256-bit "down already seen since the
+    // last up" bitmap (`repeat::KEYS_DOWN`): the first down of a key sets
+    // its bit, an up clears it, and a down with the bit already set IS a
+    // repeat. One relaxed `fetch_or` / `fetch_and`, no lock, no heap.
+    // Deliberately BELOW the cookie return (our own injected keys must not
+    // touch it) and ABOVE the excluded / bypass / fullscreen early returns
+    // (an up inside an excluded app must still clear the bit).
+    let is_repeat = if is_down {
+        repeat::KEYS_DOWN.mark_down(vk)
+    } else {
+        if is_up {
+            repeat::KEYS_DOWN.mark_up(vk);
+        }
+        false
+    };
+
     // PROBLEM 225 — "the user is typing", as a signal that can be trusted.
     //
     // Read the doc comment on `LAST_USER_TYPING` for the four false signals
@@ -4307,7 +4334,7 @@ unsafe extern "system" fn kb_hook_proc(
                 Some(ch) => KeyCombo::Alpha(ch),
                 None => KeyCombo::Vk(vk),
             };
-            send_event(HookEvent::KeyCombo(combo));
+            send_event(HookEvent::KeyCombo { combo, repeat: is_repeat });
             return LRESULT(1);
         }
         return CallNextHookEx(None, n_code, w_param, l_param);
@@ -4614,7 +4641,7 @@ unsafe extern "system" fn kb_hook_proc(
             // middle release from ALSO replaying a click (see
             // `middle_press_was_a_click`).
             SPACE_ABORTED.store(true, Ordering::Relaxed);
-            send_event(HookEvent::KeyCombo(combo));
+            send_event(HookEvent::KeyCombo { combo, repeat: is_repeat });
             return LRESULT(1); // suppress key
         }
 
@@ -5441,7 +5468,9 @@ pub(crate) fn own_window_key(vk: u16) -> bool {
         return false;
     };
     OWN_HOLD_COMBO.store(true, Ordering::Relaxed);
-    inject_hook_event(HookEvent::KeyCombo(combo))
+    // The page's own `keydown` carries `event.repeat`; `own-window-keys.ts`
+    // already suppresses repeats before calling this, so `false` here.
+    inject_hook_event(HookEvent::KeyCombo { combo, repeat: false })
 }
 
 /// The page saw Space come up. Returns `true` if the fallback ended a hold it
@@ -8040,14 +8069,15 @@ mod own_window_fallback_tests {
         // Escape, Enter, Tab, Backspace, arrows, Right Alt — the exclusion
         // list. A page needs these to be a page — EVEN THOUGH most of them
         // are bound in the fixture (Esc = boss key, Tab = fullscreen PiP,
-        // ⌫ = force close, ↑/↓ = scroll, RAlt = cycle profile).
+        // ⌫ = force close, ↑/↓ = scroll, ←/→ = move the window (step 3),
+        // RAlt = cycle profile).
         for vk in OWN_WINDOW_NEVER_INJECTED {
             assert!(
                 own_window_combo_for_vk_in(*vk, &bits).is_none(),
                 "VK {vk:#04X} must stay with the page"
             );
             let bound = keys::bound_in(&bits, *vk);
-            let seeded = [0x1Bu16, 0x09, 0x08, 0x26, 0x28, 0xA5].contains(vk);
+            let seeded = [0x1Bu16, 0x09, 0x08, 0x26, 0x28, 0x25, 0x27, 0xA5].contains(vk);
             assert_eq!(bound, seeded, "fixture sanity for {vk:#04X}");
         }
         // F1–F12: not bound in the fixture, so nothing is taken. (An F-key

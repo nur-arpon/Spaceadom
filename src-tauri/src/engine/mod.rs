@@ -465,7 +465,7 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
         // ---------------------------------------------------------------
         // Combo key while Space held
         // ---------------------------------------------------------------
-        HookEvent::KeyCombo(combo) => {
+        HookEvent::KeyCombo { combo, repeat } => {
             // Cancel guide HUD immediately on any combo. `true`: a toast is
             // coming, so the overlay window must stay up (PROBLEM 135).
             {
@@ -473,7 +473,7 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
                 s.cancel_hud(true);
             }
 
-            run_combo(combo, state_arc);
+            run_combo(combo, repeat, state_arc);
         }
 
         // ---------------------------------------------------------------
@@ -502,7 +502,7 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
                             "engine: pointer activation → special {combo:?} (armed tile on the \
                              icon ring, PROBLEM 267)"
                         );
-                        run_combo(combo, state_arc);
+                        run_combo(combo, false, state_arc);
                     }
                     None => log::warn!(
                         "engine: pointer activation carried an unknown special code {:#x} — \
@@ -512,7 +512,7 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
                 }
             } else {
                 log::info!("engine: pointer activation → Space+{ch} (armed chip on the guide HUD)");
-                run_binding(&ch.to_string(), state_arc);
+                run_binding(&ch.to_string(), false, state_arc);
             }
         }
 
@@ -720,18 +720,39 @@ async fn dispatch(event: HookEvent, state_arc: &Arc<Mutex<EngineState>>) {
 /// (`a`, `esc`, `f1`, `7`…), and the active profile's binding for that id
 /// decides — a seeded `Special { id: "boss_key" }` on `esc` by default. The
 /// legacy `special_keys` map (`Special(name)`) is unchanged.
-fn run_combo(combo: KeyCombo, state_arc: &Arc<Mutex<EngineState>>) {
+///
+/// PHASE A step 3 (§6) — `repeat` is the hook's verdict that this key-down
+/// is an OS auto-repeat of a key already held (`hook::repeat`). A repeat
+/// runs a `Chord` binding again (holding Space+U on a volume chord keeps
+/// raising the volume, as a media key would) and is DROPPED for every other
+/// action kind — a toggle, a URI, a command, a special, an app launch fire
+/// once per press. `repeat_is_dropped` is the rule; the legacy
+/// `special_keys` path drops repeats too (none of its specials is a chord).
+fn run_combo(combo: KeyCombo, repeat: bool, state_arc: &Arc<Mutex<EngineState>>) {
     match combo {
-        KeyCombo::Alpha(ch) => run_binding(&ch.to_string(), state_arc),
+        KeyCombo::Alpha(ch) => run_binding(&ch.to_string(), repeat, state_arc),
         KeyCombo::Vk(vk) => match crate::hook::key_id_for_vk(vk) {
-            Some(id) => run_binding(id, state_arc),
+            Some(id) => run_binding(id, repeat, state_arc),
             None => log::warn!(
                 "engine: combo Space+VK {vk:#04X} received but the key table has no id for it — \
                  nothing fired (the hook's bitmap and hook::keys::KEY_TABLE disagree)"
             ),
         },
-        KeyCombo::Special(name) => handle_special(name, state_arc),
+        KeyCombo::Special(name) => {
+            if repeat {
+                log::debug!("engine: Space+{name} auto-repeat dropped (legacy special; Phase A step 3)");
+                return;
+            }
+            handle_special(name, state_arc)
+        }
     }
+}
+
+/// PHASE A step 3 (§6) — is an auto-repeat of a key with this action
+/// dropped? Only a `Chord` repeats; everything else, including an unbound
+/// key and a legacy app / link binding (`None`), fires once per press.
+pub fn repeat_is_dropped(action: Option<&crate::config::Action>) -> bool {
+    !matches!(action, Some(crate::config::Action::Chord { .. }))
 }
 
 /// PHASE A — Space + `key_id`: look the key up in the active profile and do
@@ -746,7 +767,7 @@ fn run_combo(combo: KeyCombo, state_arc: &Arc<Mutex<EngineState>>) {
 ///   the key, else nothing. (The hook only dispatches a non-letter key that
 ///   is in its bitmap, so this is the "binding removed between the bitmap
 ///   publish and this dispatch" race — harmless.)
-fn run_binding(key_id: &str, state_arc: &Arc<Mutex<EngineState>>) {
+fn run_binding(key_id: &str, repeat: bool, state_arc: &Arc<Mutex<EngineState>>) {
     let (binding, in_special_keys) = {
         let s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
         let cfg = s.config.read().unwrap_or_else(|p| p.into_inner());
@@ -757,6 +778,10 @@ fn run_binding(key_id: &str, state_arc: &Arc<Mutex<EngineState>>) {
             .and_then(|p| p.bindings.get(key_id).cloned());
         (b, cfg.special_keys.contains_key(key_id))
     };
+    if repeat && repeat_is_dropped(binding.as_ref().and_then(|b| b.action.as_ref())) {
+        log::debug!("engine: Space+{key_id} auto-repeat dropped — only a chord repeats (Phase A step 3)");
+        return;
+    }
     match binding.as_ref().and_then(|b| b.action.clone()) {
         Some(action) => {
             let label = binding.and_then(|b| b.label);
@@ -801,11 +826,21 @@ fn run_action(
             let msg = actions::chord::send(keys);
             crate::show_toast(&app_handle, &msg);
         }
-        Action::Command { line } => {
-            let msg = actions::command::run(line);
+        Action::Command { line, elevated } => {
+            let msg = actions::command::run(line, *elevated);
             crate::show_toast(&app_handle, &msg);
         }
         Action::Brightness { delta } => actions::brightness::adjust(*delta, app_handle),
+        // PHASE A step 3 — `screen_off` and `sleep` are NEUTRALISED while
+        // `features::HAZARDOUS_TOGGLES` is off: the binding stays in the
+        // file (hide, do not delete), the key does nothing but say so.
+        Action::Toggle { what } if actions::toggle::neutralised(what) => {
+            log::warn!(
+                "engine: Space+{key_id} is bound to the removed toggle {what:?} — neutralised, nothing done \
+                 (Phase A step 3, 1.0.118: reversible or it does not ship; rebind the key)"
+            );
+            crate::show_toast(&app_handle, actions::toggle::NEUTRALISED_TOAST);
+        }
         Action::Toggle { what } => actions::toggle::run(what, app_handle),
     }
 }
@@ -827,12 +862,27 @@ fn run_special(id: &str, key_id: &str, state_arc: &Arc<Mutex<EngineState>>) {
         "osk" => handle_osk(state_arc),
         "scroll_top" => handle_scroll(key_id, true, state_arc),
         "scroll_bottom" => handle_scroll(key_id, false, state_arc),
+        // PHASE A step 3 — Windows' own "move this window to the other
+        // monitor" (Win+Shift+←/→), one `send_keys_checked` batch through
+        // `actions::chord` (PROBLEM 227).
+        "move_window_left" | "move_window_right" => {
+            let keys: [u16; 3] = if id == "move_window_left" { [0x5B, 0x10, 0x25] } else { [0x5B, 0x10, 0x27] };
+            let _ = actions::chord::send(&keys);
+            let app_handle = {
+                let s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
+                s.app_handle.clone()
+            };
+            crate::show_toast(&app_handle, MOVE_WINDOW_TOAST);
+        }
         other => log::warn!(
             "engine: Space+{key_id} is bound to an unknown special '{other}' — nothing fired \
              (a config from a newer build?)"
         ),
     }
 }
+
+/// PHASE A step 3 — the toast for both arrow specials.
+pub const MOVE_WINDOW_TOAST: &str = "⇆ Window → other screen";
 
 /// Space + ' (and the ring's "Keyboard" tile): Windows' own on-screen keyboard.
 fn handle_osk(state_arc: &Arc<Mutex<EngineState>>) {

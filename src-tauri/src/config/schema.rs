@@ -966,6 +966,23 @@ pub struct ProfileExport {
     pub specials_seeded: bool,
 }
 
+/// PHASE A step 3 (§5) — every `Command` binding in a profile, as
+/// `(key id, line, elevated)` in sorted key order: what the import dialog
+/// lists before the user confirms (a profile a friend sent must never run
+/// anything on import, and the user must see every line first).
+pub fn command_lines(p: &Profile) -> Vec<(String, String, bool)> {
+    let mut out: Vec<(String, String, bool)> = p
+        .bindings
+        .iter()
+        .filter_map(|(k, b)| match &b.action {
+            Some(Action::Command { line, elevated }) => Some((k.clone(), line.clone(), *elevated)),
+            _ => None,
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 impl ProfileExport {
     /// The current format version. Bump only if the shape changes
     /// incompatibly; `parse_profile_export` accepts anything <= this.
@@ -1000,9 +1017,18 @@ pub enum Action {
     /// Virtual-key codes in PRESS order, e.g. `[0x5B, 0x10, 0x53]` =
     /// Win+Shift+S. Sent as ONE `send_keys_checked` batch (PROBLEM 227).
     Chord { keys: Vec<u16> },
-    /// A command line, run through `cmd.exe /C` with no window. Advanced
-    /// only — that is a UI concern; the engine just runs it.
-    Command { line: String },
+    /// A PowerShell line (`powershell.exe -NoProfile -ExecutionPolicy Bypass
+    /// -Command <line>`, no window, killed after 60 s — PHASE A step 3; it
+    /// was `cmd.exe /C` in 1.0.116/117). Advanced only — that is a UI
+    /// concern; the engine just runs it. `elevated` asks Windows for its own
+    /// UAC prompt every time (`ShellExecuteW` verb `runas`); the app's
+    /// process never elevates. `#[serde(default)]`: every 1.0.116/117
+    /// binding has no such key and reads as `false`.
+    Command {
+        line: String,
+        #[serde(default)]
+        elevated: bool,
+    },
     /// +10 / -10 on the internal panel through WMI.
     Brightness { delta: i32 },
     /// One of `SPECIAL_IDS`.
@@ -1030,9 +1056,13 @@ pub const SPECIAL_IDS: &[&str] = &[
     "osk",
     "scroll_top",
     "scroll_bottom",
+    // PHASE A step 3 (2026-09-19) — Space+← / Space+→ send Win+Shift+←/→,
+    // Windows' own "move this window to the other monitor".
+    "move_window_left",
+    "move_window_right",
 ];
 
-/// Is `id` one of the twelve? Pure; the UI and the seed both ask.
+/// Is `id` one of the fourteen? Pure; the UI and the seed both ask.
 pub fn is_special_id(id: &str) -> bool {
     SPECIAL_IDS.contains(&id)
 }
@@ -1057,7 +1087,13 @@ pub const DEFAULT_SPECIALS: &[(&str, &str)] = &[
     ("quote", "osk"),
     ("up", "scroll_top"),
     ("down", "scroll_bottom"),
+    ("left", "move_window_left"),
+    ("right", "move_window_right"),
 ];
+
+/// PHASE A step 3 — the pair the SECOND seeding pass fills into a profile
+/// that was already seeded by 1.0.116/117 (`seed_specials`, pass 2).
+pub const LATE_SPECIALS: &[(&str, &str)] = &[("left", "move_window_left"), ("right", "move_window_right")];
 
 /// Seed `DEFAULT_SPECIALS` into every profile that has not been seeded yet.
 /// Returns `true` when anything changed (the caller writes the file back).
@@ -1068,10 +1104,32 @@ pub const DEFAULT_SPECIALS: &[(&str, &str)] = &[
 /// already present when the seed runs (an old config where the user had bound
 /// `esc` through a hand edit, or a Phase A config being re-read) keeps its own
 /// binding untouched.
+///
+/// PASS 2 (PHASE A step 3, 2026-09-19): a profile that 1.0.116/117 already
+/// seeded (`specials_seeded == true`) predates `move_window_left` /
+/// `move_window_right`. When BOTH `left` and `right` are absent from its
+/// `bindings` the pair is added (`LATE_SPECIALS`) and logged once; a profile
+/// where the user has bound EITHER key to anything is left alone — that is
+/// the only signal there is that the user has been there, and the cost of
+/// guessing wrong is overwriting a binding he made. Idempotent: once the
+/// pair is in, the "both absent" test is false. Known edge: a user who later
+/// removes BOTH arrows gets them back on the next load; removing one keeps
+/// both away.
 pub fn seed_specials(cfg: &mut AppConfig) -> bool {
     let mut changed = false;
+    let mut late: Vec<String> = Vec::new();
     for p in cfg.profiles.iter_mut() {
         if p.specials_seeded {
+            if LATE_SPECIALS.iter().all(|(k, _)| !p.bindings.contains_key(*k)) {
+                for (key, id) in LATE_SPECIALS {
+                    p.bindings.insert(
+                        (*key).to_string(),
+                        KeyBinding { action: Some(Action::Special { id: (*id).to_string() }), ..Default::default() },
+                    );
+                }
+                late.push(p.name.clone());
+                changed = true;
+            }
             continue;
         }
         for (key, id) in DEFAULT_SPECIALS {
@@ -1088,6 +1146,13 @@ pub fn seed_specials(cfg: &mut AppConfig) -> bool {
         }
         p.specials_seeded = true;
         changed = true;
+    }
+    if !late.is_empty() {
+        log::info!(
+            "config: seeded Space+Left / Space+Right (move the window to the other screen, Phase A step 3,              1.0.118) into {} already-seeded profile(s) that had neither arrow bound: {}",
+            late.len(),
+            late.join(", ")
+        );
     }
     changed
 }
@@ -2279,7 +2344,7 @@ mod phase_a_action_tests {
         let all = [
             Action::Uri { target: "ms-settings:display".into() },
             Action::Chord { keys: vec![0x5B, 0x10, 0x53] },
-            Action::Command { line: "control.exe /name Microsoft.PowerOptions".into() },
+            Action::Command { line: "control.exe /name Microsoft.PowerOptions".into(), elevated: false },
             Action::Brightness { delta: -10 },
             Action::Special { id: "boss_key".into() },
             Action::Toggle { what: "bluetooth".into() },
@@ -2403,6 +2468,87 @@ mod phase_a_action_tests {
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), DEFAULT_SPECIALS.len(), "one key, one special");
+    }
+
+    /// PHASE A step 3 (§5) — the import listing: every command line, sorted
+    /// by key, with its elevation; a profile with none lists nothing.
+    #[test]
+    fn command_lines_lists_every_command_binding_sorted_by_key() {
+        let mut b = BindingMap::new();
+        b.insert("z".into(), KeyBinding { action: Some(Action::Command { line: "Get-Date".into(), elevated: false }), ..Default::default() });
+        b.insert("a".into(), KeyBinding { action: Some(Action::Command { line: "Restart-Service Spooler".into(), elevated: true }), ..Default::default() });
+        b.insert("f1".into(), KeyBinding { action: Some(Action::Uri { target: "ms-settings:".into() }), ..Default::default() });
+        b.insert("b".into(), KeyBinding { app: Some("b.exe".into()), ..Default::default() });
+        let p = Profile { name: "P".into(), bindings: b, emoji: None, specials_seeded: true };
+        assert_eq!(
+            command_lines(&p),
+            vec![
+                ("a".to_string(), "Restart-Service Spooler".to_string(), true),
+                ("z".to_string(), "Get-Date".to_string(), false),
+            ]
+        );
+        let none = Profile { name: "N".into(), bindings: BindingMap::new(), emoji: None, specials_seeded: true };
+        assert!(command_lines(&none).is_empty());
+    }
+
+    /// PHASE A step 3 — `Command.elevated` defaults to false, so every
+    /// 1.0.116/117 binding (`{"kind":"command","line":"…"}`) still reads.
+    #[test]
+    fn a_command_without_the_elevated_key_reads_as_not_elevated() {
+        let a: Action = serde_json::from_str(r#"{"kind":"command","line":"Get-Date"}"#).unwrap();
+        assert_eq!(a, Action::Command { line: "Get-Date".into(), elevated: false });
+        let b: Action = serde_json::from_str(r#"{"kind":"command","line":"x","elevated":true}"#).unwrap();
+        assert_eq!(b, Action::Command { line: "x".into(), elevated: true });
+        let json = serde_json::to_string(&b).unwrap();
+        assert!(json.contains(r#""elevated":true"#), "{json}");
+    }
+
+    /// PHASE A step 3 — the second seeding pass. A fresh profile gets all
+    /// fourteen; a 1.0.117 profile (seeded, no arrows) gets the two added
+    /// and nothing else touched; a profile where `left` is already an app is
+    /// left alone entirely; the pass is idempotent.
+    #[test]
+    fn the_second_pass_adds_the_arrow_specials_to_an_already_seeded_profile() {
+        let fresh = || Profile { name: "F".into(), bindings: BindingMap::new(), emoji: None, specials_seeded: false };
+        // A 1.0.117 profile: seeded with the old twelve, flag set.
+        let old_twelve = || {
+            let mut b = BindingMap::new();
+            for (k, id) in DEFAULT_SPECIALS.iter().filter(|(k, _)| *k != "left" && *k != "right") {
+                b.insert((*k).to_string(), KeyBinding { action: Some(Action::Special { id: (*id).to_string() }), ..Default::default() });
+            }
+            b.insert("a".into(), KeyBinding { app: Some("a.exe".into()), ..Default::default() });
+            Profile { name: "Old".into(), bindings: b, emoji: None, specials_seeded: true }
+        };
+        // One where the user already put an app on `left`.
+        let left_taken = || {
+            let mut p = old_twelve();
+            p.name = "LeftTaken".into();
+            p.bindings.insert("left".into(), KeyBinding { app: Some("left.exe".into()), ..Default::default() });
+            p
+        };
+        let mut cfg = AppConfig::default();
+        cfg.profiles = vec![fresh(), old_twelve(), left_taken()];
+        assert!(seed_specials(&mut cfg));
+
+        let f = &cfg.profiles[0];
+        assert_eq!(f.bindings.len(), 14, "fresh: all fourteen");
+        assert_eq!(f.bindings["left"].action, Some(Action::Special { id: "move_window_left".into() }));
+        assert_eq!(f.bindings["right"].action, Some(Action::Special { id: "move_window_right".into() }));
+
+        let o = &cfg.profiles[1];
+        assert_eq!(o.bindings.len(), 12 + 1 + 2, "1.0.117 profile: the two added, nothing else");
+        assert_eq!(o.bindings["left"].action, Some(Action::Special { id: "move_window_left".into() }));
+        assert_eq!(o.bindings["right"].action, Some(Action::Special { id: "move_window_right".into() }));
+        assert_eq!(o.bindings["a"].app.as_deref(), Some("a.exe"));
+        assert!(o.specials_seeded);
+
+        let l = &cfg.profiles[2];
+        assert_eq!(l.bindings["left"].app.as_deref(), Some("left.exe"), "the user's app stays");
+        assert!(!l.bindings.contains_key("right"), "and the pair is not half-added");
+
+        // Idempotent.
+        assert!(!seed_specials(&mut cfg), "nothing left to seed");
+        assert_eq!(cfg.profiles[1].bindings.len(), 15);
     }
 
     /// A profile export carries the flag, so an export made after the user

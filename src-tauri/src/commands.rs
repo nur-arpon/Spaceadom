@@ -4359,8 +4359,34 @@ pub async fn export_profile(
     Ok(Some(path.to_string_lossy().to_string()))
 }
 
-/// Import a profile from a `.json` the user chooses. Returns the name it was
-/// added under, or `None` when they cancelled.
+/// PHASE A step 3 (§5) — what `import_profile` hands the page BEFORE the
+/// profile is added: the name, the binding count and EVERY `command` line
+/// in it. A profile that carries commands is listed line by line and the
+/// user confirms (`import_profile_commit(true)`) or drops it (`false`);
+/// nothing is ever run on import. A profile with no commands is committed
+/// by the page straight away, so the old one-step feel is kept.
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct ImportPreview {
+    pub name: String,
+    pub bindings: usize,
+    pub commands: Vec<ImportedCommand>,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct ImportedCommand {
+    pub key: String,
+    pub line: String,
+    pub elevated: bool,
+}
+
+/// The parsed-but-not-yet-added profile between `import_profile` and
+/// `import_profile_commit`. One at a time: a second pick replaces it.
+static PENDING_IMPORT: std::sync::Mutex<Option<Profile>> = std::sync::Mutex::new(None);
+
+/// Import a profile from a `.json` the user chooses. Returns a preview of
+/// it, or `None` when they cancelled — the profile is NOT added until
+/// `import_profile_commit(true)` (PHASE A step 3: an imported profile may
+/// carry `command` lines, and the user sees every one before confirming).
 ///
 /// The imported name is DEDUPED rather than refused: a user importing a
 /// profile a friend sent them, who already has one by that name, wants both —
@@ -4369,8 +4395,7 @@ pub async fn export_profile(
 #[tauri::command]
 pub async fn import_profile(
     app: tauri::AppHandle,
-    state: State<'_, ConfigState>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<ImportPreview>, String> {
     use tauri_plugin_dialog::DialogExt;
 
     let picked = app
@@ -4389,12 +4414,42 @@ pub async fn import_profile(
 
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| format!("Could not read {} ({e}).", path.display()))?;
-    let mut incoming = config::parse_profile_export(&raw)?;
+    let incoming = config::parse_profile_export(&raw)?;
 
     if !regex_lite(&incoming.name) {
         return Err(
             "That profile's name is not usable here (1–24 characters, no control codes).".into(),
         );
+    }
+    let commands: Vec<ImportedCommand> = crate::config::command_lines(&incoming)
+        .into_iter()
+        .map(|(key, line, elevated)| ImportedCommand { key, line, elevated })
+        .collect();
+    log::info!(
+        "import_profile: parsed '{}' ({} binding(s), {} command line(s)) from {} — waiting for the user to confirm",
+        incoming.name,
+        incoming.bindings.len(),
+        commands.len(),
+        path.display()
+    );
+    let preview = ImportPreview { name: incoming.name.clone(), bindings: incoming.bindings.len(), commands };
+    *PENDING_IMPORT.lock().unwrap_or_else(|p| p.into_inner()) = Some(incoming);
+    Ok(Some(preview))
+}
+
+/// The second half of `import_profile`: add the pending profile (`accept`)
+/// or forget it. Returns the name it was added under, or `None`.
+#[tauri::command]
+pub fn import_profile_commit(
+    accept: bool,
+    state: State<'_, ConfigState>,
+) -> Result<Option<String>, String> {
+    let Some(mut incoming) = PENDING_IMPORT.lock().unwrap_or_else(|p| p.into_inner()).take() else {
+        return Err("Nothing is waiting to be imported — choose the file again.".into());
+    };
+    if !accept {
+        log::info!("import_profile: the user declined '{}' after seeing its command lines", incoming.name);
+        return Ok(None);
     }
 
     let mut cfg = state.0.write().unwrap_or_else(|p| p.into_inner());
@@ -4406,10 +4461,7 @@ pub async fn import_profile(
     let count = incoming.bindings.len();
     cfg.profiles.push(incoming);
 
-    log::info!(
-        "import_profile: added '{added}' ({count} binding(s)) from {}",
-        path.display()
-    );
+    log::info!("import_profile: added '{added}' ({count} binding(s))");
     let snapshot = cfg.clone();
     drop(cfg);
     config::save(&snapshot)?;
@@ -4495,11 +4547,12 @@ pub fn chord_record_stop() {
 }
 
 /// "Try it" in the Run-command editor: run the line ONCE, exactly as the
-/// binding would (`cmd.exe /C`, no window, detached). Returns the toast
-/// text so the editor can show what the key will say.
+/// binding would (PowerShell, no window, killed after 60 s; `elevated` →
+/// Windows' own UAC prompt). Returns the toast text so the editor can show
+/// what the key will say.
 #[tauri::command]
-pub fn run_command_once(line: String) -> String {
-    crate::engine::actions::command::run(&line)
+pub fn run_command_once(line: String, #[allow(unused_variables)] elevated: Option<bool>) -> String {
+    crate::engine::actions::command::run(&line, elevated.unwrap_or(false))
 }
 
 /// The 1.0.96 profile-editor commands: reorder validation and copy naming.

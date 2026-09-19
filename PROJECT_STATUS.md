@@ -42,6 +42,89 @@ can fail and the write still runs.
 ================================================================================
 -->
 
+## 2026-09-19 — Claude (Phase A step 3 implementing agent, Fable) — **PHASE A step 3: the prune, the rule, two fixes — in the tree as 1.0.118 — gates green (742 unit tests / 0 failed / 6 ignored, clippy 0, tsc 0, vite clean); NOT BUILT AS AN INSTALLER, NOT INSTALLED, NO GIT — the lead does that**
+
+**The verdict.** After an hour on 1.0.117 the owner's judgement was that the
+settings catalogue and most toggles make "a shortcut app, not a utility". He
+tried Screen off and could not get the screen back: every Space+U woke the
+panel and turned it off again — six raises between 10:55:21 and 10:55:58 in
+debug.log — and he restarted the laptop to escape it. The mouse ring, he
+said, had lost its specials.
+
+**The rule** is now at the top of CLAUDE.md under its own heading:
+*Reversible, or it does not ship.* A bound action must be undoable by the
+same key or by an obvious next move, and must never leave the machine in a
+state the user has to recover from (screen off, sleep, muted mic, kept
+awake). Any new action goes through that test in its brief.
+
+**What 1.0.118 hides (never deletes).** `src/config/features.ts` +
+`src-tauri/src/features.rs`, two constants each side, a test that reads the
+TS file with `include_str!` and refuses to let them drift. With
+`windowsCatalogue: false` the key editor's Windows tab becomes **"Controls"**
+— exactly Lock, Taskbar auto-hide, Brightness up/down, Volume up/down, Mute —
+shown in Advanced mode only (or when the key already holds such a binding),
+no search box under eight rows, no "Open a settings page" rows; the engine
+still runs a `uri` binding from a 1.0.116/117 config. With
+`hazardousToggles: false` screen off, sleep, Bluetooth, Wi‑Fi, dark mode and
+night light never appear in the editor, and **`screen_off` / `sleep` are
+neutralised at run time**: a key still bound to them logs a warning and
+toasts "Screen off / Sleep were removed in 1.0.118 — rebind this key". The
+other four still execute if already bound (slow, not dangerous). Non-advanced
+users see three kinds: App or link · Send keys · Spaceadom special.
+
+**Two new default specials.** `move_window_left` / `move_window_right` on
+Space+← / Space+→ send Win+Shift+←/→ through `actions::chord` (one
+`send_keys_checked` batch), toast "Window → other screen". `seed_specials`
+has a second, idempotent pass: a profile 1.0.116/117 already seeded gets the
+pair when BOTH arrows are absent; a profile where the user bound either arrow
+is left alone. Fresh profile: 14 specials. HUD and icon ring list them with
+the others (U+E00C / U+E00D tile codes).
+
+**Run command → PowerShell.** `Action::Command { line, elevated }`
+(`#[serde(default)]` on `elevated`). `powershell.exe -NoProfile
+-ExecutionPolicy Bypass -Command <line>`, `CREATE_NO_WINDOW`, stdin null, a
+reaper thread kills it after 60 s. `elevated: true` → `ShellExecuteW` verb
+`runas` on powershell.exe with the same arguments — Windows shows its own
+UAC prompt every time; the app's process never elevates. Editor: multi-line
+box, "Ask for administrator rights (UAC prompt each time)" checkbox, the
+line in a monospace block under "This key will run:", Ctrl+Enter assigns.
+Import is two-phase now (`import_profile` → preview, `import_profile_commit`):
+a profile carrying any `command` line lists every line in a confirm dialog
+before it is added; nothing runs on import.
+
+**Auto-repeat fires once.** `hook/repeat.rs`: a 256-bit "down already seen
+since the last up" bitmap (four `AtomicU64`s) maintained in the callback below
+the injected-cookie return; a down with the bit set is a repeat.
+`HookEvent::KeyCombo { combo, repeat }`; `run_binding` drops a repeat for every
+action kind but `Chord` (`engine::repeat_is_dropped`), so a held volume chord
+keeps going and a held toggle / URI / command / special / app fires once.
+`install_hooks` resets the bitmap.
+
+**The ring "bug" (PROBLEM 269).** Not a bug in Phase A. The live config
+(copied out through explorer.exe: 137,495 bytes against the agent shell's
+47,761-byte shadow) has `middle_ring_scope: my_eight` — Favourites — and every
+`cursor-anchored-ring-raised` line since 2026-09-18 08:07:35 says
+`scope my_eight`; the last `scope all` raise was 08:07:18 on 1.0.113, with a
+config save between them. Favourites has never carried the specials —
+`build_entries` appends them under `if scope == MiddleRingScope::All`, the same
+line in commit 8d96532 (pre-Phase-A) — and the Settings description says so.
+`ring_specials_for` returns 13 for his profile (the test run against the real
+file printed them). The ring marker line now says "N item(s) of which M special
+tile(s)" so this cannot be misread again; a live-shaped fixture and an
+env-var-gated live-file test pin ≥ 8. QUESTION for the owner: should Favourites
+carry the specials on an outer ring too, or is the answer "switch to All"?
+
+**Files.** New: `src-tauri/src/features.rs`, `src/config/features.ts`,
+`src-tauri/src/hook/repeat.rs`. Changed: `CLAUDE.md`, `config/schema.rs`,
+`engine/mod.rs`, `engine/specials.rs`, `engine/actions/command.rs`,
+`engine/actions/toggle.rs`, `engine/actions/uri.rs`, `hook/mod.rs`,
+`hook/keys.rs` (test), `middle_ring.rs` (tests), `guide_hud/mod_impl.rs`,
+`commands.rs`, `lib.rs`, `src/types.ts`, `src/components/key-detail-panel.ts`,
+`src/components/special-cards.ts`, `src/components/profile-editor.ts`,
+`src/preview.ts`, `src/styles.css`, `FUTURE_IDEAS.md` §11,
+`all-versions/WHAT-CHANGED.md`, `V14_FIXES_AND_CODE.md` §PHASE A — STEP 3 +
+PROBLEM 269, versions → 1.0.118 in the four places.
+
 ## 2026-09-19 — Claude (Phase A step 2 implementing agent, Fable) — **PHASE A step 2: the `Toggle` action, in the tree as 1.0.117 — gates green (728/0/6 ignored, clippy 0, tsc 0, vite clean); dark mode and taskbar auto-hide flipped and flipped back on this machine from the real scripts, radios READ only, night light refused (exit 3) because this machine's blob is not the documented shape; NOT BUILT AS AN INSTALLER, NOT INSTALLED, NO GIT**
 
 **What changed.** `Action::Toggle { what }` (`{"kind":"toggle","what":"bluetooth"}`): a key under Space FLIPS a Windows setting and the toast says the new state — `bluetooth`, `wifi` (WinRT `Radio` via PowerShell), `dark_mode` (both Personalize values + `WM_SETTINGCHANGE ImmersiveColorSet`), `night_light` (the CloudStore blob, undocumented), `taskbar_autohide` (`SHAppBarMessage`), `screen_off` (`SC_MONITORPOWER` from Rust), `sleep` (`SetSuspendState Suspend`), `lock` (`LockWorkStation`), `show_desktop` (Win+D through `actions::chord`). One hidden `powershell.exe` each, own thread, 8 s cap, exit 3 = not available, exit 4 = radio access refused. New `engine/actions/toggle.rs` in `brightness.rs`'s shape. Catalogue: nine `toggle` rows; editor tab renamed "Windows", toggles + brightness + volume first under "Toggles & controls" (basic regardless of group), the `ms-settings:` rows under "Open a settings page"; night light's caveat under its row. Ring/HUD/board label = the catalogue row's name. Full record: `V14_FIXES_AND_CODE.md` §PHASE A — STEP 2.

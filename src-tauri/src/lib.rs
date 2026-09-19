@@ -34,6 +34,7 @@ mod config;
 mod display_watch;
 mod rival_install;
 mod engine;
+mod features;
 mod guide_hud;
 mod hook;
 mod icon_extractor;
@@ -1424,6 +1425,7 @@ pub fn run() {
             commands::chord_record_poll,
             commands::chord_record_stop,
             commands::run_command_once,
+            commands::import_profile_commit,
             commands::own_window_space_up,
         ])
         // --- App setup callback ---

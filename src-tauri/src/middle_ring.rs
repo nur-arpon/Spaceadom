@@ -3267,7 +3267,7 @@ mod route_and_special_tests {
     fn every_ring_special_has_a_combo_and_a_private_code() {
         let cfg = crate::engine::specials::seeded_cfg();
         let specials = ring_specials_for(&cfg);
-        assert_eq!(specials.len(), 10, "ten tiles: the twelve seeded specials minus the two scroll ones");
+        assert_eq!(specials.len(), 12, "twelve tiles: the fourteen seeded specials minus the two scroll ones");
         for (_, _, code) in &specials {
             assert!(is_special_code(*code));
             assert!(special_combo_for(*code).is_some());
@@ -3282,8 +3282,37 @@ mod route_and_special_tests {
         let mut cfg2 = cfg.clone();
         cfg2.profiles[0].bindings.remove("esc");
         let after = ring_specials_for(&cfg2);
-        assert_eq!(after.len(), 9);
+        assert_eq!(after.len(), 11);
         assert_eq!(after[0].2, '\u{E001}', "the backtick keeps U+E001");
+    }
+
+    /// PHASE A step 3, §7 of brief 3 — THE ROOT CAUSE OF "THE RING LOST ITS
+    /// SPECIALS", pinned. With the owner's live-shaped profile (thirteen
+    /// non-scroll specials, scope Favourites, fifteen ticked of which
+    /// thirteen are still bound) `build_entries` returns the thirteen
+    /// FAVOURITE LETTERS and no special — exactly the "13 tile(s), 13
+    /// code(s)" the log printed at 10:57:23 — because specials ride on scope
+    /// All only, and always have (PROBLEM 267 round 3, unchanged by Phase A:
+    /// the `if scope == All` gate around the specials is the same line in
+    /// commit 8d96532). Switch the same config to All and every special is
+    /// there. The design's own Settings copy says so ("All adds every other
+    /// key you have bound plus the special keys").
+    #[test]
+    fn favourites_never_carry_the_specials_all_does() {
+        use crate::config::MiddleRingScope;
+        let mut cfg = crate::engine::specials::tests::live_shaped_cfg();
+        let extract = |_: &str| -> Option<String> { None };
+        let fav = build_entries(&cfg, "Arpon's Profile", MiddleRingScope::MyEight, &extract);
+        assert_eq!(fav.len(), 13, "thirteen favourites still bound: {:?}", fav.iter().map(|e| e.code).collect::<Vec<_>>());
+        assert!(fav.iter().all(|e| e.kind != ItemKind::Special), "Favourites: no special tiles, by design");
+        assert!(fav.iter().all(|e| e.code.is_ascii_lowercase()));
+        cfg.middle_ring_scope = MiddleRingScope::All;
+        let all = build_entries(&cfg, "Arpon's Profile", MiddleRingScope::All, &extract);
+        let specials: Vec<&RingEntry> = all.iter().filter(|e| e.kind == ItemKind::Special).collect();
+        assert_eq!(specials.len(), 13, "All: every non-scroll special is a tile");
+        assert!(specials.len() >= 8);
+        assert_eq!(all.len(), 26 + 13, "every bound letter, then the specials");
+        assert!(specials.iter().all(|e| is_special_code(e.code) && special_combo_for(e.code).is_some()));
     }
 }
 
@@ -3425,7 +3454,7 @@ mod favourites_and_payload_tests {
         assert_eq!(&codes[..2], &['k', 'a']);
         assert_eq!(&codes[2..11], &['b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j']);
         assert_eq!(codes.len(), 11 + ring_specials_for(&cfg).len());
-        assert_eq!(codes.len(), 21);
+        assert_eq!(codes.len(), 23);
         assert!(all[11..].iter().all(|e| e.kind == ItemKind::Special && is_special_code(e.code)));
         let (payload, _) = build_payload(all, MiddleRingScope::All, false, true, (0.0, 0.0));
         assert_eq!(payload.scope, "all");

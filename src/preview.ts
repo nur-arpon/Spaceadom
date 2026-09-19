@@ -138,6 +138,7 @@ bindings.b = {
   ["backspace", "force_close"], ["ralt", "cycle_profile"], ["comma", "search"],
   ["period", "pause"], ["semicolon", "voice_typing"], ["slash", "screenshot"],
   ["quote", "osk"], ["up", "scroll_top"], ["down", "scroll_bottom"],
+  ["left", "move_window_left"], ["right", "move_window_right"],
 ] as const).forEach(([key, id]) => {
   bindings[key] = {
     app: null, web_url: null, label: null, icon_override: null,
@@ -513,6 +514,7 @@ const stubBackend: Record<string, (a: StubArgs) => unknown> = {
   },
   export_profile: () => null,       // the user "cancelled" — no file dialogs here
   import_profile: () => null,
+  import_profile_commit: () => null,
   undo_last_change: () => {
     if (!stubState.undo) throw "Nothing left to undo";
     stubState.config = stubState.undo;
@@ -557,7 +559,7 @@ const stubBackend: Record<string, (a: StubArgs) => unknown> = {
   chord_record_start: () => { _previewChordPolls = 0; return null; },
   chord_record_poll: () => (++_previewChordPolls > 3 ? [0x5b, 0x10, 0x53] : []),
   chord_record_stop: () => null,
-  run_command_once: (a) => `▶ Ran: ${String(a.line)}`,
+  run_command_once: (a) => (a.elevated ? `▶ Asked Windows to run as administrator: ${String(a.line)}` : `▶ Ran: ${String(a.line)}`),
 
   // ---- REVIEW FIXES 2026-09-05 (H4) — the OS light/dark seed ----
   //

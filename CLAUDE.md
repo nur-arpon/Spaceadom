@@ -9,6 +9,18 @@ key to launch/focus/minimize an app; tap Space alone and it must always type a
 normal space. Rust + Tauri v2 backend, vanilla TypeScript + Vite frontend
 (NO React, NO Tailwind — never add them). windows crate 0.58.
 
+## Reversible, or it does not ship
+
+> **Reversible, or it does not ship.** A bound action must be undoable by
+> the same key or by an obvious next move, and must never leave the machine
+> in a state the user has to recover from (screen off, sleep, muted mic,
+> kept awake). Screen off shipped in 1.0.117 and the owner restarted his
+> laptop to escape it. Any new action goes through this test in its brief.
+
+(2026-09-19, Phase A step 3. The `screen_off` and `sleep` toggles are
+neutralised at run time behind `features::HAZARDOUS_TOGGLES`; see
+`src-tauri/src/features.rs` and PROBLEM 269 for the incident.)
+
 **Identity (since the 1.0.0 release pass, PROBLEM 45):** productName
 `Spaceadom`, identifier `com.spaceadom.app`, exe `spaceadom.exe`, data dir
 `%APPDATA%\Spaceadom`, install dir `%LOCALAPPDATA%\Spaceadom` (per-user).

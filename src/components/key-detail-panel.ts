@@ -23,6 +23,7 @@ import { SPECIALS, specialSpec, keyForSpecial, keyLabel } from "./special-cards"
 import { chordFromNames, chordLabel, vkLabel } from "./vk-names";
 import { segRowHtml, positionSegIndicator } from "./controls";
 import catalogueRaw from "../data/windows-catalogue.json";
+import { FEATURES, HAZARDOUS_TOGGLE_IDS } from "../config/features";
 import { isMapped } from "../types.ts";
 // The app grid is SHARED with the App-exceptions setting (2026-08-25). Do not
 // re-inline it here: two copies drift and only one gets the next fix.
@@ -118,6 +119,34 @@ const CONTROL_IDS = new Set(["media.volume_up", "media.volume_down", "media.volu
 function isControl(it: CatalogueItem): boolean {
   return it.kind === "toggle" || it.kind === "brightness" || CONTROL_IDS.has(it.id);
 }
+/** PHASE A step 3 — with `FEATURES.windowsCatalogue` off the tab is
+ *  "Controls" and lists EXACTLY these, in this order (brief 3 §3). Show
+ *  desktop stays in the JSON and is not listed (it returns with the
+ *  mouse-ring palette). */
+const CONTROL_ROWS = [
+  "system.toggle_lock", "system.toggle_taskbar_autohide",
+  "system.brightness_up", "system.brightness_down",
+  "media.volume_up", "media.volume_down", "media.volume_mute",
+];
+/** PHASE A step 3 — screen off, sleep, the radios, dark mode and night light
+ *  never appear while `FEATURES.hazardousToggles` is off. */
+function isHazardous(it: CatalogueItem): boolean {
+  return it.kind === "toggle" && typeof it.target === "string" && HAZARDOUS_TOGGLE_IDS.has(it.target);
+}
+/** The rows the Windows / Controls tab may show at all, before any search. */
+function offeredCatalogue(): CatalogueItem[] {
+  const hazardOk = FEATURES.hazardousToggles;
+  if (!FEATURES.windowsCatalogue) {
+    return CONTROL_ROWS
+      .map((id) => CATALOGUE.find((it) => it.id === id))
+      .filter((it): it is CatalogueItem => !!it && (hazardOk || !isHazardous(it)));
+  }
+  return CATALOGUE.filter((it) => !it.unsure && (hazardOk || !isHazardous(it)));
+}
+/** The search box is only worth its space over eight or more rows. */
+function catalogueHasSearch(): boolean {
+  return offeredCatalogue().length >= 8;
+}
 /** At most this many catalogue rows at once — the list scrolls, but a search
  *  that matches half the catalogue is not a search. */
 const CATALOGUE_CAP = 40;
@@ -153,14 +182,18 @@ function actionFromItem(item: CatalogueItem): Action | null {
   }
 }
 
-/** The segmented control's options — "Run command" only in Advanced mode. */
-function kindOptions(): ReadonlyArray<readonly [EditorKind, string]> {
-  const opts: (readonly [EditorKind, string])[] = [
-    ["app", "App or link"],
-    ["setting", "Windows"],
-    ["keys", "Send keys"],
-  ];
-  if (_config?.advanced_mode) opts.push(["command", "Run command"]);
+/** The segmented control's options. PHASE A step 3: non-advanced users see
+ *  three kinds — App or link · Send keys · Spaceadom special. "Controls"
+ *  (the old "Windows" tab, a few clicks deep) and "Run command" appear only
+ *  in Advanced mode — or when THIS key already holds a binding of that
+ *  kind, so an existing setting / command binding stays visible and
+ *  editable whatever the mode. */
+function kindOptions(current: EditorKind): ReadonlyArray<readonly [EditorKind, string]> {
+  const advanced = !!_config?.advanced_mode;
+  const opts: (readonly [EditorKind, string])[] = [["app", "App or link"]];
+  if (advanced || current === "setting") opts.push(["setting", FEATURES.windowsCatalogue ? "Windows" : "Controls"]);
+  opts.push(["keys", "Send keys"]);
+  if (advanced || current === "command") opts.push(["command", "Run command"]);
   opts.push(["special", "Spaceadom special"]);
   return opts;
 }
@@ -439,7 +472,7 @@ function renderPanel(key: string): void {
          as the Theme row in Settings (controls.ts segRowHtml), so the two
          cannot drift. "Run command" appears only in Advanced mode. -->
     <div class="ed-kinds" id="ed-kinds">
-      ${segRowHtml("edkind", kindOptions(), kind, "", "What this key does")}
+      ${segRowHtml("edkind", kindOptions(kind), kind, "", "What this key does")}
     </div>
 
     <div id="ed-pane-app"${kind === "app" ? "" : " hidden"}>
@@ -711,7 +744,7 @@ function otherPaneHtml(kind: EditorKind, binding: KeyBinding | undefined): strin
       return "";
     case "setting":
       return `
-        <input class="input" id="ed-cat-search" placeholder="Search Windows…" autocomplete="off" spellcheck="false" />
+        ${catalogueHasSearch() ? `<input class="input" id="ed-cat-search" placeholder="Search Windows…" autocomplete="off" spellcheck="false" />` : ""}
         <div id="ed-cat-scroll"><div id="ed-cat-list" class="ed-cat-list"></div>
           <div class="ed-empty" id="ed-cat-empty" hidden>Nothing matches that.</div></div>`;
     case "keys":
@@ -726,15 +759,22 @@ function otherPaneHtml(kind: EditorKind, binding: KeyBinding | undefined): strin
           <div class="ed-hint">Hold the whole combination at once — Win, Shift and S together — then let go. The keys still reach Windows while you record, so a screenshot chord takes a screenshot.</div>
         </div>`;
     case "command": {
+      // PHASE A step 3 — PowerShell, PowerToys-Run parity: a multi-line box,
+      // the administrator checkbox (Windows' own UAC prompt, every time), and
+      // the exact line the key will run, in a monospace block.
       const line = binding?.action?.kind === "command" ? binding.action.line : "";
+      const elevated = binding?.action?.kind === "command" && !!binding.action.elevated;
       return `
         <div class="ed-section">Run command</div>
-        <input class="input" id="ed-cmd" placeholder="e.g. control.exe /name Microsoft.PowerOptions" autocomplete="off" spellcheck="false" value="${escapeHtml(line)}" />
+        <textarea class="input" id="ed-cmd" rows="3" placeholder="e.g. Get-Process | Sort-Object CPU -Descending | Select-Object -First 5 | Out-GridView" autocomplete="off" spellcheck="false">${escapeHtml(line)}</textarea>
+        <label class="ed-cmd-elev"><input type="checkbox" id="ed-cmd-elev" ${elevated ? "checked" : ""} /> Ask for administrator rights (UAC prompt each time)</label>
+        <div class="ed-section ed-cmd-preview-head">This key will run:</div>
+        <pre class="ed-cmd-preview" id="ed-cmd-preview">${escapeHtml(line) || "…"}</pre>
         <div class="ed-row">
           <button class="btn" id="ed-cmd-try" ${line ? "" : "disabled"}>Try it</button>
           <button class="btn btn-primary" id="ed-cmd-assign" ${line ? "" : "disabled"}>Assign</button>
         </div>
-        <div class="ed-hint">Runs through cmd.exe with no window and never asks for administrator rights. Advanced mode only.</div>`;
+        <div class="ed-hint">Runs as you, in PowerShell, with no window. Paste any PowerShell one-liner. Advanced mode only.</div>`;
     }
     case "special":
       return `
@@ -751,11 +791,16 @@ function wireOtherPane(key: string, kind: EditorKind, binding: KeyBinding | unde
     case "app":
       return;
     case "setting": {
-      const search = _panel.querySelector<HTMLInputElement>("#ed-cat-search")!;
-      search.value = _catQuery;
-      search.addEventListener("input", () => { _catQuery = search.value; renderCatalogue(key, binding); });
+      // The search box only exists over eight or more rows (step 3).
+      const search = _panel.querySelector<HTMLInputElement>("#ed-cat-search");
+      if (search) {
+        search.value = _catQuery;
+        search.addEventListener("input", () => { _catQuery = search.value; renderCatalogue(key, binding); });
+      } else {
+        _catQuery = "";
+      }
       renderCatalogue(key, binding);
-      search.focus();
+      search?.focus();
       return;
     }
     case "keys": {
@@ -771,16 +816,25 @@ function wireOtherPane(key: string, kind: EditorKind, binding: KeyBinding | unde
       return;
     }
     case "command": {
-      const input = _panel.querySelector<HTMLInputElement>("#ed-cmd")!;
+      const input = _panel.querySelector<HTMLTextAreaElement>("#ed-cmd")!;
+      const elev = _panel.querySelector<HTMLInputElement>("#ed-cmd-elev")!;
+      const preview = _panel.querySelector<HTMLElement>("#ed-cmd-preview")!;
       const tryBtn = _panel.querySelector<HTMLButtonElement>("#ed-cmd-try")!;
       const assign = _panel.querySelector<HTMLButtonElement>("#ed-cmd-assign")!;
-      const sync = () => { const has = !!input.value.trim(); tryBtn.disabled = !has; assign.disabled = !has; };
+      const sync = () => {
+        const line = input.value.trim();
+        const has = !!line;
+        tryBtn.disabled = !has;
+        assign.disabled = !has;
+        preview.textContent = line || "…";
+      };
       input.addEventListener("input", sync);
-      input.addEventListener("keydown", (e) => { if (e.key === "Enter" && input.value.trim()) assign.click(); });
+      // A textarea's Enter is a newline; Ctrl+Enter assigns.
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.ctrlKey && input.value.trim()) assign.click(); });
       tryBtn.addEventListener("click", () => {
         const line = input.value.trim();
         if (!line) return;
-        invoke<string>("run_command_once", { line })
+        invoke<string>("run_command_once", { line, elevated: elev.checked })
           .then((toast) => showToast(toast))
           .catch((e) => showToast(`⚠️ ${String(e)}`));
       });
@@ -788,7 +842,7 @@ function wireOtherPane(key: string, kind: EditorKind, binding: KeyBinding | unde
         const line = input.value.trim();
         if (!line) return;
         const first = (line.split(/\s+/)[0] ?? "Command").split(/[\\/]/).pop() || "Command";
-        commitAction({ kind: "command", line }, cleanLabel(first));
+        commitAction({ kind: "command", line, elevated: elev.checked }, cleanLabel(first));
       });
       input.focus();
       return;
@@ -825,7 +879,10 @@ function renderCatalogue(key: string, binding: KeyBinding | undefined): void {
   };
   // PHASE A step 2 — the things that FLIP come first, the pages that OPEN
   // after (owner: "i thought those would toggle settings automatically").
-  const hits = CATALOGUE.filter(matches);
+  // PHASE A step 3 — `offeredCatalogue()` is the gate: with the catalogue
+  // switch off it is exactly the seven control rows, in their order, and
+  // the hazardous toggles are never in it.
+  const hits = offeredCatalogue().filter(matches);
   const controls = hits.filter(isControl);
   const pages = hits.filter((it) => !isControl(it)).slice(0, Math.max(0, CATALOGUE_CAP - controls.length));
 
@@ -873,7 +930,8 @@ function renderCatalogue(key: string, binding: KeyBinding | undefined): void {
     });
     list.appendChild(row);
   };
-  if (controls.length) { heading("Toggles & controls"); controls.forEach(addRow); }
+  // With the catalogue off there is one short list and no headings at all.
+  if (controls.length) { if (FEATURES.windowsCatalogue) heading("Toggles & controls"); controls.forEach(addRow); }
   if (pages.length) { heading("Open a settings page"); pages.forEach(addRow); }
 }
 

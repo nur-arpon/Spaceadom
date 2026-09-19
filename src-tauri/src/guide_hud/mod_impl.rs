@@ -825,6 +825,11 @@ pub fn show_middle_ring(
     }
     let Some(handle) = APP_HANDLE.get() else { return };
     let n_items = entries.len();
+    // PHASE A step 3 (§7 of brief 3) — say how many of the items are SPECIAL
+    // tiles, because "13 item(s), scope my_eight" was read on 2026-09-19 as
+    // "the specials are missing" when it meant "Favourites never carries
+    // them". Zero specials + scope my_eight is the design, not a bug.
+    let n_specials = entries.iter().filter(|e| e.kind == crate::middle_ring::ItemKind::Special).count();
     if n_items == 0 {
         log::info!(
             "guide_hud: the icon ring has NOTHING to show — the active profile has no bound \
@@ -1077,7 +1082,8 @@ pub fn show_middle_ring(
     };
     log::info!(
         "middle-button ring v2: cursor-anchored-ring-raised-at-cursor-spaceadom-267 — centre \
-         ({},{}) physical, clamp delta ({},{}), {} item(s), scope {}, shape {} (arc radii {} \
+         ({},{}) physical, clamp delta ({},{}), {} item(s) of which {} special tile(s) — specials ride \
+         on scope All only, Favourites never carries them (Phase A step 3) — scope {}, shape {} (arc radii {} \
          logical, ring counts {}, tiles {} px), canvas {:.0}x{:.0} @ ({:.0},{:.0}) physical on \
          the monitor at ({},{}) scale {}, page centre ({:.1},{:.1}) css, room {:.0}x{:.0} @ \
          ({:.0},{:.0}) physical — the canvas less any AUTO-HIDDEN appbar band (2026-09-15) \
@@ -1087,7 +1093,7 @@ pub fn show_middle_ring(
          clamp_ring_center — either way a non-zero delta means the cursor was warped to the new \
          centre; the canvas is the work area of the cursor's monitor, never its exact bounds. \
          PROBLEM 267.",
-        pl.cx, pl.cy, pl.dx, pl.dy, n_items, payload.scope, payload.shape,
+        pl.cx, pl.cy, pl.dx, pl.dy, n_items, n_specials, payload.scope, payload.shape,
         radii.join("/"), counts.join("/"), tiles.join("/"),
         pl.canvas.w, pl.canvas.h, pl.canvas.x, pl.canvas.y,
         pl.monitor.0, pl.monitor.1, pl.scale, pl.page.0, pl.page.1,

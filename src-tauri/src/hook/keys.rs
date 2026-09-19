@@ -373,7 +373,11 @@ mod tests {
     #[test]
     fn the_bitmap_is_built_from_the_active_profile_and_special_keys() {
         let mut cfg = cfg_with(BindingMap::new(), BindingMap::new());
-        assert!(!crate::config::seed_specials(&mut cfg), "already flagged");
+        // Already flagged: the first pass is skipped, and only step 3's second
+        // pass (the arrow pair) runs on an empty, seeded profile.
+        assert!(crate::config::seed_specials(&mut cfg), "pass 2 adds the arrows");
+        assert_eq!(cfg.profiles[0].bindings.len(), 2, "and nothing else");
+        cfg.profiles[0].bindings.clear();
         cfg.profiles[0].specials_seeded = false;
         assert!(crate::config::seed_specials(&mut cfg));
         cfg.profiles[0].bindings.insert(

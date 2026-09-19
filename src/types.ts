@@ -16,24 +16,27 @@
  *
  *   uri        ms-settings:… / shell:… / any URI Windows opens
  *   chord      virtual-key codes in press order ([0x5B,0x10,0x53] = Win+Shift+S)
- *   command    a command line via cmd.exe /C — Advanced mode only (UI rule)
+ *   command    a PowerShell line (no window, 60 s cap) — Advanced mode only
+ *              (UI rule); `elevated` asks Windows for its own UAC prompt
+ *              every time (step 3; absent = false in 1.0.116/117 files)
  *   brightness ±delta on the internal panel (WMI)
  *   toggle     flip a Windows setting (Bluetooth, Wi‑Fi, dark mode, night light,
  *              taskbar auto-hide, screen off, sleep, lock, show desktop) — step 2
- *   special    one of `SPECIAL_IDS` — the twelve built-in specials
+ *   special    one of `SPECIAL_IDS` — the fourteen built-in specials
  */
 export type Action =
   | { kind: "uri"; target: string }
   | { kind: "chord"; keys: number[] }
-  | { kind: "command"; line: string }
+  | { kind: "command"; line: string; elevated?: boolean }
   | { kind: "brightness"; delta: number }
   | { kind: "toggle"; what: string }
   | { kind: "special"; id: string };
 
-/** The twelve built-in specials, in Rust's `SPECIAL_IDS` order. */
+/** The fourteen built-in specials, in Rust's `SPECIAL_IDS` order. */
 export const SPECIAL_IDS = [
   "boss_key", "pip", "pip_fullscreen", "force_close", "cycle_profile", "search",
   "pause", "voice_typing", "screenshot", "osk", "scroll_top", "scroll_bottom",
+  "move_window_left", "move_window_right",
 ] as const;
 export type SpecialId = (typeof SPECIAL_IDS)[number];
 

@@ -41,7 +41,15 @@ tidy. Their rows say what each one got wrong.
 
 ---
 
-## 2026-09-19 (latest) — 1.0.117 — keys that flip things, not just open pages
+## 2026-09-19 (latest) — 1.0.118 — the prune: reversible, or it does not ship
+
+| Version | What changed |
+| --- | --- |
+| **1.0.118** | An hour on 1.0.117 and the verdict was "a shortcut app, not a utility". Screen off was the worst of it — Space+U turned the screen off, moving the mouse woke it, the key was still held so it went off again, six times, and I restarted the laptop to get out. So: a rule, at the top of CLAUDE.md — reversible, or it does not ship. Screen off and Sleep are gone (a key still bound to them says "removed in 1.0.118 — rebind this key" and does nothing). The settings catalogue and the slow toggles (Bluetooth, Wi‑Fi, dark mode, night light) are hidden — not deleted, two switches bring them back — and what is left of the "Windows" tab is a short "Controls" list (lock, taskbar auto-hide, brightness ±, volume ±, mute), Advanced mode only. Everyone else sees three kinds: App or link, Send keys, Spaceadom special. Two new specials on every profile: Space+← / Space+→ throw the window to the other screen (Windows' own Win+Shift+arrow), and the other arrow brings it back. Holding a key now fires once — a volume chord still repeats, a toggle or an app does not. Run command is PowerShell now (PowerToys-Run style), multi-line, with an "ask for administrator rights" box that hands you Windows' own UAC prompt; an imported profile that carries command lines shows every one before you say yes. And the mouse ring's "missing" specials: they were never missing — my ring is on Favourites, and Favourites has never shown the specials; All does. The log line now says how many specials a ring carried so this is not misread again. |
+
+---
+
+## 2026-09-19 — 1.0.117 — keys that flip things, not just open pages
 
 | Version | What changed |
 | --- | --- |

@@ -100,6 +100,14 @@ export const SPECIALS: SpecialSpec[] = [
   { id: "cycle_profile", combo: "␣ RAlt", name: "Cycle Profile",
     desc: "Switches to your next profile — a different set of apps on the same keys.",
     how: "Hold Space, tap Right Alt" },
+  // PHASE A step 3 (2026-09-19) — Windows' own Win+Shift+←/→, sent as one
+  // chord. Reversible by the other arrow; nothing to recover from.
+  { id: "move_window_left", combo: "␣ ←", name: "Window to Left Screen",
+    desc: "Throws the window you're in onto the screen to the left (Windows' own Win+Shift+←). Tap → to bring it back.",
+    how: "Hold Space, tap ←" },
+  { id: "move_window_right", combo: "␣ →", name: "Window to Right Screen",
+    desc: "Throws the window you're in onto the screen to the right (Windows' own Win+Shift+→). Tap ← to bring it back.",
+    how: "Hold Space, tap →" },
   { id: "scroll", combo: "␣ Scroll", name: "Opacity",
     desc: "Fades the window under your cursor so you can see what's behind it.",
     how: "Hold Space, roll the mouse wheel" },
@@ -154,6 +162,7 @@ export const SPECIAL_SHORT: Record<string, string> = {
   force_close: "Force Close", cycle_profile: "Profile", search: "Search",
   pause: "Pause", voice_typing: "Dictate", screenshot: "Snip", osk: "Keys",
   scroll_top: "Scroll Top", scroll_bottom: "Scroll Btm",
+  move_window_left: "Move ←", move_window_right: "Move →",
 };
 
 /** The card for a special id (`SPECIALS` entry), or null. */

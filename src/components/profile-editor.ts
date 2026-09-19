@@ -778,10 +778,35 @@ async function exportProfile(name: string): Promise<void> {
   }
 }
 
+/** PHASE A step 3 — what `import_profile` returns before anything is added. */
+interface ImportPreview {
+  name: string;
+  bindings: number;
+  commands: { key: string; line: string; elevated: boolean }[];
+}
+
 async function importProfile(): Promise<void> {
   try {
-    const added = await invoke<string | null>("import_profile");
-    if (!added) return;                       // cancelled — see exportProfile
+    const preview = await invoke<ImportPreview | null>("import_profile");
+    if (!preview) return;                     // cancelled — see exportProfile
+    // PHASE A step 3 — a profile that carries `command` lines is listed,
+    // every line, before it is added. Nothing runs on import; the user
+    // reads what a key WOULD run and decides.
+    let accept = true;
+    if (preview.commands.length) {
+      const keyName = (k: string) => (k.length === 1 ? k.toUpperCase() : k);
+      const lines = preview.commands
+        .map((c) => `Space + ${keyName(c.key)}  →  ${c.line}${c.elevated ? "   (asks for administrator rights)" : ""}`)
+        .join("\n\n");
+      accept = await askConfirm({
+        title: `Import "${preview.name}"?`,
+        body: `${preview.commands.length === 1 ? "One key in this profile runs a command line" : `${preview.commands.length} keys in this profile run command lines`}. Nothing runs now — read them first:\n\n${lines}`,
+        confirmLabel: "Import",
+        cancelLabel: "Don't import",
+      });
+    }
+    const added = await invoke<string | null>("import_profile_commit", { accept });
+    if (!added) return;                       // declined
     // The imported profile's bindings are only in Rust. Ask for the config
     // back rather than reconstructing it here: `KeyBinding` has six optional
     // fields and a hand-built copy would drop the next one added.

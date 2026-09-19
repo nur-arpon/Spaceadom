@@ -43,7 +43,7 @@ pub fn open(target: &str, label: Option<&str>, app_handle: Option<tauri::AppHand
     }
     if is_command_line(t) {
         log::info!("uri: '{t}' reads as a command line — running it (Phase A action)");
-        let _ = super::command::run(t);
+        let _ = super::command::run(t, false);
         return toast_text(label, t, true);
     }
     log::info!("uri: opening '{t}' through ShellExecute (Phase A action)");

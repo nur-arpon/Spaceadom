@@ -3421,6 +3421,26 @@ body.nocturne .tour-ring {
 
 .ed-hint { margin: 8px 2px 0; font-size: 11.5px; line-height: 1.45; color: var(--st-text-dim); }
 
+/* PHASE A step 3 — Run command: a multi-line box, the administrator
+   checkbox, and the exact line in a monospace block. */
+textarea.input#ed-cmd {
+  min-height: 66px; resize: vertical; line-height: 1.45;
+  font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; font-size: 12px;
+}
+.ed-cmd-elev {
+  display: flex; align-items: center; gap: 8px; margin: 8px 2px 0;
+  font-size: 12px; color: var(--st-text-dim); cursor: pointer;
+}
+.ed-cmd-elev input { margin: 0; accent-color: var(--st-accent); }
+.ed-cmd-preview-head { margin-top: 10px; }
+.ed-cmd-preview {
+  margin: 6px 2px 0; padding: 8px 10px; border-radius: 13px;
+  border: 1px solid var(--st-border); background: rgba(90, 60, 30, 0.05);
+  font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; font-size: 11.5px;
+  line-height: 1.45; white-space: pre-wrap; word-break: break-all; color: var(--st-text);
+}
+body.nocturne .ed-cmd-preview { background: rgba(0, 0, 0, 0.22); }
+
 /* Windows setting — rows "name — path" under the search field. */
 #ed-cat-search { margin-bottom: 10px; }
 #ed-cat-scroll, #ed-spec-scroll { max-height: 236px; overflow-y: auto; margin: 0 -4px; padding: 0 4px 4px; }

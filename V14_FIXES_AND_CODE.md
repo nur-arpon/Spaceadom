@@ -36248,3 +36248,87 @@ Generalise: **a script that edits an undocumented blob must refuse every shape i
 2. **`dark_mode` takes 3–4 s** (measured twice). It is the theme broadcast, the same wait Settings incurs; the cap is 8 s. If the lag matters, the broadcast could move to Rust after a ~0.6 s script — the brief said P/Invoke in the script, so I left it there.
 3. **`sleep` toasts "Sleeping…" 350 ms before `SetSuspendState`**; on a machine that refuses to sleep the script's non-`done` outcome produces a second toast. Untested, by rule.
 4. **The toggle rows sit in the `system` group** (like brightness) with kind `toggle`; no new `groups` entry was added since the gate is on kind, not group.
+
+
+## PHASE A — STEP 3: THE PRUNE, THE RULE, TWO FIXES (2026-09-19; in the tree as 1.0.118 — gates green: 742 unit tests / 0 failed / 6 ignored, clippy 0, tsc 0, vite clean; **NOT BUILT AS AN INSTALLER, NOT INSTALLED, NO GIT** — the lead does that)
+
+**Symptom / decision.** Owner, after an hour on 1.0.117: the settings catalogue and most toggles are "a shortcut app, not a utility"; Screen off trapped him (see PROBLEM 269's neighbour, the incident below); the mouse ring "lost its specials" (PROBLEM 269 — it had not). Brief: `docs/PHASE-A-BRIEF-3.md`.
+
+**The rule** (CLAUDE.md, top, own heading): *Reversible, or it does not ship.* A bound action must be undoable by the same key or an obvious next move and must never leave the machine in a state the user has to recover from.
+
+### §2 Hide, do not delete — `features.rs` / `features.ts`
+
+`src-tauri/src/features.rs`: `pub const WINDOWS_CATALOGUE: bool = false; pub const HAZARDOUS_TOGGLES: bool = false;` plus `HAZARDOUS_TOGGLE_IDS` (`screen_off, sleep, bluetooth, wifi, dark_mode, night_light`) and `NEUTRALISED_TOGGLE_IDS` (`screen_off, sleep`). `src/config/features.ts`: `export const FEATURES = { windowsCatalogue: false, hazardousToggles: false } as const;`. Test `the_ts_switches_match_the_rust_ones` does `include_str!("../../src/config/features.ts")`, finds `windowsCatalogue:` / `hazardousToggles:` and compares the literal that follows to the Rust constant.
+
+Run-time neutralisation — `engine/actions/toggle.rs`:
+```rust
+pub const NEUTRALISED_TOAST: &str = "⇄ Screen off / Sleep were removed in 1.0.118 — rebind this key";
+pub fn neutralised(what: &str) -> bool {
+    !crate::features::HAZARDOUS_TOGGLES && crate::features::NEUTRALISED_TOGGLE_IDS.contains(&what)
+}
+```
+and in `engine::run_action`, BEFORE the ordinary Toggle arm:
+```rust
+Action::Toggle { what } if actions::toggle::neutralised(what) => {
+    log::warn!("engine: Space+{key_id} is bound to the removed toggle {what:?} — neutralised, nothing done …");
+    crate::show_toast(&app_handle, actions::toggle::NEUTRALISED_TOAST);
+}
+```
+Editor (`key-detail-panel.ts`): `offeredCatalogue()` is the single gate — with the catalogue off it is `CONTROL_ROWS` (`system.toggle_lock, system.toggle_taskbar_autohide, system.brightness_up, system.brightness_down, media.volume_up, media.volume_down, media.volume_mute`) in that order; hazardous toggles are filtered whichever way the catalogue switch points; `catalogueHasSearch()` (≥ 8 rows) decides whether the search input is rendered at all; with the catalogue off there are no headings. `kindOptions(current)` shows "Controls" (or "Windows" with the catalogue on) and "Run command" only in Advanced mode, or when THIS key already holds a binding of that kind so an existing binding stays editable.
+
+### §4 Space+← / Space+→
+
+`schema.rs`: `SPECIAL_IDS` += `move_window_left`, `move_window_right`; `DEFAULT_SPECIALS` += `("left", …)`, `("right", …)`; `LATE_SPECIALS` = the pair; `seed_specials` pass 2:
+```rust
+if p.specials_seeded {
+    if LATE_SPECIALS.iter().all(|(k, _)| !p.bindings.contains_key(*k)) {
+        for (key, id) in LATE_SPECIALS { p.bindings.insert(key, KeyBinding { action: Some(Action::Special { id }), ..Default::default() }); }
+        late.push(p.name.clone()); changed = true;
+    }
+    continue;
+}
+```
+logged once with the profile names. `engine::run_special`: `"move_window_left" | "move_window_right" => { chord::send(&[0x5B, 0x10, 0x25 | 0x27]); show_toast(MOVE_WINDOW_TOAST) }` — `MOVE_WINDOW_TOAST = "⇆ Window → other screen"`. `engine/specials.rs` `SPECIALS` rows: `("move_window_left", "Window → Left Screen", "Window ←", "⇠")`, `("move_window_right", "Window → Right Screen", "Window →", "⇢")`. Frontend: `types.ts` `SPECIAL_IDS`, `special-cards.ts` two cards + `SPECIAL_SHORT` ("Move ←" / "Move →"), `preview.ts` fixture. Tests: `the_second_pass_adds_the_arrow_specials_to_an_already_seeded_profile` (fresh 14 / 1.0.117 profile +2 / `left` bound to an app untouched / idempotent); the HUD and ring fixtures now expect `←`, `→` after `'` (U+E00C, U+E00D).
+
+### §5 Run command → PowerShell
+
+`Action::Command { line: String, #[serde(default)] elevated: bool }`. `engine/actions/command.rs`:
+```rust
+pub fn args(line: &str) -> String { format!("-NoProfile -ExecutionPolicy Bypass -Command {}", line.trim()) }
+// plain: Command::new("powershell.exe").raw_arg(args(line)).creation_flags(CREATE_NO_WINDOW).stdin(null)… then reap_after(child) — a thread polling try_wait every 250 ms, kill() at TIMEOUT = 60 s.
+// elevated: ShellExecuteW(None, "runas", "powershell.exe", args(line), NULL, SW_HIDE); HINSTANCE <= 32 is failure; 1223 = "the UAC prompt was declined".
+```
+`uri.rs`'s command-line branch calls `command::run(t, false)`. `commands::run_command_once(line, elevated: Option<bool>)`. Import: `import_profile` now parses and returns `ImportPreview { name, bindings, commands: [{key, line, elevated}] }` holding the profile in `PENDING_IMPORT`; `import_profile_commit(accept)` adds (dedupe + save) or forgets it. `config::command_lines(&Profile) -> Vec<(key, line, elevated)>` sorted — tested. `profile-editor.ts` lists the lines through `askConfirm` ("Import" / "Don't import") only when there are any. Tests: `a_command_without_the_elevated_key_reads_as_not_elevated`, `the_powershell_arguments_are_no_profile_bypass_command_line`, `command_lines_lists_every_command_binding_sorted_by_key`.
+
+### §6 Auto-repeat
+
+`hook/repeat.rs` — `KeyBitmap([AtomicU64; 4])` with `mark_down(vk) -> bool` (`fetch_or`; true = already down = repeat), `mark_up` (`fetch_and`), `reset`, `is_down`, `count`; `pub static KEYS_DOWN`. In `kb_hook_proc`, below the injected-cookie return and above `track_modifier`:
+```rust
+let is_repeat = if is_down { repeat::KEYS_DOWN.mark_down(vk) } else { if is_up { repeat::KEYS_DOWN.mark_up(vk); } false };
+```
+`HookEvent::KeyCombo { combo: KeyCombo, repeat: bool }` at both send sites (bypass-pause and the main combo branch); the own-window fallback sends `repeat: false` (the page suppresses repeats itself). `install_hooks` calls `repeat::KEYS_DOWN.reset()`. Engine: `run_combo(combo, repeat, …)` → `run_binding(id, repeat, …)`:
+```rust
+pub fn repeat_is_dropped(action: Option<&Action>) -> bool { !matches!(action, Some(Action::Chord { .. })) }
+if repeat && repeat_is_dropped(binding.as_ref().and_then(|b| b.action.as_ref())) { log::debug!(…); return; }
+```
+Legacy `Special(name)` combos drop repeats too. Tests: four in `repeat.rs` (first/repeat/up, cross-word independence, orphan up, VK > 255 masks).
+
+**Why not `KBDLLHOOKSTRUCT.flags`?** It carries extended / injected / alt-down / up only; the "previous key state" bit is `WM_KEYDOWN`'s lParam bit 30, which the LL hook never sees. Measured need: 30 `Vol+` in 200 ms at 10:47:33 (chord — fine), and six screen-offs in 37 s at 10:55 (toggle — the incident).
+
+### §7 — see PROBLEM 269 below.
+
+**How verified.** `cargo test --release --lib` 742 unit tests / 0 failed / 6 ignored; `cargo clippy --release --lib` 0 warnings; `npx tsc --noEmit -p .` 0; `npm run build` clean (`dist2/assets/main-*.js` contains "Controls"). The live-config test was run once with `SPACEADOM_LIVE_CONFIG` pointing at the explorer-copied file and printed 13 specials for "Arpon's Profile", scope MyEight. NOT run on hardware: no installer, no install, no injection, no screen_off/sleep/lock, no radio flips.
+
+**Generalise this.** A toggle whose only "undo" is a second press of a key you may still be holding is not reversible — auto-repeat turns it into an oscillator. Every one-shot that changes machine state needs BOTH the once-per-press guard and the reversibility test.
+
+## PROBLEM 269 (2026-09-19): "the mouse ring lost its specials" — it had not; the ring was on FAVOURITES, which has never carried them — 1.0.118
+
+**Symptom.** debug.log 10:57:23: `hud-pointer: icon ring published — 13 tile(s), 13 code(s)` for "Arpon's Profile"; the 13 were letters, there was no specials ring, and aiming past the second ring armed the nearest letter chip (`v`, then `c` → Brave). The brief's hypothesis: `ring_specials_for(cfg)` (Phase A's derived list) returned nothing for a real, seeded profile.
+
+**Root cause.** The owner's scope is Favourites. The live config — copied out through an explorer-launched cmd, 137,495 bytes (the agent shell's shadow copy is 47,761 bytes dated 18 Aug: PROBLEM 143's copy-on-write union) — has `"middle_ring_scope": "my_eight"` and fifteen favourites ticked of which thirteen are still bound letters: exactly 13 tiles. Every `cursor-anchored-ring-raised-at-cursor-spaceadom-267` line since 2026-09-18 08:07:35 says `scope my_eight`; the last `scope all` raise is 08:07:18 the same morning, on 1.0.113 — BEFORE Phase A — with a `config: saved 110292 bytes` at 08:07:31 between them: that is when he switched. `middle_ring::build_entries` appends the specials only under `if scope == MiddleRingScope::All`, and that is the same line in commit 8d96532 (`RING_SPECIALS`, pre-Phase-A); the Settings description for the scope row says "All adds every other key you have bound plus the special keys on further rings". `ring_specials_for` itself is fine: run against the real file it returns 13 (`Esc=Boss Key … '=Keyboard, ↵=Bluetooth on/off, [=Win+H, ]=Night light`). None of the four suspects in the brief held: it reads `cfg.active_profile` (which matched), `is_mapped()` is true for `Special` bindings, the page never sees the tiles because Rust never adds them in Favourites, and the scope was not All.
+
+**Exact files.** `src-tauri/src/guide_hud/mod_impl.rs` — the marker line now prints `{n} item(s) of which {m} special tile(s) — specials ride on scope All only, Favourites never carries them (Phase A step 3) — scope {scope}` (`n_specials` counted from `entries` by `ItemKind::Special`). `src-tauri/src/engine/specials.rs` — `tests::live_shaped_cfg()` (a trimmed synthetic copy of the owner's profile: the twelve seeded specials with two labelled, a toggle on Enter, a chord on `[`, a uri on `]`, 26 letters, scope MyEight, fifteen favourites), `the_owners_live_shaped_profile_yields_at_least_eight_ring_specials` (= 13), and `the_live_config_yields_at_least_eight_ring_specials_when_pointed_at_one` (reads `SPACEADOM_LIVE_CONFIG`, skips when unset — the real file is never committed). `src-tauri/src/middle_ring.rs` — `favourites_never_carry_the_specials_all_does`: `build_entries(MyEight)` = 13 letters, no `Special`; `build_entries(All)` = 26 letters + 13 specials.
+
+**No behaviour change.** Whether Favourites should ALSO carry the specials on an outer ring is the owner's call (QUESTION in the step-3 status entry); until then the fix is the log line and the tests, and the answer for the owner is Settings › Middle-button ring shows › All.
+
+**Generalise this.** Before diagnosing a derived list as empty, read the SCOPE the consumer filtered it with — the log line named it (`scope my_eight`) on every raise, and a count without its gate reads as a bug. Print the gate beside the count.

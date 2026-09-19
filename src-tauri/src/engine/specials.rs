@@ -37,6 +37,9 @@ const SPECIALS: &[(&str, &str, &str, &str)] = &[
     ("osk", "On-screen Keyboard", "Keyboard", "⌨"),
     ("scroll_top", "Scroll Top", "Scroll Top", "⤒"),
     ("scroll_bottom", "Scroll Bottom", "Scroll Bottom", "⤓"),
+    // PHASE A step 3 (2026-09-19) — Win+Shift+←/→ through `actions::chord`.
+    ("move_window_left", "Window → Left Screen", "Window ←", "⇠"),
+    ("move_window_right", "Window → Right Screen", "Window →", "⇢"),
 ];
 
 fn row(id: &str) -> Option<&'static (&'static str, &'static str, &'static str, &'static str)> {
@@ -115,7 +118,7 @@ pub fn action_name(action: &Action) -> String {
     match action {
         Action::Uri { target } => target.clone(),
         Action::Chord { keys } => chord_name(keys),
-        Action::Command { line } => line
+        Action::Command { line, .. } => line
             .split_whitespace()
             .next()
             .map(|t| t.rsplit(['\\', '/']).next().unwrap_or(t).to_string())
@@ -310,7 +313,7 @@ pub(crate) fn seeded_cfg() -> AppConfig {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -339,15 +342,15 @@ mod tests {
         assert_eq!(chord_name(&[]), "(no keys)");
         assert_eq!(vk_name(0xFF), "VK 0xFF");
         assert_eq!(action_name(&Action::Uri { target: "ms-settings:display".into() }), "ms-settings:display");
-        assert_eq!(action_name(&Action::Command { line: r"C:\Tools\thing.exe --flag".into() }), "thing.exe");
-        assert_eq!(action_name(&Action::Command { line: "".into() }), "Command");
+        assert_eq!(action_name(&Action::Command { line: r"C:\Tools\thing.exe --flag".into(), elevated: false }), "thing.exe");
+        assert_eq!(action_name(&Action::Command { line: "".into(), elevated: true }), "Command");
         assert_eq!(action_name(&Action::Brightness { delta: 10 }), "Brightness +10");
         assert_eq!(action_name(&Action::Brightness { delta: -10 }), "Brightness −10");
         assert_eq!(action_name(&Action::Toggle { what: "night_light".into() }), "Night light on/off");
         assert_eq!(action_name(&Action::Toggle { what: "hologram".into() }), "Toggle hologram");
         assert_eq!(action_glyph(&Action::Toggle { what: "wifi".into() }), "⇄");
         assert_eq!(action_name(&Action::Special { id: "osk".into() }), "On-screen Keyboard");
-        assert_eq!(action_glyph(&Action::Command { line: "x".into() }), ">_");
+        assert_eq!(action_glyph(&Action::Command { line: "x".into(), elevated: false }), ">_");
         assert_eq!(action_glyph(&Action::Special { id: "pause".into() }), "⏸");
     }
 
@@ -377,19 +380,22 @@ mod tests {
     }
 
     /// THE DEFAULT RING READS AS IT ALWAYS DID: Esc, `, Tab, ⌫, RAlt, `,`,
-    /// `.`, then the three 2026-09-17/18 specials, then the two gesture rows.
+    /// `.`, then the three 2026-09-17/18 specials, then (step 3) the two
+    /// arrow specials, then the two gesture rows.
     #[test]
     fn a_seeded_profile_yields_todays_hud_rows() {
         let rows = hud_specials_for(&seeded_cfg());
         let keys: Vec<&str> = rows.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(
             keys,
-            vec!["Esc", "`", "Tab", "⌫", "RAlt", ",", ".", ";", "/", "'", "Scroll", "Up/Dn ×2"]
+            vec!["Esc", "`", "Tab", "⌫", "RAlt", ",", ".", ";", "/", "'", "←", "→", "Scroll", "Up/Dn ×2"]
         );
         assert_eq!(rows[0].1, "Boss Key (Hide All + Mute)");
         assert_eq!(rows[2].1, "Fullscreen PiP");
-        assert_eq!(rows[10].1, "Layer Opacity");
-        assert_eq!(rows[11].1, "Scroll Top/Bottom");
+        assert_eq!(rows[10].1, "Window → Left Screen");
+        assert_eq!(rows[11].1, "Window → Right Screen");
+        assert_eq!(rows[12].1, "Layer Opacity");
+        assert_eq!(rows[13].1, "Scroll Top/Bottom");
     }
 
     /// Remove one special and its row goes; remove ONE scroll special and
@@ -409,10 +415,10 @@ mod tests {
         );
         let rows = hud_specials_for(&cfg);
         let keys: Vec<&str> = rows.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(keys, vec!["`", "Tab", "⌫", "RAlt", ",", ";", "/", "'", "7", "F1", "Scroll", "Up ×2"]);
-        assert_eq!(rows[8].1, "ms-settings:display");
-        assert_eq!(rows[9].1, "Panic");
-        assert_eq!(rows[11].1, "Scroll Top");
+        assert_eq!(keys, vec!["`", "Tab", "⌫", "RAlt", ",", ";", "/", "'", "←", "→", "7", "F1", "Scroll", "Up ×2"]);
+        assert_eq!(rows[10].1, "ms-settings:display");
+        assert_eq!(rows[11].1, "Panic");
+        assert_eq!(rows[13].1, "Scroll Top");
         // Neither scroll special → no double-tap row at all.
         cfg.profiles[0].bindings.remove("up");
         let rows = hud_specials_for(&cfg);
@@ -422,29 +428,138 @@ mod tests {
         assert_eq!(hud_specials_for(&cfg), vec![("Scroll".to_string(), "Layer Opacity".to_string())]);
     }
 
-    /// The icon ring's tiles: the ten non-scroll specials with the codes the
-    /// ring has always used (U+E000…), and the codes invert.
+    /// The icon ring's tiles: the twelve non-scroll specials with the codes
+    /// the ring has always used (U+E000…, the arrows at U+E00C/D — their
+    /// key-table index), and the codes invert.
     #[test]
     fn a_seeded_profile_yields_todays_ring_tiles_with_stable_codes() {
         let tiles = ring_specials_for(&seeded_cfg());
         let keys: Vec<&str> = tiles.iter().map(|(k, _, _)| k.as_str()).collect();
-        assert_eq!(keys, vec!["Esc", "`", "Tab", "⌫", "RAlt", ",", ".", ";", "/", "'"]);
+        assert_eq!(keys, vec!["Esc", "`", "Tab", "⌫", "RAlt", ",", ".", ";", "/", "'", "←", "→"]);
         let names: Vec<&str> = tiles.iter().map(|(_, n, _)| n.as_str()).collect();
         assert_eq!(
             names,
             vec!["Boss Key", "PiP", "Fullscreen PiP", "Force Close", "Cycle Profiles",
-                 "Search / Input", "Pause Spaceadom", "Voice Typing", "Screenshot", "Keyboard"]
+                 "Search / Input", "Pause Spaceadom", "Voice Typing", "Screenshot", "Keyboard",
+                 "Window ←", "Window →"]
         );
         let codes: Vec<char> = tiles.iter().map(|(_, _, c)| *c).collect();
         assert_eq!(codes[0], '\u{E000}');
         assert_eq!(codes[9], '\u{E009}');
+        assert_eq!(codes[10], '\u{E00C}', "left is key-table index 12");
+        assert_eq!(codes[11], '\u{E00D}');
+        let expected: Vec<&str> = crate::config::DEFAULT_SPECIALS
+            .iter()
+            .filter(|(_, id)| *id != "scroll_top" && *id != "scroll_bottom")
+            .map(|(k, _)| *k)
+            .collect();
         for (i, c) in codes.iter().enumerate() {
             assert!(!c.is_ascii_lowercase());
             let id = key_id_for_code(*c).unwrap();
             assert_eq!(code_for_key_id(id), Some(*c));
-            assert_eq!(id, crate::config::DEFAULT_SPECIALS[i].0);
+            assert_eq!(id, expected[i]);
         }
         assert_eq!(key_id_for_code('m'), None);
         assert_eq!(key_id_for_code('\u{E0FF}'), None, "past the table");
+    }
+
+    /// PHASE A step 3, §7 of the brief — the owner's REAL profile shape
+    /// ("Arpon's Profile", 2026-09-19, copied out of the live config through
+    /// explorer.exe): the twelve seeded specials, two of them LABELLED
+    /// ("Force Close", "Scroll Bottom"), plus a `toggle` on Enter, a `chord`
+    /// on `[` and a `uri` on `]`, 26 letters, scope Favourites with fifteen
+    /// ticked. `ring_specials_for` must return every non-scroll special —
+    /// thirteen here — for this profile. It does: the ring was empty of
+    /// specials on the owner's machine because his scope was FAVOURITES
+    /// (`middle_ring_scope: my_eight`, in the config and on every
+    /// `cursor-anchored-ring-raised` log line), and Favourites has never
+    /// carried the specials (`middle_ring::build_entries`, unchanged since
+    /// PROBLEM 267 round 3 — `favourites_never_carry_the_specials_all_does`).
+    pub(crate) fn live_shaped_cfg() -> AppConfig {
+        use crate::config::{BindingMap, Profile};
+        let sp = |id: &str, label: Option<&str>| KeyBinding {
+            action: Some(Action::Special { id: id.into() }),
+            label: label.map(str::to_string),
+            ..Default::default()
+        };
+        let mut b = BindingMap::new();
+        b.insert("esc".into(), sp("boss_key", None));
+        b.insert("backtick".into(), sp("pip", None));
+        b.insert("tab".into(), sp("pip_fullscreen", None));
+        b.insert("backspace".into(), sp("force_close", Some("Force Close")));
+        b.insert("ralt".into(), sp("cycle_profile", None));
+        b.insert("comma".into(), sp("search", None));
+        b.insert("period".into(), sp("pause", None));
+        b.insert("semicolon".into(), sp("voice_typing", None));
+        b.insert("slash".into(), sp("screenshot", None));
+        b.insert("quote".into(), sp("osk", None));
+        b.insert("up".into(), sp("scroll_top", None));
+        b.insert("down".into(), sp("scroll_bottom", Some("Scroll Bottom")));
+        b.insert("enter".into(), KeyBinding {
+            action: Some(Action::Toggle { what: "bluetooth".into() }),
+            label: Some("Bluetooth on/off".into()),
+            ..Default::default()
+        });
+        b.insert("lbracket".into(), KeyBinding {
+            action: Some(Action::Chord { keys: vec![91, 72] }),
+            label: Some("Win+H".into()),
+            ..Default::default()
+        });
+        b.insert("rbracket".into(), KeyBinding {
+            action: Some(Action::Uri { target: "ms-settings:nightlight".into() }),
+            label: Some("Night light".into()),
+            ..Default::default()
+        });
+        for c in 'a'..='z' {
+            b.insert(c.to_string(), KeyBinding { app: Some(format!("{c}.exe")), label: Some(c.to_uppercase().to_string()), ..Default::default() });
+        }
+        let mut cfg = AppConfig::default();
+        cfg.profiles = vec![
+            Profile { name: "Gamers".into(), bindings: BindingMap::new(), emoji: None, specials_seeded: true },
+            Profile { name: "Arpon's Profile".into(), bindings: b, emoji: None, specials_seeded: true },
+        ];
+        cfg.active_profile = "Arpon's Profile".into();
+        cfg.middle_ring_scope = crate::config::MiddleRingScope::MyEight;
+        cfg.middle_ring_favourites =
+            ["b", "c", "d", "f", "h", "l", "g", "a", "j", "k", "n", "x", "v", "t", "y"].iter().map(|s| s.to_string()).collect();
+        cfg
+    }
+
+    #[test]
+    fn the_owners_live_shaped_profile_yields_at_least_eight_ring_specials() {
+        let cfg = live_shaped_cfg();
+        let tiles = ring_specials_for(&cfg);
+        assert!(tiles.len() >= 8, "got {}: {tiles:?}", tiles.len());
+        assert_eq!(tiles.len(), 13, "ten seeded non-scroll specials + Enter toggle + [ chord + ] uri");
+        let names: Vec<&str> = tiles.iter().map(|(_, n, _)| n.as_str()).collect();
+        assert!(names.contains(&"Boss Key"));
+        assert!(names.contains(&"Force Close"), "the label wins: {names:?}");
+        assert!(names.contains(&"Bluetooth on/off"));
+        assert!(names.contains(&"Night light"));
+        // And the Space ring sees the same profile.
+        let hud = hud_specials_for(&cfg);
+        assert!(hud.len() >= 8 + 2, "{hud:?}");
+    }
+
+    /// The SAME assertion against the real file, when the lead points the
+    /// test at it: `SPACEADOM_LIVE_CONFIG=<path to a copy of config.json>`
+    /// (copy it out through explorer.exe — the agent shell reads a stale
+    /// shadow, CLAUDE.md). Skipped silently when the variable is unset, so
+    /// the file is never in the repo. Run 2026-09-19 against the owner's
+    /// 137,495-byte config: 13 tiles, scope my_eight.
+    #[test]
+    fn the_live_config_yields_at_least_eight_ring_specials_when_pointed_at_one() {
+        let Ok(path) = std::env::var("SPACEADOM_LIVE_CONFIG") else { return };
+        let raw = std::fs::read_to_string(&path).expect("read the live copy");
+        let cfg: AppConfig = serde_json::from_str(&raw).expect("parse the live copy");
+        let tiles = ring_specials_for(&cfg);
+        eprintln!(
+            "live config: active_profile={:?} scope={:?} ring specials={} → {:?}",
+            cfg.active_profile,
+            cfg.middle_ring_scope,
+            tiles.len(),
+            tiles.iter().map(|(k, n, _)| format!("{k}={n}")).collect::<Vec<_>>()
+        );
+        assert!(tiles.len() >= 8, "got {}", tiles.len());
     }
 }

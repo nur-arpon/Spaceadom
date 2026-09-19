@@ -49,6 +49,21 @@ pub const TOGGLE_IDS: &[&str] = &[
 /// The wait for one script before it is declared unresponsive.
 pub const TIMEOUT: Duration = Duration::from_secs(8);
 
+/// PHASE A step 3 (2026-09-19, 1.0.118) — the toast a NEUTRALISED toggle
+/// shows instead of doing anything.
+pub const NEUTRALISED_TOAST: &str = "⇄ Screen off / Sleep were removed in 1.0.118 — rebind this key";
+
+/// PHASE A step 3 — is this `what` neutralised at run time? `screen_off` and
+/// `sleep` (`features::NEUTRALISED_TOGGLE_IDS`) while
+/// `features::HAZARDOUS_TOGGLES` is off: a binding from 1.0.117 stays in the
+/// file, the key logs + toasts and does nothing. The owner restarted his
+/// laptop to escape Screen off (every Space+U woke the panel and turned it
+/// off again — six times in 37 s). The other hazardous toggles (radios,
+/// theme, night light) still run if already bound: slow, not dangerous.
+pub fn neutralised(what: &str) -> bool {
+    !crate::features::HAZARDOUS_TOGGLES && crate::features::NEUTRALISED_TOGGLE_IDS.contains(&what)
+}
+
 /// What the flip came back with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
