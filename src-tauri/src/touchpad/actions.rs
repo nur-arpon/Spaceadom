@@ -9,13 +9,18 @@
 //!   `WmiMonitorBrightnessMethods.WmiSetBrightness`), the same class
 //!   `actions/brightness.rs` used to drive through PowerShell; that module now
 //!   shares `set_brightness`/`get_brightness` here so there is one path.
-//! * **Scrub** — ←/→ taps through `hook::send_keys_checked` (cookie
-//!   `0x7A7A7A7A`, PROBLEM 227), at a rate `scrub_rate(travel, sensitivity,
-//!   band_length)`. RATE-based (continuous, a Touch Bar scrubber) — kept that
-//!   way in 1.0.122; 1.0.130 capped it (8 taps/s at sensitivity 5, flat past
-//!   40 % of the band). Also the automatic FALLBACK inside a "Video seek"
-//!   gesture that finds no seekable media session (`seek.rs`) — never a
-//!   replacement for the user's own choice of Scrub in the list.
+//! * **Scrub** — ←/→ taps through `send_chord` (cookie `0x7A7A7A7A`,
+//!   PROBLEM 227). MOVEMENT-based since 1.0.131 (owner, 2026-09-20 01:15:
+//!   "scrubbing lightly did nothing, then holding kept going forward forward
+//!   forward even at the slowest setting"): one tap per STEP of travel along
+//!   the band, direction from the sign, nothing while the finger is still,
+//!   the other arrow when it comes back — exactly the Chords step engine
+//!   (`quantise_steps`) with a step measured in MILLIMETRES
+//!   (`scrub_step_mm`: 12 mm at sensitivity 1, 6 mm at 5, 2 mm at 10). The
+//!   rate machinery (`scrub_rate`, `scrub_cap`, the ramp) is gone. Also the
+//!   automatic FALLBACK inside a "Video seek" gesture that finds no seekable
+//!   media session (`seek.rs`) — same step model — never a replacement for
+//!   the user's own choice of Scrub in the list.
 //! * **Seek** (1.0.130) — `seek.rs`: the media session's position follows the
 //!   finger in pure proportion.
 //! * **Presets** (1.0.130) — `presets.rs`: named chord pairs driven like
@@ -23,8 +28,9 @@
 //! * **Chords** ("Any shortcut", 1.0.122) — STEP-based: `chord_steps` quantises
 //!   the signed travel into steps (`chord_step_size(sensitivity)` of the pad's
 //!   short side, past the same dead zone as scrub) and `touchpad::mod` sends
-//!   the forward/backward chord once per new step. Both go out through one
-//!   path, `send_chord` → `engine::actions::chord::send_batch`.
+//!   the forward/backward chord once per new step (`step_towards`). Scrub and
+//!   chords go out through one path, `send_chord` →
+//!   `engine::actions::chord::send_batch`.
 //!
 //! COM must be initialised on the calling thread first; `touchpad::mod`'s
 //! reader thread does that once at start-up.
@@ -42,48 +48,95 @@ use windows::Win32::System::Wmi::{
 };
 
 // ---------------------------------------------------------------------------
-// Scrub rate (pure — the one line a test can referee)
+// Steps (pure — the one quantiser scrub and chords share)
 // ---------------------------------------------------------------------------
 
-/// Dead zone before any scrubbing begins: the fraction of the pad a finger
-/// must travel from entry before the first ←/→ tap.
+/// Dead zone before any stepping begins: the fraction of the pad's SHORT side
+/// a finger must travel from its landing point before the first step. Scrub
+/// and chords share it, so the two feel alike at the start.
 pub const SCRUB_DEAD_ZONE: f32 = 0.03;
-/// The slowest continuous tap rate (taps per second), just past the dead zone.
-pub const SCRUB_MIN_RATE: f32 = 2.0;
-/// The fraction of the BAND'S LENGTH at which the rate reaches its cap and
-/// goes FLAT (owner, 2026-09-20 00:58: "if you go much farther it becomes too
-/// fast, out of control" — 1.0.122's curve kept climbing to 25 taps/s at full
-/// pad travel; now nothing past ~40 % of the band is any faster).
-pub const SCRUB_RAMP_FRACTION: f32 = 0.40;
 
-/// The cap by sensitivity — 3 taps/s at 1, **8 at 5 (the default)**, 15 at 10,
-/// piecewise linear (`seek::sens_scale`). Pure.
-///
-/// | sens | 1 | 2    | 3   | 4    | 5 | 6   | 7    | 8    | 9    | 10 |
-/// |------|---|------|-----|------|---|-----|------|------|------|----|
-/// | cap  | 3 | 4.25 | 5.5 | 6.75 | 8 | 9.4 | 10.8 | 12.2 | 13.6 | 15 |
-pub fn scrub_cap(sensitivity: u8) -> f32 {
-    super::seek::sens_scale(sensitivity, 3.0, 8.0, 15.0)
+/// The signed step count for a signed `travel` past a `dead_zone`, one step
+/// per `step` beyond it — the FIRST step fires on leaving the dead zone, the
+/// next every `step` after that. 0 inside the dead zone or for garbage
+/// (NaN, a non-positive step). Odd in `travel`: `steps(−t) == −steps(t)`.
+/// Pure. The caller keeps the count it has acted on and brings it up or
+/// down to this target (`step_towards`), so a slide back undoes a slide out.
+pub fn quantise_steps(travel: f32, dead_zone: f32, step: f32) -> i32 {
+    let a = travel.abs();
+    if !a.is_finite() || a < dead_zone || !(step > 0.0) || !step.is_finite() {
+        return 0;
+    }
+    let n = ((a - dead_zone) / step).floor() as i32 + 1;
+    if travel < 0.0 {
+        -n
+    } else {
+        n
+    }
 }
 
-/// Taps per second for a signed `travel` (fraction of the pad along the band's
-/// axis) at `sensitivity` (1..=10) on a band `band_length` long (fraction of
-/// the edge, 0.30..=1.0). The SIGN of `travel` picks the direction (the
-/// caller reads it); the rate uses the magnitude. Dead zone `SCRUB_DEAD_ZONE`
-/// of the pad, then linear from `SCRUB_MIN_RATE` up to `scrub_cap` at
-/// `SCRUB_RAMP_FRACTION × band_length`, then FLAT at the cap however far the
-/// finger goes. Pure.
-pub fn scrub_rate(travel: f32, sensitivity: u8, band_length: f32) -> f32 {
-    let a = travel.abs();
-    if !a.is_finite() || a < SCRUB_DEAD_ZONE {
-        return 0.0;
+/// Bring `sent` to `target` one step at a time, calling `send(true)` for
+/// each +1 and `send(false)` for each −1 — the movement model: a target that
+/// has not changed sends nothing (a still finger), a target below the count
+/// sends the backward key (the finger came back). Returns how many sends
+/// went out. Pure apart from `send`.
+pub fn step_towards(sent: &mut i32, target: i32, mut send: impl FnMut(bool)) -> u32 {
+    let mut n = 0;
+    while *sent < target {
+        send(true);
+        *sent += 1;
+        n += 1;
     }
-    let cap = scrub_cap(sensitivity);
-    let floor = SCRUB_MIN_RATE.min(cap);
-    let len = if band_length.is_finite() { band_length.clamp(0.30, 1.0) } else { 0.80 };
-    let ramp_end = (SCRUB_RAMP_FRACTION * len).max(SCRUB_DEAD_ZONE + 1e-3);
-    let t = ((a - SCRUB_DEAD_ZONE) / (ramp_end - SCRUB_DEAD_ZONE)).clamp(0.0, 1.0);
-    floor + (cap - floor) * t
+    while *sent > target {
+        send(false);
+        *sent -= 1;
+        n += 1;
+    }
+    n
+}
+
+// ---------------------------------------------------------------------------
+// Scrub steps (pure — millimetres per ←/→ tap)
+// ---------------------------------------------------------------------------
+
+/// Millimetres of finger travel per ←/→ tap at sensitivity 1, 5 and 10.
+pub const SCRUB_STEP_SLOW_MM: f32 = 12.0;
+pub const SCRUB_STEP_MID_MM: f32 = 6.0;
+pub const SCRUB_STEP_FAST_MM: f32 = 2.0;
+/// The short side assumed when the HID descriptor gives no physical size
+/// (`PadCaps::size_mm` = `None`), so the mm table still means something:
+/// a typical Precision pad is 60–80 mm tall.
+pub const SCRUB_FALLBACK_SHORT_MM: f32 = 60.0;
+
+/// Millimetres per tap by sensitivity — 12 mm at 1, **6 mm at 5 (the
+/// default)**, 2 mm at 10, piecewise linear (`seek::sens_scale`). Pure.
+///
+/// | sens | 1  | 2    | 3   | 4   | 5 | 6   | 7   | 8   | 9   | 10 |
+/// |------|----|------|-----|-----|---|-----|-----|-----|-----|----|
+/// | mm   | 12 | 10.5 | 9   | 7.5 | 6 | 5.2 | 4.4 | 3.6 | 2.8 | 2  |
+pub fn scrub_step_mm(sensitivity: u8) -> f32 {
+    super::seek::sens_scale(sensitivity, SCRUB_STEP_SLOW_MM, SCRUB_STEP_MID_MM, SCRUB_STEP_FAST_MM)
+}
+
+/// The scrub step as a fraction of the pad's SHORT side — what the quantiser
+/// wants, since travel arrives in short-side units (`travel_short_side`).
+/// `short_mm` is the pad's physical short side when the descriptor gives one;
+/// `None` (or a bad value) falls back to `SCRUB_FALLBACK_SHORT_MM`, so the
+/// table then reads 12/60 = 0.20 … 6/60 = 0.10 … 2/60 = 0.033 of the short
+/// side. Pure.
+pub fn scrub_step_size(sensitivity: u8, short_mm: Option<f32>) -> f32 {
+    let mm = match short_mm {
+        Some(v) if v.is_finite() && v > 0.0 => v,
+        _ => SCRUB_FALLBACK_SHORT_MM,
+    };
+    scrub_step_mm(sensitivity) / mm
+}
+
+/// The signed ←/→ tap target for a signed `travel` in short-side units:
+/// `quantise_steps` with the scrub dead zone and `scrub_step_size`. Pure.
+/// Scrub IS `Chords { →, ← }` with this step table.
+pub fn scrub_steps(travel: f32, sensitivity: u8, short_mm: Option<f32>) -> i32 {
+    quantise_steps(travel, SCRUB_DEAD_ZONE, scrub_step_size(sensitivity, short_mm))
 }
 
 // ---------------------------------------------------------------------------
@@ -109,16 +162,7 @@ pub fn chord_step_size(sensitivity: u8) -> f32 {
 /// the last count it acted on and sends the forward chord for each +1 and the
 /// backward chord for each −1, so a slide back undoes a slide out.
 pub fn chord_steps(travel: f32, sensitivity: u8) -> i32 {
-    let a = travel.abs();
-    if !a.is_finite() || a < CHORD_DEAD_ZONE {
-        return 0;
-    }
-    let n = ((a - CHORD_DEAD_ZONE) / chord_step_size(sensitivity)).floor() as i32 + 1;
-    if travel < 0.0 {
-        -n
-    } else {
-        n
-    }
+    quantise_steps(travel, CHORD_DEAD_ZONE, chord_step_size(sensitivity))
 }
 
 /// The k in `cur + k·Δtravel` for the analogue actions (volume, brightness).
@@ -370,11 +414,14 @@ pub fn add_brightness(delta: i32) -> Option<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// Scrub — ←/→ taps, cookie-tagged so our own hook passes them through
+// Scrub's keys — ←/→, cookie-tagged so our own hook passes them through
 // ---------------------------------------------------------------------------
 
 pub const VK_LEFT: u16 = 0x25;
 pub const VK_RIGHT: u16 = 0x27;
+/// Scrub's chords (one → / ← tap each): scrub is `Chords { →, ← }`.
+pub const SCRUB_FORWARD: &[u16] = &[VK_RIGHT];
+pub const SCRUB_BACKWARD: &[u16] = &[VK_LEFT];
 
 /// Press one chord (downs in order, ups in reverse, ONE `send_keys_checked`
 /// batch, cookie `0x7A7A7A7A` — PROBLEM 227: a partial insert leaves nothing
@@ -391,70 +438,111 @@ pub fn send_chord(keys: &[u16]) {
     }
 }
 
-/// Send one ←/→ tap (down+up). `forward` = Right.
-pub fn scrub_tap(forward: bool) {
-    send_chord(&[if forward { VK_RIGHT } else { VK_LEFT }]);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// 1.0.131 (owner, 2026-09-20 01:15): scrub is MOVEMENT — one tap per
+    /// step of travel, in millimetres by sensitivity, nothing for a light
+    /// touch inside the dead zone, the first tap on leaving it.
     #[test]
-    fn scrub_rate_has_a_dead_zone_then_climbs_to_the_cap() {
-        let len = 0.8; // the top band's default length
-        assert_eq!(scrub_rate(0.0, 5, len), 0.0);
-        assert_eq!(scrub_rate(0.02, 5, len), 0.0, "inside the dead zone");
-        assert_eq!(scrub_rate(-0.02, 5, len), 0.0, "sign does not escape the dead zone");
-        assert_eq!(scrub_rate(f32::NAN, 5, len), 0.0);
-        // Just past the dead zone → near the minimum rate.
-        let low = scrub_rate(0.04, 5, len);
-        assert!(low >= SCRUB_MIN_RATE && low < SCRUB_MIN_RATE + 1.0, "{low}");
-        // At 40 % of the band (0.32 of the pad) → the cap, 8 taps/s at 5.
-        assert!((scrub_rate(0.32, 5, len) - 8.0).abs() < 1e-4);
-        assert!((scrub_rate(-0.32, 5, len) - 8.0).abs() < 1e-4, "magnitude, not sign");
-    }
-
-    /// Owner, 2026-09-20 00:58: past ~40 % of the band the rate is FLAT — no
-    /// faster however far the finger goes — and the cap is 8 taps/s at the
-    /// default sensitivity (3 … 15 over 1..10).
-    #[test]
-    fn scrub_rate_is_flat_past_forty_percent_of_the_band_and_capped_per_sensitivity() {
-        let len = 0.8;
-        for s in 1..=10u8 {
-            let cap = scrub_cap(s);
-            for a in [0.32f32, 0.4, 0.5, 0.75, 1.0] {
-                assert!((scrub_rate(a, s, len) - cap).abs() < 1e-4, "s={s} a={a}: {} != {cap}", scrub_rate(a, s, len));
-            }
+    fn the_scrub_step_table_is_millimetres_by_sensitivity() {
+        for (s, want) in [(1u8, 12.0f32), (2, 10.5), (3, 9.0), (4, 7.5), (5, 6.0), (6, 5.2), (7, 4.4), (8, 3.6), (9, 2.8), (10, 2.0)] {
+            assert!((scrub_step_mm(s) - want).abs() < 1e-4, "s={s}: {} != {want}", scrub_step_mm(s));
         }
-        // The documented cap table.
-        for (s, want) in [(1u8, 3.0f32), (2, 4.25), (3, 5.5), (4, 6.75), (5, 8.0), (6, 9.4), (7, 10.8), (8, 12.2), (9, 13.6), (10, 15.0)] {
-            assert!((scrub_cap(s) - want).abs() < 1e-4, "s={s}: {} != {want}", scrub_cap(s));
+        assert_eq!(scrub_step_mm(0), scrub_step_mm(1), "clamped below");
+        assert_eq!(scrub_step_mm(99), scrub_step_mm(10), "clamped above");
+        for s in 1..10u8 {
+            assert!(scrub_step_mm(s) > scrub_step_mm(s + 1), "finer with sensitivity at {s}");
         }
-        // The ramp end follows the band: a full-length band reaches the cap at
-        // 0.40 of the pad, a 0.30 band at 0.12.
-        assert!(scrub_rate(0.32, 5, 1.0) < 8.0 - 1e-3, "a longer band ramps longer");
-        assert!((scrub_rate(0.40, 5, 1.0) - 8.0).abs() < 1e-4);
-        assert!((scrub_rate(0.12, 5, 0.30) - 8.0).abs() < 1e-4, "a short band ramps fast");
+        // On a 74 mm short side, 6 mm is 0.081 of it; with no size known the
+        // 60 mm fallback makes the table 0.20 / 0.10 / 0.033.
+        assert!((scrub_step_size(5, Some(74.0)) - 6.0 / 74.0).abs() < 1e-6);
+        assert!((scrub_step_size(1, None) - 0.20).abs() < 1e-6);
+        assert!((scrub_step_size(5, None) - 0.10).abs() < 1e-6);
+        assert!((scrub_step_size(10, None) - 2.0 / 60.0).abs() < 1e-6);
+        assert_eq!(scrub_step_size(5, Some(0.0)), scrub_step_size(5, None), "a zero size is unknown");
+        assert_eq!(scrub_step_size(5, Some(f32::NAN)), scrub_step_size(5, None), "NaN is unknown");
     }
 
     #[test]
-    fn scrub_rate_is_monotonic_and_sensitivity_only_raises_the_cap() {
-        let len = 0.8;
-        assert!(scrub_rate(0.1, 5, len) < scrub_rate(0.2, 5, len));
-        assert!(scrub_rate(0.5, 5, len) <= scrub_rate(0.5, 10, len), "more sensitive is faster");
-        assert!(scrub_rate(0.5, 3, len) <= scrub_rate(0.5, 5, len), "less sensitive is slower");
-        // Every rate stays inside [min, cap] and never decreases with travel.
-        for s in 1..=10u8 {
-            let cap = scrub_cap(s);
-            let mut last = 0.0f32;
-            for i in 0..=40 {
-                let r = scrub_rate(i as f32 / 40.0, s, len);
-                assert!(r == 0.0 || (SCRUB_MIN_RATE.min(cap)..=cap + 1e-4).contains(&r), "s={s} r={r}");
-                assert!(r >= last - 1e-5, "s={s} i={i}: {r} < {last}");
-                last = r;
+    fn scrub_steps_are_nothing_for_a_light_touch_one_on_leaving_the_dead_zone_then_one_per_step() {
+        let mm = Some(74.0f32); // the short side; a step at 5 = 6 mm = 0.0811
+        let step = scrub_step_size(5, mm);
+        let dz = SCRUB_DEAD_ZONE;
+        // Light travel below the dead zone (≈ 2.2 mm on this pad) → no tap.
+        assert_eq!(scrub_steps(0.0, 5, mm), 0);
+        assert_eq!(scrub_steps(dz - 1e-4, 5, mm), 0, "just inside the dead zone");
+        assert_eq!(scrub_steps(-(dz - 1e-4), 5, mm), 0);
+        assert_eq!(scrub_steps(f32::NAN, 5, mm), 0);
+        // Leaving the dead zone → exactly ONE tap, and still one for the
+        // whole first step.
+        assert_eq!(scrub_steps(dz + 1e-4, 5, mm), 1);
+        assert_eq!(scrub_steps(dz + step * 0.5, 5, mm), 1, "halfway through the first step: still one");
+        assert_eq!(scrub_steps(dz + step - 1e-4, 5, mm), 1, "the whole first step: still one");
+        // Exactly one more step → a second tap; then one per step.
+        assert_eq!(scrub_steps(dz + step + 1e-4, 5, mm), 2);
+        assert_eq!(scrub_steps(dz + 4.0 * step + 1e-4, 5, mm), 5);
+        // Backward is the mirror.
+        assert_eq!(scrub_steps(-(dz + 1e-4), 5, mm), -1);
+        assert_eq!(scrub_steps(-(dz + 4.0 * step + 1e-4), 5, mm), -5);
+        // The owner's pad: 119 mm long, a full 80 % band is 95 mm ≈ 15 taps
+        // at 6 mm — never runaway. Travel arrives in short-side units, so a
+        // 95 mm slide on a 74 mm short side is 1.28.
+        assert_eq!(scrub_steps(95.0 / 74.0, 5, mm), 16);
+        assert_eq!(scrub_steps(95.0 / 74.0, 1, mm), 8, "12 mm per tap at 1");
+        assert_eq!(scrub_steps(95.0 / 74.0, 10, mm), 47, "2 mm per tap at 10");
+        // Monotonic and odd, every sensitivity, with and without a size.
+        for size in [Some(74.0f32), None] {
+            for s in 1..=10u8 {
+                let mut last = 0;
+                for i in 0..=100 {
+                    let t = i as f32 / 50.0;
+                    let n = scrub_steps(t, s, size);
+                    assert!(n >= last, "s={s} i={i}");
+                    assert_eq!(scrub_steps(-t, s, size), -n, "odd at s={s} t={t}");
+                    last = n;
+                }
             }
         }
+    }
+
+    /// The reader's step engine: bring the sent count to the target. A
+    /// still finger (same target) sends nothing however many ticks pass; a
+    /// return past the landing point sends the backward key.
+    #[test]
+    fn step_towards_sends_one_key_per_step_nothing_while_still_and_backward_on_the_way_back() {
+        let mut sent = 0i32;
+        let mut log: Vec<bool> = Vec::new();
+        // A slide out to 3 steps, reported over several ticks.
+        assert_eq!(step_towards(&mut sent, 0, |f| log.push(f)), 0, "inside the dead zone: nothing");
+        assert_eq!(step_towards(&mut sent, 1, |f| log.push(f)), 1);
+        assert_eq!(step_towards(&mut sent, 3, |f| log.push(f)), 2, "two steps in one tick: two taps");
+        assert_eq!(log, [true, true, true]);
+        // Still finger: 50 ticks at the same target send nothing.
+        for _ in 0..50 {
+            assert_eq!(step_towards(&mut sent, 3, |f| log.push(f)), 0);
+        }
+        assert_eq!(log.len(), 3, "nothing over time while still");
+        // Back to the landing point: three backward taps, then past it: two more.
+        assert_eq!(step_towards(&mut sent, 0, |f| log.push(f)), 3);
+        assert_eq!(step_towards(&mut sent, -2, |f| log.push(f)), 2);
+        assert_eq!(log, [true, true, true, false, false, false, false, false]);
+        assert_eq!(sent, -2);
+        // The same engine drives scrub end to end: mm travel → taps.
+        let mm = Some(74.0f32);
+        let mut sent = 0;
+        let mut taps = 0u32;
+        for t in [0.0f32, 0.01, 0.02, 0.05, 0.05, 0.05, 0.10, 0.20, 0.20, 0.10, 0.0, -0.10] {
+            taps += step_towards(&mut sent, scrub_steps(t, 5, mm), |_| {});
+        }
+        assert_eq!(sent, scrub_steps(-0.10, 5, mm));
+        assert_eq!(sent, -1);
+        assert_eq!(taps, 3 + 3 + 1, "3 out (0.20 = 2 steps + the first), 3 back, 1 past");
+        // The generic quantiser refuses a bad step.
+        assert_eq!(quantise_steps(0.5, 0.03, 0.0), 0);
+        assert_eq!(quantise_steps(0.5, 0.03, f32::NAN), 0);
+        assert_eq!(quantise_steps(0.5, 0.03, -1.0), 0);
     }
 
     #[test]

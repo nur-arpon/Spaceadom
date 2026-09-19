@@ -483,8 +483,9 @@ export interface TouchpadLive {
   travel: number | null;
   /** Chords: the forward chord's name ("Ctrl+Tab"); presets: the preset's name. */
   chord?: string | null;
-  /** Chords and stepped presets: the signed step count sent so far this
-   *  gesture. Absent for a once-per-slide preset. */
+  /** Chords, stepped presets and scrub (its hops, 1.0.131): the signed step
+   *  count sent so far this gesture; also set for a seek gesture scrubbing in
+   *  fallback. Absent for a once-per-slide preset. */
   steps?: number | null;
   /** Seek only: "12:34 / 45:00" while a session is live; null when that
    *  gesture fell back to scrubbing. */

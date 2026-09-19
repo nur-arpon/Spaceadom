@@ -10,6 +10,7 @@
  *   "guide-hud-hide" · plus "theme-changed"/"sound-changed" (bool, optional)
  */
 import { listen } from "@tauri-apps/api/event";
+import { planLive, findIdentical } from "./toast-registry";
 import { invoke } from "@tauri-apps/api/core";
 // The band count lives in its own LEAF module (nothing app-level imports
 // into it), seeded and updated by overlay.ts. Read via getBandCount() at
@@ -554,6 +555,11 @@ interface ToastOptions { duration?: number; accent?: string }
 interface ToastEntry {
   el: HTMLDivElement;
   phase: "dot" | "open" | "leave";
+  /** The message as shown — `findIdentical` (1.0.131) compares this, so an
+   *  identical toast restarts this pill instead of stacking a second. */
+  text: string;
+  /** LIVE TOAST: the pill's key, so `planLive` can find it in any phase. */
+  key?: string;
   duration: number;
   /** Its own timers, so its life clock can be PAUSED while it is the SPACE key. */
   h: number[];
@@ -744,6 +750,21 @@ export function showToast(message: string, options: ToastOptions = {}): void {
   const letter = isGlyph ? first : first.toUpperCase();
   const text = isGlyph ? message.slice(first.length).trim() : message;
 
+  /* ---- 1.0.131 (owner, 2026-09-20): TOASTS NEVER STACK FOR THE SAME THING.
+     An ordinary pill with IDENTICAL text that is still up — open, or fading
+     out — gets its clock restarted in place (un-faded, same element, same
+     slot, the drain ring re-run) instead of a second copy above it. Different
+     text still stacks exactly as before. A pill that is airborne or wearing
+     SPACE is left alone (it is mid-flight; the normal path handles it). ---- */
+  const dup = findIdentical(_toasts, text);
+  if (dup && _flying === 0 && !_absorbed.includes(dup)) {
+    reviveEntry(dup);
+    restartDrain(dup, duration);
+    armEntry(dup, duration, duration + LEAVE_MS);
+    beep(640);
+    return;
+  }
+
   const el = document.createElement("div");
   el.className = "st-toast";
   el.setAttribute("role", "status");
@@ -761,7 +782,7 @@ export function showToast(message: string, options: ToastOptions = {}): void {
 
   layer.appendChild(el);
   const entry: ToastEntry = {
-    el, phase: "dot", duration, h: [], leaveIn: 0, dieIn: 0, armedAt: 0,
+    el, phase: "dot", text, duration, h: [], leaveIn: 0, dieIn: 0, armedAt: 0,
   };
   _toasts.push(entry);
   while (_toasts.length > 3) {
@@ -961,6 +982,36 @@ export function showToast(message: string, options: ToastOptions = {}): void {
 }
 
 /* =======================================================================
+   NEVER STACK THE SAME THING — revive helpers (owner, 2026-09-20, 1.0.131)
+   ======================================================================= */
+
+/** Bring a pill that is fading ("leave") back to "open" — same element, same
+ *  slot — and cancel whatever clock it had. A pill that is up already only
+ *  loses its clock (the caller re-arms it). A pill still entering ("dot")
+ *  keeps its open timer: `armEntry` would clear it and the pill would never
+ *  open. */
+function reviveEntry(t: ToastEntry): void {
+  if (t.phase === "dot") return;
+  t.h.forEach((h) => window.clearTimeout(h));
+  t.h = [];
+  if (t.phase === "leave") {
+    t.phase = "open";
+    t.el.classList.remove("leave");
+    t.el.classList.add("open");
+    relayout();
+  }
+}
+
+/** Re-run an ordinary pill's drain ring from full for `duration` ms. */
+function restartDrain(t: ToastEntry, duration: number): void {
+  const c = t.el.querySelector("svg circle:last-child") as SVGElement | null;
+  if (!c) return;
+  c.style.animation = "none";
+  void c.getBoundingClientRect();   // flush, so the restart is a restart
+  c.style.animation = `st-ring-drain ${duration}ms linear forwards`;
+}
+
+/* =======================================================================
    LIVE TOAST — one keyed pill, updated IN PLACE (owner, 2026-09-19, 1.0.123)
    =======================================================================
    A touchpad edge slide reports its value up to 8× a second. Pushing each
@@ -974,9 +1025,17 @@ export function showToast(message: string, options: ToastOptions = {}): void {
    other toast, so `overlay_toasts_done` still fires when the stack empties.
    A live pill and a normal pill coexist: `order:1` keeps the live one in the
    bottom slot and `relayout` leaves it out of the depth count, so the normal
-   stack above it behaves as if it were alone. `showToast` is untouched. */
-const LIVE_LINGER_MS = 600;
-const _live = new Map<string, ToastEntry>();
+   stack above it behaves as if it were alone. `showToast` is untouched.
+
+   1.0.131 (owner, 2026-09-20 01:15): the pill is found by KEY in ANY phase
+   (`planLive` over `_toasts` — there is no separate map to fall out of sync).
+   A `showLiveToast` that lands while the pill is FADING after `endLiveToast`
+   revives it — the pending leave/retire is cancelled, the exit class comes
+   off, the same element and slot carry on with the new text — so back-to-back
+   slides, on the same edge or another, are one pill. The linger is 1500 ms
+   (was 600): long enough to read the result and start the next slide into
+   the same pill. Ordinary toasts keep their own clock. */
+const LIVE_LINGER_MS = 1500;
 
 /** The leading-glyph rule `showToast` applies, as a function, for the live
  *  path only (`showToast`'s own inline copy is left exactly as it was). */
@@ -989,16 +1048,30 @@ function splitGlyph(message: string): { letter: string; text: string } {
   };
 }
 
-/** Show — or, when a pill for `key` is already up, UPDATE IN PLACE — the live
- *  toast. Idempotent per key: a second call never adds a second element. */
+/** Swap a live pill's text and glyph in place — the only thing an update
+ *  touches. */
+function setLiveText(t: ToastEntry, letter: string, text: string): void {
+  t.text = text;
+  const m = t.el.querySelector(".msg") as HTMLSpanElement | null;
+  if (m && m.textContent !== text) m.textContent = text;
+  const ico = t.el.querySelector(".ico") as HTMLDivElement | null;
+  if (ico && ico.textContent !== letter) ico.textContent = letter;
+}
+
+/** Show — or, when a pill for `key` is already up OR fading, UPDATE / REVIVE
+ *  IN PLACE — the live toast. Idempotent per key: a second call never adds a
+ *  second element. */
 export function showLiveToast(key: string, message: string, options: ToastOptions = {}): void {
   const { letter, text } = splitGlyph(message);
-  const cur = _live.get(key);
-  if (cur && cur.phase !== "leave" && _toasts.includes(cur)) {
-    const m = cur.el.querySelector(".msg") as HTMLSpanElement | null;
-    if (m && m.textContent !== text) m.textContent = text;
-    const ico = cur.el.querySelector(".ico") as HTMLDivElement | null;
-    if (ico && ico.textContent !== letter) ico.textContent = letter;
+  const plan = planLive(_toasts, key);
+  if (plan.kind === "update") {
+    setLiveText(plan.entry, letter, text);
+    return;
+  }
+  if (plan.kind === "revive") {
+    // Fading after endLiveToast: cancel the exit, un-fade, keep the element.
+    reviveEntry(plan.entry);
+    setLiveText(plan.entry, letter, text);
     return;
   }
   const { accent = "#c67139" } = options;
@@ -1029,10 +1102,9 @@ export function showLiveToast(key: string, message: string, options: ToastOption
   layer.appendChild(el);
 
   const entry: ToastEntry = {
-    el, phase: "dot", duration: 0, h: [], leaveIn: 0, dieIn: 0, armedAt: 0, live: true,
+    el, phase: "dot", text, key, duration: 0, h: [], leaveIn: 0, dieIn: 0, armedAt: 0, live: true,
   };
   _toasts.push(entry);
-  _live.set(key, entry);
   /* no sound: a live slide readout is not an event (owner, 2026-09-19) */
 
   // PROBLEM 113's rule, verbatim: a stale handover flag would suppress the
@@ -1053,11 +1125,13 @@ export function showLiveToast(key: string, message: string, options: ToastOption
 }
 
 /** The pill for `key` lingers LIVE_LINGER_MS, then leaves the way every toast
- *  leaves. A key with no pill is a no-op. */
+ *  leaves. A key with no pill, or one already leaving, is a no-op. The pill
+ *  stays findable by key until `retire` removes it, so a `showLiveToast`
+ *  inside the linger — or during the exit — revives it. */
 export function endLiveToast(key: string): void {
-  const cur = _live.get(key);
-  _live.delete(key);
-  if (!cur || !_toasts.includes(cur)) return;
+  const plan = planLive(_toasts, key);
+  if (plan.kind !== "update") return;   // none, or already fading
+  const cur = plan.entry;
   const wasArmed = cur.h.length > 0 && cur.phase === "dot";
   // Keep a pending dot→open timer: armEntry clears every timer on the entry,
   // and a pill that ends before OPEN_AT must still open before it leaves.

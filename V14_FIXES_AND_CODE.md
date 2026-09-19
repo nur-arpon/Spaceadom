@@ -37331,3 +37331,174 @@ and a video follows your finger." Existing styles only (`.sp-row .label`,
   marker `touchpad-seek-bar-anchored-spaceadom-130` and the Exit send count
   in debug.log; then lift with nothing seekable open and expect "⏩
   Scrubbing (no seek bar here)".
+
+## SCRUB IS MOVEMENT; TOASTS DO NOT STACK (2026-09-20; 1.0.131 — gates in PROJECT_STATUS; **NOT BUILT AS AN INSTALLER, NOT INSTALLED, NO GIT** — the lead does that)
+
+Written so another AI can rebuild it without opening the tree. Follows
+§TOUCHPAD — SEEK + PRESETS (1.0.130) above. Two owner decisions, 2026-09-20
+01:15, plus one addition through the coordinator (the live linger).
+
+### 1. The ask — scrub
+
+"Scrubbing lightly did nothing, then holding kept going forward forward
+forward even at the slowest setting." 1.0.122–1.0.130's scrub was RATE-based:
+how far the finger sat from its landing point set a taps-per-second rate
+(`scrub_rate`, `scrub_cap`, the 40 % ramp), so a light touch inside the ramp
+gave 2 taps/s at best, and a finger held still at 40 % of the band fired
+8 taps/s for as long as it stayed there. Owner: replace it with the STEP
+model the presets and "Any shortcut" already use — one ←/→ tap per step of
+travel, direction from the sign, nothing while the finger is still, the other
+arrow on the way back — with the step in MILLIMETRES by sensitivity, the 3 %
+dead zone kept, and the rate machinery deleted. The Seek fallback uses the
+same model. The pill counts hops; no speed bar.
+
+### The step table — `touchpad/actions.rs`
+
+| Symbol | What |
+| --- | --- |
+| `SCRUB_DEAD_ZONE` = 0.03 | Fraction of the pad's SHORT side before the first step (shared with chords: `CHORD_DEAD_ZONE = SCRUB_DEAD_ZONE`). |
+| `quantise_steps(travel, dead_zone, step)` | THE ONE QUANTISER. 0 inside the dead zone (or NaN, or a non-positive step); else `floor((|t| − dz) / step) + 1`, signed. The FIRST step fires on leaving the dead zone, the next every `step` after. Odd: `q(−t) = −q(t)`. `chord_steps` is now this with `chord_step_size`. |
+| `step_towards(&mut sent, target, send)` | THE ONE STEP ENGINE. Brings `sent` to `target`, `send(true)` per +1, `send(false)` per −1; returns the count. Same target → 0 sends (a still finger); a lower target → backward sends (the finger came back). Chords, presets and scrub all run through it. |
+| `scrub_step_mm(s)` | `sens_scale(s, 12, 6, 2)` mm per tap: 1 → 12, 2 → 10.5, 3 → 9, 4 → 7.5, **5 → 6**, 6 → 5.2, 7 → 4.4, 8 → 3.6, 9 → 2.8, 10 → 2. |
+| `scrub_step_size(s, short_mm)` | The step as a fraction of the short side: `scrub_step_mm(s) / short_mm`. `short_mm` = `None` (descriptor gives no physical size), 0, or NaN → `SCRUB_FALLBACK_SHORT_MM` = 60, so the table then reads 0.20 … 0.10 … 0.033 of the short side (12/60 … 6/60 … 2/60). |
+| `scrub_steps(travel, s, short_mm)` | `quantise_steps(travel, SCRUB_DEAD_ZONE, scrub_step_size(s, short_mm))`. Travel arrives in SHORT-SIDE units (`touchpad::travel_short_side`, as chords), so on a 119 × 74 mm pad a 95 mm slide along the top (0.80 of the long side) is 1.28 short sides → 16 taps at 6 mm, 8 at 12 mm, 47 at 2 mm. |
+| `SCRUB_FORWARD` / `SCRUB_BACKWARD` | `&[VK_RIGHT]` / `&[VK_LEFT]` — scrub IS `Chords { →, ← }`. |
+
+DELETED: `scrub_rate`, `scrub_cap`, `SCRUB_MIN_RATE`, `SCRUB_RAMP_FRACTION`,
+`scrub_tap`, `touchpad::scrub_pct`, the reader's `scrub_pending` / `dt` /
+`last_tick`. `seek::sens_scale` stays (the seek span and the mm table both
+use it).
+
+**Why millimetres, and where they come from.** `raw::PadCaps::size_mm()` —
+the HID descriptor's physical min/max with its unit exponent (cm or inches →
+mm) — is what `reader_loop` already used for the aspect. The reader now also
+keeps `short_mm_phys: Option<f32>` = the smaller of the two and passes it to
+`scrub_steps`; the "reader started" line prints it (`short side 74.0 mm` or
+`unknown`). 6 mm was the owner's number for the default; a pad-fraction step
+would make the same setting mean different distances on different pads.
+
+**Dead-zone units (decision made where the ask was silent).** The ask said
+"keep the 3 % dead zone". 1.0.130's scrub measured it along the band's axis
+(a fraction of the LONG side on the top edge); chords measured it in short-side
+units. To share one quantiser, scrub now uses the chords convention — 3 % of
+the SHORT side (≈ 2.2 mm on a 74 mm pad) on every edge.
+
+### The reader — `touchpad/mod.rs`
+
+`Drive::Scrub` and `Drive::SeekFallback` stay as variants (the pill needs to
+know), but their Move arm is now
+
+```rust
+let target = actions::scrub_steps(travel_short_side(edge, travel, aspect), band.sensitivity, short_mm_phys);
+actions::step_towards(&mut chord_sent, target, |fw| {
+    actions::send_chord(if fw { actions::SCRUB_FORWARD } else { actions::SCRUB_BACKWARD })
+});
+```
+
+and the stepped `Drive::Steps` arm is the same call with the band's own
+chords (the 1.0.122 up/down `while` loops are gone into `step_towards`).
+`chord_sent` is the signed hop count for both. On Enter a scrubbing drive
+logs `touchpad: scrub — 6.0 mm per hop at sensitivity 5 (short side 74.0 mm,
+dead zone 3 % of it) (touchpad-scrub-movement-steps-spaceadom-131)` — the
+marker for this build.
+
+**The pill.** `live_toast_text` for `Scrub` → `scrub_hops_text(steps)`:
+"⏩ Scrub" before the first hop, "⏩ +N", "⏪ −N" (U+2212, as the chord pills).
+For `Seek` with `seek = None` (the fallback): `SEEK_FALLBACK_TEXT` ("⏩
+Scrubbing (no seek bar here)") until the first hop, then the same hop text.
+`shows_steps(Scrub)` is now true; the reader passes `counted = shows_steps
+(action) || drive.scrubs()` so a fallback gesture (band action still `Seek`)
+counts too. `emit_live` takes `steps: Option<i32>` from the caller (was:
+derived inside from the action). `live_value_pct` lost its travel/sensitivity
+/length arguments — scrub has no percent any more.
+
+**The page** (`touchpad-page.ts::liveReadout`): kind `scrub` → the signed
+hops where the percent goes ("+4" / "−2" / "0", `hopsText`), label "hops ·
+Video scrub", no meter; a seek gesture with no clock → the hops, label "hops
+· no seek bar here". `types.ts` `TouchpadLive.steps` doc updated.
+
+### 2. The ask — toasts never stack for the same thing
+
+(a) `showLiveToast(key, text)`: a pill with that key in ANY state — open, or
+fading after `endLiveToast` — is reused: its pending retire/exit is
+cancelled, the exit class removed, the same element and slot kept, the text
+updated; a new element only when none exists. (b) `endLiveToast` keeps a
+linger, and a `showLiveToast` inside it revives the pill. (c) `showToast
+(text)`: a visible or fading toast with IDENTICAL text restarts its clock in
+place; different text still stacks. (d) Rust: one key "touchpad" for every
+edge. Addition (coordinator, same session): the live linger is **1500 ms**
+(was 600) for both keyed pills; ordinary toasts unchanged.
+
+### The pure half — `src/components/toast-registry.ts` (new, LEAF)
+
+Imports nothing. `RegistryEntry { text, phase: "dot"|"open"|"leave", live?,
+key? }`.
+
+- `planLive(entries, key)` → `{ kind: "create" }` (no live entry with that
+  key) | `{ kind: "update", entry }` (phase dot/open) | `{ kind: "revive",
+  entry }` (phase leave). Newest last wins if two ever exist.
+- `findIdentical(entries, text)` → the newest NON-live entry with identical
+  text in phase open or leave, else `null`. A "dot" pill (still entering) is
+  never matched — its clock is fresh; a live pill is never an ordinary toast.
+
+`scripts/toast-registry.test.ts` drives both in plain Node (6 tests) — the
+DOM harness the ask hoped for, on the logic that could be lifted out; the
+DOM/timer half stays source-pinned in `scripts/live-toast.test.ts`.
+
+### `toast.ts`
+
+- `ToastEntry` gains `text` (the shown message) and `key?`. **The `_live`
+  map is GONE**: the pill is found by key over `_toasts` (`planLive`), so
+  there is no second registry to fall out of sync when `retire` or the
+  3-deep eviction removes an entry.
+- `reviveEntry(t)`: no-op for "dot" (its open timer must survive); else
+  clears every timer, and for "leave" sets phase "open", swaps `leave` →
+  `open` on the element, `relayout()`. `restartDrain(t, ms)`: re-runs the
+  drain ring animation from full (set `animation: none`, flush, set again).
+- `showLiveToast`: `planLive` → update = `setLiveText` only (no relayout, no
+  fit, no beep — pinned); revive = `reviveEntry` + `setLiveText`; create =
+  as 1.0.123, the entry now carrying `text, key`.
+- `endLiveToast`: `planLive`; not "update" (none, or already fading) → no-op;
+  else `armEntry(cur, LIVE_LINGER_MS (+ OPEN_AT if still entering), + LEAVE_MS)`.
+  **It no longer deletes the key** — the pill stays findable until `retire`
+  removes it, which is what makes the revive possible during the linger AND
+  during the 380 ms exit.
+- `LIVE_LINGER_MS = 1500`.
+- `showToast`: after the leading-glyph split and BEFORE `createElement`,
+  `findIdentical(_toasts, text)`; when found and `_flying === 0 && !_absorbed
+  .includes(dup)` (a pill mid-flight or wearing SPACE is left to the normal
+  path): `reviveEntry`, `restartDrain(dup, duration)`, `armEntry(dup,
+  duration, duration + LEAVE_MS)`, `beep(640)` (the "open" note, so a
+  repeated shortcut still gets a sound — decision made where the ask was
+  silent), return. Everything after that line is 1.0.130's `showToast`
+  byte-for-byte except `text` on the entry.
+
+### Rust — keys
+
+`touchpad::LIVE_TOAST_KEY` = `"touchpad"` (was `"touchpad-slide"`), one key
+for all four edges; `engine::handle_app_volume` keeps `"app-volume"` (its
+1200 ms own timer + the page's 1500 ms linger). `lib.rs::end_live_toast`'s
+doc says 1500 and the revive rule.
+
+### How it was verified
+
+- `cargo test --release --lib`: the mm table (all ten, clamps, monotonic),
+  `scrub_step_size` with and without a size (0 / NaN = unknown), the four
+  asked-for cases — light travel below one step → 0 taps; leaving the dead
+  zone → exactly one tap for the whole first step; one more step → two;
+  back past the landing point → negative; `step_towards` fed the same target
+  50 times → 0 sends (a still finger over time), then 0 → 3 backward, −2 →
+  2 more; an end-to-end travel sequence through `scrub_steps` + `step_towards`
+  (3 out, 3 back, 1 past); `quantise_steps` refuses a bad step; the pill
+  text for scrub / fallback / hops; `shows_steps(Scrub)`; `Drive::scrubs`.
+- `node scripts/toast-registry.test.ts` (6), `node scripts/live-toast.test.ts`
+  (8, re-pinned), `touchpad-page.test.ts`, `setting-subs.test.ts`.
+- `npx tsc --noEmit -p .`, `npm run build`, `cargo clippy --release --lib`.
+- **UNPROVEN on hardware** — the agent cannot inject touch reports or watch
+  the overlay. First real slide with a scrub band: expect the marker
+  `touchpad-scrub-movement-steps-spaceadom-131` on Enter with the pad's short
+  side in mm, "⏩ +1" after ~8 mm of travel (2 mm dead zone + the first step),
+  nothing more while the finger rests, "⏪ …" on the way back, the DEAD line's
+  `steps=` equal to the pill; then lift and slide again within 1.5 s and
+  expect the SAME pill to change text, not a second one; then Space+Y twice
+  within a toast's life and expect one "Chrome" pill restarting, not two.

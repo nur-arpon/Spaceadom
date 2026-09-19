@@ -57,7 +57,15 @@ tidy. Their rows say what each one got wrong.
 
 ---
 
-## 2026-09-20 (latest) — 1.0.130 — The top edge is a seek bar, five ready-made shortcut pairs, and scrub stops running away
+## 2026-09-20 (latest) — 1.0.131 — Scrubbing follows my finger, and the little pills stop piling up
+
+| Version | What changed |
+| --- | --- |
+| **1.0.131** | Two things I asked for at one in the morning. **Scrub is movement now.** The old scrub was a speed dial: how far my finger sat from where it landed set how fast the arrow keys fired, so a light touch did nothing and holding still kept it going forward, forward, forward even at the slowest setting. That is gone. Now every 6 mm of finger travel is one arrow tap (at the middle sensitivity — 12 mm at the slowest, 2 mm at the fastest), the direction is the direction I move, holding still does nothing at all, and coming back sends the other arrow, so sliding back to where I landed undoes the slide out. Same 3 % dead zone before the first tap as before. It is the exact same engine the Tabs / Zoom / Undo pairs and "Any shortcut" already use — scrub is just that engine with → and ←. The pill counts hops instead of drawing a speed bar: "⏩ +4", "⏪ −2". When a "Video seek" slide finds nothing seekable and falls back to scrubbing, that fallback moves the same way. **The pills never stack for the same thing.** If I slide one edge, lift, and slide again — same edge or a different one — the readout pill that was fading out comes straight back with the new text instead of a second pill appearing above it; it also hangs around for a second and a half after I lift now (was just over half a second), long enough to read and start the next slide into it. And an ordinary confirmation toast that says exactly the same thing as one that is still on screen restarts that one in place instead of adding a copy; different messages still stack as they did. **Not yet slid on the real pad** — the step table, the hop engine and the pill logic are tested, but the first real slide is mine. |
+
+---
+
+## 2026-09-20 — 1.0.130 — The top edge is a seek bar, five ready-made shortcut pairs, and scrub stops running away
 
 | Version | What changed |
 | --- | --- |

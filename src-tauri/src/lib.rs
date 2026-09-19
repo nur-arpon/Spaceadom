@@ -1852,8 +1852,11 @@ pub fn show_live_toast(app_handle: &tauri::AppHandle, key: &str, text: &str) {
     let _ = app_handle.emit("toast-live", LiveToastPayload { key, text });
 }
 
-/// The other half: the pill for `key` lingers ~600 ms and then plays the
-/// normal toast exit (`toast.ts::endLiveToast`). A key with no pill is a no-op.
+/// The other half: the pill for `key` lingers 1500 ms (1.0.131; was 600) and
+/// then plays the normal toast exit (`toast.ts::endLiveToast`). A key with no
+/// pill is a no-op, and a `show_live_toast` for the same key inside the
+/// linger — or during the exit — REVIVES the same pill (owner, 2026-09-20:
+/// toasts never stack for the same thing).
 pub fn end_live_toast(app_handle: &tauri::AppHandle, key: &str) {
     let _ = app_handle.emit("toast-live-end", LiveToastEndPayload { key });
 }

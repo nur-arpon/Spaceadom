@@ -402,6 +402,13 @@ function stepsText(n: number | null | undefined): string {
   return `${shown} step${Math.abs(v) === 1 ? "" : "s"}`;
 }
 
+/** "+3" / "−2" / "0" — scrub's signed hop count where the percent goes
+ *  (1.0.131: scrub is movement, one hop per step of travel; no speed bar). */
+function hopsText(n: number | null | undefined): string {
+  const v = n ?? 0;
+  return v > 0 ? `+${v}` : v < 0 ? `−${-v}` : "0";
+}
+
 /** The readout's two lines for the current live payload (pure on `live`). */
 function liveReadout(): { big: string; label: string; meter: boolean } {
   const pct = live?.value_pct ?? 0;
@@ -413,12 +420,16 @@ function liveReadout(): { big: string; label: string; meter: boolean } {
     const label = live?.steps == null ? "once per slide" : stepsText(live.steps);
     return { big, label, meter: false };
   }
+  if (kind === "scrub") {
+    // Scrub (1.0.131): the hops this slide where the percent goes, no meter.
+    return { big: hopsText(live?.steps), label: "hops · Video scrub", meter: false };
+  }
   if (kind === "seek") {
     // Seek: the clock where the percent goes, the meter is the position;
-    // a gesture that fell back says so.
+    // a gesture that fell back says so — and counts its hops like scrub.
     return live?.seek
       ? { big: live.seek, label: KIND_NAME.seek, meter: true }
-      : { big: "Scrubbing", label: "no seek bar here", meter: false };
+      : { big: hopsText(live?.steps), label: "hops · no seek bar here", meter: false };
   }
   return { big: `${pct}%`, label: KIND_NAME[kind], meter: true };
 }

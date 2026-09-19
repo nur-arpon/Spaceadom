@@ -1,11 +1,13 @@
 /**
  * live-toast.test.ts — 1.0.123 (owner, 2026-09-19): the LIVE toast is ONE
- * keyed pill updated in place, never a stack. `toast.ts` has no DOM harness
- * (it imports the Tauri API and touches AudioContext at module scope), so
- * this pins the SOURCE the way touchpad-page.test.ts does: the reuse path
- * exists and comes first, the update touches only the text nodes, the end
- * path arms the ordinary leave/retire clock, `showToast` is untouched, and
- * the Rust side rate-limits with the pure limiter.
+ * keyed pill updated in place, never a stack. 1.0.131 (owner, 2026-09-20
+ * 01:15): TOASTS NEVER STACK FOR THE SAME THING — a live pill is found by key
+ * in ANY phase and REVIVED while fading, an ordinary toast with IDENTICAL
+ * text restarts in place, the live linger is 1500 ms, and the reader uses
+ * ONE key for every edge. `toast.ts` has no DOM harness (it imports the
+ * Tauri API and touches AudioContext at module scope), so this pins the
+ * SOURCE the way touchpad-page.test.ts does; the pure decisions are driven
+ * for real in scripts/toast-registry.test.ts.
  *
  *   node scripts/live-toast.test.ts
  */
@@ -20,6 +22,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
 const toast = readFileSync(join(root, "src", "components", "toast.ts"), "utf8");
 const reader = readFileSync(join(root, "src-tauri", "src", "touchpad", "mod.rs"), "utf8");
+const engine = readFileSync(join(root, "src-tauri", "src", "engine", "mod.rs"), "utf8");
 const lib = readFileSync(join(root, "src-tauri", "src", "lib.rs"), "utf8");
 
 function body(name: string): string {
@@ -30,34 +33,65 @@ function body(name: string): string {
   return toast.slice(start, end < 0 ? undefined : end + 2);
 }
 
-test("a second showLiveToast with the same key reuses the element and adds nothing", () => {
+function fn(name: string): string {
+  const start = toast.indexOf(`function ${name}(`);
+  assert.ok(start >= 0, `${name} exists in toast.ts`);
+  const end = toast.indexOf("\n}\n", start);
+  return toast.slice(start, end < 0 ? undefined : end + 2);
+}
+
+test("showLiveToast plans by key over the one stack: update / revive come BEFORE anything is created", () => {
   const b = body("showLiveToast");
-  const reuse = b.indexOf("_live.get(key)");
+  assert.ok(toast.includes('import { planLive, findIdentical } from "./toast-registry";'), "the pure decisions come from the leaf module");
+  const plan = b.indexOf("planLive(_toasts, key)");
+  const update = b.indexOf('plan.kind === "update"');
+  const revive = b.indexOf('plan.kind === "revive"');
   const create = b.indexOf("document.createElement");
-  assert.ok(reuse >= 0 && create >= 0, "both the reuse and the create path exist");
-  assert.ok(reuse < create, "the reuse path is checked BEFORE anything is created");
-  // The reuse branch returns before reaching createElement/appendChild.
-  const branch = b.slice(reuse, create);
-  assert.ok(/return;\s*\}/.test(branch), "the reuse branch returns without creating");
-  assert.ok(branch.includes('querySelector(".msg")') && branch.includes("textContent"), "it swaps the text node");
-  assert.ok(!branch.includes("appendChild"), "it appends nothing");
-  assert.ok(!branch.includes("relayout(") && !branch.includes("requestFit(") && !branch.includes("beep("),
+  assert.ok(plan >= 0 && update >= 0 && revive >= 0 && create >= 0, "plan, update, revive and create all exist");
+  assert.ok(plan < update && update < revive && revive < create, "update and revive are checked BEFORE anything is created");
+  const branches = b.slice(update, b.indexOf("const { accent"));
+  assert.equal((branches.match(/return;/g) ?? []).length, 2, "both the update and the revive branch return without creating");
+  assert.ok(!branches.includes("appendChild") && !branches.includes("createElement"), "neither appends anything");
+  assert.ok(branches.includes("setLiveText(plan.entry, letter, text)"), "both swap the text node");
+  assert.ok(branches.includes("reviveEntry(plan.entry)"), "the revive branch un-fades the same entry");
+  assert.ok(!toast.includes("_live.get(") && !toast.includes("new Map<string, ToastEntry>"), "no separate live map to fall out of sync");
+  assert.ok(b.includes("live: true") && b.includes("text, key,"), "the created pill is marked live and carries its key");
+});
+
+test("the update path touches only the text nodes; the revive path cancels the exit and un-fades", () => {
+  const set = fn("setLiveText");
+  assert.ok(set.includes('querySelector(".msg")') && set.includes("textContent"), "it swaps the text node");
+  assert.ok(!set.includes("appendChild") && !set.includes("relayout(") && !set.includes("requestFit(") && !set.includes("beep("),
     "an update restarts nothing: no relayout, no fit, no beep");
-  assert.ok(b.includes("_live.set(key, entry)"), "the created pill is registered under its key");
-  assert.ok(b.includes("live: true"), "the entry is marked live");
+  const rev = fn("reviveEntry");
+  assert.ok(rev.includes('if (t.phase === "dot") return;'), "a pill still entering keeps its open timer");
+  assert.ok(rev.includes("window.clearTimeout(h)"), "the pending leave/retire is cancelled");
+  assert.ok(rev.includes('t.el.classList.remove("leave")') && rev.includes('t.el.classList.add("open")') && rev.includes('t.phase = "open"'),
+    "the exit class comes off; same element, same slot");
 });
 
-test("endLiveToast lingers then arms the ordinary leave/retire clock", () => {
+test("endLiveToast lingers 1500 ms then arms the ordinary leave/retire clock, and leaves the pill findable", () => {
   const b = body("endLiveToast");
-  assert.ok(b.includes("_live.delete(key)"), "the key is released");
+  assert.ok(b.includes("planLive(_toasts, key)"), "found by key");
+  assert.ok(b.includes('if (plan.kind !== "update") return;'), "none, or already fading: a no-op");
   assert.ok(b.includes("armEntry(cur, leaveIn, leaveIn + LEAVE_MS)"), "the normal clock (leave, then retire)");
-  assert.ok(/const LIVE_LINGER_MS = 600;/.test(toast), "~600 ms after Exit");
+  assert.ok(!b.includes("_live.delete") && !b.includes("splice"), "the key is NOT released here — retire removes it, so a new showLiveToast in the linger revives it");
+  assert.ok(/const LIVE_LINGER_MS = 1500;/.test(toast), "1500 ms after Exit (owner, 2026-09-20: was 600)");
+  assert.ok(b.includes("LIVE_LINGER_MS + (wasArmed ? OPEN_AT : 0)"), "one constant, used by every key");
 });
 
-test("showToast itself is untouched by the live path", () => {
+test("showToast restarts an IDENTICAL toast in place instead of stacking; different text still stacks", () => {
   const b = body("showToast");
-  assert.ok(!b.includes("_live") && !b.includes("live:"), "showToast never mentions the live map");
+  const dup = b.indexOf("findIdentical(_toasts, text)");
+  const create = b.indexOf("document.createElement");
+  assert.ok(dup >= 0 && create >= 0 && dup < create, "the identical check comes BEFORE anything is created");
+  const branch = b.slice(dup, create);
+  assert.ok(branch.includes("reviveEntry(dup)") && branch.includes("restartDrain(dup, duration)") && branch.includes("armEntry(dup, duration, duration + LEAVE_MS)"),
+    "un-fade, re-run the drain ring, restart the clock in place");
+  assert.ok(/return;\s*\}/.test(branch), "and return without creating");
+  assert.ok(branch.includes("_flying === 0") && branch.includes("!_absorbed.includes(dup)"), "a pill mid-flight or wearing SPACE is left to the normal path");
   assert.ok(b.includes("while (_toasts.length > 3)"), "its eviction rule is the one it always had");
+  assert.ok(b.includes("el, phase: \"dot\", text, duration"), "the entry carries its text for the next identical check");
 });
 
 test("relayout leaves a live pill full size and out of the depth count", () => {
@@ -80,4 +114,11 @@ test("the reader rate-limits with the pure limiter and reads the switch from its
   assert.ok(reader.includes("if cfg.slide_toast {"), "gated on the snapshot's field, not the config lock");
   const cb = reader.slice(reader.indexOf("let on_report = Box::new"), reader.indexOf("raw::run_sink(&pad, on_report)"));
   assert.ok(!cb.includes("config()."), "no config-lock read on the raw-input callback");
+});
+
+test("Rust uses ONE stable key per thing: \"touchpad\" for every edge, \"app-volume\" for the specials", () => {
+  assert.ok(reader.includes('const LIVE_TOAST_KEY: &str = "touchpad";'), "one key for all four edges — back-to-back slides on different edges reuse the pill");
+  const cb = reader.slice(reader.indexOf("let on_report = Box::new"), reader.indexOf("raw::run_sink(&pad, on_report)"));
+  assert.ok(!/show_live_toast\(&app, "/.test(cb) && !/end_live_toast\(&app, "/.test(cb), "the reader never passes a literal key — only LIVE_TOAST_KEY");
+  assert.equal((engine.match(/"app-volume"/g) ?? []).length, 3, "app-volume: one show + two end paths, the same literal");
 });
