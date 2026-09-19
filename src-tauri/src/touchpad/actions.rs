@@ -447,3 +447,128 @@ mod tests {
         assert!(analogue_gain(6) > 0.0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Brightness WORKER — one hidden PowerShell per slide (2026-09-19)
+// ---------------------------------------------------------------------------
+//
+// The in-process WMI COM path above failed silently on the owner's laptop
+// (1.0.120–1.0.123: the toast read 0 or a stale 60 and the panel never
+// moved) while `Get-CimInstance root/wmi WmiMonitorBrightness` in PowerShell
+// worked every time. So the reader starts ONE hidden `powershell.exe` when a
+// brightness band goes live, reads the current value from its first output
+// line, feeds it absolute percentages on stdin while the finger slides, and
+// closes it on lift. Start-up (~300 ms) is paid once per slide, never per tick.
+
+/// A live brightness session. `current()` is the value the worker last set
+/// (or read at start); `add()` clamps and sends; `stop()` closes the process.
+pub struct BrightnessWorker {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    current: u8,
+}
+
+impl BrightnessWorker {
+    /// The script: print the current brightness once, then set every integer
+    /// line read from stdin until "q".
+    pub fn script() -> &'static str {
+        "$ErrorActionPreference='SilentlyContinue'; \
+         $b = Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorBrightness | Select-Object -First 1; \
+         if (-not $b) { Write-Output 'none'; exit 3 }; \
+         $m = Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorBrightnessMethods | Select-Object -First 1; \
+         Write-Output ([int]$b.CurrentBrightness); \
+         while ($true) { $l = [Console]::In.ReadLine(); if ($null -eq $l -or $l -eq 'q') { break }; \
+           $n = 0; if ([int]::TryParse($l, [ref]$n)) { \
+             Invoke-CimMethod -InputObject $m -MethodName WmiSetBrightness -Arguments @{Timeout=0; Brightness=[Math]::Max(0,[Math]::Min(100,$n))} | Out-Null } }"
+    }
+
+    /// Spawn the worker and read the starting value. `None` (with a warn)
+    /// when there is no internal panel or PowerShell could not start.
+    pub fn start() -> Option<Self> {
+        #[cfg(windows)]
+        {
+            use std::io::BufRead;
+            use std::os::windows::process::CommandExt;
+            use std::process::{Command, Stdio};
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let mut child = Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", Self::script()])
+                .creation_flags(CREATE_NO_WINDOW)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| log::warn!("touchpad: brightness worker — could not start PowerShell: {e}"))
+                .ok()?;
+            let stdin = child.stdin.take()?;
+            let stdout = child.stdout.take()?;
+            let mut first = String::new();
+            let _ = std::io::BufReader::new(stdout).read_line(&mut first);
+            let current = match first.trim().parse::<u8>() {
+                Ok(v) => v.min(100),
+                Err(_) => {
+                    log::warn!("touchpad: brightness worker — no internal panel (first line {:?})", first.trim());
+                    let _ = child.kill();
+                    return None;
+                }
+            };
+            log::info!("touchpad: brightness worker started at {current}%");
+            Some(Self { child, stdin, current })
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
+    pub fn current(&self) -> u8 {
+        self.current
+    }
+
+    /// Nudge by `delta` points; returns the new value it asked for.
+    pub fn add(&mut self, delta: i32) -> Option<u8> {
+        use std::io::Write;
+        let next = (self.current as i32 + delta).clamp(0, 100) as u8;
+        if next == self.current {
+            return Some(next);
+        }
+        if let Err(e) = writeln!(self.stdin, "{next}") {
+            log::warn!("touchpad: brightness worker — write failed: {e}");
+            return None;
+        }
+        let _ = self.stdin.flush();
+        self.current = next;
+        Some(next)
+    }
+
+    /// Close the worker (tells it to quit, then makes sure it is gone).
+    pub fn stop(mut self) {
+        use std::io::Write;
+        let _ = writeln!(self.stdin, "q");
+        let _ = self.stdin.flush();
+        drop(self.stdin);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
+        while std::time::Instant::now() < deadline {
+            if let Ok(Some(_)) = self.child.try_wait() {
+                log::info!("touchpad: brightness worker closed at {}%", self.current);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = self.child.kill();
+        log::info!("touchpad: brightness worker killed at {}%", self.current);
+    }
+}
+
+#[cfg(test)]
+mod worker_tests {
+    use super::BrightnessWorker;
+    #[test]
+    fn the_worker_script_reads_once_then_sets_from_stdin() {
+        let s = BrightnessWorker::script();
+        assert!(s.contains("WmiMonitorBrightness"));
+        assert!(s.contains("WmiSetBrightness"));
+        assert!(s.contains("ReadLine"));
+        assert!(s.contains("Brightness=[Math]::Max(0,[Math]::Min(100,$n))"));
+    }
+}

@@ -1033,7 +1033,7 @@ export function showLiveToast(key: string, message: string, options: ToastOption
   };
   _toasts.push(entry);
   _live.set(key, entry);
-  beep(520);
+  /* no sound: a live slide readout is not an event (owner, 2026-09-19) */
 
   // PROBLEM 113's rule, verbatim: a stale handover flag would suppress the
   // fit, and a suppressed fit is a hidden window.
@@ -1046,7 +1046,7 @@ export function showLiveToast(key: string, message: string, options: ToastOption
 
   const open = () => {
     if (!_toasts.includes(entry) || entry.phase === "leave") return;
-    entry.phase = "open"; el.classList.add("open"); beep(640); relayout();
+    entry.phase = "open"; el.classList.add("open"); relayout();
   };
   if (REDUCED()) open(); else entry.h.push(window.setTimeout(open, OPEN_AT));
   relayout();

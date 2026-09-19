@@ -396,6 +396,7 @@ fn reader_loop(app: AppHandle, pad: raw::DeviceInfo) {
     let mut entered_at = Instant::now();
     let mut last_tick = Instant::now();
     let mut last_bright = Instant::now() - Duration::from_secs(1);
+    let mut bright_worker: Option<actions::BrightnessWorker> = None;
     let mut last_emit = Instant::now() - Duration::from_secs(1);
     // The live slide toast (1.0.123): the ≤ 8 Hz limiter, the text last SENT
     // and the text last COMPUTED, so Exit can flush a throttled final value.
@@ -465,6 +466,9 @@ fn reader_loop(app: AppHandle, pad: raw::DeviceInfo) {
                 prev_travel = 0.0;
                 scrub_pending = 0.0;
                 chord_sent = 0;
+                if matches!(action, BandAction::Brightness) {
+                    bright_worker = actions::BrightnessWorker::start();
+                }
                 last_travel = 0.0;
                 entered_at = Instant::now();
                 last_tick = Instant::now();
@@ -509,18 +513,22 @@ fn reader_loop(app: AppHandle, pad: raw::DeviceInfo) {
                         value = actions::add_volume(delta);
                     }
                     BandAction::Brightness => {
-                        // Rate-limit sets to ~20 Hz; accumulate travel between.
+                        // One hidden PowerShell WORKER per slide (started on Enter,
+                        // fed values, closed on Exit): the in-process WMI COM read
+                        // failed silently on the owner's laptop (1.0.120–123) while
+                        // PowerShell's WMI worked every time. Rate-limit ~20 Hz.
                         if now.duration_since(last_bright) >= Duration::from_millis(50) {
                             let delta = actions::analogue_gain(band.sensitivity) * (travel - prev_travel);
                             let step = (delta * 100.0).round() as i32;
                             if step != 0 {
-                                value = actions::add_brightness(step);
+                                if let Some(w) = bright_worker.as_mut() {
+                                    value = w.add(step);
+                                }
                                 prev_travel = travel;
                             }
                             last_bright = now;
                         } else {
-                            // Hold prev_travel so the next set sees the full delta.
-                            value = actions::get_brightness();
+                            value = bright_worker.as_ref().map(|w| w.current());
                         }
                     }
                     BandAction::Scrub => {
@@ -577,6 +585,9 @@ fn reader_loop(app: AppHandle, pad: raw::DeviceInfo) {
                 }
             }
             GestureEvent::Exit(edge) => {
+                if let Some(w) = bright_worker.take() {
+                    w.stop();
+                }
                 BAND_LIVE.store(false, Ordering::Relaxed);
                 log::info!(
                     "touchpad: band DEAD edge={} travel={:.3} steps={} after {} ms",
