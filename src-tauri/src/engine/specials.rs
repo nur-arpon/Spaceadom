@@ -40,6 +40,9 @@ const SPECIALS: &[(&str, &str, &str, &str)] = &[
     // PHASE A step 3 (2026-09-19) — Win+Shift+←/→ through `actions::chord`.
     ("move_window_left", "Window → Left Screen", "Window ←", "⇠"),
     ("move_window_right", "Window → Right Screen", "Window →", "⇢"),
+    // 1.0.125 (2026-09-19) — cycle the default output device
+    // (`actions::audio_output`). Seeded on no key.
+    ("next_speaker", "Next speaker", "Next speaker", "🔊"),
 ];
 
 fn row(id: &str) -> Option<&'static (&'static str, &'static str, &'static str, &'static str)> {
@@ -365,6 +368,8 @@ pub(crate) mod tests {
         assert_eq!(display_name("pause"), "Pause Spaceadom");
         assert_eq!(ring_name("osk"), "Keyboard");
         assert_eq!(ring_name("search"), "Search / Input");
+        assert_eq!(display_name("next_speaker"), "Next speaker");
+        assert_eq!(glyph("next_speaker"), "🔊");
         assert_eq!(display_name("nope"), "nope", "unknown ids come back as typed");
     }
 

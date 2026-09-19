@@ -41,7 +41,21 @@ tidy. Their rows say what each one got wrong.
 
 ---
 
-## 2026-09-19 (latest) — 1.0.123 — the five afternoon fixes, and a pill that counts while you slide
+## 2026-09-19 — 1.0.124 — brightness slides finally move the panel
+
+| Version | What changed |
+| --- | --- |
+| **1.0.124** | Brightness edge slides now drive one hidden PowerShell worker per slide (the in-process WMI call read 0 or a stale value and never set anything on this laptop, while PowerShell's WMI worked every time). Live slide toasts are silent. |
+
+---
+
+## 2026-09-19 (latest) — 1.0.125 — "Next speaker"
+
+| Version | What changed |
+| --- | --- |
+| **1.0.125** | One new thing, and it is on no key until you put it there: **Next speaker.** Open any key's editor, turn on Advanced mode, pick "Spaceadom special" and choose it. From then on, Space plus that key moves your sound to the next speaker or headphones that is plugged in and switched on, and a toast says where it went — "🔊 → Speakers (Realtek(R) Audio)". Press again and it goes round to the next one; it wraps back to the start, and every app follows (music, calls, games — all three of Windows' "default device" roles are set at once). With only one output connected it just says so. Windows has no official way to do this — the app uses the same private door the Sound control panel and tools like SoundSwitch have used since Windows 7; if Windows ever refuses, the toast says "Windows refused to switch" and nothing else changes. On your laptop the list is six long: the five SteelSeries Sonar virtual outputs plus the Realtek speakers, so getting from Sonar Media to the real speakers is a few presses — tell me if you would rather it skipped the Sonar ones. **The switch was proved once on your laptop, with your permission**: it moved the default from Sonar Media to Sonar Microphone and straight back, and Windows confirmed both. What has not been tried is the key itself — bind it, press it once, and check the toast and the sound both move. |
+
+## 2026-09-19 — 1.0.123 — the five afternoon fixes, and a pill that counts while you slide
 
 | Version | What changed |
 | --- | --- |

@@ -96,3 +96,19 @@ page: Matches the app / Chocolate", default Chocolate; the home thumbnail
 always matches the app). If chocolate wins after living with it, this
 becomes the fourth theme — keyboard, overlay, both rings, settings and the
 night scene all need the palette, so it is a project, not a toggle.
+
+## 14. "Next microphone" (parked 2026-09-19)
+
+Same code as "Next speaker" (1.0.125) on the capture side — cycle the
+default input among connected, enabled microphones with a toast. Parked
+until the speaker one has lived a while; a wrong default mic is the kind of
+thing people only discover mid-call, so it needs the same care as mic mute.
+
+## 15. "Next speaker": choose which outputs to cycle (parked 2026-09-19)
+
+1.0.125 cycles EVERY active output. With SteelSeries Sonar installed that is
+five virtual outputs plus the Realtek speakers, so reaching the speakers is
+five presses. Next: a tick-list in Settings, "Cycle these outputs", every
+device listed, all ticked by default; Bluetooth devices appear when
+connected. Owner: "later we will let user choose which devices to cycle
+between."

@@ -1,6 +1,6 @@
 [package]
 name = "spaceadom"
-version = "1.0.124"
+version = "1.0.125"
 description = "Spaceadom — hold Space + tap a key to launch, focus or minimise any app"
 authors = ["Spaceadom"]
 edition = "2021"
@@ -173,6 +173,11 @@ windows = { version = "0.58", features = ["Win32_UI_Input_KeyboardAndMouse"] }
 # Windows-specific crates (only linked on Windows target)
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+# 1.0.125 — `#[windows::core::interface]` (the undocumented IPolicyConfig in
+# `engine/actions/audio_output.rs`) expands to `::windows_core::` paths, which
+# only resolve when windows-core is a DIRECT dependency. Same 0.58.0 the
+# `windows` crate already pulls in; nothing new is downloaded.
+windows-core = "0.58"
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.58"

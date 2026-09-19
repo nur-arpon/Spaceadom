@@ -13,3 +13,5 @@ pub mod command;
 pub mod uri;
 // PHASE A step 2 (2026-09-19) — flip a Windows setting and say the new state.
 pub mod toggle;
+// 1.0.125 (2026-09-19) — "Next speaker": cycle the default output device.
+pub mod audio_output;

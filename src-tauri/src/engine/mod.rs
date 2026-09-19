@@ -903,6 +903,8 @@ fn run_special(id: &str, key_id: &str, state_arc: &Arc<Mutex<EngineState>>) {
             };
             crate::show_toast(&app_handle, MOVE_WINDOW_TOAST);
         }
+        // 1.0.125 — cycle the default output device (`actions::audio_output`).
+        "next_speaker" => handle_next_speaker(state_arc),
         other => log::warn!(
             "engine: Space+{key_id} is bound to an unknown special '{other}' — nothing fired \
              (a config from a newer build?)"
@@ -921,6 +923,18 @@ fn handle_osk(state_arc: &Arc<Mutex<EngineState>>) {
     };
     let msg = actions::osk::toggle_osk();
     crate::show_toast(&app_handle, msg);
+}
+
+/// 1.0.125 — the `next_speaker` special (bound by the user, on no key by
+/// default): move the default output to the next active render endpoint and
+/// toast its name. Every failure is a toast, never a panic.
+fn handle_next_speaker(state_arc: &Arc<Mutex<EngineState>>) {
+    let app_handle = {
+        let s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
+        s.app_handle.clone()
+    };
+    let msg = actions::audio_output::next_speaker();
+    crate::show_toast(&app_handle, &msg);
 }
 
 /// Space + / (and the ring's "Screenshot" tile): Windows' own region snip.

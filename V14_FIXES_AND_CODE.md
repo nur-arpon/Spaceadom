@@ -36832,3 +36832,94 @@ pub fn is_app_or_link(bind: &KeyBinding) -> bool {
 ### How it was verified
 
 `cargo test --release --lib` 781/0/6 (779 + 2), `cargo clippy --release --lib` 0 warnings, `npx tsc --noEmit -p .` 0, `npm run build` clean, `scripts/setting-subs.test.ts` passes. Not run on hardware — the ring's row count is proved by the mixed-profile test, and the editor by the type gate; the owner's hold of Space on the next build is the visual check.
+
+## NEXT SPEAKER — CYCLE THE DEFAULT OUTPUT DEVICE (2026-09-19; 1.0.125 — gates green: 795 unit tests / 0 failed / 8 ignored, clippy 0, tsc 0, vite clean, setting-subs passes; **NOT BUILT AS AN INSTALLER, NOT INSTALLED, NO GIT** — the lead does that)
+
+**Symptom / ask.** The owner switches between the laptop speakers, headphones and the SteelSeries Sonar virtual outputs through the Sound panel several times a day. He wanted one Spaceadom special, "Next speaker", that moves the default output to the next connected device and says which one — bound by him, on no key by default.
+
+**Root cause of the difficulty.** Windows exposes the LIST of endpoints (`IMMDeviceEnumerator`) but has NO documented API to SET the default one. The Sound panel does it through a private COM object, `PolicyConfigClient`, whose `IPolicyConfig::SetDefaultEndpoint` is undocumented but has been stable since Windows 7 and is what SoundSwitch, nircmd (`setdefaultsounddevice`), EarTrumpet and AudioSwitcher all call. The `windows` crate does not declare it, so the vtable has to be declared by hand.
+
+**Exact files.**
+- `src-tauri/src/engine/actions/audio_output.rs` — NEW. The whole feature: enumeration, `next_index`, the `IPolicyConfig` declaration, `next_speaker()`, the toasts, the tests.
+- `src-tauri/src/engine/actions/mod.rs` — `pub mod audio_output;`
+- `src-tauri/src/engine/mod.rs` — `run_special` arm `"next_speaker" => handle_next_speaker(state_arc)`; `handle_next_speaker` mirrors `handle_osk`.
+- `src-tauri/src/engine/specials.rs` — `SPECIALS` row `("next_speaker", "Next speaker", "Next speaker", "🔊")` (HUD name, ring name, letter-disc glyph; `binding_name` / `display_name` / `ring_name` need nothing else).
+- `src-tauri/src/config/schema.rs` — `SPECIAL_IDS` += `"next_speaker"`; NEW `pub const UNSEEDED_SPECIALS: &[&str] = &["next_speaker"]`; the seed-table test reworked (below).
+- `src-tauri/Cargo.toml` — `windows-core = "0.58"` under `[target.'cfg(windows)'.dependencies]` (see "the macro needs a direct dependency").
+- `src/types.ts` `SPECIAL_IDS`, `src/components/special-cards.ts` (card + `SPECIAL_SHORT.next_speaker = "Speaker"`), `src/preview.ts` (fixture on `pgdn`), `README.md` row, `all-versions/WHAT-CHANGED.md` 1.0.125 row.
+
+**The code.**
+
+The list, read-only (`audio_output.rs`, module `win`):
+
+```rust
+pub unsafe fn active_render_endpoints(enumerator: &IMMDeviceEnumerator) -> Result<Vec<Endpoint>> {
+    let coll = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)?;   // connected AND enabled only
+    let n = coll.GetCount()?;
+    let mut out = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        let dev = coll.Item(i)?;
+        let id = device_id(&dev)?;          // IMMDevice::GetId → String; the PWSTR is CoTaskMemFree'd
+        let name = device_name(&dev);       // OpenPropertyStore(STGM_READ).GetValue(&PKEY_DEVICE_FRIENDLY_NAME).to_string()
+        out.push(Endpoint { id, name });
+    }
+    Ok(out)
+}
+const PKEY_DEVICE_FRIENDLY_NAME: PROPERTYKEY =
+    PROPERTYKEY { fmtid: GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0), pid: 14 };
+```
+
+`PKEY_Device_FriendlyName` is declared locally rather than enabling `Win32_Devices_FunctionDiscovery` for one constant. `PROPVARIANT::to_string()` comes from `windows-core` 0.58's `Display` impl.
+
+The pure step:
+
+```rust
+pub fn next_index<S: AsRef<str>>(current: &str, ids: &[S]) -> Option<usize> {
+    if ids.len() < 2 { return None; }                       // 0 or 1 device → "Only one speaker connected"
+    match ids.iter().position(|id| id.as_ref() == current) {
+        Some(i) => Some((i + 1) % ids.len()),                // the next one, wrapping
+        None => Some(0),                                    // default not in the active list → start at the top
+    }
+}
+```
+
+The undocumented interface — twelve methods, in vtable order, only the eleventh ever called:
+
+```rust
+const CLSID_POLICY_CONFIG_CLIENT: GUID = GUID::from_u128(0x870af99c_171d_4f9e_af0d_e63df40c2bc9);
+
+#[windows::core::interface("f8679f50-850a-41cf-9c72-430f290290c8")]
+unsafe trait IPolicyConfig: IUnknown {
+    fn GetMixFormat(&self, device: PCWSTR, format: *mut *mut c_void) -> HRESULT;
+    fn GetDeviceFormat(&self, device: PCWSTR, default: i32, format: *mut *mut c_void) -> HRESULT;
+    fn ResetDeviceFormat(&self, device: PCWSTR) -> HRESULT;
+    fn SetDeviceFormat(&self, device: PCWSTR, endpoint_format: *mut c_void, mix_format: *mut c_void) -> HRESULT;
+    fn GetProcessingPeriod(&self, device: PCWSTR, default: i32, default_period: *mut i64, min_period: *mut i64) -> HRESULT;
+    fn SetProcessingPeriod(&self, device: PCWSTR, period: *mut i64) -> HRESULT;
+    fn GetShareMode(&self, device: PCWSTR, mode: *mut c_void) -> HRESULT;
+    fn SetShareMode(&self, device: PCWSTR, mode: *mut c_void) -> HRESULT;
+    fn GetPropertyValue(&self, device: PCWSTR, fx_store: i32, key: *const c_void, value: *mut c_void) -> HRESULT;
+    fn SetPropertyValue(&self, device: PCWSTR, fx_store: i32, key: *const c_void, value: *mut c_void) -> HRESULT;
+    fn SetDefaultEndpoint(&self, device: PCWSTR, role: ERole) -> HRESULT;
+    fn SetEndpointVisibility(&self, device: PCWSTR, visible: i32) -> HRESULT;
+}
+
+unsafe fn set_default_endpoint(id: &str) -> Result<()> {
+    let policy: IPolicyConfig = CoCreateInstance(&CLSID_POLICY_CONFIG_CLIENT, None, CLSCTX_ALL)?;
+    let wide = HSTRING::from(id);
+    for role in [eConsole, eMultimedia, eCommunications] {       // all three, so every app follows
+        policy.SetDefaultEndpoint(PCWSTR(wide.as_ptr()), role).ok()?;
+    }
+    Ok(())
+}
+```
+
+`next_speaker()` does `CoInitializeEx(MTA)` (per press, as `boss_key::set_system_mute` does), builds the list, reads the default's id, calls `next_index`, then `set_default_endpoint`; every `Err` becomes a `log::warn!` with the HRESULT and the toast `"🔊 Windows refused to switch"`. Success: toast `"🔊 → <name>"`, log line carrying the marker `next-speaker-default-endpoint-switched-spaceadom-125`.
+
+**Two things the macro needs, both learned in this session.** (1) `IUnknown_Vtbl` must be imported beside `IUnknown` — the expansion names it unqualified; without it: `cannot find type IUnknown_Vtbl in this scope`. (2) The expansion uses absolute `::windows_core::` paths, which only resolve when `windows-core` is a DIRECT dependency of this crate — hence the one-line `Cargo.toml` addition (the same 0.58.0 the `windows` crate already depends on; the lock did not change). The module also carries `#![allow(non_snake_case)]` for the PascalCase vtable names, or clippy prints twenty-four warnings.
+
+**The seed-table test.** `SPECIAL_IDS` gained an id that is deliberately on NO key, so `the_seed_table_covers_every_special_exactly_once` now asserts `DEFAULT_SPECIALS.len() + UNSEEDED_SPECIALS.len() == SPECIAL_IDS.len()`, that every seeded id is on exactly one key and every unseeded id on exactly zero, and that an unseeded id is in neither `DEFAULT_SPECIALS` nor `LATE_SPECIALS`. The intent (one key, one special; nothing seeded twice) is unchanged. `engine::specials::every_special_id_has_a_row_and_todays_names_are_kept` passes because the `SPECIALS` row was added.
+
+**How it was verified.** `cargo test --release --lib` 795 / 0 / 7 ignored (4 new pure tests: wrap, single, current-not-found, toasts); `cargo clippy --release --lib` 0 warnings; `npx tsc --noEmit -p .` 0; `npm run build` clean; `node scripts/setting-subs.test.ts` passes. The READ-ONLY half was run on the owner's machine through the `#[ignore]` test `list_active_render_endpoints_on_this_machine` (`cargo test --release --lib list_active_render -- --ignored --nocapture`): 6 active render endpoints — `SteelSeries Sonar - Gaming`, `- Chat`, `Speakers (Realtek(R) Audio)`, `Sonar - Aux`, `Sonar - Media` (DEFAULT), `Sonar - Microphone` — names and ids read correctly, `next_index` → 5. **The WRITE half was PROVEN once, by the owner's authorised round trip** (`#[ignore]` test `round_trip_switch_to_the_next_speaker_and_back_on_this_machine`, `cargo test --release --lib round_trip -- --ignored --nocapture`; it always switches back, whatever the forward leg said, and a failed switch-back is a panic): ORIGINAL "SteelSeries Sonar - Media" `{…adf2d6a9…}` → `SetDefaultEndpoint(next)` = `Ok(())`, `GetDefaultAudioEndpoint` read back "SteelSeries Sonar - Microphone" `{…f9cecbaf…}` → `SetDefaultEndpoint(original)` = `Ok(())`, read back "SteelSeries Sonar - Media" — the default was left where it was found. Still UNPROVEN: the press-to-toast path in the installed app (`run_special` → `handle_next_speaker` → `show_toast`, the `handle_osk` shape) and the sound audibly following in a playing app. On the installed build: bind the special, press it, `grep next-speaker-default-endpoint-switched debug.log`; a `"Windows refused"` toast with a `SetDefaultEndpoint refused` WARN line is the failure signature. Gates after the round-trip test was added: 795 / 0 / 8 ignored, clippy 0.
+
+**Generalise this.** An undocumented-but-standard COM interface is declared in FULL, in vtable order, with opaque pointers for the slots you never call — the slot INDEX is the contract, not the parameter types — and its module header must say it is undocumented, who else depends on it, and what the user sees when it stops working. A cycle through a device list keys on the device ID, never the index, because the list can shrink between the read and the write.

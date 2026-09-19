@@ -108,6 +108,11 @@ export const SPECIALS: SpecialSpec[] = [
   { id: "move_window_right", combo: "␣ →", name: "Window to Right Screen",
     desc: "Throws the window you're in onto the screen to the right (Windows' own Win+Shift+→). Tap ← to bring it back.",
     how: "Hold Space, tap →" },
+  // 1.0.125 (2026-09-19) — cycle Windows' default output device. On NO key
+  // by default; `resolveSpecials` shows "Not on any key" until it is bound.
+  { id: "next_speaker", combo: "␣ —", name: "Next speaker",
+    desc: "Cycle to the next connected speaker or headphones. Every app follows; press again to keep going round.",
+    how: "Not on any key — assign it from any key's editor" },
   { id: "scroll", combo: "␣ Scroll", name: "Opacity",
     desc: "Fades the window under your cursor so you can see what's behind it.",
     how: "Hold Space, roll the mouse wheel" },
@@ -163,6 +168,7 @@ export const SPECIAL_SHORT: Record<string, string> = {
   pause: "Pause", voice_typing: "Dictate", screenshot: "Snip", osk: "Keys",
   scroll_top: "Scroll Top", scroll_bottom: "Scroll Btm",
   move_window_left: "Move ←", move_window_right: "Move →",
+  next_speaker: "Speaker",
 };
 
 /** The card for a special id (`SPECIALS` entry), or null. */

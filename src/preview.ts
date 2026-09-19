@@ -155,6 +155,14 @@ bindings.b = {
     site_icon: null, action: { kind: "special", id },
   };
 });
+// 1.0.125 — "Next speaker" is seeded on NO key in the app; the preview binds
+// it on PgDn (a key the board draws; the board has no F-row) so the short
+// word ("Speaker") and its card can be seen.
+bindings.pgdn = {
+  app: null, web_url: null, label: null, icon_override: null,
+  browser_exe: null, browser_profile_dir: null, browser_profile_name: null,
+  site_icon: null, action: { kind: "special", id: "next_speaker" },
+};
 // One non-special action on a non-letter key. PHASE A step 4: ?editor=7
 // shows the SIMPLE editor — the app picker under the note "This key runs
 // Display — turn on Advanced mode to change it."; ?editor=7&advanced shows

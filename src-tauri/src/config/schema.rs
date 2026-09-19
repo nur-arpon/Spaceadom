@@ -1556,9 +1556,17 @@ pub const SPECIAL_IDS: &[&str] = &[
     // Windows' own "move this window to the other monitor".
     "move_window_left",
     "move_window_right",
+    // 1.0.125 (2026-09-19) — cycle the default output device. NOT seeded on
+    // any key (`UNSEEDED_SPECIALS`): the user binds it from the key editor.
+    "next_speaker",
 ];
 
-/// Is `id` one of the fourteen? Pure; the UI and the seed both ask.
+/// Specials that exist but are seeded on NO key by default — the user binds
+/// them from the key editor's "Spaceadom special" list. Every id here is in
+/// `SPECIAL_IDS` and in neither `DEFAULT_SPECIALS` nor `LATE_SPECIALS`.
+pub const UNSEEDED_SPECIALS: &[&str] = &["next_speaker"];
+
+/// Is `id` one of the fifteen? Pure; the UI and the seed both ask.
 pub fn is_special_id(id: &str) -> bool {
     SPECIAL_IDS.contains(&id)
 }
@@ -2946,18 +2954,24 @@ mod phase_a_action_tests {
         assert!(back.profiles.iter().all(|p| p.specials_seeded));
     }
 
-    /// The twelve ids in the seed are all real special ids, each special is
-    /// seeded exactly once, and the seed covers every id.
+    /// The ids in the seed are all real special ids, each seeded special is
+    /// seeded exactly once, and the seed plus `UNSEEDED_SPECIALS` covers
+    /// every id (1.0.125: `next_speaker` is deliberately on no key).
     #[test]
     fn the_seed_table_covers_every_special_exactly_once() {
-        assert_eq!(DEFAULT_SPECIALS.len(), SPECIAL_IDS.len());
+        assert_eq!(DEFAULT_SPECIALS.len() + UNSEEDED_SPECIALS.len(), SPECIAL_IDS.len());
         for id in SPECIAL_IDS {
+            let expected = if UNSEEDED_SPECIALS.contains(id) { 0 } else { 1 };
             assert_eq!(
                 DEFAULT_SPECIALS.iter().filter(|(_, s)| s == id).count(),
-                1,
-                "{id} must be seeded on exactly one key"
+                expected,
+                "{id} must be seeded on exactly {expected} key(s)"
             );
             assert!(is_special_id(id));
+        }
+        for id in UNSEEDED_SPECIALS {
+            assert!(is_special_id(id), "{id} is a real special");
+            assert!(!LATE_SPECIALS.iter().any(|(_, s)| s == id), "{id} is not late-seeded either");
         }
         assert!(!is_special_id("nope"));
         let mut keys: Vec<&str> = DEFAULT_SPECIALS.iter().map(|(k, _)| *k).collect();

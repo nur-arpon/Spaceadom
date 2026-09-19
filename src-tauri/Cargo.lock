@@ -3808,7 +3808,7 @@ dependencies = [
 
 [[package]]
 name = "spaceadom"
-version = "1.0.124"
+version = "1.0.125"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -3834,6 +3834,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tokio",
  "windows 0.58.0",
+ "windows-core 0.58.0",
  "winreg 0.52.0",
  "zip",
 ]
