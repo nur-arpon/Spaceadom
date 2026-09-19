@@ -36923,3 +36923,69 @@ unsafe fn set_default_endpoint(id: &str) -> Result<()> {
 **How it was verified.** `cargo test --release --lib` 795 / 0 / 7 ignored (4 new pure tests: wrap, single, current-not-found, toasts); `cargo clippy --release --lib` 0 warnings; `npx tsc --noEmit -p .` 0; `npm run build` clean; `node scripts/setting-subs.test.ts` passes. The READ-ONLY half was run on the owner's machine through the `#[ignore]` test `list_active_render_endpoints_on_this_machine` (`cargo test --release --lib list_active_render -- --ignored --nocapture`): 6 active render endpoints — `SteelSeries Sonar - Gaming`, `- Chat`, `Speakers (Realtek(R) Audio)`, `Sonar - Aux`, `Sonar - Media` (DEFAULT), `Sonar - Microphone` — names and ids read correctly, `next_index` → 5. **The WRITE half was PROVEN once, by the owner's authorised round trip** (`#[ignore]` test `round_trip_switch_to_the_next_speaker_and_back_on_this_machine`, `cargo test --release --lib round_trip -- --ignored --nocapture`; it always switches back, whatever the forward leg said, and a failed switch-back is a panic): ORIGINAL "SteelSeries Sonar - Media" `{…adf2d6a9…}` → `SetDefaultEndpoint(next)` = `Ok(())`, `GetDefaultAudioEndpoint` read back "SteelSeries Sonar - Microphone" `{…f9cecbaf…}` → `SetDefaultEndpoint(original)` = `Ok(())`, read back "SteelSeries Sonar - Media" — the default was left where it was found. Still UNPROVEN: the press-to-toast path in the installed app (`run_special` → `handle_next_speaker` → `show_toast`, the `handle_osk` shape) and the sound audibly following in a playing app. On the installed build: bind the special, press it, `grep next-speaker-default-endpoint-switched debug.log`; a `"Windows refused"` toast with a `SetDefaultEndpoint refused` WARN line is the failure signature. Gates after the round-trip test was added: 795 / 0 / 8 ignored, clippy 0.
 
 **Generalise this.** An undocumented-but-standard COM interface is declared in FULL, in vtable order, with opaque pointers for the slots you never call — the slot INDEX is the contract, not the parameter types — and its module header must say it is undocumented, who else depends on it, and what the user sees when it stops working. A cycle through a device list keys on the device ID, never the index, because the list can shrink between the read and the write.
+
+
+## APP VOLUME — ±10 POINTS ON THE APP IN FRONT'S OWN AUDIO SESSION (2026-09-19; 1.0.126, same build as the Space+\ seed — gates green: 802 unit tests / 0 failed / 9 ignored, clippy 0, tsc 0, vite clean; **NOT BUILT AS AN INSTALLER, NOT INSTALLED, NO GIT** — the lead does that)
+
+**Symptom / ask.** The owner wanted Space+`-` / Space+`=` to move the VOLUME MIXER slider of the app in front by 10 points — the per-app level, not the master that the keyboard's volume keys move — as two default specials on every profile, with a toast naming the app and the new level.
+
+**Root cause of the difficulty.** Two things. (1) Windows' per-app volume is an AUDIO SESSION (`ISimpleAudioVolume`), one per process that opened a stream on a render endpoint, and the process that owns the WINDOW is very often not the process that owns the SESSION: Chrome, Edge, Brave, Discord and Spotify play from a renderer / utility helper. Matching the foreground pid alone misses them — measured on the owner's laptop 2026-09-19 (below): Chrome's window is pid 9976, its only session is on pid 4504. (2) The three keys already existed in `KEY_TABLE` for typing, so seeding a special onto them must reuse their rows (`-` 18, `=` 19, `\` 22) — the ring's PUA codes and the HUD row order follow the table, not the seed order.
+
+**Exact files.**
+- `src-tauri/src/engine/actions/app_volume.rs` — NEW. `DELTA_PCT`, the pure `matching_pids` / `next_pct` / `scalar_to_pct` / `toast_text` / `nothing_playing_toast` / `NO_APP_TOAST`, and the `win` module: `foreground_target`, `process_snapshot`, `sessions_on_active_endpoints` (every ACTIVE render endpoint — owner decision 2026-09-19, Sonar), `nudge_sessions`, `adjust`. `audio_output::win::device_name` became `pub(crate)` for the per-endpoint log lines.
+- `src-tauri/src/engine/actions/mod.rs` — `pub mod app_volume;`
+- `src-tauri/src/engine/mod.rs` — `run_special` arms `"app_volume_down"` / `"app_volume_up"` → `handle_app_volume(∓DELTA_PCT)` (the `handle_osk` shape: one `adjust`, one `show_toast`).
+- `src-tauri/src/engine/specials.rs` — rows `("app_volume_down", "App volume −10%", "App −", "🔉")`, `("app_volume_up", "App volume +10%", "App +", "🔊")`.
+- `src-tauri/src/config/schema.rs` — `SPECIAL_IDS` += both; `DEFAULT_SPECIALS` += `("minus", "app_volume_down")`, `("equal", "app_volume_up")`; `LATE_SINGLES` += both (pass 3 backfills each key on its own terms: only when the key is unbound AND the special is bound nowhere in the profile); `UNSEEDED_SPECIALS` stays empty.
+- `src/types.ts` `SPECIAL_IDS`, `src/components/special-cards.ts` (two cards + `SPECIAL_SHORT` "App −" / "App +"), `src/preview.ts` (seeded fixture now carries `\`, `-`, `=`; the 1.0.125 PgDn stand-in is gone), `README.md` rows, `all-versions/WHAT-CHANGED.md` 1.0.126 row extended.
+
+**The code.**
+
+The pure match (`app_volume.rs`):
+
+```rust
+pub fn matching_pids(fg_pid: u32, fg_exe: &str, snapshot: &[(u32, String)]) -> Vec<u32> {
+    let want = fg_exe.trim().to_lowercase();
+    let mut out = vec![fg_pid];                       // the window's own process, first
+    if want.is_empty() { return out; }                // an unreadable name matches nothing else
+    for (pid, name) in snapshot {
+        if *pid != 0 && !out.contains(pid) && name.trim().eq_ignore_ascii_case(&want) {
+            out.push(*pid);                           // every helper with the same exe name
+        }
+    }
+    out
+}
+pub fn next_pct(cur: i32, delta: i32) -> u8 { (cur + delta).clamp(0, 100) as u8 }
+```
+
+The session walk (module `win`), read-only up to the write — over EVERY active render endpoint:
+
+```rust
+let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+let coll = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)?;   // all six on the owner's laptop
+for i in 0..coll.GetCount()? {                                          // per endpoint:
+let device = coll.Item(i)?;
+let manager: IAudioSessionManager2 = device.Activate(CLSCTX_ALL, None)?;
+let list = manager.GetSessionEnumerator()?;
+for i in 0..list.GetCount()? {
+    let ctl = list.GetSession(i)?;
+    let ctl2: IAudioSessionControl2 = ctl.cast()?;
+    let pid = ctl2.GetProcessId().unwrap_or(0);       // 0 = the system-sounds session, never matched
+    let state = ctl.GetState().map(|s| s.0).unwrap_or(AudioSessionStateExpired.0);
+    let volume: ISimpleAudioVolume = ctl.cast()?;
+    …
+}
+// per matched, non-expired session:
+let next = next_pct(scalar_to_pct(volume.GetMasterVolume()?), delta);
+volume.SetMasterVolume(next as f32 / 100.0, std::ptr::null())?;
+```
+
+`foreground_target` is `GetForegroundWindow` → `GetWindowThreadProcessId` → `exclusions::process_path_for_pid` → `normalize_stem`, refusing our own pid / `own_stem()` and anything `focus::is_shell_surface` calls the shell (so the ring's pill and this toast agree on "an app in front"); the toast name is `focus::short_name_for(stem)`. `process_snapshot` is the `hook::conflicts::detect` Toolhelp loop returning `(pid, exe name)`. The toast level is the foreground pid's own session when it has one, else the first helper's. Every failure is a log line plus a toast: `NO_APP_TOAST` = "No app in front"; no live session for the matched pids on any endpoint, or the endpoint enumerator itself failing → "🔇 <App> isn't playing anything" (one endpoint whose session manager refuses is logged and skipped). Success logs the marker `app-volume-session-slider-moved-spaceadom-126`. `CoInitializeEx(MTA)` per press, as `audio_output` does. The master (`IAudioEndpointVolume`) is never touched; nothing elevates.
+
+**Seed.** Pass 1 (fresh profile) seeds all seventeen. Pass 3 (`LATE_SINGLES`) backfills `\`, `-`, `=` into an already-seeded profile, each only when that key is unbound and its special is bound nowhere; a user's app on `-` is kept and only `=` is filled (`pass_three_seeds_app_volume_on_minus_and_equal_each_on_its_own_terms`).
+
+**Tests.** `app_volume::tests::{matching_pids_takes_the_foreground_and_every_same_named_helper, matching_pids_with_no_name_or_no_snapshot_matches_by_pid_alone, next_pct_clamps_at_both_ends, scalars_round_to_whole_percents, the_toasts_name_the_app_and_the_new_level}` + the `#[ignore]` READ-ONLY `list_audio_sessions_on_this_machine` (never calls `SetMasterVolume`). Re-pinned for seventeen seeds: `specials::tests::{a_seeded_profile_yields_todays_hud_rows, the_hud_rows_follow_the_bindings, a_seeded_profile_yields_todays_ring_tiles_with_stable_codes (codes U+E012 / U+E013 / U+E016; `expected` now sorted by `table_index`), step_4_…}`, `engine::band_gate_tests::step_4_a_mixed_profile…` (17 rows, 21 whole ring, 17 preview specials), `hook::keys::tests::{the_seed_keys_are_the_first_rows_in_seed_order (first 14 contiguous, then `\`/`-`/`=` against their own rows), the_bitmap_…}` (pass 3 on an empty seeded profile: 5), `middle_ring` (15 tiles, 14 after Esc, 26 codes), `schema` (17 fresh, 18 backfilled).
+
+**How it was verified.** `cargo test --release --lib` 802 / 0 / 9 ignored; `cargo clippy --release --lib` 0 warnings; `npx tsc --noEmit -p .` 0; `npm run build` clean. The READ-ONLY half was run on the owner's laptop (`cargo test --release --lib list_audio_sessions -- --ignored --nocapture`), nothing changed. First run (default endpoint only): 7 sessions — `powertoys.peek.ui.exe` 100%, `discord.exe` (pid 32076) 100%, `[system process]` pid 0, `msedgewebview2.exe` 100%, `discord.exe` (pid 19004) 100%, `chrome.exe` (pid 4504) 90%, `textinputhost.exe` 100%, all inactive; foreground "Chrome" pid 9976 `chrome.exe` → 41 matching pids including 4504. Second run (every active endpoint, after the owner's decision): **20 sessions across 6 endpoints** — Sonar Gaming / Chat / Aux / Microphone each carry `[system process]` + `msedgewebview2.exe`; Speakers (Realtek) carries the 7 above; **Sonar Media carries `gahighlight.exe`, both `discord.exe` pids, `[system process]` and `msedgewebview2.exe`** — so Discord has sessions on TWO endpoints and a default-only walk would have moved only one of them. **That listing is the proof of the helper rule:** by window pid alone Chrome would have toasted "isn't playing anything" while its mixer slider sat at 90%. **UNPROVEN:** the write half — no `SetMasterVolume` has been issued on this machine by this code; the press-to-toast path in the installed app; what the Mixer shows while a session is ACTIVE (only inactive sessions were present at both listing times); and whether moving the same app's sessions on several endpoints at once is what the owner wants to see in the Mixer (every one moves by the same delta from its own level). On the installed build: play something in Chrome, Space+`-`, expect "🔉 Chrome 80%" and the marker in debug.log; the Mixer slider for Chrome should read 80.
+
+**Generalise this.** A per-app OS resource (audio session, GPU context, network connection) is keyed by the PROCESS THAT OPENED IT, and modern apps open it from a helper. Match the app by exe name across a process snapshot, never by the window's pid alone — and write the read-only listing test first, because it is the one that shows you the pids do not line up.

@@ -106,7 +106,9 @@ works too.
 | `Space` + `;` | Voice typing — Windows dictation, typed wherever the cursor is |
 | `Space` + `/` | Screenshot — Windows' region snip (drag a rectangle, or pick window / full screen from its bar) |
 | `Space` + `'` | On-screen keyboard — Windows' own; press again to hide it |
-| `Space` + *a key you choose* | Next speaker — switches every app's sound to the next connected speaker or headphones and names it; on no key until you bind it (key editor → Advanced mode → Spaceadom special) |
+| `Space` + `\` | Next speaker — switches every app's sound to the next connected speaker or headphones and names it |
+| `Space` + `-` | App volume down — turns the app in front down by 10% on its own Volume-Mixer slider; the rest of your sound stays put |
+| `Space` + `=` | App volume up — the same slider, up by 10% |
 | Middle mouse button, held | The icon ring at the cursor; release on an app to launch it |
 | `Space` + `⌫` | Force close the app in front, even when it is frozen |
 | `Space` + `↑↑` | Jump to the top of what you are reading |

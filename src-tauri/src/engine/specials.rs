@@ -43,6 +43,10 @@ const SPECIALS: &[(&str, &str, &str, &str)] = &[
     // 1.0.125 (2026-09-19) — cycle the default output device
     // (`actions::audio_output`). Seeded on no key.
     ("next_speaker", "Next speaker", "Next speaker", "🔊"),
+    // 1.0.126 (2026-09-19) — ±10 points on the app in front's own audio
+    // session (`actions::app_volume`). Seeded on `-` / `=`.
+    ("app_volume_down", "App volume −10%", "App −", "🔉"),
+    ("app_volume_up", "App volume +10%", "App +", "🔊"),
 ];
 
 fn row(id: &str) -> Option<&'static (&'static str, &'static str, &'static str, &'static str)> {
@@ -370,6 +374,9 @@ pub(crate) mod tests {
         assert_eq!(ring_name("search"), "Search / Input");
         assert_eq!(display_name("next_speaker"), "Next speaker");
         assert_eq!(glyph("next_speaker"), "🔊");
+        assert_eq!(display_name("app_volume_down"), "App volume −10%");
+        assert_eq!(ring_name("app_volume_up"), "App +");
+        assert_eq!(glyph("app_volume_down"), "🔉");
         assert_eq!(display_name("nope"), "nope", "unknown ids come back as typed");
     }
 
@@ -420,21 +427,26 @@ pub(crate) mod tests {
 
     /// THE DEFAULT RING READS AS IT ALWAYS DID: Esc, `, Tab, ⌫, RAlt, `,`,
     /// `.`, then the three 2026-09-17/18 specials, then (step 3) the two
-    /// arrow specials, then the two gesture rows.
+    /// arrow specials, then (1.0.126) Space+-, Space+= and Space+\ — in
+    /// KEY-TABLE order, which is `-` (row 18), `=` (19), `\` (22), not the
+    /// seed table's — then the two gesture rows.
     #[test]
     fn a_seeded_profile_yields_todays_hud_rows() {
         let rows = hud_specials_for(&seeded_cfg());
         let keys: Vec<&str> = rows.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(
             keys,
-            vec!["Esc", "`", "Tab", "⌫", "RAlt", ",", ".", ";", "/", "'", "←", "→", "Scroll", "Up/Dn ×2"]
+            vec!["Esc", "`", "Tab", "⌫", "RAlt", ",", ".", ";", "/", "'", "←", "→", "-", "=", "\\", "Scroll", "Up/Dn ×2"]
         );
         assert_eq!(rows[0].1, "Boss Key (Hide All + Mute)");
         assert_eq!(rows[2].1, "Fullscreen PiP");
         assert_eq!(rows[10].1, "Window → Left Screen");
         assert_eq!(rows[11].1, "Window → Right Screen");
-        assert_eq!(rows[12].1, "Layer Opacity");
-        assert_eq!(rows[13].1, "Scroll Top/Bottom");
+        assert_eq!(rows[12].1, "App volume −10%");
+        assert_eq!(rows[13].1, "App volume +10%");
+        assert_eq!(rows[14].1, "Next speaker");
+        assert_eq!(rows[15].1, "Layer Opacity");
+        assert_eq!(rows[16].1, "Scroll Top/Bottom");
     }
 
     /// Remove one special and its row goes; remove ONE scroll special and
@@ -455,10 +467,11 @@ pub(crate) mod tests {
         );
         let rows = hud_specials_for(&cfg);
         let keys: Vec<&str> = rows.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(keys, vec!["`", "Tab", "⌫", "RAlt", ",", ";", "/", "'", "←", "→", "F1", "Scroll", "Up ×2"]);
+        assert_eq!(keys, vec!["`", "Tab", "⌫", "RAlt", ",", ";", "/", "'", "←", "→", "-", "=", "\\", "F1", "Scroll", "Up ×2"]);
         assert!(!rows.iter().any(|(_, n)| n == "ms-settings:display"), "a uri is not a Space-ring row (step 4)");
-        assert_eq!(rows[10].1, "Panic");
-        assert_eq!(rows[12].1, "Scroll Top");
+        assert_eq!(rows[12].1, "Next speaker");
+        assert_eq!(rows[13].1, "Panic");
+        assert_eq!(rows[15].1, "Scroll Top");
         // Neither scroll special → no double-tap row at all.
         cfg.profiles[0].bindings.remove("up");
         let rows = hud_specials_for(&cfg);
@@ -475,24 +488,30 @@ pub(crate) mod tests {
     fn a_seeded_profile_yields_todays_ring_tiles_with_stable_codes() {
         let tiles = ring_specials_for(&seeded_cfg());
         let keys: Vec<&str> = tiles.iter().map(|(k, _, _)| k.as_str()).collect();
-        assert_eq!(keys, vec!["Esc", "`", "Tab", "⌫", "RAlt", ",", ".", ";", "/", "'", "←", "→"]);
+        assert_eq!(keys, vec!["Esc", "`", "Tab", "⌫", "RAlt", ",", ".", ";", "/", "'", "←", "→", "-", "=", "\\"]);
         let names: Vec<&str> = tiles.iter().map(|(_, n, _)| n.as_str()).collect();
         assert_eq!(
             names,
             vec!["Boss Key", "PiP", "Fullscreen PiP", "Force Close", "Cycle Profiles",
                  "Search / Input", "Pause Spaceadom", "Voice Typing", "Screenshot", "Keyboard",
-                 "Window ←", "Window →"]
+                 "Window ←", "Window →", "App −", "App +", "Next speaker"]
         );
         let codes: Vec<char> = tiles.iter().map(|(_, _, c)| *c).collect();
         assert_eq!(codes[0], '\u{E000}');
         assert_eq!(codes[9], '\u{E009}');
         assert_eq!(codes[10], '\u{E00C}', "left is key-table index 12");
         assert_eq!(codes[11], '\u{E00D}');
-        let expected: Vec<&str> = crate::config::DEFAULT_SPECIALS
+        assert_eq!(codes[12], '\u{E012}', "minus is key-table index 18 (1.0.126)");
+        assert_eq!(codes[13], '\u{E013}', "equal is key-table index 19 (1.0.126)");
+        assert_eq!(codes[14], '\u{E016}', "backslash is key-table index 22 (1.0.126)");
+        // The tiles come in KEY-TABLE order, not seed order (the three
+        // 1.0.126 keys already had rows for typing, so `-`, `=` precede `\`).
+        let mut expected: Vec<&str> = crate::config::DEFAULT_SPECIALS
             .iter()
             .filter(|(_, id)| *id != "scroll_top" && *id != "scroll_bottom")
             .map(|(k, _)| *k)
             .collect();
+        expected.sort_by_key(|k| table_index(k));
         for (i, c) in codes.iter().enumerate() {
             assert!(!c.is_ascii_lowercase());
             let id = key_id_for_code(*c).unwrap();
@@ -619,14 +638,15 @@ pub(crate) mod tests {
         // two gesture rows — and none of the five action letters nor `]`.
         assert_eq!(
             keys,
-            vec!["Esc", "`", "Tab", "⌫", "RAlt", ",", ".", ";", "/", "'", "←", "→", "M", "Scroll", "Up/Dn ×2"]
+            vec!["Esc", "`", "Tab", "⌫", "RAlt", ",", ".", ";", "/", "'", "←", "→", "-", "=", "\\", "M", "Scroll", "Up/Dn ×2"]
         );
-        assert_eq!(rows[12].1, "Pause Spaceadom");
+        assert_eq!(rows[14].1, "Next speaker");
+        assert_eq!(rows[15].1, "Pause Spaceadom");
         assert!(!rows.iter().any(|(_, n)| n == "X"), "{rows:?}");
-        // The seeded 12 + 2 are all still there: 14 special bindings, of
+        // The seeded 15 + 2 are all still there: 17 special bindings, of
         // which the two scroll ones fold into the double-tap row.
         let seeded_specials = crate::config::DEFAULT_SPECIALS.len();
-        assert_eq!(seeded_specials, 14);
+        assert_eq!(seeded_specials, 17);
         assert_eq!(rows.len(), seeded_specials - 2 + 1 + 2);
     }
 

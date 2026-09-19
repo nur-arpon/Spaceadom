@@ -33,13 +33,15 @@ export type Action =
   | { kind: "special"; id: string };
 
 /**
- * The fifteen built-in specials, in Rust's `SPECIAL_IDS` order. `next_speaker`
- * (1.0.125) is seeded on no key — the user binds it from the key editor.
+ * The seventeen built-in specials, in Rust's `SPECIAL_IDS` order. Every one
+ * is seeded on a key (1.0.126: `next_speaker` on `\`, `app_volume_down` /
+ * `app_volume_up` on `-` / `=`).
  */
 export const SPECIAL_IDS = [
   "boss_key", "pip", "pip_fullscreen", "force_close", "cycle_profile", "search",
   "pause", "voice_typing", "screenshot", "osk", "scroll_top", "scroll_bottom",
   "move_window_left", "move_window_right", "next_speaker",
+  "app_volume_down", "app_volume_up",
 ] as const;
 export type SpecialId = (typeof SPECIAL_IDS)[number];
 

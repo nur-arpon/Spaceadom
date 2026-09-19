@@ -148,6 +148,8 @@ bindings.b = {
   ["period", "pause"], ["semicolon", "voice_typing"], ["slash", "screenshot"],
   ["quote", "osk"], ["up", "scroll_top"], ["down", "scroll_bottom"],
   ["left", "move_window_left"], ["right", "move_window_right"],
+  // 1.0.126 — Space+\ next speaker, Space+- / Space+= app volume.
+  ["backslash", "next_speaker"], ["minus", "app_volume_down"], ["equal", "app_volume_up"],
 ] as const).forEach(([key, id]) => {
   bindings[key] = {
     app: null, web_url: null, label: null, icon_override: null,
@@ -155,14 +157,8 @@ bindings.b = {
     site_icon: null, action: { kind: "special", id },
   };
 });
-// 1.0.125 — "Next speaker" is seeded on NO key in the app; the preview binds
-// it on PgDn (a key the board draws; the board has no F-row) so the short
-// word ("Speaker") and its card can be seen.
-bindings.pgdn = {
-  app: null, web_url: null, label: null, icon_override: null,
-  browser_exe: null, browser_profile_dir: null, browser_profile_name: null,
-  site_icon: null, action: { kind: "special", id: "next_speaker" },
-};
+// (1.0.125 bound "Next speaker" on PgDn here because the app seeded it on no
+// key; since 1.0.126 it is seeded on `\` like the rest, in the table above.)
 // One non-special action on a non-letter key. PHASE A step 4: ?editor=7
 // shows the SIMPLE editor — the app picker under the note "This key runs
 // Display — turn on Advanced mode to change it."; ?editor=7&advanced shows

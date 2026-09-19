@@ -1556,15 +1556,20 @@ pub const SPECIAL_IDS: &[&str] = &[
     // Windows' own "move this window to the other monitor".
     "move_window_left",
     "move_window_right",
-    // 1.0.125 (2026-09-19) — cycle the default output device. NOT seeded on
-    // any key (`UNSEEDED_SPECIALS`): the user binds it from the key editor.
+    // 1.0.125 (2026-09-19) — cycle the default output device; seeded on
+    // Space+\ since 1.0.126.
     "next_speaker",
+    // 1.0.126 (2026-09-19) — ±10 points on the audio session of the app in
+    // front (the Volume Mixer's per-app slider, never the master); Space+`-`
+    // and Space+`=`.
+    "app_volume_down",
+    "app_volume_up",
 ];
 
 /// Specials that exist but are seeded on NO key by default — the user binds
 /// them from the key editor's "Spaceadom special" list. Every id here is in
 /// `SPECIAL_IDS` and in neither `DEFAULT_SPECIALS` nor `LATE_SPECIALS`.
-pub const UNSEEDED_SPECIALS: &[&str] = &["next_speaker"];
+pub const UNSEEDED_SPECIALS: &[&str] = &[];
 
 /// Is `id` one of the fifteen? Pure; the UI and the seed both ask.
 pub fn is_special_id(id: &str) -> bool {
@@ -1593,7 +1598,20 @@ pub const DEFAULT_SPECIALS: &[(&str, &str)] = &[
     ("down", "scroll_bottom"),
     ("left", "move_window_left"),
     ("right", "move_window_right"),
+    // 1.0.126 (2026-09-19) — Space+\ cycles the default speaker (owner:
+    // "save it as a special function of the app by default").
+    ("backslash", "next_speaker"),
+    // 1.0.126 (2026-09-19) — Space+`-` / Space+`=` move the app in front's
+    // own Volume-Mixer slider by 10 points (`actions::app_volume`).
+    ("minus", "app_volume_down"),
+    ("equal", "app_volume_up"),
 ];
+
+/// 1.0.126 — singles the THIRD seeding pass fills into an already-seeded
+/// profile: each key individually, only when that key is unbound AND the
+/// special is not already bound anywhere in the profile.
+pub const LATE_SINGLES: &[(&str, &str)] =
+    &[("backslash", "next_speaker"), ("minus", "app_volume_down"), ("equal", "app_volume_up")];
 
 /// PHASE A step 3 — the pair the SECOND seeding pass fills into a profile
 /// that was already seeded by 1.0.116/117 (`seed_specials`, pass 2).
@@ -1624,6 +1642,18 @@ pub fn seed_specials(cfg: &mut AppConfig) -> bool {
     let mut late: Vec<String> = Vec::new();
     for p in cfg.profiles.iter_mut() {
         if p.specials_seeded {
+            // Pass 3 (1.0.126): singles, each on its own terms.
+            for (key, id) in LATE_SINGLES {
+                let already = p.bindings.values().any(|b| matches!(&b.action, Some(Action::Special { id: s }) if s == id));
+                if !p.bindings.contains_key(*key) && !already {
+                    p.bindings.insert(
+                        (*key).to_string(),
+                        KeyBinding { action: Some(Action::Special { id: (*id).to_string() }), ..Default::default() },
+                    );
+                    log::info!("config: seeded Space+{key} → {id} (1.0.126) into already-seeded profile '{}'", p.name);
+                    changed = true;
+                }
+            }
             if LATE_SPECIALS.iter().all(|(k, _)| !p.bindings.contains_key(*k)) {
                 for (key, id) in LATE_SPECIALS {
                     p.bindings.insert(
@@ -2973,11 +3003,73 @@ mod phase_a_action_tests {
             assert!(is_special_id(id), "{id} is a real special");
             assert!(!LATE_SPECIALS.iter().any(|(_, s)| s == id), "{id} is not late-seeded either");
         }
+        for (k, id) in LATE_SINGLES {
+            assert!(DEFAULT_SPECIALS.contains(&(*k, *id)), "a late single is also in the default table");
+        }
         assert!(!is_special_id("nope"));
         let mut keys: Vec<&str> = DEFAULT_SPECIALS.iter().map(|(k, _)| *k).collect();
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), DEFAULT_SPECIALS.len(), "one key, one special");
+    }
+
+    /// 1.0.126 — pass 3 seeds Space+\ → next_speaker into an already-seeded
+    /// profile only when `\` is unbound and the special is not bound elsewhere.
+    #[test]
+    fn pass_three_seeds_next_speaker_on_backslash_once() {
+        let mut cfg = AppConfig::default();
+        cfg.profiles = vec![Profile {
+            name: "F".into(),
+            bindings: BindingMap::new(),
+            emoji: None,
+            specials_seeded: false,
+        }];
+        seed_specials(&mut cfg);
+        let p = &cfg.profiles[0];
+        assert!(matches!(&p.bindings["backslash"].action, Some(Action::Special { id }) if id == "next_speaker"));
+        // Already seeded, key removed by the user, special moved to `=`: nothing re-added.
+        cfg.profiles[0].bindings.remove("backslash");
+        cfg.profiles[0].bindings.insert("equal".into(), KeyBinding { action: Some(Action::Special { id: "next_speaker".into() }), ..Default::default() });
+        assert!(!seed_specials(&mut cfg));
+        assert!(!cfg.profiles[0].bindings.contains_key("backslash"));
+        // Already seeded, key unbound, special nowhere: pass 3 adds it once.
+        cfg.profiles[0].bindings.remove("equal");
+        assert!(seed_specials(&mut cfg));
+        assert!(cfg.profiles[0].bindings.contains_key("backslash"));
+        assert!(!seed_specials(&mut cfg));
+    }
+
+    /// 1.0.126 — the same pass-3 rules for the two app-volume singles: a
+    /// fresh profile gets both on `-` / `=`; a user's app on `-` is kept and
+    /// only `=` is backfilled; a special moved to another key is not bound a
+    /// second time; the pass is idempotent.
+    #[test]
+    fn pass_three_seeds_app_volume_on_minus_and_equal_each_on_its_own_terms() {
+        let sp = |id: &str| KeyBinding { action: Some(Action::Special { id: id.into() }), ..Default::default() };
+        let special = |id: &str| Some(Action::Special { id: id.into() });
+        let mut cfg = AppConfig::default();
+        cfg.profiles = vec![Profile { name: "F".into(), bindings: BindingMap::new(), emoji: None, specials_seeded: false }];
+        seed_specials(&mut cfg);
+        assert_eq!(cfg.profiles[0].bindings["minus"].action, special("app_volume_down"));
+        assert_eq!(cfg.profiles[0].bindings["equal"].action, special("app_volume_up"));
+
+        // A 1.0.125-shaped profile: seeded, the user has an app on `-` and
+        // moved App + onto `f5`.
+        let p = &mut cfg.profiles[0];
+        p.bindings.remove("minus");
+        p.bindings.remove("equal");
+        p.bindings.insert("minus".into(), KeyBinding { app: Some("calc.exe".into()), ..Default::default() });
+        p.bindings.insert("f5".into(), sp("app_volume_up"));
+        assert!(!seed_specials(&mut cfg), "nothing to add: `-` is the user's, App + lives on F5");
+        assert_eq!(cfg.profiles[0].bindings["minus"].app.as_deref(), Some("calc.exe"));
+        assert!(!cfg.profiles[0].bindings.contains_key("equal"));
+
+        // Remove the moved copy: `=` is backfilled, `-` is still the user's.
+        cfg.profiles[0].bindings.remove("f5");
+        assert!(seed_specials(&mut cfg));
+        assert_eq!(cfg.profiles[0].bindings["equal"].action, special("app_volume_up"));
+        assert_eq!(cfg.profiles[0].bindings["minus"].app.as_deref(), Some("calc.exe"));
+        assert!(!seed_specials(&mut cfg), "idempotent");
     }
 
     /// PHASE A step 3 (§5) — the import listing: every command line, sorted
@@ -3041,12 +3133,12 @@ mod phase_a_action_tests {
         assert!(seed_specials(&mut cfg));
 
         let f = &cfg.profiles[0];
-        assert_eq!(f.bindings.len(), 14, "fresh: all fourteen");
+        assert_eq!(f.bindings.len(), 17, "fresh: all seventeen (1.0.126 adds Space+\\, Space+-, Space+=)");
         assert_eq!(f.bindings["left"].action, Some(Action::Special { id: "move_window_left".into() }));
         assert_eq!(f.bindings["right"].action, Some(Action::Special { id: "move_window_right".into() }));
 
         let o = &cfg.profiles[1];
-        assert_eq!(o.bindings.len(), 12 + 1 + 2, "1.0.117 profile: the two added, nothing else");
+        assert_eq!(o.bindings.len(), 15 + 1 + 2, "the fifteen non-arrow seeds + `a`, then the two arrows added, nothing else");
         assert_eq!(o.bindings["left"].action, Some(Action::Special { id: "move_window_left".into() }));
         assert_eq!(o.bindings["right"].action, Some(Action::Special { id: "move_window_right".into() }));
         assert_eq!(o.bindings["a"].app.as_deref(), Some("a.exe"));
@@ -3058,7 +3150,7 @@ mod phase_a_action_tests {
 
         // Idempotent.
         assert!(!seed_specials(&mut cfg), "nothing left to seed");
-        assert_eq!(cfg.profiles[1].bindings.len(), 15);
+        assert_eq!(cfg.profiles[1].bindings.len(), 18);
     }
 
     /// A profile export carries the flag, so an export made after the user

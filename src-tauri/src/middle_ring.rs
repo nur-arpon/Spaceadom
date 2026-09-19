@@ -3352,7 +3352,7 @@ mod route_and_special_tests {
     fn every_ring_special_has_a_combo_and_a_private_code() {
         let cfg = crate::engine::specials::seeded_cfg();
         let specials = ring_specials_for(&cfg);
-        assert_eq!(specials.len(), 12, "twelve tiles: the fourteen seeded specials minus the two scroll ones");
+        assert_eq!(specials.len(), 15, "fifteen tiles: the seventeen seeded specials minus the two scroll ones");
         for (_, _, code) in &specials {
             assert!(is_special_code(*code));
             assert!(special_combo_for(*code).is_some());
@@ -3367,7 +3367,7 @@ mod route_and_special_tests {
         let mut cfg2 = cfg.clone();
         cfg2.profiles[0].bindings.remove("esc");
         let after = ring_specials_for(&cfg2);
-        assert_eq!(after.len(), 11);
+        assert_eq!(after.len(), 14);
         assert_eq!(after[0].2, '\u{E001}', "the backtick keeps U+E001");
     }
 
@@ -3539,7 +3539,7 @@ mod favourites_and_payload_tests {
         assert_eq!(&codes[..2], &['k', 'a']);
         assert_eq!(&codes[2..11], &['b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j']);
         assert_eq!(codes.len(), 11 + ring_specials_for(&cfg).len());
-        assert_eq!(codes.len(), 23);
+        assert_eq!(codes.len(), 26);
         assert!(all[11..].iter().all(|e| e.kind == ItemKind::Special && is_special_code(e.code)));
         let (payload, _) = build_payload(all, MiddleRingScope::All, false, true, (0.0, 0.0));
         assert_eq!(payload.scope, "all");

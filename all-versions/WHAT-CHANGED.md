@@ -49,7 +49,13 @@ tidy. Their rows say what each one got wrong.
 
 ---
 
-## 2026-09-19 (latest) — 1.0.125 — "Next speaker"
+## 2026-09-19 (latest) — 1.0.126 — Next speaker on Space+\ by default; App volume on Space+- / Space+=
+
+| Version | What changed |
+| --- | --- |
+| **1.0.126** | Next speaker now sits on Space+\ by default — 1.0.125 shipped it live but unbound, so nobody would have found it without opening a key editor. It seeds onto the backslash key the same way every other special does, and if you already put it somewhere yourself it stays exactly there and does not get bound a second time. Everything else about it is unchanged from 1.0.125's description below. **Same build, two more specials: App volume.** Space+`-` turns the app in front DOWN by 10%, Space+`=` turns it UP by 10% — and it is that app's OWN slider in the Volume Mixer that moves, never the master volume your keyboard's volume keys move, so the rest of your sound stays where it is. The toast names the app and the new level ("🔉 Brave 40%", "🔊 Brave 60%"). Browsers, Discord and Spotify play their sound from helper processes, so the app is matched by exe name across all of them — on this laptop Chrome's window and its audio live in different processes, and the mixer still moves. If the app in front has nothing playing you get "🔇 Brave isn't playing anything"; on the desktop or over Spaceadom itself, "No app in front". Both are seeded onto `-` and `=` for every profile the same careful way as backslash: only when that key is free and you have not already put the special somewhere else. **Not yet pressed on hardware** — the session walk was proved read-only on this laptop (20 sessions across your six outputs listed, nothing changed — it looks at every connected output, not just the default one, because with Sonar an app is often on a different channel); the first press is the owner's. |
+
+## 2026-09-19 — 1.0.125 — "Next speaker"
 
 | Version | What changed |
 | --- | --- |

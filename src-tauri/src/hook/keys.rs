@@ -296,15 +296,32 @@ mod tests {
         assert_eq!(vk_for_any_key_id("space"), None);
     }
 
-    /// THE FIRST TWELVE ROWS ARE THE SEEDED SPECIALS' KEYS, IN SEED ORDER.
-    /// `middle_ring` codes a tile as `'\u{E000}' + index`, so the seeded
-    /// specials keep the U+E000–U+E00B codes the ring has always used.
+    /// THE FIRST FOURTEEN ROWS ARE THE SEEDED SPECIALS' KEYS, IN SEED ORDER.
+    /// `middle_ring` codes a tile as `'\u{E000}' + index`, so those seeded
+    /// specials keep the U+E000–U+E00D codes the ring has always used.
     /// Append-only: this test is the fence.
+    ///
+    /// 1.0.126's three later seeds — `backslash` → `next_speaker`, `minus` →
+    /// `app_volume_down`, `equal` → `app_volume_up` — are NOT new append
+    /// rows: `\`, `-` and `=` already had VKs (`VK_OEM_5`, `VK_OEM_MINUS`,
+    /// `VK_OEM_PLUS`) at their own rows (22, 18, 19), because the board
+    /// already let you TYPE them long before they could be specials. Seeding
+    /// a special onto an existing key must reuse that key's existing table
+    /// position — inventing a second row for the same VK would violate "one
+    /// VK, one id" and desync `vk_for_key_id`. So those three are checked
+    /// against their own stable rows instead of rows 14–16.
     #[test]
     fn the_seed_keys_are_the_first_rows_in_seed_order() {
-        for (i, (key, _)) in crate::config::DEFAULT_SPECIALS.iter().enumerate() {
+        const FIRST: usize = 14;
+        let (first, later) = crate::config::DEFAULT_SPECIALS.split_at(FIRST);
+        for (i, (key, _)) in first.iter().enumerate() {
             assert_eq!(KEY_TABLE[i].0, *key, "row {i}");
         }
+        let later_keys: Vec<&str> = later.iter().map(|(k, _)| *k).collect();
+        assert_eq!(later_keys, vec!["backslash", "minus", "equal"]);
+        assert_eq!(table_index("backslash"), Some(22), "backslash's own long-standing row");
+        assert_eq!(table_index("minus"), Some(18), "minus's own long-standing row");
+        assert_eq!(table_index("equal"), Some(19), "equal's own long-standing row");
     }
 
     /// Every non-letter key the DASHBOARD draws is in the table, except the
@@ -373,10 +390,11 @@ mod tests {
     #[test]
     fn the_bitmap_is_built_from_the_active_profile_and_special_keys() {
         let mut cfg = cfg_with(BindingMap::new(), BindingMap::new());
-        // Already flagged: the first pass is skipped, and only step 3's second
-        // pass (the arrow pair) runs on an empty, seeded profile.
-        assert!(crate::config::seed_specials(&mut cfg), "pass 2 adds the arrows");
-        assert_eq!(cfg.profiles[0].bindings.len(), 2, "and nothing else");
+        // Already flagged: the first pass is skipped, and step 3's second
+        // pass (the arrow pair) and third pass (Space+\, Space+-, Space+=)
+        // both run on an empty, seeded profile.
+        assert!(crate::config::seed_specials(&mut cfg), "pass 2 adds the arrows, pass 3 adds backslash, minus, equal");
+        assert_eq!(cfg.profiles[0].bindings.len(), 5, "and nothing else");
         cfg.profiles[0].bindings.clear();
         cfg.profiles[0].specials_seeded = false;
         assert!(crate::config::seed_specials(&mut cfg));

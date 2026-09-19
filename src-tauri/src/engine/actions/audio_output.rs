@@ -145,7 +145,8 @@ pub(crate) mod win {
     }
 
     /// The friendly name, or "Unnamed device" when the property is absent.
-    unsafe fn device_name(device: &IMMDevice) -> String {
+    /// Shared with `app_volume` (1.0.126) for its per-endpoint log lines.
+    pub(crate) unsafe fn device_name(device: &IMMDevice) -> String {
         let name = device
             .OpenPropertyStore(STGM_READ)
             .and_then(|store| store.GetValue(&PKEY_DEVICE_FRIENDLY_NAME))

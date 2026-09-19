@@ -905,6 +905,10 @@ fn run_special(id: &str, key_id: &str, state_arc: &Arc<Mutex<EngineState>>) {
         }
         // 1.0.125 — cycle the default output device (`actions::audio_output`).
         "next_speaker" => handle_next_speaker(state_arc),
+        // 1.0.126 — ±10 points on the AUDIO SESSION of the app in front
+        // (`actions::app_volume`); the master volume is never touched.
+        "app_volume_down" => handle_app_volume(-actions::app_volume::DELTA_PCT, state_arc),
+        "app_volume_up" => handle_app_volume(actions::app_volume::DELTA_PCT, state_arc),
         other => log::warn!(
             "engine: Space+{key_id} is bound to an unknown special '{other}' — nothing fired \
              (a config from a newer build?)"
@@ -934,6 +938,19 @@ fn handle_next_speaker(state_arc: &Arc<Mutex<EngineState>>) {
         s.app_handle.clone()
     };
     let msg = actions::audio_output::next_speaker();
+    crate::show_toast(&app_handle, &msg);
+}
+
+/// 1.0.126 — the `app_volume_down` / `app_volume_up` specials (Space+`-` /
+/// Space+`=`): move the Volume-Mixer slider of the app in front by `delta`
+/// points and toast the app's short name with the new level. Every failure
+/// is a toast, never a panic; the master volume is never touched.
+fn handle_app_volume(delta: i32, state_arc: &Arc<Mutex<EngineState>>) {
+    let app_handle = {
+        let s = state_arc.lock().unwrap_or_else(|p| p.into_inner());
+        s.app_handle.clone()
+    };
+    let msg = actions::app_volume::adjust(delta);
     crate::show_toast(&app_handle, &msg);
 }
 
@@ -2028,13 +2045,13 @@ mod band_gate_tests {
         );
         assert_eq!(hud_icons_for(&cfg, &name, &|_| None).len(), 4);
         let specials = specials_for_hud(cfg.hud_show_specials, &cfg.hud_band_count, specials::hud_specials_for(&cfg));
-        assert_eq!(specials.len(), 12 + 2, "{specials:?}");
+        assert_eq!(specials.len(), 15 + 2, "{specials:?}");
         assert!(specials.iter().all(|(_, n)| n != "hidden"), "{specials:?}");
-        assert_eq!(apps.len() + specials.len(), 18, "the whole Space ring");
+        assert_eq!(apps.len() + specials.len(), 21, "the whole Space ring");
         // And the preview payload — the Settings preview — agrees.
         let pv = preview_payload(&cfg, PreviewLayout::Compact);
         assert_eq!(pv.apps.len(), 4);
-        assert_eq!(pv.specials.len(), 14);
+        assert_eq!(pv.specials.len(), 17);
     }
 
     /// PHASE A — the double-tap rule, pure.

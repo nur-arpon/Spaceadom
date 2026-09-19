@@ -113,6 +113,14 @@ export const SPECIALS: SpecialSpec[] = [
   { id: "next_speaker", combo: "␣ —", name: "Next speaker",
     desc: "Cycle to the next connected speaker or headphones. Every app follows; press again to keep going round.",
     how: "Not on any key — assign it from any key's editor" },
+  // 1.0.126 (2026-09-19) — the app in front's OWN slider in the Volume Mixer,
+  // never the master. Reversible by the other key.
+  { id: "app_volume_down", combo: "␣ -", name: "App volume down",
+    desc: "Turn down the app in front by 10% — its own slider in the Volume Mixer, so the rest of your sound stays where it is. Tap = to bring it back up.",
+    how: "Hold Space, tap -" },
+  { id: "app_volume_up", combo: "␣ =", name: "App volume up",
+    desc: "Turn up the app in front by 10% — its own slider in the Volume Mixer, so the rest of your sound stays where it is. Tap - to bring it back down.",
+    how: "Hold Space, tap =" },
   { id: "scroll", combo: "␣ Scroll", name: "Opacity",
     desc: "Fades the window under your cursor so you can see what's behind it.",
     how: "Hold Space, roll the mouse wheel" },
@@ -169,6 +177,7 @@ export const SPECIAL_SHORT: Record<string, string> = {
   scroll_top: "Scroll Top", scroll_bottom: "Scroll Btm",
   move_window_left: "Move ←", move_window_right: "Move →",
   next_speaker: "Speaker",
+  app_volume_down: "App −", app_volume_up: "App +",
 };
 
 /** The card for a special id (`SPECIALS` entry), or null. */

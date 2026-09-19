@@ -15,3 +15,4 @@ pub mod uri;
 pub mod toggle;
 // 1.0.125 (2026-09-19) — "Next speaker": cycle the default output device.
 pub mod audio_output;
+pub mod app_volume;
