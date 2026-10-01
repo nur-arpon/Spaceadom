@@ -16,6 +16,7 @@ artefact.
 | **17 Sep 2026** | The icon ring anchored on the press point (1.0.112). |
 | **21 Sep 2026** | Launch on the cursor's monitor; PowerToys Workspaces as a binding target (1.0.138). |
 | **22 Sep 2026** | The ring button is a choice (wheel, Back or Forward, hold or click); Back and Forward become bindable keys; a drawn mouse and a Mouse page; external-monitor brightness over DDC/CI that follows the cursor (1.0.142). |
+| **1 Oct 2026** | Visual polish: long notifications keep their shape, round glows (1.0.143). |
 | **Sep 2026** | Submitted to the Microsoft Store. |
 
 Radial menus themselves are old — pie menus date from 1988 and there are
