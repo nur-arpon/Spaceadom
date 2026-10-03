@@ -1,6 +1,8 @@
 # Spaceadom
 
-*Source-visible, proprietary — see [LICENSE](LICENSE).*
+[![Get it from Microsoft](https://get.microsoft.com/images/en-us%20dark.svg)](https://apps.microsoft.com/detail/9PNB2QDZK902)
+
+**Free.** No account, no ads, no analytics. Windows 10/11, x64 and ARM64.
 
 **Hold Space, tap an app's initial — it opens. Tap it again — it's gone.
 Tap Space on its own and it types a space, always.**
@@ -11,7 +13,7 @@ native Windows application: a Rust core with a system-wide keyboard hook, a
 Tauri v2 shell for the dashboard, and an on-demand transparent overlay for the
 radial guide and toasts.
 
-Windows 10/11, x64 — and, since 1.0.113, Windows on ARM64 (`*_arm64-setup.exe`, built and signed but not yet run on ARM hardware). No account, no analytics, no ads.
+Windows 10/11, x64 and Windows on ARM64. Every ARM64 release is installed and started on a real ARM64 Windows machine before it ships (the keyboard hook, the overlay and the settings load; nobody presses keys there, so treat ARM64 as a beta). No account, no analytics, no ads.
 
 ---
 
@@ -47,7 +49,9 @@ Windows 10/11, x64 — and, since 1.0.113, Windows on ARM64 (`*_arm64-setup.exe`
 
 ## Install
 
-Download the latest **`Spaceadom_*_x64-setup.exe`** from
+**Easiest: the [Microsoft Store](https://apps.microsoft.com/detail/9PNB2QDZK902)** (free). The Store copy updates through the Store.
+
+Or download the latest **`Spaceadom_*_x64-setup.exe`** from
 [Releases](../../releases) and run it. This is the **recommended** installer:
 it installs into your own user folder, never asks for an admin password, and
 is the one that keeps itself updated (see "Updates" below).
@@ -63,9 +67,6 @@ believes those files belong to the `.msi`; uninstalling that entry later
 deletes them. Full detail, including a correction to an earlier version of
 this warning, is in the notes of each [release](../../releases). Install one,
 never both.
-
-**Microsoft Store:** submitted and in certification (September 2026); the
-Store copy updates through the Store.
 
 That's it. Spaceadom starts with Windows and lives in your tray.
 
@@ -138,11 +139,12 @@ works too.
 | `Space` + `-` | App volume down — turns the app in front down by 10% on its own Volume-Mixer slider; the rest of your sound stays put |
 | `Space` + `=` | App volume up — the same slider, up by 10% |
 | Middle mouse button, held | The icon ring at the cursor; release on an app to launch it |
+| Back or Forward mouse button | Your choice: open the ring instead of the wheel (hold, or one click), or bind each one like a key (Mouse page) |
 | `Space` + `⌫` | Force close the app in front, even when it is frozen |
 | `Space` + `↑↑` | Jump to the top of what you are reading |
 | `Space` + `↓↓` | Jump to the bottom |
 | `Space` alone | A space. Always. |
-| One finger, from a touchpad edge inward | Change something along that edge — left edge brightness, right edge volume, top edge video seek |
+| One finger, from a touchpad edge inward | Change something along that edge — left edge brightness, right edge volume, top edge video seek. Brightness changes the screen your cursor is on, external monitors included |
 
 Every one of these is also explained inside the app: the row along the bottom
 of the dashboard is pressable, and so is each of those keys on the on-screen
@@ -166,6 +168,18 @@ keyboard on the home screen, or Settings. Lift your finger to stop; slide back
 to undo. Every edge can also send a ready-made pair — Tabs, Zoom, Undo / Redo,
 Copy / Paste, Track — or any shortcut you record, one for each direction, a
 step at a time as you slide (Copy / Paste and Track fire once per slide).
+
+---
+
+## Questions people ask first
+
+**How much does it use when idle?** Next to nothing for CPU (0.01 % measured on a laptop with the app sitting in the tray). Memory: about 110 MB in Task Manager with the settings window closed, most of it the web view that draws the ring so it can appear instantly. The settings window is torn down 10 seconds after you close it and rebuilt when you open it again.
+
+**How is it different from PowerToys Run, Raycast or Flow Launcher?** Those are search launchers: you type part of a name and pick from a list. Spaceadom is a chord you learn once: Space+B is your browser, every time, with no typing and no list to read. They work fine side by side.
+
+**Does it get in the way of typing?** No. A tapped Space types a space. Only a held Space followed by a letter is a shortcut, and fast typing, where the next key lands within a fraction of a second, is always treated as text. You can tune that under Settings → Typing speed.
+
+**Is the source available?** No. Releases are signed for the updater, there is no account and no analytics, and [PRIVACY.md](PRIVACY.md) lists every file it writes and every request it makes.
 
 ---
 
