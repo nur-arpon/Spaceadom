@@ -51,6 +51,12 @@ Windows 10/11, x64 and Windows on ARM64. Every ARM64 release is installed and st
 
 **Easiest: the [Microsoft Store](https://apps.microsoft.com/detail/9PNB2QDZK902)** (free). The Store copy updates through the Store.
 
+Or from a terminal:
+
+```
+winget install spaceadom
+```
+
 Or download the latest **`Spaceadom_*_x64-setup.exe`** from
 [Releases](../../releases) and run it. This is the **recommended** installer:
 it installs into your own user folder, never asks for an admin password, and
