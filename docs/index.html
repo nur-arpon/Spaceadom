@@ -724,7 +724,7 @@ footer .links { display: flex; gap: 20px; margin-left: auto; flex-wrap: wrap; } 
     <a class="btn primary magnetic" href="https://apps.microsoft.com/detail/9PNB2QDZK902">Get it from Microsoft</a>
     <a class="btn ghost magnetic" href="https://github.com/nur-arpon/Spaceadom/releases/latest">Download the installer</a>
   </div>
-  <p class="coffee">Spaceadom is free and built by one student. If it saves you time, <a href="https://ko-fi.com/nurifran" target="_blank" rel="noopener">☕ buy me a coffee</a>.</p>
+  <p class="coffee">Spaceadom is free and made by student developers. If it saves you time, <a href="https://ko-fi.com/nurifran" target="_blank" rel="noopener">☕ buy me a coffee</a>.</p>
 </section>
 
 <footer><div class="wrap">
@@ -816,7 +816,7 @@ footer .links { display: flex; gap: 20px; margin-left: auto; flex-wrap: wrap; } 
   const img = (a, cls = "") => `<img src="${IC(a)}" alt=""${cls ? ` class="${cls}"` : ""} width="64" height="64" decoding="async">`;
   const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
   const wait = (ms) => new Promise(r => setTimeout(r, ms));
-  const MAC_SPRING = CSS.supports("transition-timing-function", "linear(0, 1)")
+  const BOOST_SPRING = CSS.supports("transition-timing-function", "linear(0, 1)")
     ? "linear(0, 0.0352, 0.1205, 0.2319, 0.3525, 0.4711, 0.5807, 0.6774, 0.7596, 0.8273, 0.8814, 0.9234, 0.955, 0.9778, 0.9938, 1.0042, 1.0106, 1.0139, 1.0151, 1.0149, 1.0138, 1.0122, 1.0103, 1.0085, 1.0068, 1.0053, 1.004, 1.0029, 1)"
     : "cubic-bezier(.2,.8,.2,1)";
   const fillMq = (box, list) => { const h = list.map(ch => `<span><i>${img(APP[ch])}</i>${APP[ch].n}</span>`).join(""); box.innerHTML = h + h; };
@@ -980,7 +980,7 @@ footer .links { display: flex; gap: 20px; margin-left: auto; flex-wrap: wrap; } 
     f.style.cssText = `width:${cw}px;height:${chh}px;transform:translate(${x0}px,${y0}px)`;
     setTimeout(() => { screen.append(f); chip.classList.add("gone"); hideGuide();
       const an = f.animate([{ transform: `translate(${x0}px,${y0}px)`, width: cw + "px", height: chh + "px" }, { transform: `translate(${T.x}px,${T.y}px)`, width: T.w + "px", height: T.h + "px" }],
-        { duration: 520, easing: MAC_SPRING, fill: "forwards" });
+        { duration: 520, easing: BOOST_SPRING, fill: "forwards" });
       f.children[0].animate([{ opacity: 1 }, { opacity: 1, offset: .12 }, { opacity: 0, offset: .45 }, { opacity: 0 }], { duration: 520, fill: "forwards" });
       f.children[1].animate([{ opacity: 0 }, { opacity: 0, offset: .25 }, { opacity: 1, offset: .6 }, { opacity: 1 }], { duration: 520, fill: "forwards" });
       const land = () => { if (!f.isConnected) return; desk.toast(ch, verb, true); f.remove(); }; an.onfinish = land; setTimeout(land, 760 * SLOW); }, 90 * SLOW); }
