@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://nur-arpon.github.io/Spaceadom/sitemap.xml
