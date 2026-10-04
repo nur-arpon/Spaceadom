@@ -4,6 +4,8 @@
 
 **Free.** No account, no ads, no analytics. Windows 10/11, x64 and ARM64.
 
+Built by one student. If it saves you time, [☕ buy me a coffee](https://ko-fi.com/nurifran). It keeps the updates coming.
+
 **Website: [nur-arpon.github.io/Spaceadom](https://nur-arpon.github.io/Spaceadom/)**: try it right in your browser.
 
 **Hold Space, tap an app's initial — it opens. Tap it again — it's gone.
