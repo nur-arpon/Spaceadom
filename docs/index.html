@@ -886,12 +886,19 @@ footer .links { display: flex; gap: 20px; margin-left: auto; flex-wrap: wrap; } 
     toast(ch, verb, landed) { const t = this.toastEl; clearTimeout(this.tt); t.innerHTML = this.toastHTML(ch, verb);
       if (landed) { t.className = "toast2 open snap"; void t.offsetWidth; t.classList.remove("snap"); }
       else { t.className = "toast2"; void t.offsetWidth; t.classList.add("open"); }
-      this.tt = setTimeout(() => { t.classList.remove("open"); t.classList.add("leave"); }, 1900); }
+      this.tt = setTimeout(() => { t.classList.remove("open"); t.classList.add("leave"); }, 1900 * (this.linger || 1)); }
   }
   /* ---------- hero: the Space chord ---------- */
   const stage = $("#stage"), screen = $("#screen"), guideEl = $("#guide"), gc = $("#gc"), kbEl = $("#kb"), tl = $("#tltxt"), lab = $("#autolabel");
   const small = () => matchMedia("(max-width: 560px)").matches;
   const desk = new Desk(screen, HERO);
+  /* Owner, 2026-10-04: "a little bit slower so it becomes easier to follow". One factor for the whole Space demo:
+     every animation that starts inside it plays at 1/SLOW speed (keycaps excepted, so typing still feels instant),
+     and the timers below are stretched by the same factor. */
+  const SLOW = 1.5, slowWait = (ms) => wait(ms * SLOW); desk.linger = SLOW;
+  const slowAll = () => stage.getAnimations({ subtree: true }).forEach(a => { const t = a.effect && a.effect.target;
+    if (a.playbackRate === 1 && !(t && t.closest && t.closest(".key"))) a.playbackRate = 1 / SLOW; });
+  if (!reduce) new MutationObserver(slowAll).observe(stage, { subtree: true, childList: true, attributes: true, attributeFilter: ["class"] });
 
   // 3D tilt: follows a fine pointer; flattens as you scroll on touch / reduced motion
   if (fine && !reduce) addEventListener("pointermove", e => { const r = stage.getBoundingClientRect(); if (r.bottom < 0 || r.top > innerHeight) return;
@@ -947,7 +954,7 @@ footer .links { display: flex; gap: 20px; margin-left: auto; flex-wrap: wrap; } 
     spaceKey.classList.add("down"); hud("hold"); kcSpace.classList.add("on"); clearTimeout(S.gt); S.gt = setTimeout(showGuide, 300); }
   function showGuide() { if (!S.space || S.used) return; S.guide = true; desk.hideToast(); layoutGuide(); guideEl.classList.remove("out"); Object.values(chips).forEach(c => c.classList.remove("armed", "gone")); guideEl.classList.add("on"); }
   function hideGuide() { clearTimeout(S.gt); if (!S.guide) return; S.guide = false; guideEl.classList.remove("on"); guideEl.classList.add("out");
-    setTimeout(() => { if (!S.guide) { guideEl.classList.remove("out"); Object.values(chips).forEach(c => c.classList.remove("armed", "gone")); } }, 170); }
+    setTimeout(() => { if (!S.guide) { guideEl.classList.remove("out"); Object.values(chips).forEach(c => c.classList.remove("armed", "gone")); } }, 170 * SLOW); }
   function spaceUp() { if (!S.space) return; S.space = false; spaceKey.classList.remove("down"); kcSpace.classList.remove("on"); hideGuide();
     if (!S.used) { typeChar(" "); hud("space"); } }
   function keyDown(ch) { const k = keys[ch]; if (!k) return; k.classList.add("down"); const now = performance.now();
@@ -971,21 +978,21 @@ footer .links { display: flex; gap: 20px; margin-left: auto; flex-wrap: wrap; } 
         { duration: 520, easing: MAC_SPRING, fill: "forwards" });
       f.children[0].animate([{ opacity: 1 }, { opacity: 1, offset: .12 }, { opacity: 0, offset: .45 }, { opacity: 0 }], { duration: 520, fill: "forwards" });
       f.children[1].animate([{ opacity: 0 }, { opacity: 0, offset: .25 }, { opacity: 1, offset: .6 }, { opacity: 1 }], { duration: 520, fill: "forwards" });
-      const land = () => { if (!f.isConnected) return; desk.toast(ch, verb, true); f.remove(); }; an.onfinish = land; setTimeout(land, 760); }, 90); }
+      const land = () => { if (!f.isConnected) return; desk.toast(ch, verb, true); f.remove(); }; an.onfinish = land; setTimeout(land, 760 * SLOW); }, 90 * SLOW); }
 
   // autoplay: teaches open, front, minimise, come back, and plain typing; stops the moment the visitor does anything
   let auto = !reduce, inView = false, run = 0, busy = false;
-  async function playChord(ch, src, alive = () => true) { spaceDown(src); await wait(420); if (!alive()) { S.used = true; return spaceUp(); }
-    keyDown(ch); await wait(160); keyUp(ch); await wait(360); spaceUp(); }
+  async function playChord(ch, src, alive = () => true) { spaceDown(src); await slowWait(420); if (!alive()) { S.used = true; return spaceUp(); }
+    keyDown(ch); await slowWait(160); keyUp(ch); await slowWait(360); spaceUp(); }
   async function typeStr(str, alive) { for (const c of str) { if (!alive()) return;
       if (c === " ") { spaceDown("demo"); await wait(70); spaceUp(); } else { keyDown(c.toUpperCase()); await wait(55); keyUp(c.toUpperCase()); }
-      await wait(75 + Math.random() * 70); } }
+      await wait((75 + Math.random() * 70) * 1.2); } }
   const SCRIPT = [["S"], [1000], ["C"], [1000], ["S"], [1100], ["S"], [1100], ["S"], [1300], ["type", "see you soon"], [1200], ["V"], [900], ["D"], [1000], ["E"], [1600], ["reset"], [600]];
   function resetDemo() { desk.closeAll(); text = ""; renderText(); hud("idle"); }
   async function autoplay() { const tok = ++run, alive = () => tok === run && auto && inView;
     resetDemo(); await wait(650);
     while (alive()) for (const st of SCRIPT) { if (!alive()) return;
-      if (typeof st[0] === "number") await wait(st[0]); else if (st[0] === "type") await typeStr(st[1], alive);
+      if (typeof st[0] === "number") await slowWait(st[0]); else if (st[0] === "type") await typeStr(st[1], alive);
       else if (st[0] === "reset") resetDemo(); else await playChord(st[0], "demo", alive); } }
   function setLabel() { lab.classList.toggle("replay", !auto); lab.querySelector("span").textContent = auto ? "Demo playing · try it yourself" : "Replay demo"; }
   function takeOver() { if (!auto) return; auto = false; run++; if (S.space && S.src === "demo") { S.used = true; spaceUp(); }
