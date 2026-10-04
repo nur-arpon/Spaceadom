@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<!-- Google tag (gtag.js): website visits only. The Spaceadom app has no analytics (PRIVACY.md). -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-G5CRWPMVPE"></script>
+<script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}gtag("js",new Date());gtag("config","G-G5CRWPMVPE");</script>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Spaceadom — Spacebar app launcher for Windows | Hold Space, tap a letter</title>
 <meta name="description" content="Spaceadom turns your spacebar into an app launcher for Windows. Hold Space, tap a letter, your app opens. Free on the Microsoft Store.">
@@ -108,73 +111,224 @@ h1 .grad { background: linear-gradient(100deg, #fff 10%, #b8c6ff 45%, #ff9ad5 70
 .facts span::before { content: "•"; margin-right: 10px; color: var(--accent); }
 .facts span:first-child::before { content: none; }
 
-/* ---------- the 3D stage ---------- */
-.scene { perspective: 1600px; margin: 70px auto 0; width: min(1040px, 100%); opacity: 0; animation: rise 1.4s var(--out) 1.25s forwards; }
+/* ---------- hero demo: a small Windows desktop over a keyboard ----------
+   Motion numbers are the real app's (src/styles/overlay-earthy.css, toast.ts):
+   guide shell 220ms in / 143ms out, chips bloom 620ms cubic-bezier(.34,1.3,.4,1)
+   staggered 26ms from 120ms, SPACE pill pops 560ms, chip -> toast flight on the
+   MAC damped spring (520ms, straight line, faces cross-fade), toast 560ms in /
+   340ms out. */
+.scene { perspective: 1800px; margin: 64px auto 0; width: min(1040px, 100%); opacity: 0; animation: rise 1.4s var(--out) 1.25s forwards; }
 @keyframes rise { from { opacity: 0; transform: translateY(80px) scale(.94); } to { opacity: 1; transform: none; } }
-.stage { position: relative; height: 500px; border-radius: 30px; transform-style: preserve-3d; transform: rotateX(var(--rx, 14deg)) rotateY(var(--ry, 0deg));
-  transition: transform .9s var(--out); border: 1px solid var(--line); overflow: hidden; user-select: none; touch-action: manipulation;
+.stage { --tbh: 38px; position: relative; display: flex; flex-direction: column; gap: 14px; padding: 18px; border-radius: 30px; overflow: hidden;
+  transform: rotateX(var(--rx, 8deg)) rotateY(var(--ry, 0deg)); transition: transform .9s var(--out); border: 1px solid var(--line);
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; touch-action: manipulation;
   background: radial-gradient(90% 70% at 50% 0%, rgba(var(--glow), .14), transparent 60%), linear-gradient(180deg, #111a33, #0a1022);
   box-shadow: 0 60px 140px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.02), inset 0 1px 0 rgba(255,255,255,.07); }
 .stage::after { content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
-  background: radial-gradient(500px circle at var(--sx, 50%) var(--sy, 0%), rgba(255,255,255,.07), transparent 60%); }
-.stage .hint { position: absolute; left: 0; right: 0; top: 24px; text-align: center; color: var(--dim); font-size: 15px; transition: opacity .4s; z-index: 4; }
+  background: radial-gradient(500px circle at var(--sx, 50%) var(--sy, 0%), rgba(255,255,255,.06), transparent 60%); }
 kbd { font: 600 13px "Outfit", sans-serif; padding: 3px 9px; border-radius: 7px; border: 1px solid var(--line); background: rgba(255,255,255,.07); color: var(--text); }
-.kb { position: absolute; left: 50%; bottom: 36px; transform: translateX(-50%) translateZ(30px); display: grid; gap: 8px; }
-.row { display: flex; gap: 8px; justify-content: center; }
-.key { width: 48px; height: 46px; border-radius: 12px; display: grid; place-items: center; font-weight: 600; font-size: 15px; color: var(--dim); position: relative;
-  background: linear-gradient(180deg, rgba(255,255,255,.085), rgba(255,255,255,.025)); border: 1px solid var(--line);
-  box-shadow: 0 3px 0 rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.06);
-  transition: transform .14s var(--ease), background .3s, color .3s, box-shadow .3s; cursor: pointer; }
-.key.bound::after { content: ""; position: absolute; bottom: 6px; width: 5px; height: 5px; border-radius: 50%; background: var(--c); box-shadow: 0 0 8px var(--c); }
-.key.wave { background: linear-gradient(180deg, rgba(var(--glow), .2), rgba(var(--glow), .06)); color: #dfe6ff; }
-.key.space { width: 360px; letter-spacing: .32em; font-size: 12px; }
-.key.down { transform: translateY(3px); background: rgba(var(--glow), .34); color: #fff; box-shadow: 0 0 0 1px rgba(var(--glow), .7), 0 0 34px rgba(var(--glow), .5); }
-.guide { position: absolute; left: 50%; top: 30%; width: 0; height: 0; pointer-events: none; transform: translateZ(60px); }
-.chip { position: absolute; transform: translate(-50%,-50%) scale(.5); opacity: 0; display: flex; align-items: center; gap: 8px;
-  padding: 7px 14px 7px 8px; border-radius: 999px; background: rgba(18,26,52,.94); border: 1px solid var(--line); font-size: 13.5px; white-space: nowrap;
-  transition: transform .5s var(--spring), opacity .25s var(--ease), box-shadow .25s; box-shadow: 0 10px 30px rgba(0,0,0,.35); }
-.chip i, .tile, .toast i, .mq i { font-style: normal; }
-.chip i { width: 22px; height: 22px; border-radius: 7px; display: grid; place-items: center; font-weight: 700; font-size: 12px; color: #fff; background: var(--c); }
-.guide.on .chip { opacity: 1; transform: translate(-50%,-50%) scale(1); }
-.chip.armed { box-shadow: 0 0 0 1.5px rgba(var(--glow), .95), 0 0 40px rgba(var(--glow), .6); transform: translate(-50%,-50%) scale(1.12) !important; }
-.spacepill { position: absolute; transform: translate(-50%,-50%) scale(.6); opacity: 0; padding: 15px 44px; border-radius: 999px;
-  background: linear-gradient(180deg, #92a8ff, #5872ee); color: #fff; font-weight: 800; letter-spacing: .28em; font-size: 13px;
-  box-shadow: 0 14px 50px rgba(var(--glow), .55), inset 0 1px 0 rgba(255,255,255,.35); transition: transform .5s var(--spring), opacity .2s; }
-.guide.on .spacepill { opacity: 1; transform: translate(-50%,-50%) scale(1); }
-.beam { position: absolute; left: 0; top: 0; height: 3px; transform-origin: 0 50%; border-radius: 3px; opacity: 0;
-  background: linear-gradient(90deg, rgba(var(--glow), .9), rgba(var(--glow), 0)); transition: opacity .2s; }
-.toast { position: absolute; left: 50%; bottom: 26px; transform: translate(-50%, 24px) scale(.94); opacity: 0; display: flex; align-items: center; gap: 10px;
-  padding: 10px 20px 10px 10px; border-radius: 999px; background: rgba(20,28,56,.97); border: 1px solid rgba(var(--glow), .4);
-  box-shadow: 0 18px 60px rgba(0,0,0,.5), 0 0 40px rgba(var(--glow), .18); font-weight: 600; pointer-events: none; z-index: 6; white-space: nowrap; }
-.toast i { width: 28px; height: 28px; border-radius: 9px; display: grid; place-items: center; color: #fff; background: var(--c); font-weight: 700; }
-.toast span { color: var(--faint); font-weight: 500; }
-.toast.show { animation: toast 2.2s var(--out) forwards; }
-@keyframes toast { 0% { opacity: 0; transform: translate(-50%, 24px) scale(.94); } 14% { opacity: 1; transform: translate(-50%, 0) scale(1); }
-  84% { opacity: 1; transform: translate(-50%, 0) scale(1); } 100% { opacity: 0; transform: translate(-50%, 10px) scale(.98); } }
-.win { position: absolute; left: 50%; top: 78px; width: 400px; height: 210px; border-radius: 18px; transform: translateX(-50%) translateZ(10px) scale(.9) translateY(14px); opacity: 0;
-  background: linear-gradient(180deg, rgba(255,255,255,.09), rgba(255,255,255,.025)); border: 1px solid var(--line); overflow: hidden;
-  box-shadow: 0 30px 80px rgba(0,0,0,.45); transition: transform .6s var(--spring), opacity .35s var(--ease); }
-.win.open { opacity: 1; transform: translateX(-50%) translateZ(10px) scale(1); }
-.win .bar { height: 36px; display: flex; align-items: center; gap: 9px; padding: 0 14px; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--dim); }
-.win .bar i { width: 18px; height: 18px; border-radius: 6px; background: var(--c); }
-.win .bar .dots { margin-left: auto; display: flex; gap: 6px; } .win .bar .dots b { width: 9px; height: 9px; border-radius: 50%; background: rgba(255,255,255,.14); }
-.win .body { padding: 18px; display: grid; gap: 11px; }
-.win .ln { height: 10px; border-radius: 6px; background: linear-gradient(90deg, rgba(255,255,255,.09), rgba(255,255,255,.03)); }
-.win.open .ln { animation: ln .9s var(--out) both; } .win.open .ln:nth-child(2) { animation-delay: .06s } .win.open .ln:nth-child(3) { animation-delay: .12s } .win.open .ln:nth-child(4) { animation-delay: .18s }
-@keyframes ln { from { transform: scaleX(.2); transform-origin: 0 50%; opacity: 0; } to { transform: none; opacity: 1; } }
-.stage.live .hint { opacity: 0; }
-.stage > .toast { bottom: auto; top: 18px; }
-@keyframes toastTop { 0% { opacity: 0; transform: translate(-50%, -18px) scale(.94); } 14% { opacity: 1; transform: translate(-50%, 0) scale(1); } 84% { opacity: 1; transform: translate(-50%, 0) scale(1); } 100% { opacity: 0; transform: translate(-50%, -8px) scale(.98); } }
-.stage > .toast.show { animation-name: toastTop; }
-.autolabel { position: absolute; right: 18px; top: 18px; font-size: 12px; color: var(--faint); padding: 5px 10px; border-radius: 999px; border: 1px solid var(--line); z-index: 4; transition: opacity .4s; }
-.stage.user .autolabel { opacity: 0; }
 
+/* the chord read-out: what the last input did, in keycaps */
+.chud { display: flex; align-items: center; justify-content: space-between; gap: 10px 18px; flex-wrap: wrap; min-height: 38px; position: relative; z-index: 2; }
+.chord { display: flex; align-items: center; gap: 9px; min-width: 0; font-size: 15px; color: var(--dim); }
+.kc { display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 34px; min-width: 34px; padding: 0 11px; border-radius: 10px; flex: none;
+  font: 700 13.5px "Outfit", sans-serif; color: var(--text); white-space: nowrap; letter-spacing: .02em;
+  background: linear-gradient(180deg, rgba(255,255,255,.11), rgba(255,255,255,.035)); border: 1px solid var(--line); box-shadow: 0 3px 0 rgba(0,0,0,.45);
+  transition: transform .1s var(--ease), background .2s, box-shadow .2s, opacity .25s; }
+.kc img { width: 18px; height: 18px; }
+.kc.on { transform: translateY(2px); background: rgba(var(--glow), .32); box-shadow: 0 1px 0 rgba(0,0,0,.45), 0 0 0 1px rgba(var(--glow), .75), 0 0 24px rgba(var(--glow), .45); }
+.kc.ghost { opacity: .35; }
+.kc.wait { background: transparent; border-style: dashed; border-color: rgba(var(--glow), .55); color: var(--accent2); box-shadow: none; animation: kwait 1.1s ease-in-out infinite; }
+@keyframes kwait { 50% { border-color: rgba(var(--glow), .2); } }
+.kc[hidden], .chord .plus[hidden] { display: none; }
+.chord .plus, .chord .arr { color: var(--faint); font-weight: 600; flex: none; }
+.chord .res { color: var(--text); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.chord .res em { font-style: normal; color: var(--accent2); font-weight: 500; }
+.chord .res.idle { color: var(--dim); font-weight: 500; }
+.steps { display: flex; gap: 6px; list-style: none; flex-wrap: wrap; }
+.steps li { display: inline-flex; align-items: center; gap: 7px; padding: 5px 12px 5px 6px; border-radius: 999px; border: 1px solid var(--line); background: rgba(255,255,255,.03);
+  color: var(--faint); font-size: 13px; font-weight: 600; white-space: nowrap; transition: color .25s, background .25s, border-color .25s, transform .45s var(--spring); }
+.steps li b { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; background: rgba(255,255,255,.07); transition: background .25s, color .25s; }
+.steps li.on { color: #fff; background: rgba(var(--glow), .2); border-color: rgba(var(--glow), .55); transform: translateY(-1px); }
+.steps li.on b { background: var(--accent); color: #0a0f22; }
+
+/* the screen */
+.screen { position: relative; height: 340px; border-radius: 16px; overflow: hidden; isolation: isolate; border: 1px solid rgba(255,255,255,.09);
+  background: radial-gradient(70% 90% at 22% 115%, rgba(125,151,255,.42), transparent 62%), radial-gradient(55% 80% at 84% -10%, rgba(255,122,198,.2), transparent 60%),
+    radial-gradient(40% 60% at 62% 72%, rgba(92,225,230,.1), transparent 70%), linear-gradient(165deg, #121b3a, #0a0f22);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.06), 0 18px 50px rgba(0,0,0,.35); }
+.autolabel { position: absolute; right: 10px; top: 10px; z-index: 45; display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px; border-radius: 999px; white-space: nowrap;
+  font: 500 12px "Outfit", sans-serif; color: var(--dim); background: rgba(10,14,30,.6); border: 1px solid var(--line); cursor: pointer; transition: opacity .3s, background .2s, color .2s; }
+.guide.on ~ .autolabel { opacity: 0; pointer-events: none; }
+.autolabel:hover { color: var(--text); background: rgba(10,14,30,.85); }
+.autolabel i { width: 7px; height: 7px; border-radius: 50%; background: #5ce1a0; box-shadow: 0 0 8px #5ce1a0; font-style: normal; }
+.autolabel.replay i { background: none; box-shadow: none; width: auto; height: auto; }
+.autolabel.replay i::before { content: "↻"; color: var(--accent2); }
+
+/* fake windows */
+.wins { position: absolute; inset: 0; z-index: 1; }
+.fw { --w: 46%; --h: 64%; position: absolute; left: calc((100% - var(--w)) * var(--fx)); top: calc((100% - var(--tbh) - var(--h)) * var(--fy)); width: var(--w); height: var(--h);
+  border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; background: #141b2e; border: 1px solid rgba(255,255,255,.1); box-shadow: 0 18px 44px rgba(0,0,0,.5);
+  opacity: 0; visibility: hidden; transform: translateY(12px) scale(.94); pointer-events: none;
+  transition: transform .45s var(--spring), opacity .22s var(--ease), visibility 0s .45s, box-shadow .25s; }
+.fw.open { opacity: 1; visibility: visible; transform: none; pointer-events: auto; transition: transform .5s var(--spring), opacity .2s var(--ease), visibility 0s, box-shadow .25s; }
+.fw.min { opacity: 0; visibility: hidden; transform: translate(var(--mx, 0px), var(--my, 200px)) scale(.08);
+  transition: transform .34s cubic-bezier(.4,0,1,1), opacity .3s cubic-bezier(.7,0,1,1), visibility 0s .34s; }
+.fw.fg { box-shadow: 0 26px 60px rgba(0,0,0,.6), 0 0 0 1px rgba(var(--glow), .3); }
+.fw.bg::after { content: ""; position: absolute; inset: 0; background: rgba(8,12,26,.3); pointer-events: none; }
+.fw .tb { height: 28px; flex: none; display: flex; align-items: center; gap: 8px; padding-left: 10px; font-size: 12px; color: var(--dim); white-space: nowrap;
+  background: rgba(255,255,255,.045); border-bottom: 1px solid rgba(255,255,255,.06); }
+.fw.bg .tb { color: var(--faint); }
+.fw .tb img { width: 15px; height: 15px; flex: none; }
+.fw .tb .ctl { margin-left: auto; display: flex; flex: none; }
+.fw .tb .ctl i { width: 28px; height: 28px; display: grid; place-items: center; color: var(--faint); font-style: normal; font-size: 10px; }
+.fw .bd { flex: 1; min-height: 0; display: flex; position: relative; }
+.bd .side { width: 26%; flex: none; padding: 10px 8px; display: grid; align-content: start; gap: 8px; background: rgba(255,255,255,.03); border-right: 1px solid rgba(255,255,255,.05); }
+.bd .col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.bd .main { flex: 1; min-height: 0; padding: 11px 12px; display: grid; align-content: start; gap: 8px; overflow: hidden; }
+.bd .ln { display: block; height: 7px; border-radius: 4px; background: rgba(255,255,255,.1); }
+.bd .tabs { height: 24px; flex: none; display: flex; align-items: end; padding: 0 8px; background: rgba(0,0,0,.18); }
+.bd .tab { display: flex; align-items: center; gap: 6px; height: 20px; padding: 0 10px; border-radius: 7px 7px 0 0; background: #1b2338; font-size: 10.5px; color: var(--dim); white-space: nowrap; }
+.bd .tab img { width: 11px; height: 11px; }
+.bd .url { margin: 6px 10px 0; height: 20px; border-radius: 999px; background: rgba(255,255,255,.06); font-size: 10.5px; color: var(--faint); display: flex; align-items: center; padding: 0 10px; white-space: nowrap; overflow: hidden; }
+.bd .blk { height: 54px; border-radius: 8px; background: linear-gradient(120deg, rgba(var(--glow), .45), rgba(var(--pink), .3)); }
+.bd .art { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.bd .art b { aspect-ratio: 1; border-radius: 6px; background: var(--g); }
+.bd .play { height: 30px; flex: none; display: flex; align-items: center; gap: 10px; padding: 0 12px; border-top: 1px solid rgba(255,255,255,.06); background: rgba(0,0,0,.2); }
+.bd .play i { width: 14px; height: 14px; border-radius: 50%; background: #fff; flex: none; }
+.bd .play .pr { flex: 1; height: 4px; border-radius: 4px; background: rgba(255,255,255,.12); overflow: hidden; }
+.bd .play .pr b { display: block; height: 100%; width: 38%; background: var(--c); border-radius: 4px; animation: prog 14s linear infinite; }
+@keyframes prog { from { width: 8%; } to { width: 96%; } }
+.bd .ava { width: 20px; height: 20px; border-radius: 50%; background: var(--a, rgba(255,255,255,.14)); }
+.bd .row2 { display: flex; align-items: center; gap: 7px; }
+.bd .bub { height: 17px; border-radius: 9px; background: rgba(255,255,255,.09); }
+.bd .bub.me { margin-left: auto; background: color-mix(in srgb, var(--c) 55%, transparent); }
+.bd .code { padding: 10px 12px; display: grid; gap: 6px; align-content: start; flex: 1; font: 500 9.5px ui-monospace, Consolas, monospace; color: var(--faint); }
+.bd .code p { display: flex; align-items: center; gap: 9px; }
+.bd .code p b { height: 6px; border-radius: 3px; display: block; }
+.bd .fold { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px 8px; }
+.bd .fold b { height: 26px; border-radius: 4px 4px 5px 5px; background: linear-gradient(180deg, #f6cf5c, #e2a93a); position: relative; }
+.bd .fold b::before { content: ""; position: absolute; left: 0; top: -4px; width: 45%; height: 6px; border-radius: 3px 3px 0 0; background: #e2a93a; }
+.bd .term { flex: 1; background: #0b0d14; padding: 10px 12px; font: 500 10.5px/1.65 ui-monospace, "Cascadia Code", Consolas, monospace; color: #c9d1e3; white-space: pre; overflow: hidden; }
+.bd .term s { text-decoration: none; color: #6ee7a8; }
+.bd .term u { text-decoration: none; display: inline-block; width: 7px; height: 12px; vertical-align: -2px; background: #c9d1e3; animation: blink 1s steps(1) infinite; }
+.bd .paper { flex: 1; background: #1d2231; padding: 12px 14px; display: grid; gap: 8px; align-content: start; }
+.bd .paper .ln { background: rgba(255,255,255,.16); }
+.bd .cells { flex: 1; display: grid; grid-template-columns: 22px repeat(5, 1fr); grid-auto-rows: 15px; gap: 1px; background: rgba(255,255,255,.06); padding-bottom: 1px; overflow: hidden; }
+.bd .cells b { background: #161d31; }
+.bd .cells b.h { background: #1c2540; } .bd .cells b.v { background: color-mix(in srgb, var(--c) 30%, #161d31); }
+.bd .canvas { flex: 1; background: #fafafa; position: relative; overflow: hidden; }
+.bd .canvas b { position: absolute; border-radius: 50%; }
+@keyframes blink { 50% { opacity: 0; } }
+/* taskbar: a short line under a running app, a long accent line under the active one */
+.taskbar { position: absolute; left: 0; right: 0; bottom: 0; height: var(--tbh); z-index: 20; display: flex; align-items: center; justify-content: center; gap: 2px; padding: 0 64px;
+  background: rgba(14,19,38,.88); border-top: 1px solid rgba(255,255,255,.07); }
+.tbb { position: relative; width: 36px; height: 32px; flex: none; border-radius: 7px; display: grid; place-items: center; transition: background .2s; cursor: pointer; }
+.tbb:hover { background: rgba(255,255,255,.06); }
+.tbb img { width: 20px; height: 20px; pointer-events: none; }
+.tbb.start svg { width: 17px; height: 17px; }
+.tbb::after { content: ""; position: absolute; bottom: 1px; left: 50%; height: 3px; width: 0; border-radius: 3px; transform: translateX(-50%); background: rgba(255,255,255,.55);
+  transition: width .35s var(--spring), background .2s; }
+.tbb.run::after { width: 6px; }
+.tbb.act { background: rgba(255,255,255,.1); } .tbb.act::after { width: 16px; background: var(--accent); }
+.tbb.bump img { animation: bump .5s var(--spring); }
+@keyframes bump { 35% { transform: translateY(-5px) scale(1.08); } }
+.taskbar .clock { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); font-size: 11px; line-height: 1.2; color: var(--dim); text-align: right; white-space: nowrap; }
+
+/* the guide: the SPACE pill with every binding around it */
+.guide { position: absolute; left: 0; right: 0; top: 0; bottom: var(--tbh); z-index: 30; pointer-events: none; opacity: 0; transform: scale(.93);
+  transition: opacity 143ms cubic-bezier(.4,0,1,1), transform 143ms cubic-bezier(.4,0,1,1); }
+.guide.on { opacity: 1; transform: none; transition: opacity 220ms cubic-bezier(.2,.8,.2,1), transform 220ms cubic-bezier(.2,.8,.2,1); }
+.guide .gc { position: absolute; left: 50%; top: 50%; width: 0; height: 0; }
+.g-scrim { position: absolute; left: -400px; top: -220px; width: 800px; height: 440px; border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(9,13,27,.78), rgba(9,13,27,.5) 55%, rgba(9,13,27,0)); }
+.g-pulse { position: absolute; left: -170px; top: -170px; width: 340px; height: 340px; border-radius: 50%; border: 1.5px solid rgba(var(--glow), .6); opacity: 0; }
+.guide.on .g-pulse { animation: gpulse 900ms cubic-bezier(.2,.8,.2,1) both; }
+@keyframes gpulse { from { opacity: .85; transform: scale(.35); } to { opacity: 0; transform: scale(1.2); } }
+.g-space { position: absolute; left: 0; top: 0; width: 230px; height: 60px; transform: translate(-50%,-50%); border-radius: 999px; display: grid; place-items: center;
+  font: 800 14px "Outfit", sans-serif; letter-spacing: .22em; text-indent: .22em; color: #fff;
+  background: linear-gradient(180deg, #92a8ff, #5872ee); border: 1px solid rgba(255,255,255,.22); box-shadow: 0 14px 44px rgba(var(--glow), .5), inset 0 1px 0 rgba(255,255,255,.35); }
+.guide.on .g-space { animation: spop 560ms cubic-bezier(.34,1.3,.4,1) both; }
+@keyframes spop { 0% { transform: translate(-50%,-50%) scale(.55); opacity: 0; } 62% { transform: translate(-50%,-50%) scale(1.05); opacity: 1; } 100% { transform: translate(-50%,-50%) scale(1); opacity: 1; } }
+.gchip { position: absolute; left: var(--x); top: var(--y); transform: translate(-50%,-50%); z-index: 1; transition: transform 170ms cubic-bezier(.34,1.3,.4,1), opacity 110ms; }
+.gchip > i { display: flex; align-items: center; gap: 9px; padding: 5px 13px 5px 7px; border-radius: 999px; font: 600 12.5px "Outfit", sans-serif; font-style: normal; color: #e8e4dc; white-space: nowrap;
+  background: rgba(19,26,41,.96); border: 1.5px solid rgba(232,228,220,.14); box-shadow: 0 8px 22px rgba(0,0,0,.45);
+  transition: background-color 140ms cubic-bezier(.2,.8,.2,1), border-color 140ms cubic-bezier(.2,.8,.2,1), color 140ms, box-shadow 140ms cubic-bezier(.2,.8,.2,1); }
+.guide.on .gchip > i { animation: bloom 620ms cubic-bezier(.34,1.3,.4,1) both; animation-delay: var(--d, 120ms); }
+@keyframes bloom { 0% { opacity: 0; transform: translate(var(--fx), var(--fy)) scale(.2); } 62% { opacity: 1; transform: translate(calc(var(--fx) * -.06), calc(var(--fy) * -.06)) scale(1.06); } 100% { opacity: 1; transform: none; } }
+.gchip .ico { position: relative; width: 22px; height: 22px; flex: none; }
+.gchip .ico img { width: 22px; height: 22px; display: block; }
+.gchip .ico u { position: absolute; top: -6px; right: -9px; min-width: 15px; height: 15px; padding: 0 3px; border-radius: 999px; text-decoration: none; text-align: center;
+  background: #3d4c7e; color: #fff; font: 700 9.5px/15px ui-monospace, Consolas, monospace; box-shadow: 0 0 0 1.5px #131a29; }
+.gchip.armed { z-index: 3; transform: translate(-50%,-50%) scale(1.1); }
+.gchip.armed > i { background: #5f78e8; border-color: #9aacff; color: #fff; box-shadow: 0 8px 22px rgba(0,0,0,.45), 0 0 0 3px rgba(var(--glow), .38), 0 0 0 7px rgba(var(--glow), .16); }
+.gchip.armed .ico u { background: #fff; color: #3a4fb8; box-shadow: 0 0 0 1.5px #5f78e8; }
+.gchip.armed::after { content: ""; position: absolute; inset: 0; border-radius: 999px; border: 2px solid rgba(var(--glow), .85); pointer-events: none; animation: armp 1100ms cubic-bezier(.22,1,.36,1) 3 both; }
+@keyframes armp { 0% { transform: scale(1); opacity: .9; } 70%, 100% { transform: scale(1.42); opacity: 0; } }
+.gchip.gone { opacity: 0; transition: none; }
+.guide.out .gchip:not(.gone) { transform: translate(-50%,-50%) scale(.72); opacity: 0; transition: transform 110ms cubic-bezier(.4,0,1,1), opacity 110ms cubic-bezier(.4,0,1,1); }
+
+/* chip -> toast flight */
+.fly { position: absolute; left: 0; top: 0; z-index: 40; border-radius: 999px; overflow: hidden; pointer-events: none; will-change: transform;
+  background: rgba(19,26,41,.98); border: 1.5px solid rgba(154,172,255,.6); box-shadow: 0 14px 34px rgba(0,0,0,.5); }
+.fly > div { position: absolute; left: 0; top: 0; bottom: 0; display: flex; align-items: center; white-space: nowrap; }
+.fly .f-chip { gap: 9px; padding: 0 13px 0 7px; font: 600 12.5px "Outfit", sans-serif; color: #fff; background: #5f78e8; right: 0; }
+.fly .f-chip img, .fly .f-toast img { width: 22px; height: 22px; }
+.fly .f-toast { gap: 10px; padding: 0 14px 0 9px; font: 600 13.5px "Outfit", sans-serif; color: var(--text); }
+.fly .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--c); flex: none; }
+.fly .f-toast em, .toast2 .msg em { font-style: normal; color: var(--dim); font-weight: 500; }
+
+/* toast: the real app's island pill */
+.tslot { position: absolute; left: 0; right: 0; bottom: calc(var(--tbh) + 12px); z-index: 35; display: flex; justify-content: center; pointer-events: none; }
+.toast2 { display: inline-flex; align-items: center; gap: 10px; height: 42px; padding: 0 14px 0 9px; border-radius: 999px; overflow: hidden; white-space: nowrap; flex: none;
+  background: rgba(19,26,41,.97); border: 1px solid rgba(var(--glow), .38); box-shadow: 0 14px 40px rgba(0,0,0,.5), 0 0 30px rgba(var(--glow), .14);
+  max-width: 42px; opacity: 0; transform: translateY(18px) scale(.45); }
+.toast2.open { max-width: 420px; opacity: 1; transform: none;
+  transition: max-width 560ms cubic-bezier(.34,1.3,.4,1), opacity 560ms cubic-bezier(.34,1.3,.4,1), transform 560ms cubic-bezier(.34,1.3,.4,1); }
+.toast2.leave { max-width: 42px; opacity: 0; transform: translateY(-8px) scale(.5);
+  transition: max-width 340ms cubic-bezier(.4,0,1,1), opacity 340ms cubic-bezier(.4,0,1,1), transform 340ms cubic-bezier(.4,0,1,1); }
+.toast2.snap, .toast2.snap * { transition: none !important; }
+.toast2.measure { max-width: none !important; transform: none !important; transition: none !important; visibility: hidden; }
+.toast2 img { width: 24px; height: 24px; flex: none; }
+.toast2 .msg { font-weight: 600; font-size: 13.5px; color: var(--text); opacity: 0; transition: opacity .3s .14s; }
+.toast2 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--c); flex: none; opacity: 0; transition: opacity .3s .18s; }
+.toast2.open .msg, .toast2.open .dot, .toast2.measure .msg, .toast2.measure .dot { opacity: 1; }
+
+/* the deck: a line that proves typing still types, and the keys */
+.deck { display: grid; gap: 12px; justify-items: center; }
+.typeline { width: min(600px, 100%); height: 40px; display: flex; align-items: center; gap: 12px; padding: 0 14px; border-radius: 12px; background: rgba(0,0,0,.28); border: 1px solid var(--line); overflow: hidden; }
+.typeline .lab { flex: none; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--faint); font-weight: 600; }
+.typeline .txt { flex: 1; min-width: 0; display: flex; align-items: center; overflow: hidden; white-space: pre; font-size: 15.5px; color: var(--text); }
+.typeline .txt .ph { color: var(--faint); }
+.typeline .caret { width: 2px; height: 18px; margin-left: 1px; background: var(--accent); flex: none; animation: blink 1.05s steps(1) infinite; }
+.typeline .spc { display: inline-block; width: .55em; height: 1.05em; margin: 0 1px; vertical-align: middle; border: 2px solid var(--accent); border-top: 0; border-radius: 0 0 3px 3px; opacity: .95; transition: opacity .8s .5s; }
+.typeline .spc.fade { opacity: 0; }
+.kb { --kg: 7px; --kh: 40px; --kw: min(48px, calc((100% - 9 * var(--kg)) / 10)); width: min(560px, 100%); display: grid; gap: var(--kg); }
+.row { display: flex; gap: var(--kg); justify-content: center; }
+.key { position: relative; flex: none; width: var(--kw); height: var(--kh); border-radius: 10px; display: grid; place-items: center; font-weight: 600; font-size: 14px; color: var(--faint);
+  background: linear-gradient(180deg, rgba(255,255,255,.07), rgba(255,255,255,.02)); border: 1px solid var(--line); box-shadow: 0 3px 0 rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.05);
+  transition: transform .09s var(--ease), background .2s, color .2s, box-shadow .2s; cursor: pointer; touch-action: manipulation; }
+.key.bound { background: linear-gradient(180deg, rgba(255,255,255,.13), rgba(255,255,255,.045)); color: var(--dim); }
+.key.bound img { width: 20px; height: 20px; pointer-events: none; }
+.key.bound span { position: absolute; left: 5px; top: 2px; font-size: 9.5px; line-height: 1.2; pointer-events: none; }
+.key.bound:hover { box-shadow: 0 3px 0 rgba(0,0,0,.45), 0 0 0 1px rgba(var(--glow), .5); }
+.key.down { transform: translateY(3px); background: rgba(var(--glow), .32); color: #fff; box-shadow: 0 0 0 rgba(0,0,0,0), 0 0 0 1px rgba(var(--glow), .75), 0 0 26px rgba(var(--glow), .45); }
+.key.space { width: calc(var(--kw) * 6 + var(--kg) * 5); letter-spacing: .3em; text-indent: .3em; font-size: 11.5px; color: var(--dim); }
+.key.nope { animation: nope .32s var(--ease); }
+@keyframes nope { 25% { translate: -3px 0; } 75% { translate: 3px 0; } }
+
+/* chips and pill used by the scroll-driven orbit */
+.chip { position: absolute; transform: translate(-50%,-50%); display: flex; align-items: center; gap: 9px; padding: 6px 15px 6px 7px; border-radius: 999px; white-space: nowrap;
+  background: rgba(18,26,52,.94); border: 1px solid var(--line); font-size: 13.5px; box-shadow: 0 10px 30px rgba(0,0,0,.35); }
+.chip i { width: 24px; height: 24px; display: grid; place-items: center; font-style: normal; } .chip i img { width: 24px; height: 24px; }
+.spacepill { position: absolute; transform: translate(-50%,-50%); padding: 15px 44px; border-radius: 999px; background: linear-gradient(180deg, #92a8ff, #5872ee); color: #fff;
+  font-weight: 800; letter-spacing: .28em; font-size: 13px; box-shadow: 0 14px 50px rgba(var(--glow), .55), inset 0 1px 0 rgba(255,255,255,.35); }
 /* ---------- marquee ---------- */
 .marquee { margin-top: 90px; overflow: hidden; mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent); }
 .mq { display: flex; gap: 14px; width: max-content; animation: mq 38s linear infinite; }
 .mq.rev { animation-direction: reverse; animation-duration: 46s; margin-top: 14px; }
 .mq span { display: flex; align-items: center; gap: 10px; padding: 10px 18px 10px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--card); color: var(--dim); font-size: 14.5px; white-space: nowrap; }
-.mq i { width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 12px; background: var(--c); }
+.mq i { width: 26px; height: 26px; display: grid; place-items: center; font-style: normal; } .mq i img { width: 24px; height: 24px; }
 .marquee:hover .mq { animation-play-state: paused; }
 @keyframes mq { to { transform: translateX(-50%); } }
 
@@ -211,28 +365,76 @@ h2 .grad { background: linear-gradient(100deg, #fff, #b8c6ff 60%, #ff9ad5); -web
 .orbit .chip.lit { box-shadow: 0 0 0 1.5px rgba(var(--glow), .95), 0 0 40px rgba(var(--glow), .6); }
 .orbit .ringline { position: absolute; left: -330px; top: -150px; width: 660px; height: 300px; border-radius: 50%; border: 1px dashed rgba(var(--glow), .3); opacity: 0; }
 
-/* ---------- ring demo ---------- */
-.ringpad { position: relative; height: 440px; border-radius: var(--radius); border: 1px solid var(--line); cursor: crosshair; overflow: hidden;
-  background: radial-gradient(80% 70% at 50% 40%, #16204000, #0b1122), radial-gradient(60% 60% at 50% 45%, rgba(var(--glow), .12), transparent 70%), #0b1122;
-  user-select: none; touch-action: none; box-shadow: 0 40px 100px rgba(0,0,0,.45); }
-.ringpad .label { position: absolute; inset: auto 0 24px; text-align: center; color: var(--faint); font-size: 14px; pointer-events: none; transition: opacity .3s; }
+/* ---------- ring demo: the real icon ring (src/styles/middle-ring.css + middle-ring.ts) ----------
+   r = 108 / 175 (5 + 8 favourites, outer ring turned by the golden angle), 44 px tiles,
+   130 px centre pill, 640 px scrim, guides at 2r+14. Selection is by ANGLE past an 82 px
+   dead zone, band by distance, 3° hysteresis. The armed tile and its two neighbours are
+   pushed out 40 / 24 px on a 170 ms spring; a fisheye wave (1.35 / 1.15 / 1 / .85) follows
+   the bearing with a 120 ms lerp. Shell 220 ms in / 143 ms out on the phi curves. */
+.ringpad { --tbh: 38px; position: relative; height: 540px; border-radius: var(--radius); border: 1px solid var(--line); overflow: hidden; isolation: isolate;
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; touch-action: pan-y; box-shadow: 0 40px 100px rgba(0,0,0,.45); cursor: default;
+  background: radial-gradient(70% 70% at 80% 110%, rgba(125,151,255,.3), transparent 62%), radial-gradient(50% 60% at 10% -5%, rgba(92,225,230,.13), transparent 60%),
+    radial-gradient(45% 55% at 85% 10%, rgba(255,122,198,.12), transparent 60%), linear-gradient(170deg, #111a36, #0a0f22); }
+.ringpad .fw { --w: 52%; --h: 52%; }
+.ringpad .label { position: absolute; left: 16px; right: 16px; top: 18px; z-index: 25; text-align: center; color: var(--dim); font-size: 14px; pointer-events: none; transition: opacity .3s; }
+.ringpad .label b { color: var(--text); font-weight: 600; }
 .ringpad.busy .label { opacity: 0; }
-.ring { position: absolute; width: 0; height: 0; pointer-events: none; }
-.tile { position: absolute; width: 58px; height: 58px; margin: -29px; border-radius: 17px; display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 20px;
-  background: var(--c); box-shadow: 0 10px 26px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.3); transform: translate(0,0) scale(.2); opacity: 0;
-  transition: transform .55s var(--spring), opacity .2s var(--ease), box-shadow .2s; }
-.ring.on .tile { opacity: 1; transform: translate(var(--x), var(--y)) scale(1); }
-.ring.on .tile.armed { transform: translate(var(--x), var(--y)) scale(1.2); box-shadow: 0 0 0 3px rgba(255,255,255,.9), 0 0 44px var(--c); }
-.ring .center { position: absolute; width: 136px; height: 136px; margin: -68px; border-radius: 50%; display: grid; place-items: center; text-align: center;
-  border: 1px solid rgba(var(--glow), .4); background: rgba(14,21,40,.85); font-weight: 600; font-size: 15px; opacity: 0; transform: scale(.5); transition: transform .5s var(--spring), opacity .2s; }
-.ring.on .center { opacity: 1; transform: scale(1); }
-.ripple { position: absolute; width: 136px; height: 136px; margin: -68px; border-radius: 50%; border: 1.5px solid rgba(var(--glow), .7); opacity: 0; pointer-events: none; }
-.ring.on .ripple { animation: rip 1.3s var(--out) forwards; } .ring.on .ripple.two { animation-delay: .12s; }
-@keyframes rip { from { opacity: .9; transform: scale(.4); } to { opacity: 0; transform: scale(3.3); } }
-.aimline { position: absolute; left: 0; top: 0; height: 3px; border-radius: 3px; transform-origin: 0 50%; pointer-events: none;
-  background: linear-gradient(90deg, rgba(var(--glow), 0), rgba(var(--glow), .9)); opacity: 0; transition: opacity .2s; }
-.burst { position: absolute; width: 8px; height: 8px; margin: -4px; border-radius: 50%; background: var(--c); pointer-events: none; animation: burst .8s var(--out) forwards; }
-@keyframes burst { to { transform: translate(var(--bx), var(--by)) scale(.2); opacity: 0; } }
+.ringpad .nudge { position: absolute; left: 50%; top: 18px; z-index: 26; transform: translate(-50%, -6px); opacity: 0; padding: 6px 14px; border-radius: 999px; white-space: nowrap;
+  font-size: 13px; color: var(--text); background: rgba(19,26,41,.95); border: 1px solid var(--line); pointer-events: none; transition: opacity .25s, transform .4s var(--spring); }
+.ringpad .nudge.on { opacity: 1; transform: translate(-50%, 0); }
+.mring { --bg-rgb: 13,20,31; --acc-rgb: 125,151,255; --k: 1; position: absolute; width: 0; height: 0; z-index: 30; pointer-events: none; transform-origin: 0 0;
+  opacity: 0; transform: scale(.93); transition: opacity 220ms cubic-bezier(.236,.618,.618,1), transform 220ms cubic-bezier(.236,.618,.618,1); }
+.mring.in { opacity: 1; transform: scale(1); }
+.mring.out { opacity: 0; transform: scale(.93); transition: opacity 143ms cubic-bezier(.618,0,.764,.382), transform 143ms cubic-bezier(.618,0,.764,.382); }
+.mring > * { position: absolute; left: 0; top: 0; }
+.mr-scrim { width: 640px; height: 640px; margin: -320px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(var(--bg-rgb), .8) 0%, rgba(var(--bg-rgb), .55) 34%, rgba(var(--bg-rgb), .2) 55%, rgba(var(--bg-rgb), 0) 68%); }
+.mr-guide { width: var(--d); height: var(--d); margin: calc(var(--d) / -2); border-radius: 50%; border: 1px dashed rgba(232,228,220,.14); }
+.mr-guide.o { border-color: rgba(232,228,220,.1); }
+.mr-pulse { width: 800px; height: 800px; margin: -400px; border-radius: 50%; border: 3px solid rgba(var(--acc-rgb), .8); opacity: 0; transform: scale(.15); }
+.mring.in .mr-pulse { animation: mrpulse 500ms cubic-bezier(.215,.61,.355,1) both; }
+@keyframes mrpulse { from { opacity: .9; transform: scale(.15); } to { opacity: 0; transform: scale(1); } }
+.mr-ripple { width: 130px; height: 130px; margin: -65px; border-radius: 50%; opacity: 0; transform: scale(.3); box-sizing: border-box;
+  background: radial-gradient(circle, rgba(var(--acc-rgb), .55) 0%, rgba(var(--acc-rgb), .25) 55%, rgba(var(--acc-rgb), 0) 72%); border: 2px solid rgba(var(--acc-rgb), .8); }
+.mr-beam { top: -4px; height: 8px; width: 0; border-radius: 4px; opacity: 0; transform-origin: 0 50%;
+  background: linear-gradient(90deg, rgba(var(--acc-rgb), 0) 0%, rgba(var(--acc-rgb), .55) 30%, rgba(var(--acc-rgb), 0) 100%);
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, transparent 65px, #000 105px); mask-image: linear-gradient(90deg, transparent 0, transparent 65px, #000 105px); }
+.mr-glow { width: 180px; height: 180px; margin: -90px; border-radius: 50%; opacity: 0;
+  background: radial-gradient(circle, rgba(var(--acc-rgb), .55) 0%, rgba(var(--acc-rgb), .18) 40%, rgba(var(--acc-rgb), 0) 70%); }
+.mr-tile { width: var(--tile); height: var(--tile); margin: calc(var(--tile) / -2); transform: translate(var(--dx), var(--dy)) scale(var(--ws, 1)); }
+.mr-tile.boost { z-index: 2; } .mr-tile.armed { z-index: 3; }
+.mr-lift { width: 100%; height: 100%; transform: translate(var(--px, 0px), var(--py, 0px)); transition: transform 170ms cubic-bezier(.34,1.3,.4,1); }
+.mr-face { position: relative; width: 100%; height: 100%; border-radius: calc(13px * var(--k)); background: #131a29; display: grid; place-items: center; box-sizing: border-box;
+  border: 2px solid transparent; box-shadow: 0 6px 16px rgba(0,0,0,.45);
+  transition: background-color 140ms cubic-bezier(.2,.8,.2,1), border-color 140ms cubic-bezier(.2,.8,.2,1), box-shadow 140ms cubic-bezier(.2,.8,.2,1), opacity 140ms cubic-bezier(.2,.8,.2,1);
+  animation: mrbloom 620ms cubic-bezier(.34,1.3,.4,1) both; animation-delay: var(--d, 120ms); }
+@keyframes mrbloom { 0% { opacity: 0; transform: translate(var(--fx), var(--fy)) scale(.2); } 62% { opacity: 1; transform: translate(calc(var(--fx) * -.06), calc(var(--fy) * -.06)) scale(1.06); } 100% { opacity: 1; transform: none; } }
+.mr-tile.outer .mr-face { border-radius: calc(11px * var(--k)); opacity: .85; box-shadow: 0 4px 10px rgba(0,0,0,.37); }
+.mr-icon { width: max(24px, calc(var(--tile) * .61)); height: max(24px, calc(var(--tile) * .61)); pointer-events: none; }
+.mr-badge { position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; box-sizing: border-box;
+  background: #0d141f; color: #e8e4dc; font: 600 10px "Outfit", sans-serif; border: 1.5px solid #131a29; transition: background 120ms, color 120ms; }
+.mr-tile.outer .mr-badge { width: 16px; height: 16px; font-size: 8.5px; top: -5px; right: -5px; }
+.mr-tile.armed .mr-face { border-color: rgb(var(--acc-rgb)); opacity: 1;
+  box-shadow: 0 8px 20px rgba(0,0,0,.5), 0 0 0 3px rgba(var(--acc-rgb), .38), 0 0 0 7px rgba(var(--acc-rgb), .16); }
+.mr-tile.armed .mr-badge { background: rgb(var(--acc-rgb)); color: #0d141f; font-weight: 700; }
+.mr-tile.armed .mr-face::after { content: ""; position: absolute; inset: -2px; border-radius: inherit; border: 2px solid rgba(var(--acc-rgb), .85); pointer-events: none;
+  animation: armp 1100ms cubic-bezier(.22,1,.36,1) 3 both; }
+.mring.out .mr-lift { opacity: 0; transform: translate(var(--px, 0px), var(--py, 0px)) scale(.72); transition: opacity 110ms cubic-bezier(.4,0,1,1), transform 110ms cubic-bezier(.4,0,1,1); }
+.mring.out.launched .mr-tile.armed .mr-lift { opacity: 1; transform: translate(var(--px, 0px), var(--py, 0px)) scale(1); }
+.mr-pill { width: var(--pill); height: var(--pill); margin: calc(var(--pill) / -2); border-radius: 50%; background: #131a29; border: 1.5px solid rgba(var(--acc-rgb), .3); box-sizing: border-box;
+  box-shadow: 0 10px 28px rgba(0,0,0,.5); display: grid; place-items: center; overflow: hidden; padding: 0 12px; transition: width .2s var(--out), height .2s var(--out), margin .2s var(--out);
+  animation: mrpop 560ms cubic-bezier(.34,1.3,.4,1) both; }
+@keyframes mrpop { 0% { transform: scale(.55); opacity: 0; } 62% { transform: scale(1.05); opacity: 1; } 100% { transform: scale(1); opacity: 1; } }
+.mr-name { grid-area: 1 / 1; max-width: 100%; text-align: center; color: #e8e4dc; opacity: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.15;
+  font-size: 19px; font-weight: 700; transition: opacity 120ms cubic-bezier(.22,1,.36,1); }
+.mr-name.is-on { opacity: 1; }
+.mr-name.hint { font-size: 13px; font-weight: 500; color: rgba(232,228,220,.6); white-space: normal; }
+.rcursor { position: absolute; left: 0; top: 0; z-index: 50; width: 26px; height: 26px; pointer-events: none; opacity: 0; transition: opacity .3s; }
+.rcursor svg { position: absolute; left: 0; top: 0; width: 22px; height: 26px; filter: drop-shadow(0 2px 4px rgba(0,0,0,.5)); }
+.rcursor::before { content: ""; position: absolute; left: -14px; top: -14px; width: 28px; height: 28px; border-radius: 50%; border: 2px solid rgba(255,255,255,.8); opacity: 0; transform: scale(.5); }
+.rcursor.on { opacity: 1; }
+.rcursor.press::before { animation: gpress .5s var(--out) forwards; }
+@keyframes gpress { 0% { opacity: 0; transform: scale(1.4); } 40% { opacity: .9; transform: scale(.8); } 100% { opacity: .55; transform: scale(.8); } }
 
 /* ---------- touchpad demo ---------- */
 .pad { position: relative; aspect-ratio: 1.55; border-radius: 28px; border: 1px solid var(--line); overflow: hidden; touch-action: none;
@@ -295,7 +497,7 @@ details[open] .ans { grid-template-rows: 1fr; } details .ans > p { min-height: 0
 details a { color: var(--accent2); }
 
 /* ---------- final ---------- */
-.final { text-align: center; padding: 180px 0 150px; }
+.final { text-align: center; padding: 180px 0 150px; overflow-x: clip; }
 .final h2 { margin-inline: auto; font-size: clamp(42px, 6.4vw, 84px); max-width: 14ch; }
 .final .sub { margin: 0 auto 38px; }
 .final .orb { position: absolute; left: 50%; top: 50%; width: 760px; height: 760px; margin: -380px; border-radius: 50%; z-index: -1; pointer-events: none;
@@ -309,15 +511,35 @@ footer .links { display: flex; gap: 20px; margin-left: auto; flex-wrap: wrap; } 
   nav .links { display: none; }
   .split, .split.flip { grid-template-columns: 1fr; gap: 36px; } .split.flip .copy { order: 0; }
   .bento, .nums { grid-template-columns: 1fr 1fr; } .cell.wide { grid-column: span 2; }
-  .stage { height: 440px; }
-  .key { width: 31px; height: 36px; font-size: 12px; border-radius: 9px; } .key.space { width: 190px; } .row, .kb { gap: 5px; }
-  .win { width: 300px; height: 170px; }
+  .screen { height: 320px; }
+  .ringpad { height: 500px; }
+  .orbit .ringline { left: -170px; width: 340px; }
   .orbit .ringline { left: -170px; width: 340px; }
 }
 @media (max-width: 560px) {
-  .autolabel { display: none; } .stage .hint { font-size: 13.5px; padding: 0 16px; }
+  .wrap { width: calc(100% - 32px); }
   .bento, .nums { grid-template-columns: 1fr; } .cell.wide { grid-column: auto; }
-  .key { width: 27px; } .key.space { width: 150px; }
+  .stage { --tbh: 32px; padding: 12px; gap: 10px; border-radius: 22px; }
+  .chud { flex-direction: column; align-items: stretch; gap: 8px; }
+  .chord { font-size: 13.5px; gap: 7px; } .kc { height: 30px; min-width: 30px; padding: 0 9px; font-size: 12.5px; } .kc img { width: 16px; height: 16px; }
+  .steps { gap: 5px; } .steps li { font-size: 12px; padding: 4px 9px 4px 5px; gap: 5px; } .steps li b { width: 17px; height: 17px; font-size: 10px; }
+  .screen { height: 236px; border-radius: 12px; }
+  .autolabel { right: 8px; top: 8px; font-size: 11px; padding: 4px 9px; }
+  .fw { --w: 74%; --h: 60%; } .fw .tb { height: 24px; font-size: 11px; } .fw .tb .ctl i { width: 22px; height: 24px; }
+  .taskbar { padding: 0 6px; gap: 1px; } .tbb { width: 28px; height: 26px; } .tbb img { width: 17px; height: 17px; }
+  .taskbar .clock { display: none; }
+  .g-space { width: 150px; height: 42px; font-size: 12px; }
+  .g-scrim { left: -260px; top: -150px; width: 520px; height: 300px; }
+  .gchip > i { padding: 4px; gap: 0; } .gchip .nm { display: none; }
+  .gchip .ico u { right: -7px; top: -6px; }
+  .tslot { bottom: calc(var(--tbh) + 8px); }
+  .toast2 { height: 38px; } .toast2 .msg { font-size: 12.5px; }
+  .typeline { height: 36px; padding: 0 12px; gap: 10px; } .typeline .txt { font-size: 14.5px; }
+  .kb { --kg: 4px; --kh: 36px; } .key { border-radius: 8px; font-size: 12px; }
+  .key.bound img { width: 16px; height: 16px; } .key.bound span { left: 3px; top: 1px; font-size: 8px; }
+  .ringpad { height: 460px; }
+  .ringpad .label { font-size: 13px; }
+  .orbit .chip { font-size: 0; gap: 0; padding: 6px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
@@ -350,14 +572,24 @@ footer .links { display: flex; gap: 20px; margin-left: auto; flex-wrap: wrap; } 
   <div class="facts"><span>7 MB</span><span>No account</span><span>No ads, no tracking</span><span>Updates itself</span></div>
 
   <div class="scene">
-    <div class="stage" id="stage" aria-label="Interactive demo">
-      <div class="hint">Your turn: hold <kbd>Space</kbd> and tap <kbd>B</kbd> <kbd>M</kbd> <kbd>N</kbd> or <kbd>C</kbd></div>
-      <div class="autolabel">Playing a demo · press Space to take over</div>
-      <div class="win" id="win"><div class="bar"><i></i><span id="wint">Browser</span><span class="dots"><b></b><b></b><b></b></span></div>
-        <div class="body"><div class="ln" style="width:72%"></div><div class="ln" style="width:92%"></div><div class="ln" style="width:58%"></div><div class="ln" style="width:81%"></div></div></div>
-      <div class="guide" id="guide"><div class="beam" id="beam"></div><div class="spacepill">SPACE</div></div>
-      <div class="kb" id="kb"></div>
-      <div class="toast" id="toast"><i></i><b id="toastt">Browser</b><span id="toasts">opened</span></div>
+    <div class="stage" id="stage" role="region" aria-label="Interactive demo: hold Space and tap a letter">
+      <div class="chud">
+        <div class="chord" id="chord" aria-live="polite">
+          <span class="kc" id="kcSpace">Space</span><span class="plus" id="kcPlus">+</span><span class="kc" id="kcKey">S</span>
+          <span class="arr">→</span><span class="res idle" id="kcRes">Hold Space, tap a lit key</span>
+        </div>
+        <ol class="steps" id="steps" aria-label="Tapping the same letter again">
+          <li><b>1</b>Opens</li><li><b>2</b>Minimises</li><li><b>3</b>Comes back</li>
+        </ol>
+      </div>
+      <div class="screen" id="screen">
+        <div class="guide" id="guide" aria-hidden="true"><div class="gc" id="gc"><div class="g-scrim"></div><div class="g-pulse"></div><div class="g-space">SPACE</div></div></div>
+        <button class="autolabel" id="autolabel" type="button"><i></i><span>Demo playing · try it yourself</span></button>
+      </div>
+      <div class="deck">
+        <div class="typeline" aria-label="Typing test line"><span class="lab">Typing</span><span class="txt" id="tltxt"></span></div>
+        <div class="kb" id="kb"></div>
+      </div>
     </div>
   </div>
 </header>
@@ -372,7 +604,7 @@ footer .links { display: flex; gap: 20px; margin-left: auto; flex-wrap: wrap; } 
     <div class="copy reveal">
       <div class="kicker">The Space chord</div>
       <h2>One key you already own. <span class="grad">A job you do all day.</span></h2>
-      <p class="sub">Give every app a letter. Hold Space and tap it: the app opens. Tap again: it comes to the front. Once more: it tucks away.</p>
+      <p class="sub">Give every app a letter. Hold Space and tap it: the app opens. Tap again: it tucks away. Once more: it's back. Hiding behind another window? One tap brings it to the front.</p>
       <ul class="ticks">
         <li>Hold Space for a beat and every shortcut appears around it. Nothing to memorise.</li>
         <li>Fast typing is always typing. A space and a letter within a fraction of a second is text, never a command.</li>
@@ -402,7 +634,11 @@ footer .links { display: flex; gap: 20px; margin-left: auto; flex-wrap: wrap; } 
         <li>CAD and 3D apps keep their middle button. Spaceadom steps aside.</li>
       </ul>
     </div>
-    <div class="ringpad reveal" id="ringpad"><div class="label">Press and hold anywhere in here · drift to an app · let go</div></div>
+    <div class="ringpad reveal" id="ringpad" aria-label="Interactive mouse ring demo">
+      <div class="label" id="rlabel">Hold the <b>mouse wheel</b>, or press and hold anywhere · drift toward an app · let go</div>
+      <div class="nudge" id="rnudge"></div>
+      <div class="rcursor" id="ghost" aria-hidden="true"><svg viewBox="0 0 22 26"><path d="M2 2v19l5.2-4.6 3.4 7.6 3.3-1.5-3.4-7.4H18z" fill="#fff" stroke="#0a0f22" stroke-width="1.6" stroke-linejoin="round"/></svg></div>
+    </div>
   </div>
 </section>
 
@@ -470,7 +706,7 @@ footer .links { display: flex; gap: 20px; margin-left: auto; flex-wrap: wrap; } 
   <div class="faq stagger">
     <details><summary>Does it get in the way of typing?</summary><div class="ans"><p>No. A tapped Space types a space, exactly as it always has. Only a held Space followed by a letter is a shortcut, and fast typing is always treated as text. You can tune the timing in Settings.</p></div></details>
     <details><summary>How is it different from PowerToys Run, Raycast or Flow Launcher?</summary><div class="ans"><p>Those are search launchers: you type part of a name and pick from a list. Spaceadom is a chord you learn once. Space+B is your browser, every time, with no typing and no list to read. They work fine side by side.</p></div></details>
-    <details><summary>Is it really free?</summary><div class="ans"><p>Yes. No account, no trial, no ads, no analytics. Get it from the Microsoft Store, or run <code>winget install spaceadom</code>.</p></div></details>
+    <details><summary>Is it really free?</summary><div class="ans"><p>Yes. No account, no trial, no ads, and no analytics in the app. Get it from the Microsoft Store, or run <code>winget install spaceadom</code>.</p></div></details>
     <details><summary>What does it send over the internet?</summary><div class="ans"><p>An optional crash report, which you can switch off, and, outside the Store version, a once-a-day update check. Never what you type or what you've bound. The <a href="https://github.com/nur-arpon/Spaceadom/blob/main/PRIVACY.md">privacy policy</a> lists everything.</p></div></details>
     <details><summary>Does it work on Windows on ARM?</summary><div class="ans"><p>Yes. There's a native ARM64 build, and every release is installed and started on real ARM64 hardware before it ships.</p></div></details>
     <details><summary>Mac or Linux?</summary><div class="ans"><p>Windows only for now. The keyboard hook at its heart is Windows-specific.</p></div></details>
@@ -488,7 +724,7 @@ footer .links { display: flex; gap: 20px; margin-left: auto; flex-wrap: wrap; } 
 </section>
 
 <footer><div class="wrap">
-  <span>© 2026 Nur Ifran Arpon</span>
+  <span>© 2026 Nur Ifran Arpon · This website counts visits with Google Analytics; the app does not track you.</span>
   <div class="links">
     <a href="https://github.com/nur-arpon/Spaceadom/blob/main/PRIVACY.md">Privacy</a>
     <a href="https://github.com/nur-arpon/Spaceadom/releases">Releases</a>
@@ -560,112 +796,359 @@ footer .links { display: flex; gap: 20px; margin-left: auto; flex-wrap: wrap; } 
       c.addEventListener("pointerleave", () => c.style.transform = ""); });
   }
 
-  /* ---------- apps ---------- */
-  const APPS = { B: ["Browser", "#5b7cff"], M: ["Music", "#1db954"], N: ["Notes", "#f0a83a"], C: ["Chat", "#8a6cff"], F: ["Files", "#e8a13f"], D: ["Design", "#ff6b8b"], T: ["Terminal", "#3f4660"], V: ["Video", "#e5484d"] };
-  const MORE = [["Mail", "#2f80ed"], ["Calendar", "#ff5a5f"], ["Photos", "#f7b500"], ["Code", "#22a6f2"], ["Spreadsheet", "#21a366"], ["Slides", "#d35230"], ["Games", "#7b61ff"], ["Maps", "#34c759"], ["Paint", "#ff7ac6"], ["Reader", "#a1887f"], ["Podcasts", "#b150e2"], ["Downloads", "#5ce1e6"]];
-  const fill = (el, list) => { const html = list.map(([n, c]) => `<span><i style="--c:${c}">${n[0]}</i>${n}</span>`).join(""); el.innerHTML = html + html; };
-  const all = Object.values(APPS).concat(MORE); fill($("#mq1"), all.slice(0, 10)); fill($("#mq2"), all.slice(10).concat(all.slice(0, 4)));
+  /* ---------- apps (real icons, extracted from the installed apps) ---------- */
+  const IC = (a) => `assets/apps/${a.i}.webp`;
+  const APP = {
+    C: { n: "Chrome", i: "chrome", c: "#4f8df5", k: "browser" }, S: { n: "Spotify", i: "spotify", c: "#1ed760", k: "player" },
+    D: { n: "Discord", i: "discord", c: "#5865f2", k: "chat" }, V: { n: "VS Code", i: "vscode", c: "#2f9bf0", k: "code" },
+    W: { n: "WhatsApp", i: "whatsapp", c: "#25d366", k: "chat" }, E: { n: "File Explorer", i: "explorer", c: "#f2c94c", k: "files" },
+    T: { n: "Terminal", i: "terminal", c: "#9aa4b8", k: "term" }, N: { n: "Notepad", i: "notepad", c: "#3ba6d9", k: "text" },
+    G: { n: "Steam", i: "steam", c: "#66c0f4", k: "browser" }, O: { n: "OBS Studio", i: "obs", c: "#c4c9d4", k: "player" },
+    X: { n: "Excel", i: "excel", c: "#21a366", k: "sheet" }, M: { n: "Outlook", i: "outlook", c: "#2a8ae6", k: "chat" },
+    P: { n: "Paint", i: "paint", c: "#f2a33a", k: "paint" } };
+  const HERO = ["C", "S", "D", "V", "W", "E", "T", "N"];
+  const FAVS = ["C", "S", "D", "V", "W", "E", "T", "N", "G", "O", "X", "M", "P"];   // 5 inner + 8 outer, like a full Favourites ring
+  const img = (a, cls = "") => `<img src="${IC(a)}" alt=""${cls ? ` class="${cls}"` : ""} width="64" height="64" decoding="async">`;
+  const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
+  const wait = (ms) => new Promise(r => setTimeout(r, ms));
+  const MAC_SPRING = CSS.supports("transition-timing-function", "linear(0, 1)")
+    ? "linear(0, 0.0352, 0.1205, 0.2319, 0.3525, 0.4711, 0.5807, 0.6774, 0.7596, 0.8273, 0.8814, 0.9234, 0.955, 0.9778, 0.9938, 1.0042, 1.0106, 1.0139, 1.0151, 1.0149, 1.0138, 1.0122, 1.0103, 1.0085, 1.0068, 1.0053, 1.004, 1.0029, 1)"
+    : "cubic-bezier(.2,.8,.2,1)";
+  const fillMq = (box, list) => { const h = list.map(ch => `<span><i>${img(APP[ch])}</i>${APP[ch].n}</span>`).join(""); box.innerHTML = h + h; };
+  fillMq($("#mq1"), ["C", "S", "D", "V", "W", "E", "T"]); fillMq($("#mq2"), ["N", "G", "O", "X", "M", "P", "S"]);
 
-  /* ---------- hero stage: 3D tilt ---------- */
-  const stage = $("#stage");
-  if (!fine) stage.querySelector(".hint").innerHTML = "Tap a lit key to try it";
+  /* ---------- a fake window's body, per kind of app ---------- */
+  const L = (w, bg) => `<b class="ln" style="width:${w}%${bg ? `;background:${bg}` : ""}"></b>`;
+  const BODY = {
+    browser: (a) => `<div class="col"><div class="tabs"><span class="tab">${img(a)}${a.n === "Steam" ? "Store" : "New tab"}</span></div><div class="url">${a.n === "Steam" ? "store.steampowered.com" : "nur-arpon.github.io/Spaceadom"}</div>
+      <div class="main"><div class="blk"></div>${L(82)}${L(64)}${L(74)}</div></div>`,
+    player: (a) => `<div class="side">${L(80)}${L(60)}${L(70)}${L(50)}</div><div class="col"><div class="main">${L(40, "rgba(255,255,255,.2)")}<div class="art">
+      <b style="--g:linear-gradient(135deg,#ff7ac6,#7d4dff)"></b><b style="--g:linear-gradient(135deg,#5ce1e6,#2f6bff)"></b><b style="--g:linear-gradient(135deg,#ffd166,#ff6b6b)"></b><b style="--g:linear-gradient(135deg,${a.c},#0c3d26)"></b></div>${L(56)}</div>
+      <div class="play"><i></i><div class="pr"><b></b></div></div></div>`,
+    chat: (a) => `<div class="side"><span class="ava" style="--a:${a.c}"></span><span class="ava"></span><span class="ava" style="--a:#ff7ac6"></span><span class="ava"></span></div>
+      <div class="main"><div class="row2"><span class="ava" style="--a:#ffb35c"></span><span class="bub" style="width:52%"></span></div><span class="bub me" style="width:44%"></span>
+      <div class="row2"><span class="ava" style="--a:#ffb35c"></span><span class="bub" style="width:66%"></span></div><span class="bub me" style="width:30%"></span></div>`,
+    code: () => `<div class="side">${L(70)}${L(85)}${L(60)}${L(75)}</div><div class="code">${[[0, 34, "#c792ea"], [1, 52, "#82aaff"], [2, 40, "#c3e88d"], [2, 58, "#ffcb6b"], [1, 22, "#89ddff"], [0, 12, "#c792ea"], [0, 46, "#82aaff"], [1, 36, "#c3e88d"]]
+      .map(([ind, w, c], n) => `<p>${n + 1}<b style="margin-left:${ind * 12}px;width:${w}%;background:${c}"></b></p>`).join("")}</div>`,
+    files: () => `<div class="side">${L(70)}${L(55)}${L(80)}${L(60)}</div><div class="main">${L(30, "rgba(255,255,255,.2)")}<div class="fold">${"<b></b>".repeat(8)}</div></div>`,
+    term: () => `<div class="term"><s>PS C:\\&gt;</s> winget install spaceadom\nFound Spaceadom [SpaceZ.Spaceadom]\nSuccessfully installed\n<s>PS C:\\&gt;</s> <u></u></div>`,
+    text: () => `<div class="paper">${L(88)}${L(72)}${L(94)}${L(60)}${L(80)}</div>`,
+    sheet: (a) => `<div class="cells" style="--c:${a.c}">${Array.from({ length: 60 }, (_, i) => `<b class="${i < 6 || i % 6 === 0 ? "h" : (i % 7 === 3 ? "v" : "")}"></b>`).join("")}</div>`,
+    paint: () => `<div class="canvas"><b style="left:18%;top:20%;width:70px;height:70px;background:#ff7ac6"></b><b style="left:46%;top:38%;width:90px;height:90px;background:#5ce1e6;opacity:.85"></b><b style="left:30%;top:58%;width:46px;height:46px;background:#ffd166"></b></div>`,
+  };
+  // where each app's window sits, as a fraction of the free space (so it fits at every size)
+  const POS = { C: [.06, .1], S: [.62, .28], D: [.28, .62], V: [.9, .08], W: [.46, .74], E: [.14, .88], T: [.74, .8], N: [.38, .18],
+    G: [.52, .42], O: [.92, .6], X: [.2, .34], M: [.66, .94], P: [.04, .6] };
+  const VERB = { opened: "opened", front: "to the front", minimised: "minimised", restored: "back" };
+
+  /* ---------- a small desktop: windows, a taskbar, a toast ---------- */
+  class Desk {
+    constructor(screen, pinned) {
+      this.s = screen; this.w = {}; this.order = []; this.z = 1; this.btn = {}; this.tt = 0;
+      this.tb = el("div", "taskbar");
+      const start = el("span", "tbb start", `<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="#7d97ff" d="M1 1h6.5v6.5H1zm7.5 0H15v6.5H8.5zM1 8.5h6.5V15H1zm7.5 0H15V15H8.5z"/></svg>`);
+      this.tb.append(start); pinned.forEach(ch => this.button(ch));
+      this.tb.append(el("span", "clock", "9:41<br>Today"));
+      this.slot = el("div", "tslot"); this.toastEl = el("div", "toast2"); this.slot.append(this.toastEl);
+      this.layer = el("div", "wins"); screen.prepend(this.layer); screen.append(this.tb, this.slot);
+    }
+    button(ch) { if (this.btn[ch]) return this.btn[ch]; const b = el("span", "tbb", img(APP[ch])); b.dataset.k = ch; b.title = APP[ch].n;
+      this.tb.insertBefore(b, this.tb.querySelector(".clock")); this.btn[ch] = b; return b; }
+    win(ch) { if (this.w[ch]) return this.w[ch]; const a = APP[ch];
+      const e = el("div", "fw", `<div class="tb">${img(a)}<span>${a.n}</span><span class="ctl"><i>—</i><i>▢</i><i>✕</i></span></div><div class="bd" style="--c:${a.c}">${BODY[a.k](a)}</div>`);
+      e.style.setProperty("--fx", POS[ch][0]); e.style.setProperty("--fy", POS[ch][1]); e.dataset.k = ch; this.layer.append(e);
+      return (this.w[ch] = { e, st: "closed" }); }
+    active() { for (let i = this.order.length - 1; i >= 0; i--) { const ch = this.order[i]; if (this.w[ch].st === "open") return ch; } return null; }
+    top(ch) { this.order = this.order.filter(c => c !== ch).concat(ch); this.w[ch].e.style.zIndex = ++this.z; }
+    act(ch) { const w = this.win(ch);
+      if (w.st === "closed") { this.open(ch); return "opened"; }
+      if (w.st === "min") { this.restore(ch); return "restored"; }
+      if (this.active() === ch) { this.minimise(ch); return "minimised"; }
+      this.focus(ch); return "front"; }
+    open(ch) { const w = this.win(ch); this.button(ch); void w.e.offsetWidth; w.st = "open"; w.e.classList.remove("min"); w.e.classList.add("open"); this.top(ch); this.paint(); this.bump(ch); }
+    focus(ch) { const w = this.win(ch); if (w.st !== "open") return; this.top(ch); this.paint(); }
+    restore(ch) { const w = this.win(ch); w.st = "open"; w.e.classList.remove("min"); w.e.classList.add("open"); this.top(ch); this.paint(); this.bump(ch); }
+    minimise(ch) { const w = this.win(ch), b = this.btn[ch], e = w.e;
+      const bx = b.offsetLeft + b.offsetWidth / 2, by = this.s.clientHeight - this.tb.offsetHeight / 2;
+      e.style.setProperty("--mx", (bx - (e.offsetLeft + e.offsetWidth / 2)).toFixed(1) + "px"); e.style.setProperty("--my", (by - (e.offsetTop + e.offsetHeight / 2)).toFixed(1) + "px");
+      w.st = "min"; e.classList.remove("open"); e.classList.add("min"); this.paint(); }
+    closeAll() { Object.entries(this.w).forEach(([ch, w]) => { w.st = "closed"; w.e.classList.remove("open", "min"); }); this.order = []; this.paint(); }
+    paint() { const act = this.active();
+      Object.entries(this.w).forEach(([ch, w]) => { w.e.classList.toggle("fg", ch === act); w.e.classList.toggle("bg", w.st === "open" && ch !== act); });
+      Object.entries(this.btn).forEach(([ch, b]) => { const st = this.w[ch] ? this.w[ch].st : "closed"; b.classList.toggle("run", st !== "closed"); b.classList.toggle("act", ch === act); }); }
+    hideToast() { const t = this.toastEl; if (!t.classList.contains("open")) return; clearTimeout(this.tt); t.classList.replace("open", "leave"); }
+    bump(ch) { const b = this.btn[ch]; if (!b) return; b.classList.remove("bump"); void b.offsetWidth; b.classList.add("bump"); }
+    toastHTML(ch, verb) { const a = APP[ch]; return `${img(a)}<span class="msg">${a.n} <em>${VERB[verb]}</em></span><span class="dot" style="--c:${a.c}"></span>`; }
+    measure(ch, verb) { const m = el("div", "toast2 measure", this.toastHTML(ch, verb)); m.style.position = "absolute"; this.slot.append(m);
+      const w = m.offsetWidth, h = m.offsetHeight; m.remove();
+      if (this.toastEl.classList.contains("open")) { clearTimeout(this.tt); this.toastEl.classList.replace("open", "leave"); }
+      return { w, h, x: (this.slot.clientWidth - w) / 2, y: this.slot.offsetTop + this.slot.clientHeight - h }; }
+    toast(ch, verb, landed) { const t = this.toastEl; clearTimeout(this.tt); t.innerHTML = this.toastHTML(ch, verb);
+      if (landed) { t.className = "toast2 open snap"; void t.offsetWidth; t.classList.remove("snap"); }
+      else { t.className = "toast2"; void t.offsetWidth; t.classList.add("open"); }
+      this.tt = setTimeout(() => { t.classList.remove("open"); t.classList.add("leave"); }, 1900); }
+  }
+  /* ---------- hero: the Space chord ---------- */
+  const stage = $("#stage"), screen = $("#screen"), guideEl = $("#guide"), gc = $("#gc"), kbEl = $("#kb"), tl = $("#tltxt"), lab = $("#autolabel");
+  const small = () => matchMedia("(max-width: 560px)").matches;
+  const desk = new Desk(screen, HERO);
+
+  // 3D tilt: follows a fine pointer; flattens as you scroll on touch / reduced motion
   if (fine && !reduce) addEventListener("pointermove", e => { const r = stage.getBoundingClientRect(); if (r.bottom < 0 || r.top > innerHeight) return;
     const x = (e.clientX - (r.left + r.width / 2)) / innerWidth, y = (e.clientY - (r.top + r.height / 2)) / innerHeight;
-    stage.style.setProperty("--ry", (x * 10).toFixed(2) + "deg"); stage.style.setProperty("--rx", (8 - y * 8).toFixed(2) + "deg");
+    stage.style.setProperty("--ry", (x * 7).toFixed(2) + "deg"); stage.style.setProperty("--rx", (5 - y * 5).toFixed(2) + "deg");
     stage.style.setProperty("--sx", ((e.clientX - r.left) / r.width * 100) + "%"); stage.style.setProperty("--sy", ((e.clientY - r.top) / r.height * 100) + "%"); }, { passive: true });
-  addEventListener("scroll", () => { const r = stage.getBoundingClientRect(); const k = Math.max(0, Math.min(1, 1 - r.top / innerHeight)); if (!fine || reduce) stage.style.setProperty("--rx", (14 - k * 14).toFixed(2) + "deg"); }, { passive: true });
+  const flatten = () => { const r = stage.getBoundingClientRect(); const k = Math.max(0, Math.min(1, 1 - r.top / innerHeight)); if (!fine || reduce) stage.style.setProperty("--rx", (8 - k * 8).toFixed(2) + "deg"); };
+  addEventListener("scroll", flatten, { passive: true }); flatten();
 
-  /* ---------- keyboard ---------- */
-  const ROWS = ["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"], kb = $("#kb"), keys = {};
-  ROWS.forEach(r => { const row = document.createElement("div"); row.className = "row";
-    for (const ch of r) { const k = document.createElement("div"); k.className = "key" + (APPS[ch] ? " bound" : ""); k.textContent = ch; if (APPS[ch]) k.style.setProperty("--c", APPS[ch][1]); keys[ch] = k; row.append(k); }
-    kb.append(row); });
-  const srow = document.createElement("div"); srow.className = "row"; const sp = document.createElement("div"); sp.className = "key space"; sp.textContent = "SPACE"; srow.append(sp); kb.append(srow);
-  // idle wave across the keys
-  if (!reduce) { let w = 0; setInterval(() => { if (stage.classList.contains("live")) return; const cols = 10; $$(".key", kb).forEach((k, i) => k.classList.toggle("wave", (i % cols) === (w % (cols + 6)))); w++; }, 110); }
+  // keyboard: bound keys carry their app's icon
+  const ROWS = ["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"], keys = {};
+  ROWS.forEach(r => { const row = el("div", "row");
+    for (const ch of r) { const a = HERO.includes(ch) ? APP[ch] : null; const k = el("div", "key" + (a ? " bound" : ""), a ? `${img(a)}<span>${ch}</span>` : ch);
+      k.dataset.k = ch; k.setAttribute("aria-label", a ? `${ch}: ${a.n}` : ch); keys[ch] = k; row.append(k); }
+    kbEl.append(row); });
+  const srow = el("div", "row"), spaceKey = el("div", "key space", "SPACE"); spaceKey.dataset.k = " "; spaceKey.setAttribute("aria-label", "Space"); srow.append(spaceKey); kbEl.append(srow);
 
-  const guide = $("#guide"), chipEls = {}, beam = $("#beam");
-  Object.entries(APPS).forEach(([ch, [name, c]], i) => { const el = document.createElement("div"); el.className = "chip"; el.style.transitionDelay = (i * 26) + "ms";
-    el.innerHTML = `<i style="--c:${c}">${ch}</i>${name}`; guide.append(el); chipEls[ch] = el; });
-  function placeChips() { const w = stage.clientWidth, rx = Math.min(300, w * .36), ry = Math.min(84, stage.clientHeight * .17), arr = Object.values(chipEls);
-    arr.forEach((el, i) => { const a = (i / arr.length) * Math.PI * 2 - Math.PI / 2; el.dataset.x = Math.cos(a) * rx; el.dataset.y = Math.sin(a) * ry;
-      el.style.left = el.dataset.x + "px"; el.style.top = el.dataset.y + "px"; }); }
-  placeChips(); addEventListener("resize", placeChips);
-  const win = $("#win"), toast = $("#toast"); let spaceDown = false, ringTimer = 0, openApp = null;
+  // the guide: every binding around the SPACE pill
+  const chips = {};
+  HERO.forEach((ch, i) => { const a = APP[ch]; const c = el("div", "gchip", `<i><span class="ico">${img(a)}<u>${ch}</u></span><span class="nm">${a.n}</span></i>`);
+    c.style.setProperty("--d", (120 + i * Math.min(26, 340 / (HERO.length - 1))) + "ms"); chips[ch] = c; gc.append(c); });
+  function layoutGuide() { const W = screen.clientWidth, H = screen.clientHeight - desk.tb.offsetHeight, sm = W < 520;
+    const rx = Math.min(sm ? 132 : 300, W / 2 - (sm ? 24 : 78)), ry = Math.min(sm ? 76 : 106, H / 2 - (sm ? 22 : 26));
+    HERO.forEach((ch, i) => { const ang = -Math.PI / 2 + i / HERO.length * Math.PI * 2, x = Math.cos(ang) * rx, y = Math.sin(ang) * ry, c = chips[ch];
+      c._x = x; c._y = y; c.style.setProperty("--x", x.toFixed(1) + "px"); c.style.setProperty("--y", y.toFixed(1) + "px");
+      c.style.setProperty("--fx", (-x).toFixed(1) + "px"); c.style.setProperty("--fy", (-y).toFixed(1) + "px"); }); }
 
-  function pointBeam(ch) { const el = chipEls[ch]; if (!el) return; const x = +el.dataset.x, y = +el.dataset.y; beam.style.width = Math.hypot(x, y) - 40 + "px";
-    beam.style.transform = `rotate(${Math.atan2(y, x)}rad)`; beam.style.opacity = 1; }
-  function fire(ch) { const [name, c] = APPS[ch]; const was = openApp === ch && win.classList.contains("open");
-    $("#wint").textContent = name; win.querySelector(".bar i").style.background = c; win.classList.remove("open"); void win.offsetWidth;
-    if (!was) { win.classList.add("open"); openApp = ch; } else openApp = null;
-    const ti = toast.querySelector("i"); ti.style.setProperty("--c", c); ti.textContent = ch; $("#toastt").textContent = name; $("#toasts").textContent = was ? "minimised" : "opened";
-    toast.classList.remove("show"); void toast.offsetWidth; toast.classList.add("show"); }
-  function press(ch) { stage.classList.add("live"); keys[ch].classList.add("down"); chipEls[ch].classList.add("armed"); pointBeam(ch); fire(ch); }
-  function releaseKey(ch) { keys[ch] && keys[ch].classList.remove("down"); chipEls[ch] && chipEls[ch].classList.remove("armed"); beam.style.opacity = 0; }
-  function spaceOn() { spaceDown = true; sp.classList.add("down"); stage.classList.add("live"); clearTimeout(ringTimer); ringTimer = setTimeout(() => { if (spaceDown) guide.classList.add("on"); }, 260); }
-  function spaceOff() { spaceDown = false; sp.classList.remove("down"); clearTimeout(ringTimer); guide.classList.remove("on"); Object.keys(chipEls).forEach(releaseKey); }
+  // the read-out above the screen
+  const kcSpace = $("#kcSpace"), kcPlus = $("#kcPlus"), kcKey = $("#kcKey"), kcRes = $("#kcRes"), steps = $$("#steps li");
+  const lightStep = (i) => steps.forEach((s, j) => s.classList.toggle("on", i === j));
+  function hud(mode, ch, verb) {
+    kcSpace.hidden = kcPlus.hidden = kcKey.hidden = false; kcSpace.classList.remove("ghost"); kcKey.classList.remove("ghost", "wait"); kcRes.classList.remove("idle");
+    if (mode === "chord") { kcKey.innerHTML = `${img(APP[ch])}${ch}`; kcRes.innerHTML = `${APP[ch].n} <em>${VERB[verb]}</em>`; lightStep({ opened: 0, minimised: 1, restored: 2 }[verb] ?? -1); }
+    else if (mode === "space") { kcPlus.hidden = kcKey.hidden = true; kcRes.innerHTML = `typed a space <em>· it's still a spacebar</em>`; lightStep(-1); }
+    else if (mode === "type") { kcSpace.hidden = kcPlus.hidden = true; kcKey.textContent = ch; kcRes.innerHTML = `typed “${ch.toLowerCase()}” <em>· just text</em>`; lightStep(-1); }
+    else if (mode === "hold") { kcKey.textContent = "?"; kcKey.classList.add("wait"); kcRes.textContent = "now tap a lit key"; kcRes.classList.add("idle"); }
+    else if (mode === "nobind") { kcKey.textContent = ch; kcRes.innerHTML = `nothing on ${ch} <em>· yet</em>`; }
+    else { kcSpace.classList.add("ghost"); kcKey.classList.add("ghost"); kcKey.textContent = "S"; kcRes.classList.add("idle"); lightStep(-1);
+      kcRes.textContent = fine ? "Hold Space, tap a lit key" : "Tap a key that has an app on it"; } }
 
-  // auto demo until the visitor takes over
-  let auto = true; const seq = ["B", "M", "N", "C", "B"]; let si = 0, autoT = 0;
-  function autoplay() { if (!auto || reduce) return; const ch = seq[si++ % seq.length];
-    spaceOn(); autoT = setTimeout(() => { press(ch); autoT = setTimeout(() => { releaseKey(ch); spaceOff(); autoT = setTimeout(autoplay, 1500); }, 900); }, 700); }
-  const sio = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting && auto) { clearTimeout(autoT); autoT = setTimeout(autoplay, 1800); } else clearTimeout(autoT); }), { threshold: .4 });
-  sio.observe(stage);
-  function takeOver() { if (!auto) return; auto = false; clearTimeout(autoT); spaceOff(); stage.classList.add("user"); }
+  // the typing line: proof that typing still types
+  let text = "";
+  const esc = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  function renderText(flash) { if (!text) { tl.innerHTML = `<span class="caret"></span><span class="ph"> ${fine ? "type, or tap Space" : "tap a plain letter, or Space"}</span>`; return; }
+    const t = text.slice(-Math.max(8, Math.floor(tl.clientWidth / 8.6)));
+    tl.innerHTML = (flash && t.endsWith(" ") ? esc(t.slice(0, -1)) + `<span class="spc"></span>` : esc(t)) + `<span class="caret"></span>`;
+    if (flash) { const sp = tl.querySelector(".spc"); requestAnimationFrame(() => requestAnimationFrame(() => sp && sp.classList.add("fade"))); } }
+  const typeChar = (c) => { text = (text + c).slice(-80); renderText(c === " "); };
 
-  const inField = e => { const t = e.target; return t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)); };
-  addEventListener("keydown", e => { if (inField(e) || e.ctrlKey || e.metaKey || e.altKey) return;
-    if (e.code === "Space") { e.preventDefault(); takeOver(); if (!e.repeat) spaceOn(); return; }
-    const ch = (e.key || "").toUpperCase(); if (!keys[ch]) return; keys[ch].classList.add("down");
-    if (spaceDown && APPS[ch]) { e.preventDefault(); press(ch); } });
-  addEventListener("keyup", e => { if (e.code === "Space") { spaceOff(); return; } const ch = (e.key || "").toUpperCase(); if (keys[ch]) releaseKey(ch); });
-  kb.addEventListener("pointerdown", e => { const k = e.target.closest(".key"); if (!k) return; const ch = k.textContent; if (!APPS[ch]) return; takeOver();
-    spaceOn(); guide.classList.add("on"); setTimeout(() => press(ch), 240); setTimeout(() => { releaseKey(ch); spaceOff(); }, 900); });
+  // the chord state machine (same rules as the app: guide after 300 ms, a chord never types, a lone tap types a space)
+  const S = { space: false, src: "", t0: 0, used: false, guide: false, gt: 0, lastType: 0 };
+  function spaceDown(src) { if (S.space) return; Object.assign(S, { space: true, src, t0: performance.now(), used: false });
+    spaceKey.classList.add("down"); hud("hold"); kcSpace.classList.add("on"); clearTimeout(S.gt); S.gt = setTimeout(showGuide, 300); }
+  function showGuide() { if (!S.space || S.used) return; S.guide = true; desk.hideToast(); layoutGuide(); guideEl.classList.remove("out"); Object.values(chips).forEach(c => c.classList.remove("armed", "gone")); guideEl.classList.add("on"); }
+  function hideGuide() { clearTimeout(S.gt); if (!S.guide) return; S.guide = false; guideEl.classList.remove("on"); guideEl.classList.add("out");
+    setTimeout(() => { if (!S.guide) { guideEl.classList.remove("out"); Object.values(chips).forEach(c => c.classList.remove("armed", "gone")); } }, 170); }
+  function spaceUp() { if (!S.space) return; S.space = false; spaceKey.classList.remove("down"); kcSpace.classList.remove("on"); hideGuide();
+    if (!S.used) { typeChar(" "); hud("space"); } }
+  function keyDown(ch) { const k = keys[ch]; if (!k) return; k.classList.add("down"); const now = performance.now();
+    if (S.space) {
+      if (!S.used && now - S.t0 < 110 && now - S.lastType < 260) { S.used = true; typeChar(" "); typeChar(ch.toLowerCase()); S.lastType = now; hud("type", ch); return; } // a fast roll while typing is text
+      S.used = true;
+      if (HERO.includes(ch)) chord(ch); else { hud("nobind", ch); k.classList.remove("nope"); void k.offsetWidth; k.classList.add("nope"); }
+      kcKey.classList.add("on"); return; }
+    typeChar(ch.toLowerCase()); S.lastType = now; hud("type", ch); kcKey.classList.add("on"); }
+  function keyUp(ch) { keys[ch] && keys[ch].classList.remove("down"); kcKey.classList.remove("on"); }
+  function chord(ch) { const verb = desk.act(ch); hud("chord", ch, verb);
+    if (S.guide && !reduce) fly(ch, verb); else { hideGuide(); desk.toast(ch, verb); } }
+  // the armed chip flies straight to the toast slot on the damped spring while its face cross-fades into the toast's
+  function fly(ch, verb) { const a = APP[ch], chip = chips[ch], face = chip.firstElementChild; chip.classList.add("armed");
+    const cw = face.offsetWidth, chh = face.offsetHeight, gx = guideEl.offsetLeft + gc.offsetLeft, gy = guideEl.offsetTop + gc.offsetTop;
+    const x0 = gx + chip._x - cw / 2, y0 = gy + chip._y - chh / 2, T = desk.measure(ch, verb);
+    const f = el("div", "fly", `<div class="f-chip">${img(a)}${small() ? "" : `<span>${a.n}</span>`}</div><div class="f-toast">${desk.toastHTML(ch, verb)}</div>`);
+    f.style.cssText = `width:${cw}px;height:${chh}px;transform:translate(${x0}px,${y0}px)`;
+    setTimeout(() => { screen.append(f); chip.classList.add("gone"); hideGuide();
+      const an = f.animate([{ transform: `translate(${x0}px,${y0}px)`, width: cw + "px", height: chh + "px" }, { transform: `translate(${T.x}px,${T.y}px)`, width: T.w + "px", height: T.h + "px" }],
+        { duration: 520, easing: MAC_SPRING, fill: "forwards" });
+      f.children[0].animate([{ opacity: 1 }, { opacity: 1, offset: .12 }, { opacity: 0, offset: .45 }, { opacity: 0 }], { duration: 520, fill: "forwards" });
+      f.children[1].animate([{ opacity: 0 }, { opacity: 0, offset: .25 }, { opacity: 1, offset: .6 }, { opacity: 1 }], { duration: 520, fill: "forwards" });
+      const land = () => { if (!f.isConnected) return; desk.toast(ch, verb, true); f.remove(); }; an.onfinish = land; setTimeout(land, 760); }, 90); }
 
+  // autoplay: teaches open, front, minimise, come back, and plain typing; stops the moment the visitor does anything
+  let auto = !reduce, inView = false, run = 0, busy = false;
+  async function playChord(ch, src, alive = () => true) { spaceDown(src); await wait(420); if (!alive()) { S.used = true; return spaceUp(); }
+    keyDown(ch); await wait(160); keyUp(ch); await wait(360); spaceUp(); }
+  async function typeStr(str, alive) { for (const c of str) { if (!alive()) return;
+      if (c === " ") { spaceDown("demo"); await wait(70); spaceUp(); } else { keyDown(c.toUpperCase()); await wait(55); keyUp(c.toUpperCase()); }
+      await wait(75 + Math.random() * 70); } }
+  const SCRIPT = [["S"], [1000], ["C"], [1000], ["S"], [1100], ["S"], [1100], ["S"], [1300], ["type", "see you soon"], [1200], ["V"], [900], ["D"], [1000], ["E"], [1600], ["reset"], [600]];
+  function resetDemo() { desk.closeAll(); text = ""; renderText(); hud("idle"); }
+  async function autoplay() { const tok = ++run, alive = () => tok === run && auto && inView;
+    resetDemo(); await wait(650);
+    while (alive()) for (const st of SCRIPT) { if (!alive()) return;
+      if (typeof st[0] === "number") await wait(st[0]); else if (st[0] === "type") await typeStr(st[1], alive);
+      else if (st[0] === "reset") resetDemo(); else await playChord(st[0], "demo", alive); } }
+  function setLabel() { lab.classList.toggle("replay", !auto); lab.querySelector("span").textContent = auto ? "Demo playing · try it yourself" : "Replay demo"; }
+  function takeOver() { if (!auto) return; auto = false; run++; if (S.space && S.src === "demo") { S.used = true; spaceUp(); }
+    Object.values(keys).forEach(k => k.classList.remove("down")); kcKey.classList.remove("on"); setLabel(); }
+  lab.addEventListener("click", () => { lab.blur(); if (auto) { takeOver(); hud("idle"); } else { auto = true; setLabel(); if (inView) autoplay(); } });
+  new IntersectionObserver(es => es.forEach(e => { const was = inView; inView = e.intersectionRatio >= .35;
+    if (inView && !was && auto) autoplay(); if (!inView && was) { run++; if (S.space && S.src === "demo") { S.used = true; spaceUp(); } } }), { threshold: [0, .35, .6] }).observe(stage);
+
+  // mouse and touch: a lit key plays the whole chord; hold SPACE (or a second finger on it) for the real thing
+  const ptr = {};
+  kbEl.addEventListener("pointerdown", async e => { const k = e.target.closest(".key"); if (!k) return; e.preventDefault(); takeOver(); const ch = k.dataset.k;
+    try { k.setPointerCapture(e.pointerId); } catch (_) {}
+    if (ch === " ") { ptr[e.pointerId] = ch; spaceDown("ptr"); return; }
+    if (S.space) { ptr[e.pointerId] = ch; keyDown(ch); return; }
+    if (HERO.includes(ch)) { if (busy) return; busy = true; await playChord(ch, "click"); busy = false; return; }
+    ptr[e.pointerId] = ch; keyDown(ch); });
+  const ptrEnd = (e) => { const ch = ptr[e.pointerId]; if (ch == null) return; delete ptr[e.pointerId]; if (ch === " ") spaceUp(); else keyUp(ch); };
+  kbEl.addEventListener("pointerup", ptrEnd); kbEl.addEventListener("pointercancel", ptrEnd);
+  desk.tb.addEventListener("pointerdown", async e => { const b = e.target.closest(".tbb[data-k]"); if (!b || busy) return; takeOver(); busy = true; await playChord(b.dataset.k, "click"); busy = false; });
+  desk.layer.addEventListener("pointerdown", e => { const w = e.target.closest(".fw"); if (!w) return; takeOver(); desk.focus(w.dataset.k); });
+
+  // a physical keyboard, while the demo is on screen and nothing else has focus
+  const inField = (e) => { const t = e.target; return t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT|BUTTON|A|SUMMARY)$/.test(t.tagName)); };
+  addEventListener("keydown", e => { if (!inView || inField(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.code === "Space") { e.preventDefault(); if (e.repeat) return; takeOver(); if (S.space) { S.used = true; spaceUp(); } spaceDown("kbd"); return; }
+    const ch = (e.key || "").toUpperCase(); if (!keys[ch]) return; e.preventDefault(); if (e.repeat) return; takeOver(); keyDown(ch); });
+  addEventListener("keyup", e => { if (e.code === "Space") { if (S.space && S.src === "kbd") spaceUp(); return; } const ch = (e.key || "").toUpperCase(); if (keys[ch]) keyUp(ch); });
+  addEventListener("blur", () => { if (S.space && S.src !== "demo") { S.used = true; spaceUp(); } });
+
+  layoutGuide(); renderText(); hud("idle"); setLabel();
+  addEventListener("resize", () => { layoutGuide(); renderText(); });
+  if (reduce) { desk.open("S"); lab.hidden = true; }
   /* ---------- scroll-driven assemble ---------- */
   const asm = $("#assemble"), orbit = $("#orbit"), ringline = $("#ringline"), opill = $("#opill"), ochips = [];
-  const OAPPS = Object.entries(APPS).concat(MORE.slice(0, 4).map(([n, c]) => [n[0], [n, c]]));
-  const RX = () => innerWidth < 920 ? 160 : 330, RY = () => innerWidth < 920 ? 140 : 150;
-  OAPPS.forEach(([ch, [name, c]], i) => { const el = document.createElement("div"); el.className = "chip";
-    el.innerHTML = `<i style="--c:${c}">${ch}</i>${name}`; const ang = (i / OAPPS.length) * Math.PI * 2 - Math.PI / 2;
+  const RX = () => innerWidth < 560 ? 118 : innerWidth < 920 ? 160 : 330, RY = () => innerWidth < 920 ? 140 : 150;
+  FAVS.slice(0, 12).forEach((ch, i, arr) => { const a = APP[ch], e = el("div", "chip", `<i>${img(a)}</i>${a.n}`), ang = (i / arr.length) * Math.PI * 2 - Math.PI / 2;
     const far = 900 + Math.random() * 500, fa = ang + (Math.random() - .5) * 1.4;
-    el._t = { ang, fx: Math.cos(fa) * far, fy: Math.sin(fa) * far * .7, rot: (Math.random() - .5) * 120, delay: Math.random() * .25 };
-    orbit.append(el); ochips.push(el); });
-  function assemble() { const r = asm.getBoundingClientRect(); const total = asm.offsetHeight - innerHeight; const p = Math.max(0, Math.min(1, -r.top / total));
-    const rx = RX(), ry = RY();
-    ochips.forEach(el => { const t = el._t; let k = Math.max(0, Math.min(1, (p - t.delay) / .55)); k = 1 - Math.pow(1 - k, 3);
+    e._t = { ang, fx: Math.cos(fa) * far, fy: Math.sin(fa) * far * .7, rot: (Math.random() - .5) * 120, delay: Math.random() * .25 }; orbit.append(e); ochips.push(e); });
+  function assemble() { const r = asm.getBoundingClientRect(), total = asm.offsetHeight - innerHeight, p = Math.max(0, Math.min(1, -r.top / total)), rx = RX(), ry = RY();
+    ochips.forEach(e => { const t = e._t; let k = Math.max(0, Math.min(1, (p - t.delay) / .55)); k = 1 - Math.pow(1 - k, 3);
       const x = t.fx + (Math.cos(t.ang) * rx - t.fx) * k, y = t.fy + (Math.sin(t.ang) * ry - t.fy) * k;
-      el.style.transform = `translate(-50%,-50%) translate(${x}px, ${y}px) rotate(${t.rot * (1 - k)}deg) scale(${.7 + .3 * k})`; el.style.opacity = Math.min(1, k * 1.6);
-      el.classList.toggle("lit", p > .82 && el === ochips[Math.floor((p - .82) / .18 * ochips.length) % ochips.length]); });
+      e.style.transform = `translate(-50%,-50%) translate(${x}px, ${y}px) rotate(${t.rot * (1 - k)}deg) scale(${.7 + .3 * k})`; e.style.opacity = Math.min(1, k * 1.6);
+      e.classList.toggle("lit", p > .82 && e === ochips[Math.floor((p - .82) / .18 * ochips.length) % ochips.length]); });
     const pk = Math.max(0, Math.min(1, (p - .35) / .3)); opill.style.transform = `translate(-50%,-50%) scale(${.4 + .6 * pk})`; opill.style.opacity = pk;
     ringline.style.opacity = Math.max(0, Math.min(1, (p - .5) / .2)) * .9; ringline.style.transform = `rotate(${p * 40}deg)`; }
   addEventListener("scroll", assemble, { passive: true }); addEventListener("resize", assemble); assemble();
 
-  /* ---------- mouse ring ---------- */
-  const pad = $("#ringpad"); const RAPPS = Object.entries(APPS).map(([ch, [n, c]]) => [ch, n, c]);
-  let ring = null, armed = -1, origin = null, aimline = null;
-  function openRing(x, y) { pad.classList.add("busy"); ring = document.createElement("div"); ring.className = "ring"; ring.style.left = x + "px"; ring.style.top = y + "px";
-    ring.innerHTML = `<div class="ripple"></div><div class="ripple two"></div><div class="center"><span>Drift to an app</span></div>` + RAPPS.map((a, i) => {
-      const ang = (i / RAPPS.length) * Math.PI * 2 - Math.PI / 2, R = 122;
-      return `<div class="tile" style="--c:${a[2]};--x:${Math.cos(ang) * R}px;--y:${Math.sin(ang) * R}px;transition-delay:${i * 20}ms">${a[0]}</div>`; }).join("");
-    aimline = document.createElement("div"); aimline.className = "aimline"; ring.prepend(aimline);
-    pad.append(ring); origin = { x, y }; requestAnimationFrame(() => ring.classList.add("on")); }
-  function aim(x, y) { if (!ring) return; const dx = x - origin.x, dy = y - origin.y, d = Math.hypot(dx, dy); let idx = -1;
-    if (d > 42) { let a = Math.atan2(dy, dx) + Math.PI / 2; if (a < 0) a += Math.PI * 2; idx = Math.round(a / (Math.PI * 2 / RAPPS.length)) % RAPPS.length; }
-    aimline.style.width = Math.min(d, 120) + "px"; aimline.style.transform = `rotate(${Math.atan2(dy, dx)}rad)`; aimline.style.opacity = d > 20 ? 1 : 0;
-    if (idx !== armed) { $$(".tile", ring).forEach((t, i) => t.classList.toggle("armed", i === idx)); armed = idx; ring.querySelector(".center span").textContent = idx < 0 ? "Drift to an app" : RAPPS[idx][1]; } }
-  function closeRing() { if (!ring) return; const r = ring, pick = armed; ring = null; armed = -1;
-    if (pick >= 0) { const t = $$(".tile", r)[pick]; const [ch, name, c] = RAPPS[pick]; const tx = parseFloat(t.style.getPropertyValue("--x")), ty = parseFloat(t.style.getPropertyValue("--y"));
-      for (let i = 0; i < 14; i++) { const b = document.createElement("div"); b.className = "burst"; const a = Math.random() * 6.28, s = 40 + Math.random() * 60;
-        b.style.cssText = `--c:${c};left:${tx}px;top:${ty}px;--bx:${Math.cos(a) * s}px;--by:${Math.sin(a) * s}px`; r.append(b); }
-      toastIn(pad, ch, name, c); }
-    r.classList.remove("on"); setTimeout(() => { r.remove(); if (!ring) pad.classList.remove("busy"); }, 800); }
-  function toastIn(host, ch, name, c) { let t = host.querySelector(":scope > .toast"); if (!t) { t = document.createElement("div"); t.className = "toast"; host.append(t); }
-    t.innerHTML = `<i style="--c:${c}">${ch}</i><b>${name}</b><span>opened</span>`; t.classList.remove("show"); void t.offsetWidth; t.classList.add("show"); }
-  pad.addEventListener("pointerdown", e => { const b = pad.getBoundingClientRect(); pad.setPointerCapture(e.pointerId); openRing(e.clientX - b.left, e.clientY - b.top); e.preventDefault(); });
-  pad.addEventListener("pointermove", e => { const b = pad.getBoundingClientRect(); aim(e.clientX - b.left, e.clientY - b.top); });
-  pad.addEventListener("pointerup", closeRing); pad.addEventListener("pointercancel", closeRing); pad.addEventListener("contextmenu", e => e.preventDefault());
+  /* ---------- mouse ring: the app's icon ring, its geometry, selection and motion ---------- */
+  const pad = $("#ringpad"), rlabel = $("#rlabel"), nudgeEl = $("#rnudge"), ghost = $("#ghost");
+  const rdesk = new Desk(pad, []);
+  if (!fine) rlabel.innerHTML = "<b>Touch and hold</b> anywhere · drift toward an app · let go";
+  const RG = { R: [108, 175], T: 44, PILL: 130, PMAX: 162, DEAD: 82, HYST: 3, PUSH: [40, 24], HOLD: 200, LERP: 120 };
+  const WAVE = [1.35, 1.15, 1, .85], FIB = [1, 1, 2, 3, 5, 8, 13];
+  const waveScale = (s) => { const d = Math.max(0, s), i = Math.floor(d); if (i >= WAVE.length - 1) return WAVE[WAVE.length - 1];
+    const w = (1 - Math.cos(Math.PI * (d - i))) / 2; return WAVE[i] + (WAVE[i + 1] - WAVE[i]) * w; };
+  const cdist = (a, b) => { const d = ((a - b) % 360 + 360) % 360; return d > 180 ? 360 - d : d; };
+  const bearing = (dx, dy) => (Math.atan2(dx, -dy) * 180 / Math.PI + 360) % 360;   // compass: 0 = up, clockwise
+  // 5 on the inner ring from north, 8 on the outer ring turned by the golden angle (137.5°)
+  const SLOTS = FAVS.map((ch, i) => { const ring = i < 5 ? 0 : 1, n = ring ? 8 : 5, j = ring ? i - 5 : i; return { ch, ring, pitch: 360 / n, ang: ((ring ? 137.5 : 0) + j * 360 / n) % 360 }; });
+  let R = null;
 
+  function openRing(px, py) {
+    const W = pad.clientWidth, H = pad.clientHeight, ext0 = RG.R[1] + RG.T / 2, k = Math.min(1, (Math.min(W, H) / 2 - 10) / ext0), ext = ext0 * k + 8;
+    const cx = Math.max(ext, Math.min(W - ext, px)), cy = Math.max(ext, Math.min(H - ext, py)), tile = RG.T * k, pill = Math.min(RG.PILL, RG.PMAX * k);
+    const ring = el("div", "mring"); ring.style.left = cx + "px"; ring.style.top = cy + "px"; ring.style.setProperty("--k", k.toFixed(3));
+    let html = `<div class="mr-scrim"></div>` + RG.R.map((r, i) => `<div class="mr-guide${i ? " o" : ""}" style="--d:${(2 * r * k + 14).toFixed(1)}px"></div>`).join("")
+      + `<div class="mr-pulse"></div><div class="mr-ripple"></div><div class="mr-glow"></div><div class="mr-beam"></div>`;
+    SLOTS.forEach((s, i) => { const r = RG.R[s.ring] * k, t = s.ang * Math.PI / 180; s.x = r * Math.sin(t); s.y = -r * Math.cos(t);
+      html += `<div class="mr-tile${s.ring ? " outer" : ""}" style="--tile:${tile.toFixed(1)}px;--dx:${s.x.toFixed(1)}px;--dy:${s.y.toFixed(1)}px"><div class="mr-lift">`
+        + `<div class="mr-face" style="--fx:${(-s.x).toFixed(1)}px;--fy:${(-s.y).toFixed(1)}px;--d:${Math.round(120 + 26 * FIB[i % 7])}ms">${img(APP[s.ch], "mr-icon")}<span class="mr-badge">${s.ch}</span></div></div></div>`; });
+    html += `<div class="mr-pill" style="--pill:${pill.toFixed(1)}px"><div class="mr-name hint is-on">Drift toward an app</div><div class="mr-name"></div></div>`;
+    ring.innerHTML = html; pad.append(ring); pad.classList.add("busy");
+    getComputedStyle(ring).opacity; ring.classList.add("in");   // read style first, or the entrance transition never starts (the app's own 1.0.110 lesson)
+    const now = performance.now();
+    R = { el: ring, cx, cy, k, pillBase: pill, pmax: RG.PMAX * k, tiles: $$(".mr-tile", ring), names: $$(".mr-name", ring), pill: $(".mr-pill", ring),
+      beam: $(".mr-beam", ring), glow: $(".mr-glow", ring), ripple: $(".mr-ripple", ring), rippleEnd: Math.max(3 * k, (ext0 * k + 24) / 65),
+      armed: null, aim: null, dist: 0, curA: 0, curD: 0, ws: SLOTS.map(() => 1), t0: now, last: now, raf: 0 };
+    R.raf = requestAnimationFrame(frame);
+  }
+  // the app's ring_pick: nothing inside the dead zone; squarely over one tile wins; else the band by distance and the nearest tile by angle, with 3° hysteresis
+  function ringPick(dx, dy, d) { const k = R.k; if (d < RG.DEAD * k) return null;
+    const reach = (RG.T / 2 + 8) * k; let near = null, nd = Infinity, cnt = 0;
+    SLOTS.forEach((s, i) => { const m = Math.max(Math.abs(dx - s.x), Math.abs(dy - s.y)); if (m <= reach) { cnt++; if (m < nd) { nd = m; near = i; } } });
+    if (cnt === 1) return near;
+    const b = bearing(dx, dy), band = Math.abs(RG.R[0] * k - d) <= Math.abs(RG.R[1] * k - d) ? 0 : 1; let best = null, bd = 90;
+    SLOTS.forEach((s, i) => { if (s.ring !== band) return; const a = cdist(b, s.ang); if (a < bd) { bd = a; best = i; } });
+    const A = R.armed; if (best !== null && A !== null && A !== best && SLOTS[A].ring === band && cdist(b, SLOTS[A].ang) - bd < 2 * RG.HYST) return A;
+    return best; }
+  function aimAt(px, py) { if (!R) return; const dx = px - R.cx, dy = py - R.cy, d = Math.hypot(dx, dy);
+    R.dist = d; R.aim = d < RG.DEAD * R.k ? null : bearing(dx, dy); const p = ringPick(dx, dy, d); if (p !== R.armed) setArmed(p); }
+  function setArmed(i) { R.armed = i; R.tiles.forEach((t, j) => t.classList.toggle("armed", j === i));
+    const push = new Map();
+    if (i !== null && !reduce) { push.set(i, RG.PUSH[0]); const ord = SLOTS.map((s, j) => ({ j, a: s.ang, r: s.ring })).filter(o => o.r === SLOTS[i].ring).sort((p, q) => p.a - q.a), at = ord.findIndex(o => o.j === i);
+      push.set(ord[(at - 1 + ord.length) % ord.length].j, RG.PUSH[1]); push.set(ord[(at + 1) % ord.length].j, RG.PUSH[1]); }
+    R.tiles.forEach((t, j) => { const lift = t.firstElementChild, p = push.get(j); t.classList.toggle("boost", p !== undefined);
+      if (p !== undefined) { const a = SLOTS[j].ang * Math.PI / 180; lift.style.setProperty("--px", Math.round(p * R.k * Math.sin(a)) + "px"); lift.style.setProperty("--py", Math.round(-p * R.k * Math.cos(a)) + "px"); }
+      else { lift.style.removeProperty("--px"); lift.style.removeProperty("--py"); } });
+    const on = R.names.find(n => n.classList.contains("is-on")), off = R.names.find(n => n !== on);
+    if (i === null) { off.className = "mr-name hint"; off.textContent = "Drift toward an app"; } else { off.className = "mr-name"; off.textContent = APP[SLOTS[i].ch].n; }
+    fitPill(off); off.classList.add("is-on"); on.classList.remove("is-on"); }
+  // the pill shrinks the name to 15 px, then grows (up to the free inner circle) rather than clip it
+  function fitPill(n) { let d = R.pillBase;
+    if (!n.classList.contains("hint")) { let fs = 19; n.style.fontSize = fs + "px"; while (n.scrollWidth + 27 > d && fs > 15) n.style.fontSize = --fs + "px"; d = Math.min(R.pmax, Math.max(d, n.scrollWidth + 27)); }
+    R.pill.style.setProperty("--pill", d.toFixed(1) + "px"); }
+  function frame(now) { if (!R) return; const dt = Math.min(64, now - R.last), kk = reduce ? 1 : 1 - Math.exp(-dt / RG.LERP); R.last = now;
+    if (R.aim !== null) R.curA = (R.curA + (((R.aim - R.curA + 540) % 360) - 180) * kk + 360) % 360;
+    R.curD += ((R.aim === null ? 0 : R.dist) - R.curD) * kk;
+    SLOTS.forEach((s, i) => { const tg = R.aim === null || reduce ? 1 : waveScale(cdist(R.aim, s.ang) / s.pitch), v = R.ws[i] + (tg - R.ws[i]) * kk;
+      if (Math.abs(v - R.ws[i]) > .0004) { R.ws[i] = v; R.tiles[i].style.setProperty("--ws", v.toFixed(4)); } });
+    const age = now - R.t0, bs = Math.max(0, Math.min(1, (R.curD - 40) / 160)) * Math.min(1, age / 250), a = R.curA * Math.PI / 180;
+    R.beam.style.width = (R.curD + 60).toFixed(1) + "px"; R.beam.style.transform = `rotate(${(R.curA - 90).toFixed(2)}deg)`; R.beam.style.opacity = (bs * .7).toFixed(3);
+    R.glow.style.transform = `translate(${(R.curD * Math.sin(a)).toFixed(1)}px,${(-R.curD * Math.cos(a)).toFixed(1)}px) scale(${(.7 + .5 * bs).toFixed(3)})`; R.glow.style.opacity = (.6 + .4 * bs).toFixed(3);
+    const e = 1 - Math.pow(1 - Math.min(1, age / 2500), 3); R.ripple.style.transform = `scale(${(.3 + (R.rippleEnd - .3) * e).toFixed(3)})`; R.ripple.style.opacity = (.95 - .35 * e).toFixed(3);
+    R.raf = requestAnimationFrame(frame); }
+  // release: an armed tile launches (it holds while the rest collapse); released in the middle, nothing happens
+  function closeRing(launch) { if (!R) return null; const r = R, pick = launch ? r.armed : null; R = null; cancelAnimationFrame(r.raf);
+    r.el.classList.add("out"); if (pick !== null) r.el.classList.add("launched");
+    setTimeout(() => { r.el.remove(); if (!R) pad.classList.remove("busy"); }, 200);
+    if (pick !== null) { const ch = SLOTS[pick].ch; setTimeout(() => rdesk.toast(ch, rdesk.act(ch)), 60); }
+    return pick; }
+
+  let pid = null, pend = 0, p0 = null, pl = null, ptype = "";
+  const local = (e) => { const b = pad.getBoundingClientRect(); return { x: e.clientX - b.left, y: e.clientY - b.top }; };
+  function nudge(t) { nudgeEl.textContent = t; nudgeEl.classList.add("on"); clearTimeout(nudge.t); nudge.t = setTimeout(() => nudgeEl.classList.remove("on"), 1600); }
+  pad.addEventListener("pointerdown", e => {
+    if (e.pointerType === "mouse" && e.button !== 0 && e.button !== 1) return;
+    if (e.pointerType === "mouse") e.preventDefault();          // also stops the wheel button's autoscroll
+    stopGhost(true); if (pid !== null || R) return;
+    pid = e.pointerId; ptype = e.pointerType; p0 = pl = local(e); try { pad.setPointerCapture(pid); } catch (_) {}
+    pend = setTimeout(() => { pend = 0; openRing(p0.x, p0.y); aimAt(pl.x, pl.y); }, RG.HOLD); });
+  pad.addEventListener("pointermove", e => { if (e.pointerId !== pid) return; pl = local(e);
+    if (pend && ptype !== "mouse" && Math.hypot(pl.x - p0.x, pl.y - p0.y) > 10) { clearTimeout(pend); pend = 0; pid = null; return; }   // a finger that moves first is scrolling
+    if (R) aimAt(pl.x, pl.y); });
+  const ringUp = (e, cancel) => { if (e.pointerId !== pid) return; pid = null;
+    if (pend) { clearTimeout(pend); pend = 0; if (!cancel) nudge(fine ? "Hold it a moment, then drift" : "Touch and hold for a moment"); return; }
+    if (!R) return; const pick = closeRing(!cancel); if (pick === null && !cancel) nudge("Let go in the middle: nothing opens"); };
+  pad.addEventListener("pointerup", e => ringUp(e, false)); pad.addEventListener("pointercancel", e => ringUp(e, true));
+  pad.addEventListener("mousedown", e => { if (e.button === 1) e.preventDefault(); });
+  pad.addEventListener("auxclick", e => { if (e.button === 1) e.preventDefault(); });
+  pad.addEventListener("contextmenu", e => e.preventDefault());
+  pad.addEventListener("touchmove", e => { if (R) e.preventDefault(); }, { passive: false });
+
+  // until the visitor tries it, a ghost cursor shows the gesture every few seconds
+  let ghostOn = !reduce, gRun = 0, padVis = false, gi = 0;
+  const GT = ["S", "D", "V", "E", "C"];
+  const ghostGlide = (x0, y0, x1, y1, ms, fn, alive) => new Promise(res => { const t0 = performance.now();
+    const step = (t) => { if (!alive()) return res(); const k = Math.min(1, (t - t0) / ms), q = k < .5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+      fn(x0 + (x1 - x0) * q, y0 + (y1 - y0) * q); k < 1 ? requestAnimationFrame(step) : res(); }; requestAnimationFrame(step); });
+  function stopGhost(forever) { gRun++; if (forever) ghostOn = false; ghost.classList.remove("on", "press"); if (R && R.ghost) closeRing(false); }
+  async function ghostLoop() { const tok = ++gRun, alive = () => tok === gRun && ghostOn && padVis, mv = (x, y) => { ghost.style.transform = `translate(${x}px,${y}px)`; };
+    await wait(900);
+    while (alive()) { const W = pad.clientWidth, H = pad.clientHeight, ch = GT[gi++ % GT.length], sx = W * (.42 + Math.random() * .16), sy = H * .5;
+      mv(sx + 70, sy + 80); ghost.classList.add("on"); await wait(350); if (!alive()) break;
+      await ghostGlide(sx + 70, sy + 80, sx, sy, 420, mv, alive); if (!alive()) break;
+      ghost.classList.add("press"); await wait(RG.HOLD); if (!alive()) break;
+      openRing(sx, sy); R.ghost = true; await wait(300); if (!alive()) break;
+      const s = SLOTS[FAVS.indexOf(ch)], tx = R.cx + s.x * .92, ty = R.cy + s.y * .92;
+      await ghostGlide(sx, sy, tx, ty, 620, (x, y) => { mv(x, y); aimAt(x, y); }, alive); if (!alive()) break;
+      await wait(450); if (!alive()) break;
+      ghost.classList.remove("press"); closeRing(true); await wait(650); ghost.classList.remove("on"); await wait(5200); }
+    ghost.classList.remove("on", "press"); if (R && R.ghost) closeRing(false); }
+  new IntersectionObserver(es => es.forEach(e => { const was = padVis; padVis = e.intersectionRatio >= .5;
+    if (padVis && !was && ghostOn) ghostLoop(); if (!padVis && was) { gRun++; ghost.classList.remove("on", "press"); if (R && R.ghost) closeRing(false); } }), { threshold: [0, .5] }).observe(pad);
   /* ---------- touchpad ---------- */
   const tp = $("#pad"), finger = $("#finger"), mname = $("#mname"), mfill = $("#mfill"), mval = $("#mval"); const vals = { Brightness: 60, Volume: 40, Video: 25 }; let drag = null;
   function show(k) { const v = vals[k]; mname.textContent = k === "Video" ? "Video position" : k; mfill.style.width = v + "%";

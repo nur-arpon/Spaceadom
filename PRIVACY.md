@@ -1,6 +1,6 @@
 # Privacy Policy — Spaceadom
 
-**Last updated: 5 September 2026 (version 1.0.100).**
+**Last updated: 5 September 2026 (version 1.0.100). Website section added 4 October 2026.**
 
 Spaceadom is a keyboard utility for Windows. To do its job it has to watch your
 keyboard, so it is reasonable to want a straight answer about what happens to
@@ -299,6 +299,23 @@ If a future version of Spaceadom ever collects or transmits anything, this
 document will be updated before that version is released, and the change will
 be stated plainly in the release notes. The change history is public at
 <https://github.com/nur-arpon/Spaceadom>.
+
+---
+
+## The Spaceadom website (not the app)
+
+The marketing website at <https://nur-arpon.github.io/Spaceadom/> uses
+**Google Analytics** to count visits: which pages are viewed, roughly where
+visitors come from (country, referring site), and the kind of device and
+browser. Google sets cookies to do this, under
+[Google's privacy policy](https://policies.google.com/privacy). It is used
+only to see whether people find the site and which parts they use. The
+interactive demos on the page run entirely in your browser; nothing you type
+into them is sent anywhere. You can block it with any content blocker, or
+with Google's [opt-out add-on](https://tools.google.com/dlpage/gaoptout).
+
+This applies to the website only. **The Spaceadom app contains no analytics**;
+everything it can send is described above.
 
 ---
 
