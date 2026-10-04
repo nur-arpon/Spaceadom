@@ -895,7 +895,7 @@ footer .links { display: flex; gap: 20px; margin-left: auto; flex-wrap: wrap; } 
   /* Owner, 2026-10-04: "a little bit slower so it becomes easier to follow". One factor for the whole Space demo:
      every animation that starts inside it plays at 1/SLOW speed (keycaps excepted, so typing still feels instant),
      and the timers below are stretched by the same factor. */
-  const SLOW = 1.5, slowWait = (ms) => wait(ms * SLOW); desk.linger = SLOW;
+  const SLOW = 1.8, slowWait = (ms) => wait(ms * SLOW); desk.linger = SLOW;
   const slowAll = () => stage.getAnimations({ subtree: true }).forEach(a => { const t = a.effect && a.effect.target;
     if (a.playbackRate === 1 && !(t && t.closest && t.closest(".key"))) a.playbackRate = 1 / SLOW; });
   if (!reduce) new MutationObserver(slowAll).observe(stage, { subtree: true, childList: true, attributes: true, attributeFilter: ["class"] });
