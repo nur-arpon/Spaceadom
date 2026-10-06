@@ -18,6 +18,7 @@ artefact.
 | **22 Sep 2026** | The ring button is a choice (wheel, Back or Forward, hold or click); Back and Forward become bindable keys; a drawn mouse and a Mouse page; external-monitor brightness over DDC/CI that follows the cursor (1.0.142). |
 | **1 Oct 2026** | Visual polish: long notifications keep their shape, round glows (1.0.143). |
 | **2 Oct 2026** | Store apps open on the cursor's screen; shortcuts ready the moment you return; fewer false error reports (1.0.145). |
+| **6 Oct 2026** | One engine for Windows, Mac and Linux; Mac beta refreshed to 1.0.153 (1.0.154). |
 | **6 Oct 2026** | Several apps on one shortcut; little windows (timer, notepad, round picture frame); typing calibration; choose speakers and microphones (1.0.153). Mac and Linux betas. |
 | **5 Oct 2026** | Chips fly straight into their notification; the optional Space Boost motion; a Support Spaceadom card in Settings (1.0.151). |
 | **4 Oct 2026** | Idle memory cut to about 110 MB; the first-shortcut-after-a-break fix; the portable zip returns (1.0.148). |
