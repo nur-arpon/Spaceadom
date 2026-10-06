@@ -53,7 +53,7 @@ Windows 10/11, x64 and Windows on ARM64. Every ARM64 release is installed and st
 
 ## Install
 
-**On a Mac?** A [Mac beta](https://github.com/nur-arpon/Spaceadom/releases/tag/v1.0.153-macos-beta) for Apple Silicon (M1 and newer) is out: Space shortcuts, the guide and the settings app. A [Linux beta](https://github.com/nur-arpon/Spaceadom/releases/tag/v1.0.153-linux-beta) for GNOME and KDE on Wayland (Ubuntu, Fedora; .deb, .rpm, AppImage) is out too.
+**On a Mac?** A [Mac beta](https://github.com/nur-arpon/Spaceadom/releases/tag/v1.0.154-macos-beta) for Apple Silicon (M1 and newer) is out: Space shortcuts, the mouse ring, the guide and the settings app. A [Linux beta](https://github.com/nur-arpon/Spaceadom/releases/tag/v1.0.154-linux-beta) for GNOME and KDE on Wayland (Ubuntu, Fedora; .deb, .rpm, AppImage) is out too, also with the mouse ring.
 
 **Easiest: the [Microsoft Store](https://apps.microsoft.com/detail/9PNB2QDZK902)** (free). The Store copy updates through the Store.
 
