@@ -21,7 +21,7 @@
  "description":"Spaceadom turns your spacebar into an app launcher for Windows. Hold Space, tap a letter, your app opens. A mouse-button app ring and touchpad edge sliders too.",
  "applicationCategory":"UtilitiesApplication","operatingSystem":"Windows 10, Windows 11","url":"https://nur-arpon.github.io/Spaceadom/",
  "downloadUrl":"https://apps.microsoft.com/detail/9PNB2QDZK902","installUrl":"https://apps.microsoft.com/detail/9PNB2QDZK902",
- "image":"https://nur-arpon.github.io/Spaceadom/assets/og.png","softwareVersion":"1.0.154",
+ "image":"https://nur-arpon.github.io/Spaceadom/assets/og.png","softwareVersion":"1.0.155",
  "offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},
  "author":{"@type":"Person","name":"Nur Ifran Arpon","url":"https://github.com/nur-arpon"},
  "sameAs":["https://apps.microsoft.com/detail/9PNB2QDZK902","https://github.com/nur-arpon/Spaceadom"]}
@@ -113,6 +113,12 @@ h1 .grad { background: linear-gradient(100deg, #fff 10%, #b8c6ff 45%, #ff9ad5 70
 .also { margin-top: 16px; color: var(--faint); font-size: 14px; text-align: center; opacity: 0; animation: up 1s var(--out) 1.4s forwards; }
 .also a { color: var(--dim); border-bottom: 1px solid var(--line); padding-bottom: 1px; transition: color .2s, border-color .2s; }
 .also a:hover { color: var(--text); border-color: var(--text); }
+.dl { display: flex; gap: 10px; justify-content: center; align-items: center; flex-wrap: wrap; margin-top: 18px; color: var(--faint); font-size: 14px; opacity: 0; animation: up 1s var(--out) 1.4s forwards; }
+.dl > span { margin-right: 2px; }
+.dlb { display: inline-flex; align-items: center; gap: 7px; padding: 7px 14px; border-radius: 999px; border: 1px solid var(--line); background: var(--card); color: var(--dim); font-weight: 600; white-space: nowrap; transition: color .2s, border-color .2s, background .2s; }
+.dlb:hover { color: var(--text); border-color: rgba(255,255,255,.28); background: rgba(255,255,255,.08); }
+.dlb em { font-style: normal; font-size: 10.5px; letter-spacing: .04em; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--line); color: var(--faint); }
+.dlb[hidden] { display: none; }
 .platforms { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; max-width: 860px; margin: 40px auto 0; text-align: left; }
 .plat { display: flex; flex-direction: column; gap: 6px; padding: 18px 20px; border-radius: 18px; border: 1px solid var(--line); background: var(--card); transition: border-color .3s, transform .4s var(--out); }
 .plat:hover { border-color: rgba(255,255,255,.28); transform: translateY(-3px); }
@@ -586,7 +592,7 @@ footer .links { display: flex; gap: 20px; margin-left: auto; flex-wrap: wrap; } 
     <span class="winget"><code>winget install spaceadom</code><button type="button" data-copy="winget install spaceadom">Copy</button></span>
   </div>
     <div class="facts"><span>7 MB</span><span>No account</span><span>No ads, no tracking</span><span>Updates itself</span></div>
-  <p class="also" id="also">Also on <a href="https://github.com/nur-arpon/Spaceadom/releases/tag/v1.0.154-macos-beta" target="_blank" rel="noopener">Mac (beta)</a> and <a href="https://github.com/nur-arpon/Spaceadom/releases/tag/v1.0.154-linux-beta" target="_blank" rel="noopener">Linux (beta)</a>.</p>
+  <div class="dl" id="dl"><span>Or download for</span><a class="dlb" data-os="win" href="https://github.com/nur-arpon/Spaceadom/releases/latest">Windows</a><a class="dlb" data-os="mac" href="https://github.com/nur-arpon/Spaceadom/releases/download/v1.0.154-macos-beta/Spaceadom_1.0.154_aarch64.dmg">macOS <em>BETA</em></a><a class="dlb" data-os="linux" href="https://github.com/nur-arpon/Spaceadom/releases/tag/v1.0.154-linux-beta" target="_blank" rel="noopener">Linux <em>BETA</em></a></div>
 
   <div class="scene">
     <div class="stage" id="stage" role="region" aria-label="Interactive demo: hold Space and tap a letter">
@@ -1219,16 +1225,17 @@ footer .links { display: flex; gap: 20px; margin-left: auto; flex-wrap: wrap; } 
 </script>
 <script>
 (() => {
-  // Mac and Linux visitors: the hero button offers their beta first; Windows stays one line below.
+  // Mac and Linux visitors: the hero button offers their beta first; the download row below keeps the rest.
   const ua = navigator.userAgent, touch = matchMedia("(pointer: coarse)").matches;
   const os = /Mac OS X|Macintosh/.test(ua) && !touch ? "mac" : (/Linux/.test(ua) && !/Android/.test(ua) && !touch ? "linux" : "");
   if (!os) return;
   const btn = document.querySelector(".hero .cta .btn.primary") || document.querySelector(".cta .btn.primary");
-  const also = document.getElementById("also");
   if (!btn) return;
   if (os === "mac") { btn.href = "https://github.com/nur-arpon/Spaceadom/releases/download/v1.0.154-macos-beta/Spaceadom_1.0.154_aarch64.dmg"; btn.lastChild.textContent = " Download the Mac beta"; }
   else { btn.href = "https://github.com/nur-arpon/Spaceadom/releases/tag/v1.0.154-linux-beta"; btn.lastChild.textContent = " Get the Linux beta"; }
-  if (also) also.innerHTML = 'On Windows? <a href="https://apps.microsoft.com/detail/9PNB2QDZK902">Get it from Microsoft</a>.';
+  // The download row keeps the other two systems and Windows; hide the one the hero button now is.
+  const mine = document.querySelector('.dl .dlb[data-os="' + os + '"]');
+  if (mine) mine.hidden = true;
 })();
 </script>
 </body>

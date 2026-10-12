@@ -167,7 +167,7 @@ keystroke history anywhere in the program.
 
 ## What Spaceadom stores on your computer
 
-Two files, both on your machine only.
+Three files, all on your machine only.
 
 ### `%APPDATA%\Spaceadom\config.json`
 
@@ -207,6 +207,15 @@ of information listed just above (your shortcuts, your app paths, your screen
 layout, other programs) are written at INFO and WARN level, so none of them are
 included. If you want the developer to have the full log, you still have to
 send it yourself, deliberately.
+
+### `%APPDATA%\Spaceadom\typing-history.json` (since 1.0.155)
+
+Used only by *Calibrate* in Settings. For each of the last 14 days it holds
+two lists of counts: how many milliseconds passed between pressing Space and
+the next key, sorted into 10 ms steps, once for keys that were typed and once
+for keys that ran a shortcut. **It never records which key, or anything you
+typed.** Days older than 14 are dropped automatically, it never leaves your
+computer, and deleting the file simply starts it again from empty.
 
 ### Backups
 
